@@ -598,7 +598,7 @@ def finalize_launch_only(root, directory, message_id):
         return receipt
 
 
-def deliver(root, reference, message_id, retry=False, check=False):
+def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
     # take their own shorter lock, separate from read-position changes.
@@ -618,7 +618,7 @@ def deliver(root, reference, message_id, retry=False, check=False):
                                attempts=[*tracking.get('attempts', []), receipt])
             return receipt
         if tracking.get('submission_state') == 'cancelled':
-            return {**tracking['last_receipt'], 'message_id': message_id, 'reused': True, 'ok': False}
+            return {**tracking['last_receipt'], 'state': 'cancelled', 'message_id': message_id, 'reused': True, 'ok': False}
         if tracking.get('submission_state') == 'launch-only':
             receipt = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
             return {**receipt, 'message_id': message_id, 'reused': True, 'ok': False}
@@ -674,7 +674,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
         relay_lost = (session.native_relay or {}).get('state') == 'lost'
         if not relay_lost and executor.facts.get('startup_delivery') == 'waiting' and observe(executor.properties, executor.facts)['live'] == 'alive':
             update_message(directory, message_id, submission_state='pending', deferred_launch_id=session.launch_id,
-                           delivery_method='native', target_session=target or session.native_id)
+                           delivery_method='native', target_session=target or session.native_id,
+                           restart_on_delivery=bool(new_message and not retry))
             return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         try:
             executor.check_session()
@@ -695,11 +696,15 @@ def deliver(root, reference, message_id, retry=False, check=False):
         # Persist BEFORE the native call: a crash cannot turn uncertain submission
         # into pending and silently replay it on restart.
         update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
-                       delivery_method='native', attempts=[*previous, attempt])
+                       delivery_method='native', attempts=[*previous, attempt], restart_on_delivery=False)
         try:
             if not session.native_id:
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
             else:
+                if (not retry and (new_message or tracking.get('restart_on_delivery') is True)
+                        and adapter_hook(adapter, 'continue_queued') is not None):
+                    from .queue_continuation import claim_restart
+                    session = claim_restart(directory, session, message_id)
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
                                       delivery=selected_mode, framed=framed_text(root, message)), executor)
         except Exception as error:
@@ -715,7 +720,7 @@ def deliver(root, reference, message_id, retry=False, check=False):
         return receipt
 
 
-def send_or_wake(root, reference, message_id, retry=False):
+def send_or_wake(root, reference, message_id, retry=False, *, new_message=False):
     """Caller holds .send.lock. Release .launch.lock before start takes it."""
     # Waking a stopped agent launches it, and launching uses this module: the one
     # import that has to wait until the call.
@@ -766,15 +771,23 @@ def send_or_wake(root, reference, message_id, retry=False):
                            **({'final_reason': 'launch-only'} if launch_only else {}))
             return receipt
     if not wake:
-        return deliver(root, reference, message_id, retry=retry)
+        return deliver(root, reference, message_id, retry=retry, new_message=new_message)
     try:
         previous_socket = (executor.facts.get('tmux') or {}).get('socket') if executor else None
-        launched = lifecycle.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
+        paused = (session.queue_state or {}).get('state') in ('paused', 'interrupting')
+        queued_wake = (paused and session.attachment is not None
+                       and session.attachment.readiness in ('binding', 'legacy-binding')
+                       and adapter_hook(adapter, 'continue_queued') is not None)
+        options = {'_queue_wake': True, '_restart_queue': bool(new_message and not retry)} if queued_wake else {}
+        launched = lifecycle.start(root, resume=reference, resume_message_id=message_id,
+                                   socket_path=previous_socket, **options)
         _, tracking = message_record(directory, message_id)
         if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
             receipt = tracking['attempts'][-1]
         else:
-            receipt = {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
+            receipt = {'state': 'pending', 'ok': True, 'reason':
+                       'Resuming the bridge before queued message delivery' if queued_wake else
+                       'Resuming with this message as the interactive starting prompt',
                        'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
         return {**receipt, 'notices': launched['notices']} if launched.get('notices') else receipt
     except Exception as error:

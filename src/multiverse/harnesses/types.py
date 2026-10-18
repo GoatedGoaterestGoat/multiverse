@@ -255,6 +255,8 @@ class SessionHandle:
         queue = runtime.get('queue_state')
         if not isinstance(queue, dict) or queue.get('native_session_id') != properties.get('native_session_id'):
             queue = None
+        elif queue:
+            queue = {key: value for key, value in queue.items() if key != 'restart'}
         return cls(properties['id'], properties['harness'], properties['workspace'],
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),

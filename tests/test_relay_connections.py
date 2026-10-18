@@ -71,6 +71,10 @@ class View:
     def usage(self, value):
         return value.get('usage')
 
+    def primary_event(self, direction, value):
+        if self.owns() and direction == 'outgoing' and value.get('method') == 'interrupt':
+            return {'kind': 'interrupt', 'native_session_id': 'primary', 'turn_id': 'one'}
+
     def closed(self):
         self.closed_count += 1
         self.pending.clear()
@@ -123,11 +127,15 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.folder = Path(self.temporary.name)
         self.spec = {'socket_path': str(self.folder / 'relay'), 'upstream_path': str(self.folder / 'native')}
         self.received = []
+        self.events = []
+        self.events_at_interrupt = []
         async def upstream(connection):
             async for payload in connection:
                 value = json.loads(payload)
                 self.received.append(value)
                 method = value.get('method')
+                if method == 'interrupt':
+                    self.events_at_interrupt.append(list(self.events))
                 if method is None:
                     continue
                 params = value.get('params', {})
@@ -160,6 +168,7 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
             self.loss_recorded.set()
         self.proxy = rpc.LaunchProxy(self.spec, self.protocol, self.bound.append, self.errors.append,
                                     self.usage.append, record_loss, self.refusals.append)
+        self.proxy.record_primary_event = self.events.append
         await asyncio.to_thread(self.proxy.start)
         self.clients = []
 
@@ -188,7 +197,7 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_request_ids_are_scoped_per_connection(self):
         """Clients reusing small JSON-RPC ids on one relay, through the relay and Codex's connection views, each get
         their own replies, and ownership follows the binding client; a break goes unnoticed because a crossed reply
-        binds or confirms the wrong request."""
+        binds or confirms the wrong request or forwards an interrupt before its durable pause barrier."""
         with self.subTest('relay views'):
             first, second = await self.connect(), await self.connect()
             replies = await asyncio.gather(self.request(first, 7, 'delay', label='first'),
@@ -200,6 +209,18 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
             await self.request(first, 9, 'bind')
             self.assertEqual(sum(view.owns() for view in self.protocol.views), 1)
             self.assertEqual(self.bound, ['primary'])
+            await self.request(second, 10, 'interrupt')
+            self.assertEqual(self.events_at_interrupt, [[]])
+            await self.request(first, 11, 'interrupt')
+            self.assertEqual(self.events_at_interrupt[-1], [{'kind': 'interrupt',
+                'native_session_id': 'primary', 'turn_id': 'one'}])
+            self.assertEqual(self.events_at_interrupt[-1], self.events)
+            def cannot_record(event):
+                raise OSError('pause ledger unavailable')
+            self.proxy.record_primary_event = cannot_record
+            await first.send(json.dumps({'id': 12, 'method': 'interrupt'}))
+            await first.wait_closed()
+            self.assertNotIn(12, [request.get('id') for request in self.received])
         main, side = str(uuid4()), str(uuid4())
         fork = {'id': 10, 'method': 'thread/fork',
                 'params': {'threadId': main, 'ephemeral': True, 'excludeTurns': True}}

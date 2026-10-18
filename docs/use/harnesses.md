@@ -106,7 +106,7 @@ On launch-only spawn and resume, including automatic fallback, mv2 requests an e
 {"schema": 2, "adapter": "codex", "settings": {"args": ["--sandbox", "workspace-write"]}}
 ```
 
-**Interrupted queues.** After an interrupt (such as Esc), accepted follow-ups stay paused with Codex's own queue. The pause survives stop and resume. A new terminal prompt, or a new steer or follow-up submitted by mv2, starts the native FIFO head and continues the queue in order. Inbox-only messages, `deliver --check` and `deliver --retry` do not restart it. `deliver --check` shows queued messages as paused until a new turn starts; it never resends them.
+**Interrupted queues.** After an interrupt (such as Esc), accepted follow-ups stay paused with Codex's own queue. The pause survives closing only the terminal attachment and resuming it. A new terminal prompt lets Codex continue its queue; a new steer or follow-up submitted by mv2 starts the native FIFO head, even when waking a stopped agent, so older queued messages run first. Default `mv2 kill` cancels queued work; `deliver --check` reports those messages as cancelled. Inbox-only messages, `deliver --check` and `deliver --retry` do not restart it. `deliver --check` shows queued messages as paused until a new turn starts; it never resends them.
 
 **Session binding.** With a live connection, mv2 records Codex's session ID automatically. A launch-only agent is asked to run `mv2 session-bind` at startup. If it never did, take the ID from Codex's `/status` and bind it with `mv2 session-bind --agent NAME --session-id UUID` before resuming.
 

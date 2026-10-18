@@ -181,7 +181,8 @@ def plain_fallback(command, error):
 
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
-          wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None):
+          wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
+          _queue_wake=False, _restart_queue=False):
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
     if (resume_prompt is not None or resume_message_id is not None) and not resume:
@@ -272,6 +273,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise RuntimeError(closing + '; retry after terminal cleanup finishes')
         if resume_message_id is not None:
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
+            if _queue_wake:
+                resume_prompt = None
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = proposed_launch or uid()
         launch = agent_dir / "launches" / launch_id
@@ -315,6 +318,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices,
                     _resume_notices(adapter, session, ambient, context.environment) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
+        if _queue_wake:
+            command = replace(command, fallback=None)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
             if resume and properties.get('native_service_identity') not in (None, identity):
@@ -459,6 +464,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             selected_notices = display.notice_lines(notices, command.notices)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
+            if _queue_wake and (not endpoint or not command.attachment
+                    or command.attachment.readiness not in ('binding', 'legacy-binding')):
+                raise ValueError('Paused conversation requires its native bridge before queued wake delivery')
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,
@@ -467,13 +475,18 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
-            write(launch / "request.json", {**_request(argv, env, command, endpoint, resume_message_id),
+            write(launch / "request.json", {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
                                            'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,
                                            'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None})
-            if resume_message_id is not None:
+            if resume_message_id is not None and _queue_wake:
+                update_message(agent_dir, resume_message_id, submission_state='pending',
+                               delivery_method='native', deferred_launch_id=launch_id,
+                               restart_on_delivery=bool(_restart_queue),
+                               target_session=properties.get('native_session_id'))
+            elif resume_message_id is not None:
                 # The runner cannot start until ready exists. Persist uncertainty
                 # first so a crash can never silently replay this command-line input.
                 update_message(agent_dir, resume_message_id, submission_state='submitting',
@@ -619,6 +632,9 @@ def _initial_runtime(launch_id, command, adapter, session, previous, resume, rec
                       "started_at": now(), "native_mode": command.native_mode}
     if resume and previous.get('automatic_restarts'):
         runtime_record['automatic_restarts'] = previous['automatic_restarts'][-5:]
+    queue = previous.get('queue_state')
+    if resume and isinstance(queue, dict) and session and queue.get('native_session_id') == session.native_id:
+        runtime_record['queue_state'] = dict(queue)
     if recovery:
         event = {'at': now(), 'from_launch_id': previous['launch_id'], 'launch_id': launch_id,
                  'reason': 'Native relay disconnected while the exact thread was idle'}

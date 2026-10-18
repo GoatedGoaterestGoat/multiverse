@@ -44,6 +44,10 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    if state == 'cancelled':
+        return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
+    if value.get('paused') is True:
+        return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
         # A file path is actionable evidence, not an opaque native identifier.
         why = clean(reason) if value.get('pre_submission_failure') is True else failure_reason(reason, text)

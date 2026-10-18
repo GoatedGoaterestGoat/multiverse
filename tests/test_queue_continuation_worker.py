@@ -1,268 +1,164 @@
-"""The idle-time worker continues owned accepted follow-ups without submitting them again."""
-import fcntl
-import shutil
-import threading
+"""Only new submitted input can authorize one native FIFO restart."""
+from dataclasses import replace
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse.runtime import native
-from multiverse.runtime.queue_continuation import QueueContinuation
-from multiverse.harnesses.types import NativeResult
+from multiverse.harnesses.types import NativeResult, SessionHandle
+from multiverse.runtime import lifecycle, native, queue_continuation, runner
 from multiverse.store import read, write
+from multiverse.tools import deliver
 from multiverse.universe import agents
-from multiverse.universe.mailbox import append_message, update_message
+from multiverse.universe.mailbox import inbox, message_record, update_message
+from test_message_delivery import DeliveryFixture
 from test_native_backends import NativeBackendTest
 
 
-class QueueContinuationWorkerTest(NativeBackendTest):
+class QueueContinuationWorkerTest(DeliveryFixture):
     def setUp(self):
         super().setUp()
-        self.worker = QueueContinuation(self.directory, self.launch, self.root)
-        self.adapter.continue_queued = Mock(return_value=NativeResult('ok', value={'continued': True}))
-        self.enterContext(patch.object(native, 'owned'))
-        self.addCleanup(self.worker.close)
+        self.adapter = native.harnesses.load(self.root, 'claude')
+        self.adapter.continue_queued = Mock()
+        self.paused = {'native_session_id': self.native_id, 'turn_id': 'old', 'state': 'paused'}
+        agents.update_runtime(self.directory, self.launch, queue_state=self.paused)
 
-    def accepted(self, text='owned', delivery='follow-up', **tracking):
-        message = append_message(self.directory, text, {}, delivery=delivery,
+    def test_only_new_submitted_input_gets_one_restart_claim(self):
+        """A restart claim belongs to one new submission; leaking it to checks or retries silently repeats queue/start after lost acceptance."""
+        self.send('manual', delivery='inbox-only')
+        self.assertEqual(agents.runtime(self.directory)['queue_state'], self.paused)
+        for mode in ('steer', 'follow-up'):
+            with self.subTest(mode=mode):
+                sent = self.send(mode, delivery=mode)
+                session, message, _ = self.calls[-1]
+                self.assertEqual(session.queue_state['restart'], {'id': sent['id'], 'state': 'claimed'})
+                ordinary = SessionHandle.from_records(read(self.directory / 'properties.json'),
+                                                      agents.runtime(self.directory), self.directory)
+                self.assertNotIn('restart', ordinary.queue_state)
+                count = len(self.calls)
+                native.deliver(self.root, self.agent, sent['id'], check=True)
+                native.deliver(self.root, self.agent, sent['id'], retry=True)
+                self.assertEqual(len(self.calls), count)
+        self.behavior = TimeoutError('lost native acceptance')
+        lost = self.send('lost')
+        self.assertEqual(message_record(self.directory, lost['id'])[1]['submission_state'], 'unknown')
+        count = len(self.calls)
+        deliver.run(self.root, agent=self.agent, retry=True)
+        self.assertEqual(len(self.calls), count)
+        self.adapter.continue_queued.assert_not_called()
+        # A receipt retry may submit a definite failure, but cannot mint a restart.
+        self.behavior = NativeResult('error', 'definite refusal')
+        failed = self.send('refused')
+        self.behavior = NativeResult('native_queued', value={})
+        native.deliver(self.root, self.agent, failed['id'], retry=True)
+        self.assertNotIn('restart', self.calls[-1][0].queue_state)
+        for damaged in ([], {**self.paused, 'restart': ['bad']}):
+            with self.subTest(damaged=damaged):
+                agents.update_runtime(self.directory, self.launch, queue_state=damaged)
+                count = len(self.calls)
+                refused = self.send('bad pause record ' + str(damaged))
+                self.assertEqual(refused['state'], 'unknown')
+                self.assertEqual(len(self.calls), count)
+
+    def test_primary_events_keep_pause_order_and_scope_across_resume(self):
+        """Pause survives attachment replacement but stale turns and generations cannot re-pause a newer turn, a silent event-order race."""
+        publish = lambda **event: queue_continuation.record_primary_event(self.directory, self.launch,
+            {'native_session_id': self.native_id, **event})
+        publish(kind='started', turn_id='one')
+        publish(kind='interrupt', turn_id='one')
+        self.assertEqual(agents.runtime(self.directory)['queue_state']['state'], 'interrupting')
+        publish(kind='completed', turn_id='one', status='finished')
+        self.assertEqual(agents.runtime(self.directory)['queue_state']['state'], 'idle')
+        publish(kind='started', turn_id='two')
+        publish(kind='completed', turn_id='two', status='interrupted')
+        self.assertEqual(agents.runtime(self.directory)['queue_state']['state'], 'paused')
+        publish(kind='started', turn_id='three')
+        publish(kind='completed', turn_id='two', status='interrupted')
+        self.assertEqual(agents.runtime(self.directory)['queue_state']['state'], 'running')
+        publish(kind='completed', turn_id='three', status='interrupted')
+        facts = agents.runtime(self.directory)
+        properties = read(self.directory / 'properties.json')
+        session = SessionHandle.from_records(properties, facts, self.directory)
+        command = Mock(native_mode={'mode': 'bridge'})
+        adapter = Mock(retained_usage=None)
+        fresh = lifecycle._initial_runtime(str(uuid4()), command, adapter, session, facts, True, None)
+        self.assertEqual(fresh['queue_state'], facts['queue_state'])
+        foreign = lifecycle._initial_runtime(str(uuid4()), command, adapter,
+                                            replace(session, native_id=str(uuid4())), facts, True, None)
+        self.assertNotIn('queue_state', foreign)
+        before = (self.directory / 'runtime.json').read_bytes()
+        with self.assertRaises(ValueError):
+            queue_continuation.record_primary_event(self.directory, 'replaced',
+                {'kind': 'started', 'turn_id': 'other', 'native_session_id': self.native_id})
+        self.assertEqual((self.directory / 'runtime.json').read_bytes(), before)
+        with patch.object(runner, 'mutate_runtime'), patch.object(runner, 'runtime', return_value=facts):
+            watcher = runner.StatusWatcher(self.directory, self.launch, self.root)
+            watcher._publish('idle')
+        self.adapter.continue_queued.assert_not_called()
+
+    def test_checks_after_resume_show_paused_or_cancelled_without_restart(self):
+        """Receipt selection crosses launch replacement and kill; losing those rows silently hides paused or cancelled accepted input."""
+        self.behavior = NativeResult('native_queued', value={'queued_submission_id': 'q'})
+        message = self.send('accepted', delivery='follow-up')
+        write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': str(uuid4())})
+        self.behavior = NativeResult('native_queued', 'Native queue paused',
+                                    {'queued_submission_id': 'q', 'paused': True})
+        result = deliver.run(self.root, agent=self.agent, check=True)
+        self.assertEqual(len(result['messages']), 1)
+        self.assertTrue(result['messages'][0]['paused'])
+        update_message(self.directory, message['id'], submission_state='cancelled',
+                       last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+        result = deliver.run(self.root, agent=self.agent, check=True)
+        self.assertEqual(result['messages'][0]['state'], 'cancelled')
+        self.assertFalse(result['ok'])
+        self.assertEqual(len(self.calls), 1)
+
+
+class PausedWakeTest(NativeBackendTest):
+    def test_paused_wake_queues_after_binding_instead_of_starting_a_prompt(self):
+        """A paused wake must enter the native FIFO after binding; a command-line wake silently jumps ahead of already accepted input."""
+        self.adapter.continue_queued = Mock()
+        agents.update_runtime(self.directory, self.launch, state='stopped',
+            queue_state={'native_session_id': self.properties['native_session_id'], 'state': 'paused'})
+        from multiverse.universe.mailbox import append_message
+        message = append_message(self.directory, 'new wake', {}, delivery='follow-up',
                                  target_session=self.properties['native_session_id'])
-        values = dict(submission_state='accepted', delivery_method='native',
-                      target_session=self.properties['native_session_id'],
-                      attempts=[{'launch_id': self.launch, 'native_session_id': self.properties['native_session_id']}],
-                      native_receipt={'queued_submission_id': 'queue-' + message['id'], 'transcript_confirmed': False})
-        update_message(self.directory, message['id'], **{**values, **tracking})
-        return message
-
-    def once(self):
-        self.assertTrue(self.worker.notify())
-        token, self.worker.pending = self.worker.pending, None
-        self.worker.active = token
-        try:
-            done = self.worker._work(token)
-        finally:
-            self.worker.active = None
-        if done:
-            self.worker.completed = token
-        return done
-
-    def test_continuation_runs_only_for_owned_accepted_followups_of_the_idle_launch(self):
-        """The background worker continues only owned, accepted, unconsumed follow-ups of the current idle, ready
-        launch; fragile because selection crosses two files and about 26 conditions, and a wrong row starts an extra
-        native turn or another session's queue (1635478)."""
-        for values in ({'submission_state': 'pending'}, {'submission_state': 'failed'},
-                       {'submission_state': 'unknown'}, {'submission_state': 'submitting'},
-                       {'delivery_method': 'resume_prompt'},
-                       {'target_session': str(uuid4())}, {'attempts': []},
-                       {'attempts': [{'launch_id': 'old', 'native_session_id': self.properties['native_session_id']}]},
-                       {'attempts': [{'launch_id': self.launch, 'native_session_id': str(uuid4())}]},
-                       {'native_receipt': {'queued_submission_id': 'old', 'transcript_confirmed': True}},
-                       {'native_receipt': {'turn_id': 'native-history', 'transcript_confirmed': False}},
-                       {'native_receipt': {}}):
-            self.accepted(**values)
-        self.accepted(delivery='steer')
-        self.accepted(delivery='inbox-only')
-        for change in ({'launch_id': 'old'}, {'state': 'starting'}, {'status': 'working'}, {'status': 'waiting'},
-                       {'status': 'unknown'}, {'startup_checked': False}, {'ending_at': 'now'},
-                       {'native_refusal': {'message': 'owned elsewhere'}}, {'binding_conflict': 'wrong'},
-                       {'startup_delivery': 'waiting'}, {'startup_delivery': 'failed'},
-                       {'native_relay': {'state': 'lost'}}, {'attachment': {'readiness': 'process'}},
-                       {'native_status_version': True}):
-            with self.subTest(change=change):
-                write(self.directory / 'runtime.json', {**self.facts, **change})
-                self.assertFalse(self.worker.notify())
-        write(self.directory / 'runtime.json', self.facts)
-        with self.subTest('only unowned, inactive or consumed receipts'):
-            self.assertTrue(self.once())
-            self.adapter.continue_queued.assert_not_called()
-        message = self.accepted()
-        state = (self.directory / 'inbox-state.json').read_bytes()
-        log = (self.directory / 'inbox.jsonl').read_bytes()
-        with self.subTest('status changed after the notification'):
-            self.assertTrue(self.worker.notify())
-            token = self.worker.pending
-            write(self.directory / 'runtime.json', {**self.facts, 'native_status_version': 1})
-            self.assertTrue(self.worker._work(token))
-            self.adapter.continue_queued.assert_not_called()
-        write(self.directory / 'runtime.json', self.facts)
-        self.worker.pending = None
-        with self.subTest('current accepted follow-up'):
-            self.assertTrue(self.once())
-            args = self.adapter.continue_queued.call_args.args
-            self.assertEqual(args[0].native_id, self.properties['native_session_id'])
-            self.assertEqual(args[1], {message['id']: 'queue-' + message['id']})
-            self.assertEqual((self.directory / 'inbox-state.json').read_bytes(), state)
-            self.assertEqual((self.directory / 'inbox.jsonl').read_bytes(), log)
-            self.assertFalse(self.worker.notify())
-            self.adapter.continue_queued.assert_called_once()
-            self.assertEqual(agents.runtime(self.directory)['queue_continuation']['value'], {'continued': True})
-
-    def test_damaged_ledger_or_removed_agent_fails_closed(self):
-        """A damaged ledger or a removed agent stops continuation with a named diagnostic and recreates nothing; a break
-        goes unseen because the worker runs in the background."""
-        self.accepted('valid accepted receipt')
-        damaged = self.accepted('damaged accepted receipt')
-        path = self.directory / 'inbox-state.json'
-        with self.subTest('wrong-typed receipt'):
-            states = read(path)
-            states[damaged['id']]['native_receipt'] = []
-            write(path, states)
-            before = path.read_bytes()
-            self.assertTrue(self.once())
-            self.adapter.continue_queued.assert_not_called()
-            diagnostic = agents.runtime(self.directory)['queue_continuation']
-            self.assertEqual(diagnostic['state'], 'error')
-            self.assertIn(str(path), diagnostic['reason'])
-            self.assertIn('invalid delivery tracking', diagnostic['reason'])
-            self.assertIn(damaged['id'], diagnostic['reason'])
-            self.assertEqual(path.read_bytes(), before)
-        with self.subTest('unreadable ledger'):
-            path.write_text('{broken')
-            self.assertTrue(self.worker.notify())
-            token = self.worker.pending
-            self.assertTrue(self.worker._work(token))
-            self.adapter.continue_queued.assert_not_called()
-        with self.subTest('removed agent'):
-            shutil.rmtree(self.directory)
-            self.assertFalse(self.worker.notify())
-            self.assertTrue(self.worker._work(token))
-            self.assertFalse(self.directory.exists())
-
-    def test_completion_token_rules(self):
-        """The same accepted set is checked once, even after an ambiguous start, new acceptance starts a new check
-        without another native notification, and a busy lock retries later; fragile because the token mixes the status
-        version, the ledger file's stat and the accepted set, and an error repeats native starts or strands a
-        message."""
-        continued = self.adapter.continue_queued
-        first = self.accepted()
-        with self.subTest('busy locks'):
-            for name in ('.launch.lock', '.delivery.lock'):
-                with self.subTest(lock=name), (self.directory / name).open('a') as stream:
-                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    try:
-                        self.assertFalse(self.once())
-                        self.assertIsNone(self.worker.completed)
-                    finally:
-                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-                self.worker.pending = None
-            self.assertTrue(self.once())
-            continued.assert_called_once()
-        with self.subTest('receipt-only update'):
-            update_message(self.directory, first['id'], native_receipt={
-                'queued_submission_id': 'queue-' + first['id'], 'transcript_confirmed': False,
-                'observed_by_check': True})
-            self.once()
-            continued.assert_called_once()
-        with self.subTest('acceptance after idle'):
-            self.accepted('not yet accepted', submission_state='pending')
-            self.once()
-            continued.assert_called_once()
-            self.assertFalse(self.worker.notify())
-            message = self.accepted('accepted after idle')
-            self.once()
-            self.assertEqual(continued.call_count, 2)
-            self.assertEqual(continued.call_args.args[1], {first['id']: 'queue-' + first['id'],
-                                                           message['id']: 'queue-' + message['id']})
-            self.assertFalse(self.worker.notify())
-        with self.subTest('ambiguous transport'):
-            self.accepted('accepted before an ambiguous start')
-            state = (self.directory / 'inbox-state.json').read_bytes()
-            continued.side_effect = TimeoutError('ambiguous native start')
-            self.once()
-            self.assertFalse(self.worker.notify())
-            self.assertEqual((self.directory / 'inbox-state.json').read_bytes(), state)
-            self.assertIn('ambiguous native start', agents.runtime(self.directory)['queue_continuation']['reason'])
-            self.assertEqual(continued.call_count, 3)
-
-    def test_acceptance_during_a_scan_is_not_hidden_by_its_completion_token(self):
-        """Acceptance that arrives during the native call is not hidden by the scan's completion token; fragile because
-        it happens only inside the RPC window, and the message is stranded."""
-        first = self.accepted('first')
-        newer = []
-        def continue_first(*args):
-            newer.append(self.accepted('arrived during native operation'))
-            self.assertTrue(self.worker.notify())
-            return NativeResult('ok', value={'continued': True})
-        self.adapter.continue_queued.side_effect = continue_first
-        self.once()
-        self.assertIsNotNone(self.worker.pending)
-        old = self.worker.completed
-        self.assertNotEqual(self.worker.pending, old)
-        self.adapter.continue_queued.side_effect = None
-        # The pending token remains scheduled; its second scan sees both receipts.
-        token = self.worker.pending
-        self.assertTrue(self.worker._work(token))
-        self.assertEqual(set(self.adapter.continue_queued.call_args.args[1]), {first['id'], newer[0]['id']})
-
-    def test_shutdown_drains_the_worker_before_the_relay_closes(self):
-        """No native operation starts after close, and the runner drains the worker before closing the relay; fragile
-        because these are thread races at runner exit, never seen interactively."""
-        self.accepted()
-        with self.subTest('close during the accepted scan'):
-            scan = self.worker._accepted
-            def closing_scan(session):
-                selected = scan(session)
-                self.worker.close()
-                return selected
-            with patch.object(self.worker, '_accepted', side_effect=closing_scan):
-                self.once()
-            self.adapter.continue_queued.assert_not_called()
-        with self.subTest('close drains the owned worker'):
-            worker = QueueContinuation(self.directory, self.launch, self.root)
-            self.addCleanup(worker.close)
-            entered, release = threading.Event(), threading.Event()
-            def paused(*args):
-                entered.set()
-                release.wait(2)
-                return NativeResult('ok', value={'continued': True})
-            self.adapter.continue_queued.side_effect = paused
-            worker.start()
-            worker.notify()
-            try:
-                self.assertTrue(entered.wait(2))
-                closing = threading.Thread(target=worker.close)
-                closing.start()
-                # close sets its flag before joining the still-owned RPC thread.
-                for _ in range(100):
-                    with worker.mutex:
-                        if worker.closed:
-                            break
-                    threading.Event().wait(.001)
-                self.assertTrue(worker.closed)
-                self.assertFalse(worker.notify())
-                self.assertTrue(closing.is_alive())
-            finally:
-                release.set()
-            closing.join(2)
-            self.assertFalse(closing.is_alive())
-            self.assertFalse(worker.thread.is_alive())
-            worker.start()
-            self.assertFalse(worker.thread.is_alive())
-        with self.subTest('runner closes the worker before the relay'):
-            from multiverse.runtime import runner, rpc
-            request_path = self.directory / 'launches' / self.launch / 'request.json'
-            request = read(request_path)
-            request['attachment']['observe_status'] = True
-            write(request_path, request)
-            process, proxy, watcher, worker = Mock(pid=123), Mock(), Mock(), Mock()
-            process.poll.return_value = process.wait.return_value = 0
-            ordering = Mock()
-            ordering.attach_mock(worker.close, 'worker_close')
-            ordering.attach_mock(proxy.close, 'relay_close')
-            with patch.object(runner.sys, 'argv', ['runner', str(request_path.parent)]), \
-                    patch.object(runner, 'process_started', return_value=None), \
-                    patch.object(runner.subprocess, 'Popen', return_value=process), \
-                    patch.object(rpc, 'LaunchProxy', return_value=proxy), \
-                    patch.object(runner, 'StatusWatcher', return_value=watcher), \
-                    patch('multiverse.runtime.queue_continuation.QueueContinuation', return_value=worker), \
-                    patch.object(runner, 'launch_diagnostic', return_value={}):
-                self.assertEqual(runner.main(), 0)
-            worker.start.assert_called_once()
-            worker.close.assert_called_once()
-            watcher.start.assert_called_once()
-            self.assertIs(watcher.queue_continuation, worker)
-            self.assertEqual([call[0] for call in ordering.mock_calls], ['worker_close', 'relay_close'])
+        with patch.object(native, 'observe', return_value={'live': 'dormant'}):
+            result = native.send_or_wake(self.root, self.directory.name, message['id'], new_message=True)
+        self.assertEqual(result['state'], 'pending')
+        facts = agents.runtime(self.directory)
+        launch = self.directory / 'launches' / facts['launch_id']
+        self.assertEqual((launch / 'task.md').read_text(), '')
+        self.assertIsNone(read(launch / 'request.json')['resume_message_id'])
+        tracking = message_record(self.directory, message['id'])[1]
+        self.assertEqual(tracking['submission_state'], 'pending')
+        self.assertEqual(tracking['deferred_launch_id'], facts['launch_id'])
+        self.assertTrue(tracking['restart_on_delivery'])
+        agents.update_runtime(self.directory, facts['launch_id'], state='running', pid=123,
+                              native_relay={'state': 'ready'}, startup_checked=True)
+        with patch.object(native, 'owned'), patch.object(native, 'observe', return_value={'live': 'alive'}):
+            native.flush_startup(self.root, self.directory, facts['launch_id'])
+            native.flush_startup(self.root, self.directory, facts['launch_id'])
+        sent = [call for call in self.adapter.calls if call[0] == 'send']
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1].queue_state['restart']['id'], message['id'])
+        with self.subTest('failed startup stays retryable without inventing a new restart intent'):
+            agents.update_runtime(self.directory, facts['launch_id'], state='stopped')
+            later = append_message(self.directory, 'wake whose bridge fails', {}, delivery='follow-up',
+                                   target_session=self.properties['native_session_id'])
+            with patch.object(native, 'observe', return_value={'live': 'dormant'}):
+                native.send_or_wake(self.root, self.directory.name, later['id'], new_message=True)
+            generation = agents.runtime(self.directory)['launch_id']
+            native.flush_startup(self.root, self.directory, generation, error='Bridge startup failed')
+            self.assertEqual(message_record(self.directory, later['id'])[1]['submission_state'], 'failed')
+            agents.update_runtime(self.directory, generation, state='running', pid=123,
+                                  native_relay={'state': 'ready'}, startup_delivery='ready')
+            with patch.object(native, 'owned'):
+                native.deliver(self.root, self.directory.name, later['id'], retry=True)
+            sent = [call for call in self.adapter.calls if call[0] == 'send']
+            self.assertEqual(len(sent), 2)
+            self.assertNotIn('restart', sent[-1][1].queue_state)
 
 
 def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(QueueContinuationWorkerTest(name) for name in QueueContinuationWorkerTest.__dict__
-                              if name.startswith('test_'))
+    return unittest.TestSuite(cls(name) for cls in (QueueContinuationWorkerTest, PausedWakeTest)
+                              for name in cls.__dict__ if name.startswith('test_'))

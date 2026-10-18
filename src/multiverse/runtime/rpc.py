@@ -147,7 +147,7 @@ class LaunchProxy:
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
-                 record_refusal=lambda evidence: None, record_connection=None):
+                 record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -155,6 +155,7 @@ class LaunchProxy:
         self.record_lost = record_lost
         self.record_refusal = record_refusal
         self.record_connection = record_connection
+        self.record_primary_event = record_primary_event
         self.owner = None
         self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
@@ -270,6 +271,11 @@ class LaunchProxy:
                                     await client.send(json.dumps({'id': value.get('id'), 'error': {
                                         'code': -32602, 'message': f'Native launch preparation failed: {error}'}}))
                                     continue
+                                observe_event = getattr(protocol, 'primary_event', None)
+                                if observe_event is not None:
+                                    event = observe_event('outgoing', value)
+                                    if event is not None:
+                                        self.record_primary_event(event)
                             else:
                                 try:
                                     native_id = protocol.incoming(value)
@@ -281,6 +287,11 @@ class LaunchProxy:
                                         self.record_refusal({'source': 'adapter-validation', 'method': 'binding',
                                                              'code': None, 'message': str(error), 'native_id': None})
                                     raise
+                                observe_event = getattr(protocol, 'primary_event', None)
+                                if observe_event is not None:
+                                    event = observe_event('incoming', value)
+                                    if event is not None:
+                                        self.record_primary_event(event)
                                 refusal = getattr(protocol, 'launch_refusal', None)
                                 if refusal is not None:
                                     self.record_refusal(refusal)

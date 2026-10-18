@@ -850,27 +850,28 @@ Different process-level environments require separately configured native homes.
 Exact thread ID/workspace are checked before queueing or steering. Urgent busy
 input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. A racing busy steer is never converted to a fresh turn.
-Codex 0.159.3 and 0.160.0 can leave automatic queue draining paused after an
-interrupt: a later `queue/add` accepts a message while the thread remains idle.
-This reproduces through direct native RPC, independently of mv2. For a thread
-observed idle before submission, mv2 checks the queue after acceptance. If the
-new message is its only entry, mv2 asks `thread/queue/start` to start that exact
-entry. It never resubmits the text, skips older work or restarts a thread. Native
-queue start rejects active/pending turns. If auto-draining already took the
-entry, no start is needed. A rejected explicit start preserves acceptance and
-reports a diagnostic for `deliver AGENT --check`, rather than making it retryable.
-Codex 0.163.0 also pauses automatic draining when the person presses Escape in
-the native terminal. A connected idle launch checks its durable accepted
-follow-ups and can continue the existing native queue head. It inventories up
-to eight pages of 100 entries; every entry must match a follow-up accepted by
-this launch. It then rechecks the exact thread and native head before starting
-that existing ID. Mixed, malformed, oversized or changed queues are left alone.
-No text is resubmitted, no entry is reordered and no thread is resumed. Native
-changes can race the final check: a rejected start preserves acceptance and
-never makes an uncertain message retryable. Empty or unchanged local state
-does not cause repeated native checks. One runner-owned worker serializes these
-checks outside the status stream and drains before the relay closes. It never
-rewrites acceptance or receipt records. Receipt checks never start or replay work.
+Codex can leave automatic queue draining paused after an interrupt. The owning
+terminal relay publishes interrupt intent before forwarding it, and records
+exact-primary turn starts and completions. An interrupted completion labels the
+queue paused; a newer start clears it. The public API flattens several abort
+reasons, so this label never blocks Codex's own native draining. Old-turn and
+side-thread events cannot change the primary's state.
+
+Only a new steer or follow-up submitted by mv2 authorizes an explicit restart.
+Core durably claims that message ID under delivery locks and exposes the claim
+to that send invocation only. Ordinary handles strip it; receipt checks,
+retries, inbox-only messages and idle polling cannot reuse it. After accepting
+new idle input, the adapter uses queue/start without an item ID, so the native
+FIFO head runs even if an older item came from another client. A busy race or
+lost acceptance never retries that start or resubmits text. The returned head's
+turn is separate from the new tail's receipt.
+
+Pause state survives an attachment-only resume of the exact conversation. A new
+message waking a paused bridge resumes without an interactive prompt, waits for
+binding, then queues through normal startup delivery. Thus it cannot jump ahead
+of older accepted input. Failed startup leaves it saved for an explicit retry.
+Default kill still cancels native queued work, and delivery checks report those
+messages as cancelled. There is no background idle queue starter.
 Approvals remain unanswered by the delivery client. Core bounds transport
 requests, frames and deadlines. Explicit sandbox/approval flags in `args` or
 `resume_args` are applied and verified on bridge resume as described above;

@@ -23,6 +23,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     directory = agents.directory(root, agent)
     name = store.read(directory / 'properties.json')['name']
     launch_id = agents.runtime(directory).get('launch_id')
+    native_id = store.read(directory / 'properties.json').get('native_session_id')
     results = []
     finalized = 0
     for message in mailbox.inbox(directory, limit=None, all_messages=True)['messages']:
@@ -39,8 +40,11 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True
         accepted = (not retry and state == 'accepted' and not confirmed
                     and tracking.get('delivery_method') != 'resume_prompt'
-                    and attempts[-1].get('launch_id') == launch_id)
-        if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown')):
+                    and (attempts[-1].get('launch_id') == launch_id
+                         or isinstance(evidence, dict) and evidence.get('queued_submission_id')
+                         and native_id and attempts[-1].get('native_session_id') == native_id
+                         and (tracking.get('target_session') or message.get('target_session')) == native_id))
+        if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') else None

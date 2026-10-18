@@ -128,7 +128,7 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             return ({**result, 'state': 'error', 'saved': True, 'ok': False,
                      'native_delivery': delivery_summary(receipt)}, receipt)
         try:
-            receipt = native.send_or_wake(root, directory.name, message['id'])
+            receipt = native.send_or_wake(root, directory.name, message['id'], new_message=True)
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
             try:

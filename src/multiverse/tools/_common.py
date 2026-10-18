@@ -65,6 +65,8 @@ def delivery_summary(receipt):
     value = receipt.get('value')
     if isinstance(value, dict) and 'transcript_confirmed' in value:
         result['transcript_confirmed'] = value['transcript_confirmed']
+    if isinstance(value, dict) and value.get('paused') is True:
+        result['paused'] = True
     return result
 
 

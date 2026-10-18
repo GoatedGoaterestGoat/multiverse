@@ -174,7 +174,6 @@ class StatusWatcher:
         self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='native-status', daemon=True)
-        self.queue_continuation = None
 
     def start(self):
         self.thread.start()
@@ -213,8 +212,6 @@ class StatusWatcher:
                 changes['status'] = 'unknown' if lost else status
                 return changes if any(facts.get(key) != value for key, value in changes.items()) else None
             mutate_runtime(self.agent_dir, self.launch_id, changes_for)
-            if status == 'idle' and not self.stopped.is_set() and self.queue_continuation is not None:
-                self.queue_continuation.notify()
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -238,8 +235,6 @@ class StatusWatcher:
                 if facts.get('state') == 'starting':
                     await asyncio.sleep(.1)
                     continue
-                if self.queue_continuation is not None:
-                    self.queue_continuation.notify(facts, properties)
                 if task is not None:
                     if properties.get('native_session_id') != native_id or task.done():
                         return
@@ -552,7 +547,6 @@ def main():
     proxy = None
     startup = None
     recovery_monitor = None
-    queue_continuation = None
     refusal_monitor = None
     startup_checked = False
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
@@ -606,12 +600,14 @@ def main():
                 update_runtime(agent_dir, launch.name, state='running', native_relay={'state': 'ready'})
                 from multiverse.runtime.recovery import reconnected
                 reconnected(agent_dir, launch.name)
+            from multiverse.runtime.queue_continuation import record_primary_event
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
                 UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name),
                 record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
-                record_connection=attachments.connection_logger(launch, started=runner_started))
+                record_connection=attachments.connection_logger(launch, started=runner_started),
+                record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event))
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()
@@ -719,19 +715,6 @@ def main():
         if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             roles['status observer'] = attachments.Role(launch, 'status observer', started=runner_started)
-            from multiverse import harnesses
-            from multiverse.runtime.native import adapter_hook
-            try:
-                selected_properties = read(agent_dir / 'properties.json')
-                selected_adapter = harnesses.load(Path(env['MV2_UNIVERSE']), selected_properties['harness'])
-            except (OSError, ValueError, TypeError, KeyError):
-                selected_adapter = None  # Optional continuation cannot prevent the terminal starting.
-            if adapter_hook(selected_adapter, 'continue_queued') is not None:
-                from multiverse.runtime.queue_continuation import QueueContinuation
-                queue_continuation = QueueContinuation(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
-                roles['queue continuation'] = attachments.Role(launch, 'queue continuation', started=runner_started)
-                watcher.queue_continuation = queue_continuation
-                queue_continuation.start()
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
             from multiverse.runtime.recovery import RecoveryMonitor
@@ -803,7 +786,6 @@ def main():
             except Exception as error:
                 cleanup_errors.append('startup bookkeeping: ' + str(error))
         close_role('refusal observer', refusal_monitor)
-        close_role('queue continuation', queue_continuation)
         close_role('relay', proxy)
         close_role('status observer', watcher)
         close_role('recovery monitor', recovery_monitor)
