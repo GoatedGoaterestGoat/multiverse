@@ -75,7 +75,8 @@ class ClaudeResumeTest(BaseTest):
                 self.assertEqual(fresh.argv[fresh.argv.index('--model') + 1], 'chosen')
                 self.assertEqual(('--plugin-dir' in fresh.argv), bridge)
                 self.assertNotIn('--original task', fresh.argv)  # the first task is never replayed
-                self.assertEqual(fresh.native_mode['fallback_reason'], NEVER_USED)
+                # The note is the resume's notice, never a fallback reason (inspect would print it twice).
+                self.assertFalse(fresh.native_mode['fallback_reason'])
                 self.assertEqual(fresh.environment, saved.environment)
                 self.assertEqual(fresh.control_endpoint, saved.control_endpoint)
 
@@ -176,7 +177,8 @@ class ClaudeResumeLaunchTest(TerminalBase):
         argv, runtime = self.restart(agent, directory)
         self.assertEqual(argv[argv.index('--session-id') + 1], agent['native_session_id'])
         self.assertNotIn('--resume', argv)
-        self.assertEqual(runtime['native_mode']['fallback_reason'], NEVER_USED)
+        self.assertFalse(runtime['native_mode'] and runtime['native_mode'].get('fallback_reason'))
+        self.assertEqual(runtime['launch_notices'], [NEVER_USED])
         self.assertNotEqual(runtime['state'], 'failed')
         self.stop_agent(agent)
 
@@ -206,7 +208,7 @@ class ClaudeResumeLaunchTest(TerminalBase):
         until(lambda: (used_dir / 'seen.json').exists())
         argv = read(used_dir / 'seen.json')['argv']
         self.assertEqual(argv[argv.index('--session-id') + 1], used['native_session_id'])  # the fresh start stays
-        self.assertEqual(read(used_dir / 'runtime.json')['native_mode']['fallback_reason'], CONVERSATION_MISSING)
+        self.assertEqual(read(used_dir / 'runtime.json')['launch_notices'], [CONVERSATION_MISSING])
         self.stop_agent(used)
 
     def test_a_used_agent_still_resumes_its_conversation(self):

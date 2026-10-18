@@ -198,7 +198,7 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
         self.deliver(str(uuid4()), str(uuid4()))  # confirmed, but in an earlier conversation of this agent
         self.deliver(str(uuid4()), native, receipt=False)  # sent to this one, never stored
         self.assertEqual(self.notice(self.session(native)), NEVER_USED)
-        self.assertEqual(self.resumed(self.session(native)).native_mode['fallback_reason'], NEVER_USED)
+        self.assertFalse(self.resumed(self.session(native)).native_mode['fallback_reason'])
 
     def test_evidence_of_a_conversation_says_the_saved_one_is_missing(self):
         def receipt(native):
@@ -223,7 +223,7 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
                 native = str(uuid4())
                 evidence(native)
                 self.assertEqual(self.notice(self.session(native)), CONVERSATION_MISSING)
-                self.assertEqual(self.resumed(self.session(native)).native_mode['fallback_reason'], CONVERSATION_MISSING)
+                self.assertFalse(self.resumed(self.session(native)).native_mode['fallback_reason'])
 
     def test_context_reported_before_the_agent_moved_to_this_session_is_not_its_evidence(self):
         native = str(uuid4())
@@ -243,6 +243,79 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
         self.assertEqual(self.notice(self.session(native)), NEVER_USED)
         self.assertIn('--session-id', self.resumed(self.session(native)).argv)
 
+
+
+class ClaudeStartupPromptEvidenceTest(BaseTest):
+    """qa-claude CLAUDE-10: when a launch carrying a wake prompt exits during startup, core asks whether Claude
+    recorded the prompt. True keeps the message uncertain, False makes it a definite failure --retry resends,
+    None (can't tell) keeps it uncertain."""
+
+    SINCE = '2026-10-18T10:00:00.000000+00:00'
+    PROMPT = 'Message from lead:\nPlease rebase.'
+
+    def setUp(self):
+        super().setUp()
+        self.storage = self.work / 'claude-config'
+        self.environment = {'CLAUDE_CONFIG_DIR': str(self.storage)}
+        self.adapter = harnesses.load(self.root, 'claude')
+        self.native = str(uuid4())
+
+    def session(self, native=None):
+        return SessionHandle(str(uuid4()), 'claude', str(self.work), launch_id='launch', native_id=native or self.native,
+                             state='failed')
+
+    def transcript(self, *rows, raw=None, native=None):
+        path = self.storage / 'projects' / '-w' / f'{native or self.native}.jsonl'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = ''.join(json.dumps(row) + '\n' for row in rows)
+        path.write_text(text + (raw or ''))
+        return path
+
+    def row(self, text, timestamp='2026-10-18T10:00:05.000Z', blocks=False):
+        content = [{'type': 'text', 'text': text}] if blocks else text
+        return {'type': 'user', 'message': {'role': 'user', 'content': content}, 'timestamp': timestamp,
+                'sessionId': self.native, 'uuid': str(uuid4())}
+
+    def evidence(self, session=None, since=SINCE, prompt=PROMPT):
+        return self.adapter.startup_prompt_evidence(session or self.session(), prompt, since, self.environment)
+
+    def test_a_row_this_launch_recorded_is_evidence(self):
+        for blocks in (False, True):
+            with self.subTest(blocks=blocks):
+                self.transcript({'type': 'system', 'timestamp': '2026-10-18T10:00:01.000Z'}, self.row(self.PROMPT, blocks=blocks))
+                self.assertIs(self.evidence(), True)
+
+    def test_no_transcript_or_a_complete_one_without_the_prompt_is_proof_it_never_arrived(self):
+        self.assertIs(self.evidence(), False)  # Claude exited before writing anything for this session
+        self.transcript(self.row('Message from lead:\nPlease rebase.', timestamp='2026-10-18T09:59:00.000Z'),  # an older launch
+                        self.row('something else'), {'type': 'assistant', 'message': {'content': 'ok'}})
+        self.assertIs(self.evidence(), False)
+        # Another session's transcript, and a subagent's, never count for this one.
+        self.transcript(self.row(self.PROMPT), native=str(uuid4()))
+        sub = self.storage / 'projects' / '-w' / self.native / 'subagents' / 'agent-1.jsonl'
+        sub.parent.mkdir(parents=True)
+        sub.write_text(json.dumps(self.row(self.PROMPT)) + '\n')
+        self.assertIs(self.evidence(), False)
+
+    def test_anything_that_cannot_be_told_is_none(self):
+        self.transcript(self.row('something else'), raw='{"type": "user", "message": {"content": "Message from le')  # cut short
+        self.assertIsNone(self.evidence())
+        self.transcript(self.row('something else'), raw='not json\n')  # damaged
+        self.assertIsNone(self.evidence())
+        self.transcript(self.row('something else'))
+        for since in (None, 'not a time', '2026-10-18'):  # missing, invalid, or without a time zone
+            with self.subTest(since=since):
+                self.assertIsNone(self.evidence(since=since))
+        self.assertIsNone(self.evidence(session=replace(self.session(), native_id=None)))
+        self.assertIsNone(self.evidence(prompt=''))
+        path = self.storage / 'projects' / '-w' / f'{self.native}.jsonl'
+        path.unlink()
+        path.mkdir()  # unreadable
+        self.assertIsNone(self.evidence())
+
+    def test_a_damaged_line_does_not_hide_a_row_that_proves_it_arrived(self):
+        self.transcript(self.row(self.PROMPT), raw='not json\n')
+        self.assertIs(self.evidence(), True)
 
 class ClaudeInheritedVariablesTest(BaseTest):
     def test_a_parent_claudes_ide_port_and_inbox_never_reach_an_agent(self):

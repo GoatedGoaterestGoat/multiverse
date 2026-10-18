@@ -319,13 +319,20 @@ def bridge_problem(executable):
 
 # A resume whose session Claude has no conversation for starts it fresh under the same ID (PR #3), and says which
 # case it is: never used, or a saved conversation that went missing (Claude deletes them after cleanupPeriodDays).
+# The notes say what this launch does, which holds even when the launch then fails at startup.
 NEVER_USED = ('Claude has no saved conversation for this session: the agent was stopped before its first message, '
-              'so it started fresh under the same session ID')
+              'so this launch starts it fresh under the same session ID')
 CONVERSATION_MISSING = ("Claude's saved conversation for this session is missing (Claude deletes conversations older "
-                        'than its cleanupPeriodDays setting): the agent started fresh under the same session ID, '
+                        'than its cleanupPeriodDays setting): this launch starts it fresh under the same session ID, '
                         'without its earlier context')
-FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'  # older records
-FRESH_NOTES = (NEVER_USED, CONVERSATION_MISSING, FRESH_SESSION)
+# Earlier records joined a note like these onto native_mode.fallback_reason; launch-only causes filter them out.
+FRESH_NOTES = (NEVER_USED, CONVERSATION_MISSING,
+               'No saved Claude conversation for this session; started it fresh under the same session ID',
+               'Claude has no saved conversation for this session: the agent was stopped before its first message, '
+               'so it started fresh under the same session ID',
+               "Claude's saved conversation for this session is missing (Claude deletes conversations older than its "
+               'cleanupPeriodDays setting): the agent started fresh under the same session ID, without its earlier context')
+FRESH_SESSION = FRESH_NOTES[2]  # the first note's text, kept for callers that name it
 LAUNCH_ONLY = 'This agent is launch-only'
 
 
@@ -407,6 +414,46 @@ def _typed_prompt(native_id, environment):
     except OSError:
         return False
     return False
+
+
+def prompt_recorded(native_id, prompt, since, environment):
+    """Whether Claude recorded `prompt`, a launch's command-line first prompt, in session `native_id` from
+    `since` on: True for a user row with it, False when the transcript is missing or complete and has none,
+    None when that can't be told (unreadable or damaged rows, no session or prompt, `since` not an aware time)."""
+    start, text = moment(since), (prompt or '').strip()
+    if not native_id or not text or start is None or start.tzinfo is None:
+        return None
+    try:
+        paths = list((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
+    except OSError:
+        return None
+    unsure = False
+    for path in paths:
+        try:
+            lines = path.read_bytes().split(b'\n')
+        except OSError:
+            return None
+        for raw in lines:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:  # damaged, or the last row cut short while it was being written
+                unsure = True
+                continue
+            message = row.get('message') if isinstance(row, dict) and row.get('type') == 'user' else None
+            content = message.get('content') if isinstance(message, dict) else None
+            body = content if isinstance(content, str) else ' '.join(
+                str(block.get('text', '')) for block in content if isinstance(block, dict)) if isinstance(content, list) else ''
+            if text not in body:
+                continue
+            when = moment(row.get('timestamp'))
+            try:
+                if when is None or when >= start:  # a matching row with no usable time still counts as evidence
+                    return True
+            except TypeError:  # a time without a zone can't be compared
+                return True
+    return None if unsure else False
 
 
 def launch_only_cause(launch):
@@ -492,17 +539,17 @@ class ClaudeAdapter(ConfiguredAdapter):
         command = self._snapshot_flag(super().resume(session, context))
         note = fresh_start(session, context.environment)
         fresh = self._reserve_session(command, session.native_id) if note else None
-        command = self._with_bridge(fresh or command, context)
-        if fresh is None:
-            return command
-        # Say so in the agent's details too: it now runs without any earlier context.
-        mode = dict(command.native_mode)
-        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), note]))
-        return replace(command, native_mode=mode)
+        # The note itself is the resume's notice (`resume_notice`), which core shows and keeps with the launch.
+        return self._with_bridge(fresh or command, context)
 
     def resume_notice(self, session, caller_environment, effective_environment):
         """The line a resume result adds when it starts the session fresh; same evidence as `resume`."""
         return fresh_start(session, effective_environment)
+
+    def startup_prompt_evidence(self, session, prompt, since, environment):
+        """For a launch that exited during startup with a wake prompt: whether its Claude recorded the prompt.
+        Core makes the message a definite failure only on False; True or None keep it uncertain."""
+        return prompt_recorded(session.native_id, prompt, since, environment)
 
     def _snapshot_flag(self, command):
         """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.

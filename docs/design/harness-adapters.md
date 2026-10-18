@@ -25,13 +25,21 @@ must not guess a recent session. Claude receives an assigned UUID, and resumes i
 with `--resume` only once Claude has saved a transcript for it (it writes none before
 the first message); a session Claude has no transcript for restarts fresh under
 the same UUID with `--session-id`, without replaying its task, and says so in the
-resume result (the `resume_notice` hook) and the agent's details. The note tells
+resume result (the `resume_notice` hook) and the agent's details, where core keeps
+it with the launch's notices (never in `fallback_reason`, which is for a plain
+launch's cause). The note tells
 "stopped before its first message" from "the saved conversation is missing"
 (Claude deletes transcripts after `cleanupPeriodDays`) by what outlives the
 transcript: a message to this session whose receipt the mod wrote, context the
 mod reported after the agent last moved to this session, or the session in
 Claude's prompt history (`history.jsonl`, which Claude prunes too, so its absence
-proves nothing). Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+proves nothing). When a launch carrying a wake prompt exits during startup, core
+asks `startup_prompt_evidence(session, prompt, since, environment)`: Claude says
+True when the session's transcript has a user row with that prompt from the
+launch's start on, False when the transcript is missing or complete without one
+(the message is then a definite failure that `--retry` resends), and None when it
+can't tell (unreadable or damaged rows, or no aware start time), which keeps the
+message uncertain. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
 every resume. Claude Code keeps a conversation's system prompt as recorded at its
 first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
 would leave a resumed agent with the bootstrap it started with: a plugin's
