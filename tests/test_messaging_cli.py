@@ -128,7 +128,8 @@ class MessagingCliTest(BaseTest):
         self.assertEqual(len(self.calls), 1)
         self.behavior = NativeResult('unknown', 'No receipt found')
         checked = self.output('deliver', 'first', '--check', code=1)
-        self.assertIn('cannot yet tell', checked)
+        self.assertEqual(checked, '')
+        self.assertIn('cannot yet tell', self.stderr)
         self.assertEqual(len(self.calls), 1)
 
     def test_retry_and_check_show_evidence_without_message_text(self):
@@ -265,3 +266,47 @@ class MessagingCliTest(BaseTest):
                 *([] if standalone else ['deliver']), 'first', '--check'], env=env, text=True, capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, 'first: no messages to check.\n')
+
+    def test_launch_only_failures_offer_inbox_or_attach_without_restarting(self):
+        self.behavior = NativeResult('unavailable', 'This agent is launch-only: its harness sets inbox_bridge to false',
+                                     {'launch_only': True})
+        self.output('send', 'first', '--text', 'private', code=1)
+        self.assertIn('launch-only', self.stderr)
+        self.assertIn('--delivery inbox-only', self.stderr)
+        self.assertIn('mv2 attach first', self.stderr)
+        self.assertNotIn('mv2 kill', self.stderr)
+        self.assertEqual(self.output('deliver', 'first', '--retry', code=1), '')
+        self.assertIn('--delivery inbox-only', self.stderr)
+        self.assertNotIn('resume it', self.stderr)
+        self.assertEqual(len(self.history('first')), 1)
+
+    def test_retry_failure_goes_to_stderr_while_json_stays_on_stdout(self):
+        self.behavior = NativeResult('error', 'rejected before submission')
+        self.output('send', 'first', '--text', 'private', code=1)
+        self.assertEqual(self.output('deliver', 'first', '--retry', code=1), '')
+        self.assertIn('Not delivered to first', self.stderr)
+        record = json.loads(self.output('deliver', 'first', '--retry', '--json', code=1))
+        self.assertFalse(record['ok'])
+        self.assertEqual(self.stderr, '')
+
+    def test_short_message_tokens_never_corrupt_diagnostic_words(self):
+        from multiverse.tools._messaging import failure_reason
+        reason = 'This agent is launch-only: its harness sets inbox_bridge to false'
+        for text in ('hi', 'is', 'a', 'agent', 'needs'):
+            with self.subTest(text=text):
+                self.assertEqual(failure_reason(reason, text), reason)
+        body = 'long private message with several words'
+        result = failure_reason('Rejected ' + body + '; more detail', body)
+        self.assertEqual(result, 'Rejected the message')
+        self.assertNotIn('messthe', result)
+
+    def test_retry_wake_keeps_launch_notices_in_text_and_json(self):
+        self.behavior = NativeResult('error', 'rejected before submission')
+        self.output('send', 'first', '--text', 'private', code=1)
+        receipt = {'state': 'pending', 'ok': True, 'reason': 'Resuming with the interactive starting prompt',
+                   'notices': ['Kept its saved storage.']}
+        with patch.object(native, 'send_or_wake', return_value=receipt):
+            line = self.output('deliver', 'first', '--retry')
+            self.assertIn('Kept its saved storage.', line)
+            record = json.loads(self.output('deliver', 'first', '--retry', '--json'))
+            self.assertEqual(record['messages'][0]['notices'], receipt['notices'])

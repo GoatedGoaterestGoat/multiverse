@@ -245,6 +245,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
 | `inbox-state.json` | Delivery attempts and receipts per message. |
+| `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: one line per verified native session change, such as Claude's `/clear`, with the old and new session IDs. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |

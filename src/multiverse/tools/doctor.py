@@ -5,7 +5,7 @@ from pathlib import Path
 from ..runtime import lifecycle
 from .. import compaction, universe
 from ..universe import catalog
-from ..universe.mailbox import inbox
+from ..universe.mailbox import inbox_problem
 
 def configure(parser):
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
@@ -48,7 +48,8 @@ def check(root, notes=None):
                 if compaction.old_guard(scope / "state" / "agents" / item["id"], runtime):
                     problem = f"{item['name']} runs the compaction guard from before compaction became a plugin"
                     found.append((problem, f"{problem}: restart it to use tree compaction."))
-                inbox(scope / "state" / "agents" / item["id"], all_messages=True)
+                if problem := inbox_problem(scope / "state" / "agents" / item["id"]):
+                    found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
         found.extend((problem, problem) for problem in _plugins(scope))

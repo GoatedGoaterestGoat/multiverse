@@ -37,6 +37,9 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 
 Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
+If a name or UUID prefix matches several agents, the error lists their names
+and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
+
 A running agent without a live connection can't receive `steer` or `follow-up` messages, so send it `inbox-only` messages instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
 
 ## Read the result
@@ -55,10 +58,13 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME was stopped; resuming it with your message.` | The agent is starting with your message as its prompt | Nothing |
 | `NAME is starting; your message will be delivered when ready.` | It's waiting for the session to be ready | Nothing |
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
-| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose messaging broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first |
+| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A launch-only agent instead points to inbox-only delivery or attaching; restarting it does not add messaging |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
+
+Failed delivery and check lines go to stderr and exit nonzero; successful lines
+go to stdout. With `--json`, the result stays on stdout.
 
 ## Check and retry deliveries
 
@@ -123,3 +129,17 @@ mv2 ask worker --question 'Which file holds the parser?'
 ## Scripts
 
 Every command on this page takes `--json` and then prints the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
+
+If inbox-state.json is damaged, send still saves the new message, names the file,
+and makes no native submission. Repair or reset that file before retrying.
+Only messages with saved proof that submission never began become retryable;
+resetting delivery state does not make older accepted or uncertain messages safe
+to resend. Doctor names damaged delivery state and incomplete inbox tails.
+Back up an incomplete log before repairing its final line; complete messages
+remain readable and are never overwritten.
+
+A wake launch that exits during startup becomes a definite failure only when
+the harness's exact conversation record shows no consumption of its starting
+prompt. The result says it was saved for explicit retry. Evidence of consumption,
+unreadable records, and harnesses without this check remain uncertain; no
+automatic resend occurs.

@@ -6,11 +6,13 @@ import json
 def failure_reason(reason, text=''):
     reason = str(reason or 'the session could not accept the message')
     if text:
-        reason = reason.replace(text, 'the message')
-        reason = reason.replace(json.dumps(text, ensure_ascii=False)[1:-1], 'the message')
-        for line in text.splitlines():
-            if line.strip():
-                reason = reason.replace(line, 'the message')
+        # Replace whole reflected values once. Short conversational tokens are
+        # not secrets and occur inside ordinary diagnostic prose.
+        pieces = {text, json.dumps(text, ensure_ascii=False)[1:-1], *text.splitlines()}
+        pieces = {piece for piece in pieces if len(piece.strip()) >= 7 or (len(piece.strip()) >= 3 and any(char.isspace() for char in piece.strip()))}
+        if pieces:
+            pattern = r'(?<!\w)(?:' + '|'.join(re.escape(piece) for piece in sorted(pieces, key=len, reverse=True)) + r')(?!\w)'
+            reason = re.sub(pattern, 'the message', reason)
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'
@@ -38,10 +40,17 @@ def failure_reason(reason, text=''):
 
 def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text='', running=False):
     state = receipt.get('state')
-    value = receipt.get('value') or {}
+    value = receipt.get('value')
+    value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
     if state in ('error', 'unavailable'):
         why = failure_reason(reason, text)
+        if value.get('launch_only') is True:
+            return (f"Not delivered to {name}: {why}. Saved; resend it with --delivery inbox-only "
+                    f"for manual reading, or attach with mv2 attach {name}.")
+        if value.get('pre_submission_failure') is True:
+            return (f"Not delivered to {name}: {why}. Saved without submission; repair the named file, "
+                    f"then mv2 deliver {name} --retry.")
         if check:
             return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."
         if running:

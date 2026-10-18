@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from ..store import lock, now, read, uid, write
+from . import records
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None):
@@ -65,19 +66,78 @@ def _messages(agent_dir):
 
 def _states(agent_dir):
     path = agent_dir / 'inbox-state.json'
-    states = read(path) if path.exists() else {}
+    states = records.runtime(path)
+    for identifier, state in states.items():
+        if (not isinstance(state, dict)
+                or ('submission_state' in state and (not isinstance(state['submission_state'], str)
+                    or state['submission_state'] not in ('pending', 'submitting', 'accepted', 'unknown', 'failed', 'cancelled', 'manual')))
+                or (state.get('native_receipt') is not None and not isinstance(state['native_receipt'], dict))
+                or ('attempts' in state and (not isinstance(state['attempts'], list)
+                    or any(not isinstance(attempt, dict) for attempt in state['attempts'])))):
+            raise records.RecordError(path, f'invalid delivery tracking for {identifier!r}')
+
     # Retired per-message read markers have no effect on delivery or read position.
     states = {identifier: {key: value for key, value in state.items() if key != 'acknowledged_at'}
               for identifier, state in states.items()}
     states = {identifier: state for identifier, state in states.items() if state}
     legacy = agent_dir / 'native-delivery.json'
     if legacy.exists():
-        for identifier, attempts in read(legacy).items():
+        for identifier, attempts in records.runtime(legacy).items():
+            if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
+                    or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
+                           for attempt in attempts)):
+                raise records.RecordError(legacy, f'invalid delivery attempts for {identifier!r}')
             if identifier not in states and attempts:
                 last = attempts[-1]
                 states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                     'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
+    for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
+        failed = records.runtime(proof)
+        identifier = failed.get('message_id')
+        if (failed.get('schema') != 1 or identifier != proof.stem
+                or not isinstance(identifier, str) or not isinstance(failed.get('reason'), str)):
+            raise records.RecordError(proof, 'invalid pre-submission failure record')
+        previous = states.get(identifier, {})
+        if previous.get('submission_state', 'pending') in ('pending', 'failed'):
+            receipt = {'state': 'error', 'ok': False, 'reason': failed['reason'],
+                       'value': {'pre_submission_failure': True}}
+            states[identifier] = {**previous, 'submission_state': 'failed',
+                                  'attempts': previous.get('attempts') or [receipt]}
     return states
+
+
+def preflight_delivery(agent_dir):
+    """No native request until its delivery ledger is readable."""
+    with lock(agent_dir / '.inbox.lock'):
+        _states(agent_dir)
+
+
+def record_unsubmitted(agent_dir, message_id, reason):
+    """Durable negative proof for a newly saved message whose preflight failed.
+
+    Never inferred for old messages. Removed durably before any later native
+    submission, so deleting inbox-state.json cannot revive this proof afterward.
+    """
+    with lock(agent_dir / '.inbox.lock'):
+        _, _, messages = _messages(agent_dir)
+        if not any(message.get('id') == message_id for _, message in messages):
+            raise ValueError('Message does not belong to this recipient inbox')
+        write(agent_dir / 'inbox-unsubmitted' / (message_id + '.json'),
+              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason})
+
+
+def inbox_problem(agent_dir):
+    """Doctor reports damage without consuming or rewriting the message log."""
+    try:
+        with lock(agent_dir / '.inbox.lock'):
+            data, _, _ = _messages(agent_dir)
+            _states(agent_dir)
+            if data and not data.endswith(b'\n'):
+                return (f"{agent_dir / 'inbox.jsonl'}: incomplete final line; sends cannot append. "
+                        "Back up the file, then repair or remove only the incomplete tail; keep complete messages")
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        return f"{agent_dir}: inbox cannot be read: {error}"
+    return None
 
 
 def _manual(message):
@@ -173,6 +233,16 @@ def update_message(agent_dir, message_id, **changes):
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
         write(agent_dir / 'inbox-state.json', states)
+        if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled'):
+            proof = agent_dir / 'inbox-unsubmitted' / (message_id + '.json')
+            if proof.exists():
+                proof.unlink()
+                # Do not let a crash resurrect a negative proof after submission.
+                descriptor = os.open(proof.parent, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
     # Transitions only, each once: accepted, then (maybe later) confirmed in the transcript; or a definite failure.
     if after.get('submission_state') == 'accepted' and before.get('submission_state') != 'accepted':
         _event(agent_dir, "message.delivered", {"id": message_id, "stage": "accepted"})

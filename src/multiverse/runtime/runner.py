@@ -419,6 +419,36 @@ def launch_environment(request):
     return env
 
 
+
+def finish_failed_wake(launch, request, environment, process, reason):
+    """A failed startup is retryable only with exact harness negative evidence."""
+    message_id = request.get('resume_message_id')
+    if not message_id:
+        return
+    from multiverse import harnesses
+    from multiverse.harnesses.types import SessionHandle
+    from multiverse.runtime.native import adapter_hook
+    from multiverse.universe.mailbox import finish_wake
+    evidence = None
+    if process is None:
+        evidence = False  # No child was ever created.
+    elif process.poll() is not None:
+        try:
+            directory = launch.parent.parent
+            properties, facts = read(directory / 'properties.json'), runtime(directory)
+            if facts.get('launch_id') == launch.name:
+                adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
+                hook = adapter_hook(adapter, 'startup_prompt_evidence')
+                if hook is not None:
+                    evidence = hook(SessionHandle.from_records(properties, facts, directory),
+                                    (launch / 'task.md').read_text(), facts.get('started_at'), dict(environment))
+        except Exception:
+            evidence = None  # Missing or unreadable evidence can never authorize replay.
+    if evidence is False and process is not None:
+        reason += '\nThe harness recorded no consumption of this startup prompt; saved for explicit retry'
+    finish_wake(launch.parent.parent, launch.name, message_id, False, reason, uncertain=evidence is not False)
+
+
 def main():
     launch = Path(sys.argv[1])
     agent_dir = launch.parent.parent
@@ -434,6 +464,7 @@ def main():
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
     request = {}
+    env = {}
     diagnostic = {}
     roles = {}
     from multiverse.runtime import attachments, refusal, registration
@@ -612,6 +643,9 @@ def main():
         if not ending and (code != 0 or not startup_checked):
             reason = f'Native process exited with code {code}' + (' during startup.' if not startup_checked else '.')
             diagnostic = launch_diagnostic(agent_dir, launch.name, reason)
+        if not startup_checked:
+            finish_failed_wake(launch, request, env, process,
+                               diagnostic.get('reason') or 'Runner ended before launch readiness')
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code == 0 or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
@@ -637,14 +671,6 @@ def main():
         return 1
     finally:
         cleanup_errors = []
-        if request.get('resume_message_id') and not startup_checked:
-            try:
-                from multiverse.universe.mailbox import finish_wake
-                finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
-                            diagnostic.get('reason') or 'Runner ended before launch readiness',
-                            uncertain=process is not None)
-            except Exception as error:
-                cleanup_errors.append('startup bookkeeping: ' + str(error))
         def close_role(name, instance):
             if instance is None:
                 return
@@ -674,6 +700,12 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        if request.get('resume_message_id') and not startup_checked:
+            try:
+                finish_failed_wake(launch, request, env, process,
+                    diagnostic.get('reason') or 'Runner ended before launch readiness')
+            except Exception as error:
+                cleanup_errors.append('startup bookkeeping: ' + str(error))
         # Shared services deliberately outlive terminal clients and monitors.
         if service_dir:
             shutil.rmtree(service_dir, ignore_errors=True)

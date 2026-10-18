@@ -1,5 +1,6 @@
 """Check uncertain native deliveries or retry a recipient's definite failures."""
-from .. import store, universe
+import sys
+from .. import display, store, universe
 from ..runtime import native
 from ..universe import agents, mailbox
 from ._common import delivery_summary
@@ -15,7 +16,7 @@ def configure(parser):
     mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
 
 
-def run(root=None, *, agent, retry=False, check=False, json=False, _present=None):
+def run(root=None, *, agent, retry=False, check=False, json=False, _present=None, _present_error=None):
     if retry == check:
         raise ValueError('Choose exactly one of --check or --retry')
     root = universe.resolve(root)
@@ -49,21 +50,26 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False}
         summary = delivery_summary(receipt)
+        notices = display.notice_lines(receipt.get('notices'))
+        if notices:
+            summary['notices'] = notices
         if accepted and receipt.get('state') != 'error':
             # Missing evidence for an accepted message is not a failure.
             summary['ok'] = True
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message}, **summary})
         if _present:
             _, current = mailbox.message_record(directory, message['id'])
-            _present(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
-                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']))
+            present = _present_error if summary.get('ok') is False and _present_error else _present
+            present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
+                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
     if _present and not results:
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results)}
 
 
 def cli_run(root=None, *, json=False, **options):
-    result = run(root, **options, _present=None if json else lambda line: print(line, flush=True))
+    result = run(root, **options, _present=None if json else lambda line: print(line, flush=True),
+                 _present_error=None if json else lambda line: print(line, file=sys.stderr, flush=True))
     if json:
         return result
     if not result['ok']:

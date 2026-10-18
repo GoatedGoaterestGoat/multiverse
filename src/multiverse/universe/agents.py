@@ -13,8 +13,12 @@ def record_paths(root):
         return []
 
 
+class AmbiguousAgent(ValueError):
+    """A reference names several agents; retain names and full IDs for selection."""
+
+
 def directory(root, reference, *, allow_damaged=False):
-    matches, damaged = [], []
+    matches, damaged, names = [], [], {}
     for path in record_paths(root):
         try:
             data = records.properties(path)
@@ -26,12 +30,13 @@ def directory(root, reference, *, allow_damaged=False):
         if (reference in (identity, name, path.parent.name) or identity.startswith(reference)
                 or path.parent.name.startswith(reference)):
             matches.append(path.parent)
+            names[path.parent] = name if isinstance(name, str) and name else path.parent.name
     if not matches:
         detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
         raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
     if len(matches) != 1:
-        detail = ". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
-        raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
+        detail = ", ".join(f"{names[path]} ({path.name})" for path in sorted(matches))
+        raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. Use a full UUID")
     if not allow_damaged:
         # Recheck the selected record, never a peer's runtime. Actions cannot
         # treat unreadable identity or launch facts as an empty/stopped agent.

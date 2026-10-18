@@ -5,7 +5,7 @@ import sys
 from .. import universe, display
 from ..runtime import native
 from ..store import read, lock
-from ..universe import agents, records
+from ..universe import agents, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
 from ._messaging import delivery_line, failure_reason
@@ -48,7 +48,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
         try:
             directory = agents.directory(root, reference)
         except ValueError as error:
-            damaged = isinstance(error, records.RecordError)
+            damaged = isinstance(error, (records.RecordError, agents.AmbiguousAgent))
             if len(references) == 1:
                 if damaged:
                     raise  # The target is known; preserve its named record error.
@@ -89,6 +89,12 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
         if queue_only:
             delivery = 'inbox-only'
         binding_error = None
+        preflight_error = None
+        if delivery != 'inbox-only':
+            try:
+                mailbox.preflight_delivery(directory)
+            except (OSError, ValueError, TypeError) as error:
+                preflight_error = str(error)
         with lock(directory / '.launch.lock'):
             properties = read(directory / 'properties.json')
             if delivery != 'inbox-only':
@@ -103,6 +109,13 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
         if delivery == 'inbox-only':
             return ({**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}, {})
+        if preflight_error:
+            reason = f"{directory / 'inbox-state.json'}: {preflight_error}"
+            mailbox.record_unsubmitted(directory, message['id'], reason)
+            receipt = {'state': 'error', 'ok': False, 'reason': reason,
+                       'value': {'pre_submission_failure': True}}
+            return ({**result, 'state': 'error', 'saved': True, 'ok': False,
+                     'native_delivery': delivery_summary(receipt)}, receipt)
         if binding_error:
             receipt = {'state': 'error', 'reason': binding_error}
             update_message(directory, message['id'], submission_state='failed', attempts=[receipt])
@@ -112,10 +125,16 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             receipt = native.send_or_wake(root, directory.name, message['id'])
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
-            _, tracking = message_record(directory, message['id'])
-            if tracking.get('submission_state', 'pending') == 'pending':
-                update_message(directory, message['id'], submission_state='failed',
-                               attempts=[*tracking.get('attempts', []), receipt])
+            try:
+                _, tracking = message_record(directory, message['id'])
+                if tracking.get('submission_state', 'pending') == 'pending':
+                    update_message(directory, message['id'], submission_state='failed',
+                                   attempts=[*tracking.get('attempts', []), receipt])
+            except (OSError, ValueError, TypeError) as damaged:
+                # A later ledger failure cannot establish whether the native
+                # operation ran. Save the named error, never fabricate retry proof.
+                receipt = {'state': 'unknown', 'ok': False,
+                           'reason': f'{directory / "inbox-state.json"}: {damaged}; submission is unconfirmed'}
         return ({**result, "state": receipt['state'], "saved": True, "native_delivery": delivery_summary(receipt),
                 "ok": receipt['state'] not in ('error', 'unavailable', 'unknown'),
                 **({"notices": receipt["notices"]} if receipt.get("notices") else {})}, receipt)
