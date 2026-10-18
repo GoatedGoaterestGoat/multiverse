@@ -626,7 +626,10 @@ Plugin utilities:
   parents, and files are written without making their directory, so an agent
   removed or moved at any moment (its folder renamed away or deleted) makes a
   late write fail with `api.AgentGone` instead of bringing it back as an orphan.
-  No lock against removal is needed (1.10).
+  No lock against removal is needed (1.10). A universe's root is kept the same
+  way: `mv.state_dir`, files in a plugin's state (`state/plugins/...`), `mv.log`
+  and mv2's own plugin logs never make it again (`api.UniverseGone`; logs write
+  nothing).
 - `mv.agent_at(directory)` and `mv.current_agent()` (from `MV2_AGENT_DIR`, else
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage

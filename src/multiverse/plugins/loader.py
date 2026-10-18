@@ -846,19 +846,26 @@ def log_lock_path(path):
     return path.with_name(f".{path.name}.lock")
 
 
-def append_log(path, line, limit=None):
+def append_log(path, line, limit=None, root=None):
     """Append text to a log, rotating it to NAME.1 (one old file kept) once it is past `limit` (LOG_BYTES).
 
     The size check, the rotation and the append happen under a file lock, so two processes writing one log never
-    both rotate it (which would overwrite NAME.1, or rename a file that is already gone)."""
-    from ..store import lock
+    both rotate it (which would overwrite NAME.1, or rename a file that is already gone). A log in a universe's
+    plugin state (or under `root`) that is gone is not written: a log line never brings a removed universe or
+    agent back (agent_files)."""
+    from . import agent_files
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _log_lock, lock(log_lock_path(path)):
-        if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
-            path.replace(path.with_name(path.name + ".1"))
-        with path.open("a") as handle:
-            handle.write(line.rstrip("\n") + "\n")
+    guarded = agent_files.required_folder(path, root)[0] is not None
+    try:
+        agent_files.ensure_dir(path.parent, root)
+        with _log_lock, agent_files.lock(log_lock_path(path), root):
+            if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
+                path.replace(path.with_name(path.name + ".1"))
+            with path.open("a") as handle:
+                handle.write(line.rstrip("\n") + "\n")
+    except FileNotFoundError:
+        if not guarded:
+            raise  # removed meanwhile, with the folder it must find
 TRACEBACK_EVERY = 60.0  # seconds: at most one traceback per plugin and call site in this long
 _logged = {}  # (id(Loaded), what) -> (when a traceback was last written, failures not written since)
 

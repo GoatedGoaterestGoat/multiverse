@@ -38,9 +38,17 @@ class Error(ValueError):
     """An operation a plugin asked for could not be done; the message says why."""
 
 
-class AgentGone(Error):
-    """A write was for an agent whose folder is gone (removed, or moved to another universe): nothing of it is
-    made again, so a late write never brings a removed agent back. Stop working for that agent."""
+class Gone(Error):
+    """A write was for an agent or a universe that is gone (removed, or moved): nothing of it is made again, so a
+    late write never brings it back as an orphan. Stop working for it."""
+
+
+class AgentGone(Gone):
+    """The agent a write was for is gone: its folder (state/agents/<id>) was removed or moved."""
+
+
+class UniverseGone(Gone):
+    """The universe a write was for is gone: its root was removed or moved."""
 
 
 def _call(function, *args, **kwargs):
@@ -49,9 +57,13 @@ def _call(function, *args, **kwargs):
     except Error:
         raise
     except agent_files.Gone as error:
-        raise AgentGone(str(error)) from error
+        raise _gone(error) from error
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         raise Error(str(error)) from error
+
+
+def _gone(error):
+    return (UniverseGone if isinstance(error, agent_files.UniverseGone) else AgentGone)(str(error))
 
 
 class _Points:
@@ -439,26 +451,27 @@ class Files:
     @staticmethod
     def write_json(path, value):
         """Write JSON so a reader sees the old or the new file, never part of one. Its missing parents are made,
-        but never an agent's folder (state/agents/<id>): for an agent that is gone, AgentGone, and nothing is
-        made."""
+        but never an agent's folder (state/agents/<id>) or, for a plugin's state (state/plugins/...), its
+        universe's root: AgentGone or UniverseGone for one that is gone, and nothing is made."""
         return _call(agent_files.write_json, path, value)
 
     @staticmethod
     @contextmanager
     def lock(path):
         """An exclusive lock on `path` while the `with` block runs, across processes (it waits). Its missing
-        parents are made, but never an agent's folder: AgentGone for an agent that is gone."""
+        parents are made, as for write_json: AgentGone or UniverseGone for one that is gone."""
         with ExitStack() as stack:
             try:
                 stack.enter_context(agent_files.lock(path))
             except agent_files.Gone as error:
-                raise AgentGone(str(error)) from error
+                raise _gone(error) from error
             yield
 
     @staticmethod
     def ensure_dir(path):
-        """Directory `path`, with its missing parents; returns it. Never an agent's folder: below one, only while
-        it exists (AgentGone once it is gone). Use it, not a mkdir with parents, for anything under an agent."""
+        """Directory `path`, with its missing parents; returns it. Never an agent's folder or, for a plugin's state,
+        its universe's root: below one, only while it exists (AgentGone or UniverseGone once it is gone). Use it,
+        not a mkdir with parents, for anything under an agent or a plugin's state."""
         return _call(agent_files.ensure_dir, path)
 
     @staticmethod
@@ -631,10 +644,10 @@ class Plugin:
                            bool(settings.get("inbox_bridge")), dict(settings), _harness_home(family))
 
     def state_dir(self, universe=None):
-        """state/plugins/NAME/ of a universe, created on first use."""
-        directory = _root(universe) / "state" / "plugins" / self.name
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        """state/plugins/NAME/ of a universe, made on first use while the universe exists; UniverseGone once it
+        was removed or moved (its root is never made again)."""
+        root = _root(universe)
+        return _call(agent_files.ensure_dir, root / "state" / "plugins" / self.name, root=root)
 
     def agent_state_dir(self, agent):
         """state/agents/<id>/NAME/ of an agent, made on first use while the agent's folder exists; AgentGone once
@@ -644,7 +657,7 @@ class Plugin:
         return _call(agent_files.ensure_dir, agent.universe.path / "state" / "agents" / agent.id / self.name)
 
     def log(self, text, universe=None):
-        """Append a line to state/plugins/NAME/plugin.log."""
+        """Append a line to state/plugins/NAME/plugin.log; for a universe that is gone, nothing is written."""
         from ..store import now
         try:
             loader.append_log(self.state_dir(universe) / "plugin.log", f"{now()} {text}")
