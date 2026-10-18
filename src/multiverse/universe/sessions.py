@@ -45,6 +45,16 @@ def _stored_home(home):
     return home
 
 
+
+def _different_homes(left, right):
+    """Only disjoint recorded paths AND their present aliases prove separate storage."""
+    try:
+        left, right = _stored_home(left), _stored_home(right)
+        return left != right and canonical_home(left) != canonical_home(right)
+    except (OSError, ValueError, RuntimeError):
+        return False  # Unknown storage cannot authorize a duplicate claim.
+
+
 def journal(directory):
     path = directory / 'sessions.jsonl'
     if not path.exists():
@@ -181,11 +191,7 @@ def claim(root, directory, data, native_id, home=None):
             if own_provider and other_provider:
                 if other_provider != own_provider:
                     continue
-                try:
-                    different_home = _stored_home(own_home) != _stored_home(other.get('native_session_home'))
-                except ValueError:
-                    different_home = False
-                if different_home:
+                if _different_homes(own_home, other.get('native_session_home')):
                     continue
             try:
                 other, rows = effective(path.parent, other)
@@ -209,7 +215,7 @@ def claim(root, directory, data, native_id, home=None):
             if native_id not in identities or (own_provider and other_provider and other_provider != own_provider):
                 continue
             homes = {other.get('native_session_home'), *(row['home'] for row in rows)}
-            if own_home and None not in homes and own_home not in homes:
+            if all(_different_homes(own_home, other_home) for other_home in homes):
                 continue
             raise SessionConflict(f'This terminal switched to another agent\'s session ({other.get("name", "another agent")}); '
                                   'return to this agent\'s own conversation before sending messages')

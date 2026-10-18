@@ -192,10 +192,8 @@ class SessionLineageTest(BaseTest):
         self.assertEqual(results.count('ok'), 1, results)
         self.assertTrue(any('another agent' in result for result in results), results)
 
-    def test_historical_homes_are_compared_as_recorded(self):
-        """A stored home stays valid when its parent later becomes a symlink, because homes are compared as recorded;
-        fragile because any refactor adding .resolve() brings the bug back, and only a later symlink change shows it
-        (3503e0e, 7bc1d3d)."""
+    def test_home_aliases_preserve_history_but_cannot_duplicate_ownership(self):
+        """History keeps its recorded paths while live alias claims collide; resolving everywhere corrupts history, but resolving nowhere permits two owners after a rename."""
         parent = self.work / 'scope-parent'
         home = parent / 'home'
         home.mkdir(parents=True)
@@ -211,22 +209,22 @@ class SessionLineageTest(BaseTest):
         effective, rows = sessions.effective(self.agent, read(self.agent / 'properties.json'))
         self.assertEqual(effective['native_session_id'], target)
         self.assertEqual(rows[0]['home'], self.home, 'Historical storage is not reinterpreted through a new symlink')
-        # A claim in the home the symlink now leads to never reads the peer's journal: their homes differ as recorded.
+        # Rename the real storage and leave an alias at its former location.
+        # Current and historical session IDs still belong to the same peer.
         self.fresh('claimant')
         parent = self.work / 'old-parent'
         old_home = parent / 'home'
         old_home.mkdir(parents=True)
         peer, previous = self.make_agent('old-scope', home=str(old_home))
-        agents.rebind_session(self.root, peer.name, previous, str(uuid4()), 'clear', 'launch', home=str(old_home))
-        parent.rename(self.work / 'moved-parent')
-        replacement = self.work / 'replacement-parent'
-        (replacement / 'home').mkdir(parents=True)
-        parent.symlink_to(replacement, target_is_directory=True)
-        journal, original = peer / 'sessions.jsonl', Path.open
-        def opened(path, *args, **kwargs):
-            if path == journal:
-                raise AssertionError('A historical home must not be resolved through its later symlink')
-            return original(path, *args, **kwargs)
-        with patch.object(Path, 'open', opened), sessions.namespace(self.root):
-            sessions.claim(self.root, self.agent, read(self.agent / 'properties.json'), str(uuid4()),
-                           str(replacement / 'home'))
+        current = str(uuid4())
+        agents.rebind_session(self.root, peer.name, previous, current, 'clear', 'launch', home=str(old_home))
+        moved = self.work / 'moved-parent'
+        parent.rename(moved)
+        parent.symlink_to(moved, target_is_directory=True)
+        before = (peer / 'sessions.jsonl').read_bytes()
+        for identity in (previous, current):
+            for home in (str(old_home), str(moved / 'home')):
+                with self.subTest(identity=identity, home=home), sessions.namespace(self.root), \
+                        self.assertRaisesRegex(sessions.SessionConflict, 'another agent'):
+                    sessions.claim(self.root, self.agent, read(self.agent / 'properties.json'), identity, home)
+        self.assertEqual((peer / 'sessions.jsonl').read_bytes(), before)
