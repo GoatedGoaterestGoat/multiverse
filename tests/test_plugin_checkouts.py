@@ -42,8 +42,13 @@ def checkout_suites(test_loader, plugins=PLUGINS, own=TESTS):
             suite.addTest(_failure(f"{manifest.parent.name}: its tests {', '.join(clashes)} have the names of "
                                    f"mv2's own tests in {own}; rename one of each so both can run"))
             continue
-        with _home_of_its_own():
-            suite.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
+        top = test_loader._top_level_dir
+        try:
+            with _home_of_its_own():
+                suite.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
+        finally:
+            test_loader._top_level_dir = top  # Python 3.11's discover() leaves it at the plugin's, which breaks
+            # the discovery that called this load_tests
     return suite
 
 

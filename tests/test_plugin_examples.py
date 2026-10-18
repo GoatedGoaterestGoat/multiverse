@@ -45,6 +45,10 @@ def load_tests(test_loader, tests, pattern):
     # The example plugins' own tests (notifier's handlers, cost-item's status item, hello-column), fast and
     # in-process: the only check that the shipped samples, which authors copy, still work against the API. Nothing
     # else runs them, so without these a break goes unnoticed.
-    for directory in sorted(EXAMPLES.glob("*/tests")):
-        tests.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
+    top = test_loader._top_level_dir
+    try:
+        for directory in sorted(EXAMPLES.glob("*/tests")):
+            tests.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
+    finally:
+        test_loader._top_level_dir = top  # Python 3.11's discover() leaves it at the last example's
     return tests
