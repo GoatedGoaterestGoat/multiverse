@@ -218,7 +218,7 @@ class ClaudeBoundaryTest(BoundaryBase, BaseTest):
         self.assertTrue(adapter.attachment_ready(fell_back))  # nothing to wait for: the process is the work
         message = Message('id', 'body', framed='Message from a:\nbody')
         for result in (adapter.send(fell_back, message, executor), adapter.ask(fell_back, 'What?', executor)):
-            self.assertEqual((result.state, result.reason), ('unavailable', 'Launched without the bridge: ' + reason))
+            self.assertEqual((result.state, result.reason), ('unavailable', 'This agent is launch-only: ' + reason))
         executor.write_lines.assert_not_called()
 
 

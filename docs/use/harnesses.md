@@ -34,7 +34,7 @@ Some things work the same in both modes:
 | `/multiverse` in the session | With the connection | No | With the connection | No |
 | Reconnects a lost terminal | No | With the connection, when idle | No | No |
 
-`mv2 capabilities --harness NAME` shows what a harness supports on your machine. `mv2 capabilities --agent NAME` shows what one running agent has, with the reason for anything missing. When an agent has no live connection, the dashboard's inspector says why, for example because Claude Code is too old.
+`mv2 capabilities --harness NAME` shows what a harness supports on your machine. For Claude it says what its launches get with the harness's `inbox_bridge` setting; add `--probe` to check the installed Claude Code too. `mv2 capabilities --agent NAME` shows what one running agent has, with the reason for anything missing. When an agent has no live connection, the dashboard's inspector says why, for example because Claude Code is too old.
 
 ## Turn the connection on or off
 
@@ -54,7 +54,7 @@ mv2 applies the setting at every start and resume. A running agent keeps the mod
 {"schema": 2, "adapter": "claude", "settings": {}}
 ```
 
-With a live connection, mv2 loads its `multiverse` mod into Claude Code and gives the session a private inbox. `steer` merges a message into the current turn at the next tool result, or starts a turn when Claude is idle. `follow-up` waits for the turn to end. The mod also reports status, delivery receipts, context use, cost and rate limits, and it answers `mv2 ask`. The dashboard header shows the account's rate-limit windows, such as `5h 34% · 7d 12%`.
+With a live connection, mv2 loads its `multiverse` mod into Claude Code and gives the session a private inbox. `steer` merges a message into the current turn at the next tool result, or starts a turn when Claude is idle. `follow-up` waits for the turn to end. A message that starts its own turn adds a `Prompt dropped by a hook` line to Claude's transcript. Claude Code writes it when the mod replaces its own framing of the message; it is not an error, and mv2 can't remove it. The mod also reports status, delivery receipts, context use, cost and rate limits, and it answers `mv2 ask`. The dashboard header shows the account's rate-limit windows, such as `5h 34% · 7d 12%`.
 
 If the installed Claude Code is too old for the mod and `inbox_bridge` is unset, the agent starts launch-only. `mv2 inspect NAME` then shows the reason on its `Note:` line. With `inbox_bridge` set to `false`, mv2 loads no mod, plugin or hook. Minimum versions are in [compatibility](../reference/compatibility.md#bridge-feature-minimums).
 
@@ -70,9 +70,9 @@ Choose the items and their order in `statusline.json` at the universe root:
 {"schema": 1, "items": {"agent": true, "phase": true, "summary": false, "inbox": true, "compaction": true}}
 ```
 
-A running `/compact` shows its progress on the same line. `mv2 refresh --apply` adds `statusline.json` to a universe created before it existed. If you deleted it, refresh keeps it deleted; copy it from a new universe or from `src/multiverse/templates/base/` to get it back.
+Claude Code draws every plugin's status line in yellow, with `⚠` and the plugin's name (`⚠ multiverse: working`). That is its style for plugin lines, not an error, and mv2 can't change it. A running `/compact` shows its progress on the same line. `mv2 refresh --apply` adds `statusline.json` to a universe created before it existed. If you deleted it, refresh keeps it deleted; copy it from a new universe or from `src/multiverse/templates/base/` to get it back.
 
-**`/multiverse`.** With a live connection, `/multiverse` is a real Claude command. Its subcommands are `list`, `NAME [args]`, `send AGENT TEXT` and `inbox` (see [messaging](../cli/messaging.md#inside-claude-and-pi-sessions)). Only a prompt you type can run `send`, `inbox` or a catalog entry. Any other caller can only list. Recent Claude Code versions suggest the subcommands and agent names as you type.
+**`/multiverse`.** With a live connection, `/multiverse` is a real Claude command. Its subcommands are `list`, `NAME [args]`, `send AGENT TEXT` and `inbox` (see [messaging](../cli/messaging.md#inside-claude-and-pi-sessions)). Only a person typing at the prompt can use it: the model can't run `/multiverse` (Claude's Skill tool refuses plugin commands), so agents use `mv2` commands instead. Recent Claude Code versions suggest the subcommands and agent names as you type.
 
 **Resume and the bootstrap.** A resumed Claude agent gets the universe's current bootstrap, because mv2 resumes it with `--system-prompt-snapshot off`. To keep the prompt Claude recorded at the conversation's start instead, set `"system_prompt_snapshot": "on"`. A bootstrap change then reaches only new agents. A `--system-prompt-snapshot` flag you pass yourself in `args` or `resume_args` wins over the setting.
 
@@ -206,7 +206,7 @@ While you are attached, the bar refreshes every 2 seconds. Set `refresh_seconds`
 
 | Harness | Limits |
 | --- | --- |
-| Claude Code | The connection lives inside the Claude process, so nothing reconnects a lost terminal. Resume restarts the conversation. `mv2 ask` has nothing to answer from before the first response or right after `/clear`. An agent stopped before its first message has no saved conversation, so it restarts fresh under the same ID. Resume needs Claude's saved session on disk, so keep Claude's `cleanupPeriodDays` large. |
+| Claude Code | The connection lives inside the Claude process, so nothing reconnects a lost terminal. Resume restarts the conversation. `mv2 ask` has nothing to answer from before the first response or right after `/clear`. An agent stopped before its first message has no saved conversation, so it restarts fresh under the same ID. So does one whose conversation Claude deleted after `cleanupPeriodDays`, without its earlier context; `mv2 resume` says which case it was. Keep Claude's `cleanupPeriodDays` large. |
 | Codex | When launch-only, it has no message delivery, status or session name, and no new context readings. A daemon crash interrupts every agent on it. Native work can keep running after its terminal disconnects, and `mv2 kill` cancels it. Codex permission and trust prompts stay native, so attach to answer them. |
 | Pi | It has no `mv2 ask`, context use or compaction, and no `waiting` status. Resume refuses when the agent's session file is missing. |
 | Custom | It is launch-only, with no delivery, status, wake or naming. |

@@ -316,7 +316,106 @@ def bridge_problem(executable):
     return None
 
 
-FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
+# A resume whose session Claude has no conversation for starts it fresh under the same ID (PR #3), and says which
+# case it is: never used, or a saved conversation that went missing (Claude deletes them after cleanupPeriodDays).
+NEVER_USED = ('Claude has no saved conversation for this session: the agent was stopped before its first message, '
+              'so it started fresh under the same session ID')
+CONVERSATION_MISSING = ("Claude's saved conversation for this session is missing (Claude deletes conversations older "
+                        'than its cleanupPeriodDays setting): the agent started fresh under the same session ID, '
+                        'without its earlier context')
+FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'  # older records
+FRESH_NOTES = (NEVER_USED, CONVERSATION_MISSING, FRESH_SESSION)
+LAUNCH_ONLY = 'This agent is launch-only'
+
+
+def fresh_start(session, environment):
+    """The note for resuming `session` fresh, or None when Claude has its conversation and resume continues it."""
+    if not session.native_id or has_saved_conversation(session.native_id, environment):
+        return None
+    return CONVERSATION_MISSING if had_conversation(session, environment) else NEVER_USED
+
+
+def had_conversation(session, environment):
+    """Whether this session ever had a message, from records that outlive Claude's transcript. False means no
+    evidence, never proof: Claude prunes its prompt history too, and a person's prompts leave mv2 nothing else."""
+    directory = Path(session.session_file).parent if session.session_file else None
+    return bool((directory and (_stored_message(directory, session.native_id)
+                                or _context_since_move(directory, session.native_id)))
+                or _typed_prompt(session.native_id, environment))
+
+
+def _stored_message(directory, native_id):
+    """A message core sent to this session whose row the mod confirmed was stored in the conversation."""
+    try:
+        state = json.loads((directory / 'inbox-state.json').read_text())
+    except (OSError, ValueError):
+        return False
+    for message_id, record in state.items() if isinstance(state, dict) else ():
+        if not isinstance(record, dict):
+            continue
+        attempts = record.get('attempts') if isinstance(record.get('attempts'), list) else []
+        if record.get('target_session') != native_id and not any(
+                isinstance(attempt, dict) and attempt.get('native_session_id') == native_id for attempt in attempts):
+            continue
+        try:
+            if (directory / 'claude-receipts' / f'{normalize_session_id(message_id)}.json').is_file():
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _context_since_move(directory, native_id):
+    """Context the mod reported during the last launch, after the agent last moved to this session (/clear)."""
+    try:
+        usage = json.loads((directory / 'runtime.json').read_text()).get('usage')
+        tokens = usage['context']['tokens']
+        reported = moment(usage['reported_at'])
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return False
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0 or reported is None:
+        return False
+    moved = None
+    try:
+        for line in (directory / 'sessions.jsonl').read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            at = moment(row.get('at')) if isinstance(row, dict) and row.get('to') == native_id else None
+            if at and (moved is None or at > moved):
+                moved = at
+    except OSError:
+        pass
+    return moved is None or reported > moved
+
+
+def _typed_prompt(native_id, environment):
+    """A prompt typed into this session, in Claude's own prompt history (each line names its sessionId)."""
+    path = claude_home(environment) / 'history.jsonl'
+    needle = f'"sessionId":"{native_id}"'.encode()
+    try:
+        if not path.is_file():
+            return False
+        with path.open('rb') as stream:
+            tail = b''
+            while chunk := stream.read(1 << 20):
+                if needle in tail + chunk:
+                    return True
+                tail = chunk[-len(needle):]
+    except OSError:
+        return False
+    return False
+
+
+def launch_only_cause(launch):
+    """Why a launch has no connection by design: its harness setting, or what kept an auto launch from the mod."""
+    if launch.get('policy') == 'plain':
+        return 'its harness sets inbox_bridge to false'
+    text = str(launch.get('fallback_reason') or '')
+    for note in FRESH_NOTES:  # resume joins its fresh-start note on; it is no cause (the older one holds a '; ')
+        text = text.replace(note, '')
+    return '; '.join(part for part in text.split('; ') if part.strip()) or 'it was launched without the bridge'
 
 
 @dataclass(frozen=True)
@@ -325,12 +424,14 @@ class Bridge:
 
     `launched`: this launch loaded the mod (not plain, not an auto fallback). `registered`: the mod
     reported itself for this launch, so its inbox exists. `ready`: steering, `ask` and receipts can be used
-    now. `reason` says why not. None of this is a service or a reconnectable terminal.
+    now. `reason` says why not. `launch_only`: the launch has no connection by design, so restarting it can't
+    give it one. None of this is a service or a reconnectable terminal.
     """
     launched: bool
     registered: bool
     ready: bool
     reason: str | None
+    launch_only: bool = False
 
 
 def bridge_of(enabled, session):
@@ -342,13 +443,19 @@ def bridge_of(enabled, session):
     registered = bool(launched and session.native_id and session.endpoint
                       and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
     ready = registered and session.state == 'running'
+    launch_only = plain or not enabled
     if ready:
         reason = None
-    elif plain and launch.get('fallback_reason'):
-        reason = f'Launched without the bridge: {launch["fallback_reason"]}'
+    elif launch_only:
+        reason = f'{LAUNCH_ONLY}: {launch_only_cause(launch if plain else {"policy": "plain"})}'
     else:
         reason = NOT_REGISTERED
-    return Bridge(launched, registered, ready, reason)
+    return Bridge(launched, registered, ready, reason, launch_only)
+
+
+def unavailable(bridge):
+    """Why send or ask can't run now; a launch-only one is flagged, so core advises no restart."""
+    return NativeResult('unavailable', bridge.reason, {'launch_only': True} if bridge.launch_only else None)
 
 
 class ClaudeAdapter(ConfiguredAdapter):
@@ -380,16 +487,19 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def resume(self, session, context):
         command = self._snapshot_flag(super().resume(session, context))
-        fresh = None
-        if session.native_id and not has_saved_conversation(session.native_id, context.environment):
-            fresh = self._reserve_session(command, session.native_id)
+        note = fresh_start(session, context.environment)
+        fresh = self._reserve_session(command, session.native_id) if note else None
         command = self._with_bridge(fresh or command, context)
         if fresh is None:
             return command
-        # Say so in the agent's details: it now runs without any earlier context.
+        # Say so in the agent's details too: it now runs without any earlier context.
         mode = dict(command.native_mode)
-        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
+        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), note]))
         return replace(command, native_mode=mode)
+
+    def resume_notice(self, session, caller_environment, effective_environment):
+        """The line a resume result adds when it starts the session fresh; same evidence as `resume`."""
+        return fresh_start(session, effective_environment)
 
     def _snapshot_flag(self, command):
         """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.
@@ -552,6 +662,8 @@ class ClaudeAdapter(ConfiguredAdapter):
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
         result['session_name'] = Capability('supported', mechanism='--name')
+        if not session.agent_id:  # `mv2 capabilities --harness`: no agent, so no launch to judge
+            return {**result, **self._would_support(executor)}
         # The launch's own record decides whether it used the bridge: an auto launch may have fallen back to plain.
         bridge = self._bridge(session)
         for name in ('send_steer', 'send_follow_up'):
@@ -559,11 +671,31 @@ class ClaudeAdapter(ConfiguredAdapter):
                             else Capability('unavailable', bridge.reason, required=True))
         if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
-        if bridge.ready and session.session_file:
-            result['ask'] = Capability('supported', mechanism='claude-model-fork')
+        result['ask'] = (Capability('supported', mechanism='claude-model-fork') if bridge.ready and session.session_file
+                         else Capability('unavailable', bridge.reason or 'No agent directory recorded'))
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
+
+    def _would_support(self, executor):
+        """With no launch (`mv2 capabilities --harness`): what this harness's launches get, from its setting and,
+        with --probe, the installed Claude Code. Reading the version runs claude, so only --probe does."""
+        if self.bridge_policy == 'plain':
+            found, why = None, 'Agents of this harness are launch-only: it sets inbox_bridge to false'
+        elif executor is None:
+            found = (f'Through the multiverse mod, on Claude Code {".".join(map(str, MIN_BRIDGE_VERSION))} or newer; '
+                     '--probe checks the installed version')
+            why = None
+        else:
+            problem = bridge_problem(self.spec['spawn'][0])
+            found = None if problem else 'Through the multiverse mod'
+            why = problem and (f'Launches of this harness refuse to start: {problem}' if self.bridge_policy == 'required'
+                               else f'Agents of this harness launch without the bridge: {problem}')
+        mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
+                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt'}
+        return {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
+                       else Capability('unavailable', why, required=name.startswith('send_')))
+                for name, mechanism in mechanisms.items()}
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
@@ -605,7 +737,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', f'Unknown delivery mode: {message.delivery}')
         bridge = self._bridge(session)
         if not bridge.ready:
-            return NativeResult('unavailable', bridge.reason)
+            return unavailable(bridge)
         target, token = self._inbox(session)
         if target is None:
             return NativeResult('unavailable', token)
@@ -630,7 +762,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         """
         bridge = self._bridge(session)
         if not bridge.ready:
-            return NativeResult('unavailable', bridge.reason)
+            return unavailable(bridge)
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         target, token = self._inbox(session)

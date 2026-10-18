@@ -1,4 +1,5 @@
 """Claude resume: a session that was never used has no transcript, so it restarts under its own ID."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse import harnesses
-from multiverse.harnesses.claude import FRESH_SESSION
+from multiverse.harnesses.claude import CONVERSATION_MISSING, FRESH_NOTES, NEVER_USED
 from multiverse.harnesses.types import LaunchContext, SessionHandle
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase, until
@@ -56,7 +57,7 @@ class ClaudeResumeTest(BaseTest):
                 self.assertEqual(command.argv[command.argv.index('--resume') + 1], values['session_id'])
                 self.assertNotIn('--session-id', command.argv)
                 self.assertFalse((command.native_mode or {}).get('fallback_reason'))
-                self.assertNotIn(FRESH_SESSION, str(command.native_mode))
+                self.assertFalse(any(note in str(command.native_mode) for note in FRESH_NOTES))
 
     def test_unused_session_restarts_under_its_own_id_with_every_other_flag(self):
         for bridge in (False, True):
@@ -74,7 +75,7 @@ class ClaudeResumeTest(BaseTest):
                 self.assertEqual(fresh.argv[fresh.argv.index('--model') + 1], 'chosen')
                 self.assertEqual(('--plugin-dir' in fresh.argv), bridge)
                 self.assertNotIn('--original task', fresh.argv)  # the first task is never replayed
-                self.assertEqual(fresh.native_mode['fallback_reason'], FRESH_SESSION)
+                self.assertEqual(fresh.native_mode['fallback_reason'], NEVER_USED)
                 self.assertEqual(fresh.environment, saved.environment)
                 self.assertEqual(fresh.control_endpoint, saved.control_endpoint)
 
@@ -175,9 +176,38 @@ class ClaudeResumeLaunchTest(TerminalBase):
         argv, runtime = self.restart(agent, directory)
         self.assertEqual(argv[argv.index('--session-id') + 1], agent['native_session_id'])
         self.assertNotIn('--resume', argv)
-        self.assertEqual(runtime['native_mode']['fallback_reason'], FRESH_SESSION)
+        self.assertEqual(runtime['native_mode']['fallback_reason'], NEVER_USED)
         self.assertNotEqual(runtime['state'], 'failed')
         self.stop_agent(agent)
+
+    def test_the_resume_result_says_when_it_started_fresh_and_why(self):
+        from multiverse.display import outcome
+        unused, unused_dir = self.launch('unused', '')
+        self.stop_agent(unused)
+        (unused_dir / 'seen.json').unlink()
+        result = lifecycle.start(self.root, resume=unused['id'], socket_path=self.socket)
+        self.assertEqual(result['notices'], [NEVER_USED])
+        self.assertEqual(outcome(result, 'Resumed', 'did not resume').splitlines()[1:], [NEVER_USED])
+        until(lambda: (unused_dir / 'seen.json').exists())
+        self.stop_agent(unused)
+        # A used agent whose conversation Claude has since deleted, as cleanupPeriodDays does: Claude's own prompt
+        # history still names its session, so the result says the saved conversation is missing.
+        used, used_dir = self.launch('used', 'do the work')
+        history = self.storage / 'history.jsonl'
+        history.write_text(json.dumps({'display': 'do the work', 'pastedContents': {}, 'timestamp': 1,
+                                       'project': str(self.work), 'sessionId': used['native_session_id']},
+                                      separators=(',', ':')) + '\n')
+        self.stop_agent(used)
+        for transcript in (self.storage / 'projects').glob(f"*/{used['native_session_id']}.jsonl"):
+            transcript.unlink()
+        (used_dir / 'seen.json').unlink()
+        result = lifecycle.start(self.root, resume=used['id'], socket_path=self.socket)
+        self.assertEqual(result['notices'], [CONVERSATION_MISSING])
+        until(lambda: (used_dir / 'seen.json').exists())
+        argv = read(used_dir / 'seen.json')['argv']
+        self.assertEqual(argv[argv.index('--session-id') + 1], used['native_session_id'])  # the fresh start stays
+        self.assertEqual(read(used_dir / 'runtime.json')['native_mode']['fallback_reason'], CONVERSATION_MISSING)
+        self.stop_agent(used)
 
     def test_a_used_agent_still_resumes_its_conversation(self):
         agent, directory = self.launch('used', 'do the work')

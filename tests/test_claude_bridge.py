@@ -175,7 +175,7 @@ class ClaudeBridgeTest(BaseTest):
         capabilities = adapter.capabilities(fell_back)
         for name in ('send_steer', 'send_follow_up'):
             self.assertEqual(capabilities[name].state, 'unavailable')
-            self.assertEqual(capabilities[name].reason, 'Launched without the bridge: ' + reason)
+            self.assertEqual(capabilities[name].reason, 'This agent is launch-only: ' + reason)
         self.assertNotEqual(capabilities['get_delivery'].state, 'supported')
         self.assertNotEqual(capabilities['ask'].state, 'supported')
 

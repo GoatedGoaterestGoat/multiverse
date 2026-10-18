@@ -59,5 +59,6 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | `CLAUDE_CONFIG_DIR` | Reads it from its own environment to find Claude transcripts. Set it where mv2 runs, because a harness's `env` can't set it. |
 | `CODEX_THREAD_ID`, `CLAUDECODE` | Removes the parent's values before a launch. Codex supplies its own `CODEX_THREAD_ID` to its tools. |
 | `CLAUDE_CODE_CHILD_SESSION` | Always removes it when inherited. Claude Code sets it for its own tool subprocesses, and a Claude agent that inherits it saves no transcript. A harness's `env` can still set it. |
+| `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` | Sets it to `1` for Claude bridge launches, because the multiverse mod needs it. |
 | `TMUX`, `TMUX_PANE` | `mv2 attach` reads them to return to the dashboard pane it was started from. |

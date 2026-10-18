@@ -133,14 +133,15 @@ Every message is saved before delivery, so nothing is lost. What to do depends o
 
 ### Claude starts launch-only (`plain`)
 
-`spawn` prints `Started NAME (Claude, plain).` Find the reason on `mv2 inspect NAME`'s `Note:` line, or in `mv2 capabilities --agent NAME` as `Launched without the bridge: REASON`. It is recorded in the agent's `runtime.json` as `native_mode.fallback_reason`.
+`spawn` prints `Started NAME (Claude, plain).` Find the reason on `mv2 inspect NAME`'s `Note:` line, or in `mv2 capabilities --agent NAME` as `This agent is launch-only: REASON`. A send to it says it is launch-only, too. It is recorded in the agent's `runtime.json` as `native_mode.fallback_reason`.
 
 | Reason | Fix |
 | --- | --- |
 | `Claude Code X is older than Y, which the multiverse mod needs` | Update Claude Code, then kill and resume the agent. With `"inbox_bridge": true` the launch fails instead. |
-| No reason, and the dashboard inspector shows `Mode: plain (plain)` | `harness.json` sets `"inbox_bridge": false`. Remove it, then kill and resume. |
+| `its harness sets inbox_bridge to false`, and the dashboard inspector shows `Mode: plain (plain)` | Remove `"inbox_bridge": false` from `harness.json`, then kill and resume. |
 | `Launched without compaction: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable. `mv2 doctor` names the problem, so fix it and relaunch. |
-| `No saved Claude conversation for this session; started it fresh under the same session ID` | This is not launch-only. The agent was stopped before its first message, so there was nothing to resume. |
+| `Claude has no saved conversation for this session: the agent was stopped before its first message, ...` | This is not launch-only. There was nothing to resume, so the agent started fresh under the same session ID. `mv2 resume` prints the same line. |
+| `Claude's saved conversation for this session is missing (Claude deletes conversations older than its cleanupPeriodDays setting): ...` | This is not launch-only. The agent had a conversation, but Claude's file for it is gone, so it started fresh without its earlier context. `mv2 resume` prints the same line. mv2 tells the two cases apart from its delivery receipts, the context the agent last reported, and Claude's prompt history. To keep conversations, set a large `cleanupPeriodDays` in Claude's settings. |
 
 Sometimes a connected launch never becomes ready: `--wait` times out, and sends report `messaging is not connected for this session`. The launch may be waiting at a Claude login or workspace trust prompt. Attach and answer it.
 

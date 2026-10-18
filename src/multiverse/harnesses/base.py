@@ -133,8 +133,10 @@ class ConfiguredAdapter:
                 prompt_args = prompt_args[1:]
             argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
         # Scrubbing parent identity is a core invariant, including legacy definitions, and so is Claude's
-        # child-session marker, which turns transcript saving off: a harness replacing unset_env keeps both.
+        # child-session marker, which turns transcript saving off, and a parent Claude's IDE port and inbox path
+        # and secret (an agent spawned from inside Claude inherits them): a harness replacing unset_env keeps them.
         unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION',
+                                     'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
                                      *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 

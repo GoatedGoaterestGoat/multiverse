@@ -23,9 +23,15 @@ asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID, and resumes it
 with `--resume` only once Claude has saved a transcript for it (it writes none before
-the first message); a session stopped before then restarts fresh under the same
-UUID with `--session-id`, without replaying its task, and says so in the agent's
-details. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+the first message); a session Claude has no transcript for restarts fresh under
+the same UUID with `--session-id`, without replaying its task, and says so in the
+resume result (the `resume_notice` hook) and the agent's details. The note tells
+"stopped before its first message" from "the saved conversation is missing"
+(Claude deletes transcripts after `cleanupPeriodDays`) by what outlives the
+transcript: a message to this session whose receipt the mod wrote, context the
+mod reported after the agent last moved to this session, or the session in
+Claude's prompt history (`history.jsonl`, which Claude prunes too, so its absence
+proves nothing). Claude takes the bootstrap with `--append-system-prompt` on spawn and on
 every resume. Claude Code keeps a conversation's system prompt as recorded at its
 first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
 would leave a resumed agent with the bootstrap it started with: a plugin's
@@ -718,8 +724,11 @@ Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution,
 and so is an inherited `CLAUDE_CODE_CHILD_SESSION` (Claude Code sets it for its own
-tool subprocesses, and a Claude that inherits it saves no transcript); a harness
-that sets it in `env` keeps its value.
+tool subprocesses, and a Claude that inherits it saves no transcript), and a
+parent Claude's `CLAUDE_CODE_SSE_PORT` (its IDE connection) and
+`CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` (its inbox and
+its secret), which an agent spawned from inside Claude inherits; a harness that
+sets one in `env` keeps its value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
@@ -1142,6 +1151,14 @@ reads only the session record, never the other capabilities (building them reads
 Status is whatever the mod reports and is never overwritten: core runs no
 observer for Claude and produces no `NativeActivity` for it. A launch that fell
 back to plain says so in its `native_mode`, its capabilities and `mv2 inspect`.
+A plain launch (`inbox_bridge` false, or an auto launch Claude Code is too old
+for) is launch-only by design: `send` and `ask` return `unavailable` with
+`{"launch_only": true}` and `This agent is launch-only: REASON`, so core advises
+no restart, which could not connect it. A bridged launch whose mod has not
+registered carries no flag. With no agent (`mv2 capabilities --harness`), the
+adapter answers for the harness's launches: launch-only for `false`, and for auto
+or `true` the bridge, checked against the installed version only with `--probe`,
+since reading it runs `claude`.
 
 Claude bridge mode steers through the session's own peer inbox. `inbox_bridge` unset is auto: the bridge is used unless the installed
 Claude Code is older than 2.1.280 (the oldest the mod was built on; a version that cannot be read does not count), in which case the
@@ -1205,7 +1222,8 @@ typeahead with an argument hint, and runnable while a turn is running):
 shadowed. Everything but `list` acts with the person's authority at this terminal
 (it sends as this agent, submits a prompt as the person's, or changes what the
 agent has read), so it runs only for a prompt the person typed (the composer, or
-Remote Control); a plugin, the SDK or a peer can only list.
+Remote Control); a plugin, the SDK or a peer can only list. The model can't run
+it at all: Claude's Skill tool refuses plugin commands, so agents use `mv2`.
 
 On Claude Code 2.1.292 or newer the launch also loads `claude/typeahead/`, a
 second small plugin that fills the prompt box's typeahead while `/multiverse` is
