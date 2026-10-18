@@ -14,15 +14,37 @@ from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, owned, status_setup
-from ..universe import agents, catalog, mailbox
+from ..universe import agents, catalog, mailbox, records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import native, attachments, agent_identity, registration
 
 TEARDOWN_TIMEOUT = 10
 
+def damaged_row(scope, error, properties=None):
+    """The row of an agent whose record cannot be used: always well formed, never raising.
+
+    `error` is the RecordError; `properties` is the agent's properties when only its runtime.json is damaged,
+    so its name, harness and reported phase still show. `damaged` says which file and why.
+    """
+    known = properties if properties is not None else (error.data if isinstance(error.data, dict) else {})
+    text = lambda key: known[key] if isinstance(known.get(key), str) else ""
+    agent_dir = error.file if error.file.suffix != ".json" else error.file.parent
+    try:
+        shown = str(error.file.relative_to(scope))
+    except ValueError:
+        shown = str(error.file)
+    label = error.file.name if error.file.suffix == ".json" else shown
+    return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
+            "live": "unknown", "status": "unknown", "phase": text("phase") or "unknown",
+            "summary": f"damaged: {label}: {error.reason}", "damaged": {"file": shown, "reason": error.reason}}
+
+
 def listing(root, recursive=False, only=None):
-    """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none."""
+    """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
+
+    One agent's damaged records never stop the others: that agent's row says which file is unusable and why
+    (see damaged_row)."""
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
@@ -34,14 +56,22 @@ def listing(root, recursive=False, only=None):
             if only is not None and not path.is_file():
                 continue
             try:
-                properties = read(path)
-                facts = runtime(path.parent)
+                properties = records.properties(path)
+            except records.RecordError as error:
+                rows.append(damaged_row(scope, error))
+                continue
+            try:
+                facts = records.runtime(path.parent / "runtime.json")
+            except records.RecordError as error:
+                rows.append(damaged_row(scope, error, properties))
+                continue
+            try:
                 identity_problem = None
                 try:
                     properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
                 except Exception as error:
                     identity_problem = str(error)
-                    facts = runtime(path.parent)
+                    facts = records.runtime(path.parent / "runtime.json")
                 observation = observe(properties, facts, snapshots)
                 measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
                             native.usage_snapshot(scope, properties, facts, reconciled=True))
@@ -59,9 +89,11 @@ def listing(root, recursive=False, only=None):
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "runtime": facts})
-            except (OSError, ValueError, KeyError) as error:
-                rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
-                             "live": "unknown", "status": "unknown", "phase": "unknown", "summary": str(error)})
+            except records.RecordError as error:
+                rows.append(damaged_row(scope, error, properties))
+            except Exception as error:  # content no reader expected: this agent's row says so, the others still list
+                rows.append(damaged_row(scope, records.RecordError(path.parent, f"unexpected content: {type(error).__name__}: {error}"),
+                                        properties))
     return rows
 
 
