@@ -27,6 +27,9 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexPermissionTest(TerminalBase):
     def test_plain_full_access_survives_repeated_explicit_bridge_resume(self):
+        """On live Codex one thread keeps full access across plain spawn, plain wake, bridge wake and two bridge
+        resumes, with wakes through the CLI prompt; fragile because it depends on Codex applying thread/resume
+        overrides, and a break shows only as an agent mysteriously unable to write (e6a11a4)."""
         completed, requests = set(), []
         bad_python = forbidden_python(self.work)
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))

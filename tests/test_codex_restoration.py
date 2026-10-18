@@ -79,26 +79,20 @@ class RestorationProtocolTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.script, 'Native check stopped before consuming required evidence')
         return result
 
-    async def test_unloaded_then_restored_requires_complete_fresh_qualification(self):
-        pending = await self.execute(self.start() + [self.page(), self.read(self.thread('notLoaded'))])
-        self.assertEqual(pending.state, 'pending')
-        self.assertEqual(pending.reason, 'Codex did not restore this conversation after its restart')
-        self.assertIsNone(pending.value)
-        restored = await self.execute(self.start(self.thread()) + self.qualify())
-        self.assertEqual(restored.state, 'ok')
-        self.assertEqual(len(self.requests), 6)
-
-    async def test_pagination_finds_exact_thread_on_later_page_then_rechecks(self):
-        result = await self.execute(self.start() + [self.page(['other'], next_cursor='page2'),
-            self.page([self.session.native_id], cursor='page2'), self.read(self.thread())] + self.qualify())
-        self.assertEqual(result.state, 'ok')
-
-    async def test_absence_requires_all_pages_and_fresh_exact_read(self):
-        result = await self.execute(self.start() + [self.page(['other'], next_cursor='page2'),
-            self.page(['another'], cursor='page2'), self.read(self.thread('notLoaded'))])
-        self.assertEqual(result.state, 'pending')
-
-    async def test_loaded_inventory_is_not_proof_of_idle(self):
+    async def test_restoration_check_after_daemon_restart(self):
+        """After a daemon restart the conversation counts as restored only after every thread/loaded/list page and a
+        fresh exact read; fragile because it reads Codex's paging and status shapes, and a false ok restarts a busy or
+        unrestored agent (59108e5)."""
+        native_id = self.session.native_id
+        pages = [self.page(cursor=None if n == 0 else str(n),
+                           next_cursor=str(n + 1) if n < 31 else None) for n in range(32)]
+        rows = [('restored at the first read', self.start(self.thread()) + self.qualify(), 'ok', 6),
+                ('found on a later page', self.start() + [self.page(['other'], next_cursor='page2'),
+                    self.page([native_id], cursor='page2'), self.read(self.thread())] + self.qualify(), 'ok', None),
+                ('32 pages', self.start() + pages + [self.read(self.thread())] + self.qualify(), 'ok', 39),
+                ('not restored', self.start() + [self.page(), self.read(self.thread('notLoaded'))], 'pending', None),
+                ('absent from every page', self.start() + [self.page(['other'], next_cursor='page2'),
+                    self.page(['another'], cursor='page2'), self.read(self.thread('notLoaded'))], 'pending', None)]
         for response in (self.thread('active'),
                          self.thread(status={'type': 'active', 'activeFlags': ['waitingOnApproval']}),
                          self.thread(status={'type': 'active', 'activeFlags': ['waitingOnUserInput']}),
@@ -106,47 +100,39 @@ class RestorationProtocolTest(unittest.IsolatedAsyncioTestCase):
                          self.thread(id='different'), self.thread(cwd='/elsewhere'),
                          self.thread('notLoaded', id='different'), self.thread('notLoaded', cwd='/elsewhere'),
                          self.thread(canAcceptDirectInput=False)):
-            with self.subTest(response=response):
-                result = await self.execute(self.start() + [self.page([self.session.native_id]), self.read(response)])
-                self.assertNotIn(result.state, ('ok', 'pending'))
-
-    async def test_initial_busy_unknown_and_mismatched_unloaded_stop_immediately(self):
+            script = self.start() + [self.page([native_id]), self.read(response)]
+            rows.append((('loaded but not idle', response), script, 'refused', None))
         for response in (self.thread('active'), self.thread('systemError'), self.thread('future'),
                          self.thread('notLoaded', id='different'), self.thread('notLoaded', cwd='/elsewhere')):
-            with self.subTest(response=response):
-                result = await self.execute(self.start(response))
-                self.assertNotIn(result.state, ('ok', 'pending'))
-
-    async def test_restoration_still_requires_inventories_and_final_idle_read(self):
+            rows.append((('refused at the first read', response), self.start(response), 'refused', None))
         prefix = self.start() + [self.page(), self.read(self.thread())]
         for index, data in ((0, [{'status': 'inProgress'}]), (0, [{'status': 'future'}]),
                             (1, [{'id': 'queued'}]), (2, [{'id': 'background'}])):
-            with self.subTest(index=index, data=data):
-                suffix = self.qualify()[:index + 1]
-                method, params, _ = suffix[-1]
-                suffix[-1] = (method, params, {'data': data})
-                self.assertEqual((await self.execute(prefix + suffix)).state, 'unavailable')
+            suffix = self.qualify()[:index + 1]
+            method, params, _ = suffix[-1]
+            suffix[-1] = (method, params, {'data': data})
+            rows.append((('busy inventory', method, data), prefix + suffix, 'unavailable', None))
         for final in (self.thread('active'), self.thread('notLoaded'), self.thread(id='different'),
                       self.thread(cwd='/elsewhere')):
-            with self.subTest(final=final):
-                self.assertEqual((await self.execute(prefix + self.qualify(final))).state, 'unavailable')
-
-    async def test_malformed_and_cyclic_pages_fail_closed(self):
-        for page in ({'data': {}}, {'data': [None]}, {'data': ['']},
-                     {'data': [], 'nextCursor': ''}, {'data': [], 'nextCursor': 7}):
-            with self.subTest(page=page):
-                with self.assertRaises(ValueError):
-                    await self.execute(self.start() + [('thread/loaded/list', {}, page)])
-        with self.assertRaisesRegex(ValueError, 'cursor'):
-            await self.execute(self.start() + [self.page(next_cursor='loop'),
-                self.page(cursor='loop', next_cursor='loop')])
-
-    async def test_page_cap_allows_full_qualification_but_not_unbounded_inventory(self):
-        pages = [self.page(cursor=None if n == 0 else str(n),
-                           next_cursor=str(n + 1) if n < 31 else None) for n in range(32)]
-        result = await self.execute(self.start() + pages + [self.read(self.thread())] + self.qualify())
-        self.assertEqual(result.state, 'ok')
-        self.assertEqual(len(self.requests), 39)
-        pages[-1] = self.page(cursor='31', next_cursor='32')
-        with self.assertRaisesRegex(ValueError, 'page'):
-            await self.execute(self.start() + pages)
+            rows.append((('final read not idle', final), prefix + self.qualify(final), 'unavailable', None))
+        for case, script, expected, requests in rows:
+            with self.subTest(case=case):
+                result = await self.execute(script)
+                if expected == 'refused':
+                    self.assertNotIn(result.state, ('ok', 'pending'))
+                else:
+                    self.assertEqual(result.state, expected)
+                if expected == 'pending':
+                    self.assertEqual(result.reason, 'Codex did not restore this conversation after its restart')
+                    self.assertIsNone(result.value)
+                if requests is not None:
+                    self.assertEqual(len(self.requests), requests)
+        failures = [(('malformed page', page), self.start() + [('thread/loaded/list', {}, page)], '')
+                    for page in ({'data': {}}, {'data': [None]}, {'data': ['']},
+                                 {'data': [], 'nextCursor': ''}, {'data': [], 'nextCursor': 7})]
+        failures.append(('cyclic cursor', self.start() + [self.page(next_cursor='loop'),
+                         self.page(cursor='loop', next_cursor='loop')], 'cursor'))
+        failures.append(('33 pages', self.start() + pages[:-1] + [self.page(cursor='31', next_cursor='32')], 'page'))
+        for case, script, pattern in failures:
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, pattern):
+                await self.execute(script)

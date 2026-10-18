@@ -26,6 +26,9 @@ install()
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class NativeQueueContinuationTest(TerminalBase):
     def test_native_escape_continues_owned_accepted_follow_up_without_resending(self):
+        """On live Codex an accepted follow-up still runs after a native Escape in the launch's own pane and stays
+        checkable until confirmed; fragile because it relies on Codex pausing queue draining after an interrupt, which
+        is undocumented, and a break strands messages with no error (60c3cbf, 1dbe82c)."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
                                    text=True).strip() != 'codex-cli 0.163.0':
             self.skipTest('native queue continuation evidence pinned to 0.163.0')

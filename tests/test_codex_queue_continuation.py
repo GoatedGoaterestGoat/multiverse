@@ -89,116 +89,96 @@ class QueueContinuationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.script, 'Continuation omitted required evidence')
         return observed
 
-    async def test_owned_queue_starts_existing_head_once_without_reordering_or_resubmission(self):
-        result = await self.execute(self.prefix() + [self.page(), self.read(),
-            self.page(self.items[:1], limit=1), self.start()])
-        self.assertEqual(result.state, 'ok')
-        self.assertEqual(result.value, {'continued': True, 'queued_submission_id': 'queued-1',
-            'client_user_message_id': 'message-1', 'turn_id': 'turn-1'})
-        self.assertEqual([r['method'] for r in self.requests].count('thread/queue/start'), 1)
-        self.assertFalse(any(r['method'] in ('thread/queue/add', 'thread/queue/delete',
-            'thread/queue/reorder', 'thread/resume', 'thread/unsubscribe', 'turn/interrupt') for r in self.requests))
-
-    async def test_empty_native_queue_is_noop_even_when_acceptance_is_saved(self):
-        result = await self.execute(self.prefix() + [self.page([])])
-        self.assertEqual(result.state, 'ok')
-        self.assertEqual(result.value, {'continued': False})
-
-    async def test_initial_busy_unloaded_unknown_or_wrong_thread_never_starts(self):
-        for changes in ({'status': {'type': 'active'}}, {'status': {'type': 'notLoaded'}},
-                        {'status': {'type': 'future'}}, {'id': 'other'}, {'cwd': '/elsewhere'},
-                        {'canAcceptDirectInput': False}):
-            with self.subTest(changes=changes):
-                result = await self.execute(self.prefix(**changes))
-                self.assertNotEqual(result.state, 'ok')
-                self.assertNotIn('thread/queue/start', [r['method'] for r in self.requests])
-
-    async def test_foreign_or_uncorrelated_input_preserves_entire_queue(self):
-        for item in ({'id': 'foreign', 'clientUserMessageId': 'other'},
-                     {'id': 'queued-1', 'clientUserMessageId': 'other'},
-                     {'id': 'different', 'clientUserMessageId': 'message-1'}):
-            with self.subTest(item=item):
-                result = await self.execute(self.prefix() + [self.page([self.items[1], item])])
-                self.assertEqual(result.state, 'unavailable')
-
-    async def test_all_pages_must_be_owned_before_starting_native_head(self):
-        result = await self.execute(self.prefix() + [self.page(self.items[:1], next_cursor='two'),
-            self.page(self.items[1:], cursor='two'), self.read(), self.page(self.items[:1], limit=1), self.start()])
-        self.assertEqual(result.state, 'ok')
+    async def test_native_queue_head_starts_only_when_every_item_is_ours(self):
+        """mv2 starts Codex's queued head only when every queued item is its own and the thread is still idle; fragile
+        because it races user input and Codex's own draining, and a wrong start runs the user's typed input or
+        double-submits (60c3cbf)."""
+        def started(queued, message):
+            return {'continued': True, 'queued_submission_id': queued, 'client_user_message_id': message,
+                    'turn_id': 'turn-1'}
+        head = [self.read(), self.page(self.items[:1], limit=1)]
         foreign = {'id': 'foreign', 'clientUserMessageId': 'outside'}
-        result = await self.execute(self.prefix() + [self.page(self.items[:1], next_cursor='two'),
-            self.page([foreign], cursor='two')])
-        self.assertEqual(result.state, 'unavailable')
+        busy = {'error': {'code': -32600, 'message': 'Thread is busy'}}
+        rows = [('owned queue', self.prefix() + [self.page(), *head, self.start()], started('queued-1', 'message-1')),
+                ('every page owned', self.prefix() + [self.page(self.items[:1], next_cursor='two'),
+                    self.page(self.items[1:], cursor='two'), *head, self.start()], started('queued-1', 'message-1')),
+                ('native order wins', self.prefix() + [self.page(self.items[::-1]), self.read(),
+                    self.page(self.items[1:], limit=1), self.start('queued-2')], started('queued-2', 'message-2')),
+                ('empty queue with saved acceptance', self.prefix() + [self.page([])], {'continued': False}),
+                ('foreign later page', self.prefix() + [self.page(self.items[:1], next_cursor='two'),
+                    self.page([foreign], cursor='two')], 'unavailable'),
+                ('start refused', self.prefix() + [self.page(), *head, ('thread/queue/start', None, busy)], 'error'),
+                ('start without a turn', self.prefix() + [self.page(), *head,
+                    self.response('thread/queue/start', None, {'turn': {}})], ValueError)]
+        rows += [(f'initially {changes}', self.prefix(**changes), 'not ok')
+                 for changes in ({'status': {'type': 'active'}}, {'status': {'type': 'notLoaded'}},
+                                 {'status': {'type': 'future'}}, {'id': 'other'}, {'cwd': '/elsewhere'},
+                                 {'canAcceptDirectInput': False})]
+        rows += [(f'foreign item {item}', self.prefix() + [self.page([self.items[1], item])], 'unavailable')
+                 for item in ({'id': 'foreign', 'clientUserMessageId': 'other'},
+                              {'id': 'queued-1', 'clientUserMessageId': 'other'},
+                              {'id': 'different', 'clientUserMessageId': 'message-1'})]
+        rows += [(f'changed during check {changes}', self.prefix() + [self.page(), self.read(**changes)], 'not ok')
+                 for changes in ({'status': {'type': 'active'}}, {'id': 'other'}, {'cwd': '/elsewhere'},
+                                 {'canAcceptDirectInput': False})]
+        rows += [(f'head changed to {changed}', self.prefix() + [self.page(), self.read(), self.page(changed, limit=1)],
+                  None) for changed in ([], self.items[1:], [{'id': 'outside', 'clientUserMessageId': 'foreign'}])]
+        for name, script, expected in rows:
+            with self.subTest(name):
+                if expected is ValueError:
+                    with self.assertRaisesRegex(ValueError, 'turn ID'):
+                        await self.execute(script)
+                else:
+                    result = await self.execute(script)
+                    if isinstance(expected, dict):
+                        self.assertEqual(result.state, 'ok')
+                        self.assertEqual(result.value, expected)
+                    elif expected == 'not ok':
+                        self.assertNotEqual(result.state, 'ok')
+                    elif expected:
+                        self.assertEqual(result.state, expected)
+                    if not isinstance(expected, dict) or not expected['continued']:
+                        self.assertFalse((result.value or {}).get('continued'))
+                methods = [r['method'] for r in self.requests]
+                self.assertLessEqual(methods.count('thread/queue/start'), 1)
+                self.assertFalse(any(method in ('thread/queue/add', 'thread/queue/delete', 'thread/queue/reorder',
+                    'thread/resume', 'thread/unsubscribe', 'turn/interrupt') for method in methods))
 
-    async def test_native_order_wins_over_receipt_order(self):
-        result = await self.execute(self.prefix() + [self.page(self.items[::-1]), self.read(),
-            self.page(self.items[1:], limit=1), self.start('queued-2')])
-        self.assertEqual(result.value['client_user_message_id'], 'message-2')
-
-    async def test_activity_or_head_change_during_check_never_starts(self):
-        for changes in ({'status': {'type': 'active'}}, {'id': 'other'}, {'cwd': '/elsewhere'},
-                        {'canAcceptDirectInput': False}):
-            with self.subTest(changes=changes):
-                self.assertNotEqual((await self.execute(self.prefix() + [self.page(), self.read(**changes)])).state, 'ok')
-        for head in ([], self.items[1:], [{'id': 'outside', 'clientUserMessageId': 'foreign'}]):
-            with self.subTest(head=head):
-                result = await self.execute(self.prefix() + [self.page(), self.read(), self.page(head, limit=1)])
-                self.assertFalse((result.value or {}).get('continued'))
-
-    async def test_malformed_duplicate_and_cyclic_inventory_fails_closed(self):
-        for data in (None, {}, [None], [{'id': ''}], [{'id': 'queued-1'}], [*self.items, self.items[0]]):
-            with self.subTest(data=data), self.assertRaises(ValueError):
-                await self.execute(self.prefix() + [self.response('thread/queue/list', None, {'data': data})])
-        for cursor in ('', 7, False):
-            with self.subTest(cursor=cursor), self.assertRaises(ValueError):
-                await self.execute(self.prefix() + [self.page([], next_cursor=cursor)])
-        with self.assertRaisesRegex(ValueError, 'cursor'):
-            await self.execute(self.prefix() + [self.page([], next_cursor='loop'),
-                self.page([], cursor='loop', next_cursor='loop')])
-
-    async def test_page_bound_allows_thirteen_requests_but_never_unbounded_scan(self):
+    async def test_damaged_receipts_and_pages_fail_closed(self):
+        """Damaged receipts and malformed, cyclic or unbounded Codex pages never start anything; fragile because the
+        queue inventory is Codex's paged shape and the receipts are a file other writers touch, and a wrong start
+        double-submits silently."""
+        executor = Mock()
+        rows = [('no receipts', self.session, {}, ('ok', 'unavailable')),
+                ('starting', replace(self.session, state='starting'), self.accepted, ('ok', 'unavailable')),
+                ('no native id', replace(self.session, native_id=None), self.accepted, ('ok', 'unavailable')),
+                ('plain', replace(self.session, native_mode={'mode': 'plain'}), self.accepted, ('ok', 'unavailable')),
+                ('relay lost', replace(self.session, native_relay={'state': 'lost', 'reason': 'lost'}), self.accepted,
+                 ('ok', 'unavailable'))]
+        rows += [(f'receipts {receipts}', self.session, receipts, ('error',))
+                 for receipts in (None, [], {'': 'queued'}, {'message': ''}, {'message': None},
+                                  {'one': 'same', 'two': 'same'})]
+        for name, session, receipts, states in rows:
+            with self.subTest(name):
+                self.assertIn(self.adapter.continue_queued(session, receipts, executor).state, states)
+                executor.rpc.assert_not_called()
         pages = [self.page(self.items if n == 0 else [], cursor=str(n) if n else None,
                           next_cursor=str(n + 1) if n < 7 else None) for n in range(8)]
-        result = await self.execute(self.prefix() + pages + [self.read(), self.page(self.items[:1], limit=1), self.start()])
-        self.assertEqual(result.state, 'ok')
-        self.assertEqual(len(self.requests), 13)
-        pages[-1] = self.page([], cursor='7', next_cursor='8')
-        with self.assertRaisesRegex(ValueError, 'page'):
-            await self.execute(self.prefix() + pages)
-
-    async def test_rpc_error_and_ambiguous_start_do_not_claim_consumption(self):
-        error = {'error': {'code': -32600, 'message': 'Thread is busy'}}
-        result = await self.execute(self.prefix() + [self.page(), self.read(),
-            self.page(self.items[:1], limit=1), ('thread/queue/start', None, error)])
-        self.assertEqual(result.state, 'error')
-        self.assertFalse((result.value or {}).get('continued'))
-        with self.assertRaisesRegex(ValueError, 'turn ID'):
-            await self.execute(self.prefix() + [self.page(), self.read(), self.page(self.items[:1], limit=1),
-                self.response('thread/queue/start', None, {'turn': {}})])
-
-    async def test_empty_or_unavailable_session_never_opens_rpc(self):
-        executor = Mock()
-        for session, accepted in ((self.session, {}),
-                (replace(self.session, state='starting'), self.accepted),
-                (replace(self.session, native_id=None), self.accepted),
-                (replace(self.session, native_mode={'mode': 'plain'}), self.accepted),
-                (replace(self.session, native_relay={'state': 'lost', 'reason': 'lost'}), self.accepted)):
-            with self.subTest(session=session, accepted=accepted):
-                result = self.adapter.continue_queued(session, accepted, executor)
-                self.assertIn(result.state, ('ok', 'unavailable'))
-                executor.rpc.assert_not_called()
-
-    async def test_damaged_receipts_and_oversized_native_page_never_start(self):
-        executor = Mock()
-        for receipts in (None, [], {'': 'queued'}, {'message': ''}, {'message': None},
-                         {'one': 'same', 'two': 'same'}):
-            with self.subTest(receipts=receipts):
-                result = self.adapter.continue_queued(self.session, receipts, executor)
-                self.assertEqual(result.state, 'error')
-                executor.rpc.assert_not_called()
-        with self.assertRaisesRegex(ValueError, 'limit'):
-            await self.execute(self.prefix() + [self.page(self.items[:1] * 101)])
-        for cursor in ('', 7, False):
-            with self.subTest(cursor=cursor), self.assertRaisesRegex(ValueError, 'cursor'):
-                await self.execute(self.prefix() + [self.page(), self.read(),
-                    self.page(self.items[:1], limit=1, next_cursor=cursor)])
+        rows = [(f'inventory {data}', [self.response('thread/queue/list', None, {'data': data})], '')
+                for data in (None, {}, [None], [{'id': ''}], [{'id': 'queued-1'}], [*self.items, self.items[0]])]
+        rows += [(f'next cursor {cursor!r}', [self.page([], next_cursor=cursor)], '') for cursor in ('', 7, False)]
+        rows += [('cyclic cursor', [self.page([], next_cursor='loop'),
+                                    self.page([], cursor='loop', next_cursor='loop')], 'cursor'),
+                 ('eight pages', pages + [self.read(), self.page(self.items[:1], limit=1), self.start()], None),
+                 ('nine pages', pages[:-1] + [self.page([], cursor='7', next_cursor='8')], 'page'),
+                 ('oversized page', [self.page(self.items[:1] * 101)], 'limit')]
+        rows += [(f'head cursor {cursor!r}', [self.page(), self.read(),
+                  self.page(self.items[:1], limit=1, next_cursor=cursor)], 'cursor') for cursor in ('', 7, False)]
+        for name, script, error in rows:
+            with self.subTest(name):
+                if error is None:
+                    self.assertEqual((await self.execute(self.prefix() + script)).state, 'ok')
+                    self.assertEqual(len(self.requests), 13)
+                else:
+                    with self.assertRaisesRegex(ValueError, error):
+                        await self.execute(self.prefix() + script)

@@ -30,21 +30,15 @@ class PaneEvidenceTest(BaseTest):
         self.assertIn('#{pane_width}', backend.run.call_args.args[-1])
         return observed[0]
 
-    def test_width_joins_cursor_capture(self):
-        observed = self.snapshot('1\t2\t20\t40')
-        self.assertIs(observed['cursor_visible'], True)
-        self.assertEqual((observed['cursor_x'], observed['cursor_y'], observed['width']), (2, 20, 40))
-
-    def test_unknown_width_does_not_corrupt_other_cursor_evidence(self):
-        for value in ('0', '-1', 'unknown', 'True'):
-            with self.subTest(value=value):
-                observed = self.snapshot('0\t2\t20\t' + value)
-                self.assertIs(observed['cursor_visible'], False)
-                self.assertEqual((observed['cursor_x'], observed['cursor_y']), (2, 20))
-                self.assertIsNone(observed['width'])
-
-    def test_old_three_field_fixture_retains_full_composer_evidence(self):
-        observed = self.snapshot('1\t2\t20')
-        self.assertIs(observed['cursor_visible'], True)
-        self.assertEqual(observed['cursor_x'], 2)
-        self.assertIsNone(observed['width'])
+    def test_cursor_and_width_come_from_one_tmux_call(self):
+        """Cursor visibility, position and pane width come from one tmux format string, and a bad width never corrupts
+        the cursor fields; fragile because the startup and refusal classifiers key on these fields, and a parse slip
+        silently disables refusal detection (bf94d0b)."""
+        rows = [('1\t2\t20\t40', True, 40)]
+        rows += [('0\t2\t20\t' + value, False, None) for value in ('0', '-1', 'unknown', 'True')]
+        rows.append(('1\t2\t20', True, None))
+        for raw, visible, width in rows:
+            with self.subTest(raw=raw):
+                observed = self.snapshot(raw)
+                self.assertIs(observed['cursor_visible'], visible)
+                self.assertEqual((observed['cursor_x'], observed['cursor_y'], observed['width']), (2, 20, width))

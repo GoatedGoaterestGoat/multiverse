@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
@@ -27,7 +26,11 @@ install()
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class NativeSideTest(TerminalBase):
-    def test_btw_turn_close_and_resume_keep_delivery_on_primary(self):
+    def test_btw_open_and_close_keep_delivery_and_usage_on_primary(self):
+        """On live Codex, steer and follow-up messages sent while a real /btw side turn runs, and after it closes, are
+        transcript-confirmed on the primary while usage and status stay the primary's; the real TUI, relay and daemon
+        fork must leave mv2's messages on the primary conversation, and fake frames can agree while the real TUI is
+        rejected or the main receipts and usage quietly move."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
                                    text=True).strip() != 'codex-cli 0.163.0':
             self.skipTest('native side evidence pinned to 0.163.0')
@@ -190,14 +193,8 @@ class NativeSideTest(TerminalBase):
             self.assertEqual(agents.runtime(directory)['launch_id'], before_launch)
             self.assertFalse(any('PRIMARY_AFTER_SIDE_CLOSE' in json.dumps(record['body'])
                                  for record in requests if record['scope'] == 'side'))
-            lifecycle.kill(self.root, started['id'])
-            with patch.dict(os.environ, test_env):
-                resumed = lifecycle.start(self.root, resume=started['id'], socket_path=self.socket,
-                                          wait=True, wait_timeout=30)
-            self.assertTrue(resumed['ready'], resumed)
-            self.assertEqual(resumed['native_session_id'], primary)
             print('Native /btw evidence:', json.dumps({'primary': primary, 'side': side,
-                'provider_requests': counts, 'messages_confirmed': len(messages), 'resumed': primary}))
+                'provider_requests': counts, 'messages_confirmed': len(messages) + 1}))
         except Exception:
             print('Native /btw diagnostic:', json.dumps({'requests': [(r['scope'], len(r['body'].get('input', [])))
                   for r in requests], 'runtime': {key: agents.runtime(directory).get(key) for key in

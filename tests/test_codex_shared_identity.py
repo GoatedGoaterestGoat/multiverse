@@ -3,7 +3,6 @@ import asyncio
 from dataclasses import asdict
 import json
 import os
-from pathlib import Path
 import shlex
 import shutil
 import signal
@@ -11,7 +10,7 @@ import subprocess
 import sys
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from native_safety import install, isolated_home
@@ -21,11 +20,16 @@ from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, ServiceIdentity, SessionHandle
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import read, write
+from multiverse.tools import inbox, report
 
 
 @unittest.skipUnless(shutil.which('codex'), 'Codex CLI is not installed')
 class NativeSharedIdentityTest(PluginTestCase):
     def test_one_agent_coordinates_with_another_client_across_attachment_resume(self):
+        """On live Codex, mv2 calls from tool shells act as one agent across attachments and from the user's own
+        client on the same conversation, and every forged or stale proof built from the shell's real one is refused;
+        it relies on Codex injecting CODEX_THREAD_ID and honouring shell_environment_policy, and a break locks agents
+        out or lets one act as another (661fc41)."""
         install()
         executable = shutil.which('codex')
         version = subprocess.check_output([executable, '--version'], text=True).strip()
@@ -98,25 +102,15 @@ started=time.monotonic()
 def progress(label,code):
  pathlib.Path(PROGRESS).write_text(json.dumps({'label':label,'exit':code,'elapsed':time.monotonic()-started}))
 result={'identity':{key:value for key,value in os.environ.items() if key.startswith('MV2_')}}
+result['environment']=dict(os.environ)
 for name,args in [('report',['report','--phase','working','--summary','native identity fixture']),('inbox',['inbox','--peek'])]:
  p=subprocess.run([os.environ['MV2_CLI'],*args],capture_output=True,text=True)
  result[name]={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
  progress(name,p.returncode)
-result['invalid_proofs']={}
-for name,key,value in [('missing-mode','MV2_IDENTITY_MODE',None),('missing-marker','CODEX_THREAD_ID',None),('wrong-marker','CODEX_THREAD_ID','00000000-0000-0000-0000-000000000000'),('wrong-dir','MV2_AGENT_DIR','/not-the-agent'),('wrong-storage','CODEX_HOME',os.environ['CODEX_HOME']+'/wrong'),('old-perlaunch','MV2_IDENTITY_MODE',None)]:
- env=dict(os.environ)
- if value is None:env.pop(key,None)
- else:env[key]=value
- if name=='old-perlaunch':env['MV2_LAUNCH_ID']='00000000-0000-0000-0000-000000000000'
- result['invalid_proofs'][name]={}
- for operation,args in [('report',['report','--phase','blocked']),('inbox',['inbox','--peek'])]:
-  p=subprocess.run([os.environ['MV2_CLI'],*args],env=env,capture_output=True,text=True)
-  result['invalid_proofs'][name][operation]={'exit':p.returncode,'stderr':p.stderr}
-  progress(name+'/'+operation,p.returncode)
 pathlib.Path(OUTPUT).write_text(json.dumps(result))
 '''.replace('OUTPUT', repr(str(output))).replace('PROGRESS', repr(str(output.with_suffix('.progress.json'))))
-            # Fourteen real CLI imports need more than the old ten seconds on a
-            # busy machine. Native execution and output polling are both bounded.
+            # Real CLI imports can be slow on a busy machine. Native execution
+            # and output polling are both bounded.
             response = await rpc(client, 'thread/shellCommand', {'threadId': native_id,
                 'command': shlex.join([sys.executable, '-c', script]), 'timeoutMs': 30000})
             deadline = time.monotonic() + 35
@@ -132,15 +126,35 @@ pathlib.Path(OUTPUT).write_text(json.dumps(result))
             result = json.loads(output.read_text())
             self.assertEqual(result['report']['exit'], 0, result)
             self.assertEqual(result['inbox']['exit'], 0, result)
-            for name, operations in result['invalid_proofs'].items():
-                for operation, failure in operations.items():
-                    self.assertNotEqual(failure['exit'], 0, (name, operation, failure))
-                    if name == 'old-perlaunch':
-                        self.assertIn('with no other client attached', failure['stderr'])
             for key in ('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'):
                 self.assertNotIn(key, result['identity'])
             self.assertEqual(result['identity']['MV2_AGENT_ID'], agent_id)
-            return result['identity']
+            return result
+
+        def refuse_invalid_proofs(proof):
+            # The same report and inbox checks the CLI runs, in this process, from the shell's real environment.
+            calls = (('report', lambda: report.run(agent=agent_id, phase='blocked')),
+                     ('inbox', lambda: inbox.run(agent=agent_id, peek=True)))
+            with patch.dict(os.environ, proof, clear=True):
+                # The real proof is accepted here, so each refusal below is the changed proof's.
+                report.run(agent=agent_id, phase='working')
+                inbox.run(agent=agent_id, peek=True)
+            for name, key, value in (('missing-mode', 'MV2_IDENTITY_MODE', None),
+                                     ('missing-marker', 'CODEX_THREAD_ID', None),
+                                     ('wrong-marker', 'CODEX_THREAD_ID', '00000000-0000-0000-0000-000000000000'),
+                                     ('wrong-dir', 'MV2_AGENT_DIR', '/not-the-agent'),
+                                     ('wrong-storage', 'CODEX_HOME', proof['CODEX_HOME'] + '/wrong'),
+                                     ('old-perlaunch', 'MV2_IDENTITY_MODE', None)):
+                environment = {k: v for k, v in proof.items() if k != key}
+                if value is not None:
+                    environment[key] = value
+                if name == 'old-perlaunch':
+                    environment['MV2_LAUNCH_ID'] = '00000000-0000-0000-0000-000000000000'
+                for operation, call in calls:
+                    with self.subTest(proof=name, operation=operation), patch.dict(os.environ, environment, clear=True):
+                        with self.assertRaisesRegex(ValueError, 'with no other client attached'
+                                                    if name == 'old-perlaunch' else ''):
+                            call()
 
         try:
             for _ in range(150):
@@ -163,9 +177,10 @@ pathlib.Path(OUTPUT).write_text(json.dumps(result))
                 'agent_identity': {'schema': 1, 'spec': asdict(initial.agent_identity), 'service': service,
                     'native_id': native_id, 'workspace': str(self.work / 'project')}})
             write(directory / 'runtime.json', {'launch_id': 'first', 'state': 'running', 'native_mode': {'mode': 'bridge'}})
-            first_identity = await shell(first, 'initial')
+            initial = await shell(first, 'initial')
+            first_identity = initial['identity']
             outside = await connect()
-            await rpc(outside, 'thread/resume', {'threadId': native_id})
+            self.assertEqual((await rpc(outside, 'thread/resume', {'threadId': native_id}))['thread']['id'], native_id)
             await first.close()  # Only our old attachment; do not cancel the conversation.
             write(directory / 'runtime.json', {'launch_id': 'second', 'state': 'running', 'native_mode': {'mode': 'bridge'}})
             second = await connect()
@@ -174,9 +189,10 @@ pathlib.Path(OUTPUT).write_text(json.dumps(result))
             frame = protocol.outgoing({'id': 901, 'method': 'thread/resume', 'params': {'threadId': native_id}})
             reply = await rpc(second, 'thread/resume', frame['params'])
             self.assertEqual(protocol.incoming({'id': 901, 'result': reply}), native_id)
-            self.assertEqual(await shell(second, 'resumed'), first_identity)
+            self.assertEqual((await shell(second, 'resumed'))['identity'], first_identity)
             # Driving the same conversation from the user's client is the same agent.
-            self.assertEqual(await shell(outside, 'outside-client'), first_identity)
+            self.assertEqual((await shell(outside, 'outside-client'))['identity'], first_identity)
+            refuse_invalid_proofs(initial['environment'])
             self.assertEqual(read(directory / 'properties.json')['phase'], 'working')
             self.assertEqual((await rpc(outside, 'thread/read', {'threadId': native_id, 'includeTurns': False}))['thread']['id'], native_id)
         finally:

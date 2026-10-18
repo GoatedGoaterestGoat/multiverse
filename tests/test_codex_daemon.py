@@ -3,6 +3,7 @@
 The provider is a local deterministic HTTP fixture; no credentials or paid calls.
 """
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -20,9 +21,10 @@ from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse.runtime import native, rpc
 from multiverse.universe import templates
+from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
-from multiverse.harnesses.codex.launch import name_session
-from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
+from multiverse.harnesses.codex.launch import launch_settings, name_session
+from multiverse.harnesses.types import LaunchContext, NativeResult, RpcSpec, RpcRequest
 from multiverse.universe.mailbox import inbox
 from multiverse.store import read, write
 from multiverse.tools import send
@@ -35,6 +37,10 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexDaemonTest(TerminalBase):
     def test_concurrent_universes_share_daemon_and_keep_native_identity(self):
+        """One live shared daemon serves two universes with the right identity in Codex's shell, no cross-universe
+        mixing, exact-thread stop, no restart on outage, saved CODEX_HOME and CODEX_SQLITE_HOME on resume, no update
+        dialog, and config/read after its start workspace is deleted; all of it rests on Codex daemon internals and
+        each failure is silent (2fd65b2, 85c2c39)."""
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         seen_requests = []
         class Handler(BaseHTTPRequestHandler):
@@ -98,29 +104,52 @@ class CodexDaemonTest(TerminalBase):
         # cache so this regression does not depend on a live update lookup.
         write(home / 'version.json', {'latest_version': '9999.0.0',
               'last_checked_at': datetime.now(timezone.utc).isoformat(), 'dismissed_version': None})
-        env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
+        saved_database = self.work / 'saved-database'
+        saved_database.mkdir()
+        env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(saved_database),
                'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '', 'http_proxy': '', 'https_proxy': '', 'all_proxy': '',
                'NO_PROXY': '127.0.0.1,localhost', 'USER_EXCLUDED': 'must-remain-excluded', 'MV2_FOREIGN_AGENT': 'must-not-leak', 'CLAUDECODE': 'foreign'}
         daemon_groups = PrivateDaemonGroups()
+        self.enterContext(daemon_groups.observe_starts())
         def daemon(command):
             result = subprocess.run(['codex', 'app-server', 'daemon', command], env=env,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
-            info = json.loads(result.stdout)
-            if command == 'start' and 'pid' in info:
-                daemon_groups.remember(info)
-            return info
+            return json.loads(result.stdout)
         def stop_owned_daemon():
             try:
                 daemon('stop')
             finally:
                 daemon_groups.close()
         self.addCleanup(stop_owned_daemon)
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            started = list(pool.map(lambda _: daemon('start'), range(4)))
-        self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)
-        self.assertEqual(len({x['socketPath'] for x in started}), 1)
-        endpoint = started[0]['socketPath']
+        # mv2 starts the daemon for a workspace that is then deleted. The daemon carries another agent's
+        # markers, as one started from inside an agent's shell would.
+        throwaway = self.work / 'throwaway-workspace'
+        throwaway.mkdir()
+        values = {'name': 'daemon-start', 'workspace': str(throwaway), 'agent_dir': str(self.root),
+                  'bootstrap_json': json.dumps('probe'), 'task': '', 'session_id': '',
+                  'control_socket': str(self.work / 'unused-relay.sock')}
+        command = CodexAdapter.configured('codex', {'inbox_bridge': True}).spawn(
+            LaunchContext('spawn', values, environment=env))
+        service = replace(command.shared_service, environment={**command.shared_service.environment,
+                          'MV2_FOREIGN_AGENT': 'must-not-leak', 'CLAUDECODE': 'foreign'})
+        def start(index):
+            log = self.work / f'daemon-start-{index}.log'
+            address = native.start_shared_service(service, throwaway, log, command.unset_env).address
+            return json.JSONDecoder().raw_decode(log.read_text())[0]['status'], address
+        with patch.dict(os.environ, env), ThreadPoolExecutor(max_workers=4) as pool:
+            started = list(pool.map(start, range(4)))
+        self.assertEqual(sum(status == 'started' for status, _ in started), 1, started)
+        self.assertEqual(len({address for _, address in started}), 1)
+        endpoint = started[0][1]
+        self.assertFalse((home / 'app-server-daemon/daemon-updater.pid').exists(),
+                         'Disposable test daemons must not start a background updater')
+        before = rpc.execute(RpcSpec(endpoint, lambda: launch_settings(str(self.work))))
+        self.assertEqual(before.state, 'ok', before.reason)
+        throwaway.rmdir()
+        after = rpc.execute(RpcSpec(endpoint, lambda: launch_settings(str(self.work))))
+        self.assertEqual(after.state, 'ok', after.reason)
+        self.assertEqual(after.value, before.value)
         # Positive control: this exact home/workspace/remote endpoint shows the
         # cached update without mv2's argument. Packaged CLIs show a dialog;
         # binaries without a detected updater show a banner. No turn is started.
@@ -189,6 +218,7 @@ class CodexDaemonTest(TerminalBase):
                 for key in ('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'):
                     self.assertNotIn(key, identity['env'])
                 self.assertEqual(identity['env']['CODEX_THREAD_ID'], properties['native_session_id'])
+                self.assertEqual(properties['native_environment']['CODEX_SQLITE_HOME'], str(saved_database))
                 self.assertNotIn('MV2_FOREIGN_AGENT', identity['env'])
                 self.assertNotIn('CLAUDECODE', identity['env'])
                 self.assertNotIn('USER_EXCLUDED', identity['env'])
@@ -235,16 +265,28 @@ class CodexDaemonTest(TerminalBase):
             renamed = rpc.execute(RpcSpec(endpoint, lambda: name_session(first_session.native_id, 'renamed-native')))
             self.assertEqual(renamed.state, 'ok')
             self.assertEqual(thread_name(roots[0], results[0]['id']), 'renamed-native')
-            # Resume from a monitor with a DIFFERENT home must retain saved storage.
-            with patch.dict(os.environ, {**env, 'CODEX_HOME': str(self.work / 'wrong-home')}):
+            # Resume from a monitor with a DIFFERENT home and database must retain saved storage.
+            databases = {path.name: path.stat().st_ino for path in saved_database.glob('*.sqlite')}
+            self.assertTrue(databases, 'Native server did not open a database in the requested initial root')
+            other_database = self.work / 'other-database'
+            other_database.mkdir()
+            properties = agents.directory(roots[0], results[0]['id']) / 'properties.json'
+            saved = read(properties)
+            with patch.dict(os.environ, {**env, 'CODEX_HOME': str(self.work / 'wrong-home'),
+                                         'CODEX_SQLITE_HOME': str(other_database)}):
                 resumed = lifecycle.start(roots[0], resume=results[0]['id'], socket_path=self.socket)
             self.assertEqual(resumed['native_environment']['CODEX_HOME'], str(home))
-            self.assertEqual(resumed['native_session_id'], read(agents.directory(roots[0], resumed['id']) / 'properties.json')['native_session_id'])
+            self.assertEqual(resumed['native_environment']['CODEX_SQLITE_HOME'], str(saved_database))
+            self.assertEqual(resumed['native_session_id'], read(properties)['native_session_id'])
+            self.assertEqual(read(properties)['native_session_id'], saved['native_session_id'])
+            self.assertEqual(read(properties)['native_service_identity'], saved['native_service_identity'])
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
             until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
             pane = agents.runtime(agents.directory(roots[0], resumed['id']))['tmux']['pane']
             self.assertNotIn('Update available', self.backend.run('capture-pane', '-p', '-t', pane))
+            self.assertEqual({path.name: path.stat().st_ino for path in saved_database.glob('*.sqlite')}, databases)
+            self.assertEqual(list(other_database.iterdir()), [], 'Caller override opened a different native database')
             # Work on the shared daemon survives losing its TUI. Stop still
             # cancels only this exact thread after its pane has disappeared.
             message = send.run(roots[1], agent=results[1]['id'], text='STOP_ACTIVE_WORK_ORPHAN', delivery='follow-up')
@@ -272,7 +314,7 @@ class CodexDaemonTest(TerminalBase):
             self.assertTrue(failed['saved'])
             self.assertNotEqual(failed['state'], 'native_queued')
             self.assertFalse(Path(endpoint).exists(), 'Failed send must not restart the daemon')
-            print('Shared daemon evidence:', json.dumps({'startup_statuses': [s['status'] for s in started],
+            print('Shared daemon evidence:', json.dumps({'startup_statuses': [status for status, _ in started],
                   'universes': len(roots), 'unique_agent_ids': len({r['id'] for r in results}),
                   'socket': endpoint, 'outage_delivery': failed['state'],
                   'update_check': 'project enables; raw remote shows update; mv2 resume suppresses it'}))
