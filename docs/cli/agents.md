@@ -47,6 +47,8 @@ mv2 attach worker             # open its terminal
 
 Press `Ctrl-b d` to detach from an attached terminal; the agent keeps running. [Concepts](../concepts.md#agent-state) explains the live, status and phase fields.
 
+`mv2 capabilities --agent worker` lists what that agent can do now, one line each, such as `steer: supported` or `ask: unavailable: REASON`. `--harness NAME` answers for a harness's launches instead; with `--probe` it also checks that the executable exists and, for Claude, its version. `--json` prints every record.
+
 ## Stop and resume
 
 ```sh
@@ -55,7 +57,7 @@ mv2 resume worker
 mv2 resume worker --model opus --wait
 ```
 
-`kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`. If a caller storage override is ignored to preserve the saved conversation, the resume summary explains it on a separate line (also with `--wait`); `--json` includes it in `notices`. A message that wakes the agent returns the same notice.
+`kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane, then prints `Stopped NAME.` If mv2 couldn't confirm the work was cancelled, the line says so and why; `--json` prints the record. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`. If a caller storage override is ignored to preserve the saved conversation, the resume summary explains it on a separate line (also with `--wait`); `--json` includes it in `notices`. A message that wakes the agent returns the same notice.
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
@@ -77,7 +79,7 @@ mv2 trash                                  # list what's in the trash
 mv2 trash --empty                          # delete it permanently
 ```
 
-Stop agents before you move or remove them. A subverse can move only when all its agents are stopped. A moved agent keeps its inbox and conversation.
+Stop agents before you move or remove them. A subverse can move only when all its agents are stopped. A moved agent keeps its inbox and conversation. `remove` prints `Moved NAME to the trash.`, and `trash` lists one entry per line, such as `agent worker, removed 2026-10-18 00:30 UTC`. Both take `--json` for the records.
 
 A removed agent or subverse goes to `trash/` with a record of where it came from. Moving it back restores it. Top-level universes can't be moved or removed this way.
 

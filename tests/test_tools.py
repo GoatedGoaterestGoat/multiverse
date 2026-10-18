@@ -139,7 +139,7 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(batch['messages'][0]['text'], result['text'])
 
     def test_init_and_tui_subverse_install_fresh_scoped_definitions(self):
-        installed = json.loads(self.invoke("init", str(self.work / "fresh"), "--name", "fresh").stdout)
+        installed = json.loads(self.invoke("init", str(self.work / "fresh"), "--name", "fresh", "--json").stdout)
         self.assertEqual(installed["name"], "fresh")
         child = LocalBackend().subverse(self.root, {"name": "child"})
         self.assertEqual(child, self.root / "subverses/child")

@@ -86,7 +86,7 @@ mv2 inbox --agent worker --all --since 2h
 mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
 ```
 
-Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details.
+Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
 
 `--wait` without `--timeout` waits indefinitely. When a timeout runs out, `inbox` prints a line and exits 1.
 
@@ -111,6 +111,14 @@ With a live connection, Claude Code and Pi have a `/multiverse` command you can 
 | `/multiverse inbox` | Show this agent's unread inbox-only messages and mark them read | yes | no |
 
 In Codex and launch-only sessions, ask the agent in words instead, such as "Please run /multiverse list". You can also run `mv2 catalog` yourself.
+
+## Ask a side question
+
+```sh
+mv2 ask worker --question 'Which file holds the parser?'
+```
+
+`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. Only Claude Code with a live connection supports it. When there is no answer, `ask` prints why and exits 1.
 
 ## Scripts
 

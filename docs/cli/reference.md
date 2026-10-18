@@ -57,7 +57,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 Clean template install into DIRECTORY/.multiverse.
 
 ```sh
-mv2 init [--name NAME] [--template TEMPLATE] [directory]
+mv2 init [--name NAME] [--template TEMPLATE] [--json] [directory]
 ```
 
 | Argument | Value | Description | Default |
@@ -65,6 +65,7 @@ mv2 init [--name NAME] [--template TEMPLATE] [directory]
 | `directory` |  |  | `.` |
 | `--name` | `NAME` |  |  |
 | `--template` | `TEMPLATE` |  | `base` |
+| `--json` |  | Print the universe's record as JSON |  |
 
 ## subverse
 
@@ -161,26 +162,28 @@ mv2 resume [--model MODEL] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json] agent
 Alias for kill: end native work, then remove the owned tmux wrapper.
 
 ```sh
-mv2 stop [--attachment-only] agent
+mv2 stop [--attachment-only] [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
+| `--json` |  | Print the full record as JSON |  |
 
 ## kill
 
 End native work and its process, then remove the agent's tmux wrapper.
 
 ```sh
-mv2 kill [--attachment-only] agent
+mv2 kill [--attachment-only] [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
+| `--json` |  | Print the full record as JSON |  |
 
 ## move
 
@@ -201,25 +204,27 @@ mv2 move [--subverse] target destination
 Move a stopped agent, or a subverse whose agents are all stopped, to the trash.
 
 ```sh
-mv2 remove [--subverse] target
+mv2 remove [--subverse] [--json] target
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `target` |  | Agent name/UUID, or with --subverse a subverse path or name |  |
 | `--subverse` |  | Remove a subverse instead of an agent |  |
+| `--json` |  | Print the full record as JSON |  |
 
 ## trash
 
 List removed agents and subverses and replaced refresh files, or delete them permanently with --empty.
 
 ```sh
-mv2 trash [--empty]
+mv2 trash [--empty] [--json]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `--empty` |  | Permanently delete every trashed entry |  |
+| `--json` |  | Print the full record as JSON |  |
 
 ## attach
 
@@ -312,20 +317,21 @@ Alias for [`report`](#report).
 Record a native session UUID for exact resume.
 
 ```sh
-mv2 session-bind [--agent AGENT] --session-id SESSION_ID
+mv2 session-bind [--agent AGENT] --session-id SESSION_ID [--json]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `--agent` | `AGENT` |  | `$MV2_AGENT_ID` |
 | `--session-id` | `SESSION_ID` | Required. Native harness session UUID for exact resume |  |
+| `--json` |  | Print the agent's record as JSON |  |
 
 ## capabilities
 
 Discover operation support for a configured harness or exact session.
 
 ```sh
-mv2 capabilities (--agent AGENT | --harness HARNESS) [--probe]
+mv2 capabilities (--agent AGENT | --harness HARNESS) [--probe] [--json]
 ```
 
 | Argument | Value | Description | Default |
@@ -333,6 +339,7 @@ mv2 capabilities (--agent AGENT | --harness HARNESS) [--probe]
 | `--agent` | `AGENT` |  |  |
 | `--harness` | `HARNESS` |  |  |
 | `--probe` |  | Run bounded, read-only native availability checks |  |
+| `--json` |  | Print every capability record as JSON |  |
 
 Use exactly one of `--agent`, `--harness`.
 
@@ -371,13 +378,14 @@ mv2 native-status [--operation {status,activity,usage,interrupt,ask}] agent
 Ask an isolated side question without changing the main conversation.
 
 ```sh
-mv2 ask --question QUESTION agent
+mv2 ask --question QUESTION [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--question` | `QUESTION` | Required. |  |
+| `--json` |  | Print the full result as JSON |  |
 
 ## get-usage
 

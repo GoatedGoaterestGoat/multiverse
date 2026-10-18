@@ -73,6 +73,22 @@ def with_notices(summary, record):
     return "\n".join([summary, *lines])
 
 
+def agent_name(root, reference):
+    """The agent's name for a sentence, or the reference as given when its record can't be read."""
+    from .universe import agents
+    from .store import read
+    try:
+        return read(agents.directory(root, reference) / "properties.json").get("name") or reference
+    except (OSError, ValueError, KeyError, TypeError):
+        return reference
+
+
+def sentence(text):
+    """`text` cleaned for one line, starting with a capital and ending with a period."""
+    text = " ".join(clean(text).split()).rstrip(".")
+    return (text[:1].upper() + text[1:] + ".") if text else ""
+
+
 def cause(error, name, failure):
     """The reason behind a failed launch, without the record ID and recovery advice around it."""
     return ValueError(f"{name} {failure}: {error.__cause__ or error}")

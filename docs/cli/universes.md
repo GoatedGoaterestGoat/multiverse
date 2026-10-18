@@ -9,7 +9,7 @@ mv2 init ~/my-project
 mv2 init ~/my-project --template development --name my-project
 ```
 
-`init` installs a template into `DIRECTORY/.multiverse`, where `DIRECTORY` defaults to the current directory. It refuses if a `.multiverse` is already there. Running `mv2` with no command, in a folder without a universe, does the same with the `base` template and then opens the dashboard. Neither command starts any agents.
+`init` installs a template into `DIRECTORY/.multiverse`, where `DIRECTORY` defaults to the current directory. It prints `Created universe NAME in PATH.` (`--json` prints the record) and refuses if a `.multiverse` is already there. Running `mv2` with no command, in a folder without a universe, does the same with the `base` template and then opens the dashboard. Neither command starts any agents.
 
 ## Choose which universe a command uses
 

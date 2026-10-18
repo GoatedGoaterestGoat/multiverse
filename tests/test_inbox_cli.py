@@ -103,7 +103,7 @@ class InboxCliTest(BaseTest):
                 self.assertEqual(self.output('--all', '--since', timestamp), expected)
         self.assertEqual(self.output('--all', '--since', '2026-10-03T11:00:00Z', '--last', '1'),
                          'Message from user:\nnew\n')
-        self.assertEqual(self.output('--all', '--since', '2026-10-04T00:00:00Z'), 'No unread messages.\n')
+        self.assertEqual(self.output('--all', '--since', '2026-10-04T00:00:00Z'), 'No messages since 2026-10-04T00:00:00Z.\n')
         self.assertFalse((self.directory / 'inbox.cursor').exists())
 
     def test_relative_since_and_json_paging_over_an_empty_filtered_page(self):
