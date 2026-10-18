@@ -859,6 +859,41 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.gone_soon(helper), "the helper outlived the unit that tracked its group")
 
+    def test_tracking_a_leader_again_after_it_starts_its_helpers_covers_a_helper_started_late(self):
+        # The documented remedy for a helper the runner's looks can miss: started after track(), its leader exiting
+        # before the next look. Tracking the leader again once the helper has started records the helper.
+        go, helper_file, leader = self.work / "go", self.work / "helper", self.work / "leader.py"
+        leader.write_text(textwrap.dedent(f"""
+            import subprocess, sys, time
+            from pathlib import Path
+            while not Path({str(go)!r}).exists():
+                time.sleep(0.005)
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", {str(self.work)!r}])
+            Path({str(helper_file)!r}).write_text(str(child.pid))
+            while not Path({str(go)!r} + ".2").exists():
+                time.sleep(0.005)
+            """))
+        self.module("test_late", f"""
+            import subprocess, sys, time, unittest
+            from pathlib import Path
+            from isolation import track
+            class Late(unittest.TestCase):
+                def test_group(self):
+                    leader = subprocess.Popen([sys.executable, {str(leader)!r}], start_new_session=True)
+                    track(pid=leader.pid)  # no helper yet
+                    Path({str(go)!r}).touch()
+                    while not Path({str(helper_file)!r}).exists():
+                        time.sleep(0.005)
+                    track(pid=leader.pid)  # again, now that it has started its helper and is still running
+                    Path({str(go)!r} + ".2").touch()
+                    leader.wait()
+            """)
+        result = self.run_tests("test_late")
+        helper = self.pid_in(helper_file)
+        self.addCleanup(self.kill_if_running, helper)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.gone_soon(helper), "the helper outlived the unit that tracked its group")
+
     def test_a_group_is_sampled_only_while_a_process_already_recorded_in_it_is_there(self):
         sys.path.insert(0, str(RUNNER.parent))
         self.addCleanup(sys.path.remove, str(RUNNER.parent))

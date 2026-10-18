@@ -87,6 +87,11 @@ node --experimental-strip-types tests/pi_bridge_test.mjs
 
 Pass `socket_path=self.socket` to `lifecycle.start` so launches stay on the test's tmux server. Wait with `until`, and never with a fixed sleep. A test class that isn't a `BaseTest` calls `isolate(self)` first in its own `setUp`, and a test that starts a tmux server or daemon of its own names it with `track`.
 
+`track` has one limit with a daemon's group. The runner sees who is in the group when you call `track`, then every half second, and once more as the test ends. It ends the group afterwards only while a process it saw there is still in it, since a group's number can later belong to someone else. So a helper that starts after one look, whose leader and other seen processes have all exited before the next, can't be shown to be the daemon's, and it's left running. If a daemon starts helpers and may exit quickly, do one of these:
+
+- call `track(pid=helper)` for a helper you start yourself;
+- call `track(pid=leader)` again once the leader has started its helpers and is still running, so the runner looks again.
+
 ## Dashboard tests
 
 Textual tests drive the real app with `App.run_test()` and Pilot. They use real widgets, keys, clicks and resizes, with no terminal.

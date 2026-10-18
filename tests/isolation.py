@@ -60,7 +60,11 @@ def track(*, tmux_socket=None, pid=None):
     """Tell tests/run.py about a tmux server (by its socket) or a process (by PID) this test started outside its own
     process group, where the runner's kill cannot reach. The runner ends it after the unit, even if the test was
     stopped or killed before its cleanups ran; for a process that leads its own group (a daemon), the whole group,
-    helpers included, even once the leader has exited. Does nothing when the tests run some other way."""
+    helpers included, even once the leader has exited. Does nothing when the tests run some other way.
+
+    The runner sees who is in a group now, every 0.5 s and as the unit ends, and ends the group only while a process
+    it saw there is still in it. A helper that starts after one look, when everything seen has exited before the
+    next, is left running: track the helper itself, or call track(pid=leader) again once its helpers have started."""
     if not TRACKED:
         return
     from multiverse.runtime.process import process_started  # home_safety put this checkout's src on the path
