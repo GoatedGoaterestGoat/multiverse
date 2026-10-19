@@ -119,8 +119,10 @@ class ClaudeRelaunchTest(BaseTest):
         self.claude_start, self.other_start = ticks, str(int(LINUX_START) + 1)
 
     def counted(self):
-        """Every ps the observer runs (multiverse.runtime.process), counted."""
-        return self.enterContext(patch.object(process, '_query', wraps=process._query))
+        """Every process observation core makes (multiverse.runtime.process), counted: a ps on macOS, a /proc
+        read on Linux, where core never runs ps for a live check."""
+        reader = '_linux_snapshot' if sys.platform.startswith('linux') else '_query'
+        return self.enterContext(patch.object(process, reader, wraps=getattr(process, reader)))
 
     def test_which_claude_process_file_is_this_launch(self):
         """Claude's sessions/<pid>.json matches this launch only by pid, start time and sessionId, across /clear, reused
@@ -298,8 +300,8 @@ class ClaudeRelaunchTest(BaseTest):
             self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
 
     def test_process_checks_cost_nothing_for_stopped_agents(self):
-        """Listing runs no ps for stopped Claude agents and exactly one per check for live ones, with no cache between
-        checks; a break goes unnoticed because results stay right while list and the dashboard slow with every agent,
+        """Listing makes no process query for stopped Claude agents and exactly one per check for live ones (ps on
+        macOS, /proc on Linux), with no cache between checks; a break goes unnoticed because results stay right while list and the dashboard slow with every agent,
         and a cache would hide a pid reused between checks (93a936c)."""
         with self.subTest('a stopped launch, or one without a process file'):
             query = self.counted()
@@ -314,7 +316,7 @@ class ClaudeRelaunchTest(BaseTest):
             self.claude_file('sessions-darwin.json', procStart=self.claude_start)
             query.reset_mock()
             self.assertIsNotNone(self.adapter.observed_binding(self.session()))
-            self.assertEqual(query.call_count, 1)  # one ps for a running launch on macOS
+            self.assertEqual(query.call_count, 1)  # one observation for a running launch
         with self.subTest('a listing of stopped agents'):
             self.reset()
             for number in range(10):
