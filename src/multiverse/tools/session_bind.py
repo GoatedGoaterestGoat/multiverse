@@ -31,7 +31,7 @@ def run(root=None, *, agent=None, session_id, json=False):  # `json`: presentati
     root, directory, launch_id = callback(root, agent)
     try:
         return agents.bind_session(root, agent, session_id, launch_id)
-    except PermissionError as error:
+    except OSError as error:
         from ..runtime.binding_requests import namespace_denied, request_binding
         if not launch_id or not namespace_denied(root, error):
             raise

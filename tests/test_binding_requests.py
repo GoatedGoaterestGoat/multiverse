@@ -19,7 +19,7 @@ class BindingRequestsTest(BaseTest):
               'native_session_provider': 'codex', 'native_session_home': str(self.work),
               'native_session_id': foreign})
         for case in ('success', 'foreign session', 'wrong launch', 'wrong agent', 'bridge', 'child exited',
-                     'replaced', 'ending', 'removed', 'other permission', 'operator'):
+                     'replaced', 'ending', 'removed', 'other permission', 'other readonly', 'other error', 'operator'):
             with self.subTest(case=case):
                 directory = self.root / 'state' / 'agents' / uid()
                 launch = directory / 'launches' / uid()
@@ -55,15 +55,16 @@ class BindingRequestsTest(BaseTest):
                     self.assertFalse(directory.exists())
                     self.assertEqual(read(trash / 'properties.json'), props)
                     continue
-                if case in ('other permission', 'operator'):
+                if case in ('other permission', 'other readonly', 'other error', 'operator'):
                     environment = {} if case == 'operator' else {
                         'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': directory.name,
                         'MV2_AGENT_DIR': str(directory), 'MV2_LAUNCH_ID': launch.name}
-                    denied_path = (self.root / 'state/.sessions.lock' if case == 'operator'
+                    code = errno.EROFS if case == 'other readonly' else errno.EIO if case == 'other error' else errno.EPERM
+                    denied_path = (self.root / 'state/.sessions.lock' if case in ('operator', 'other error')
                                    else directory / 'properties.json')
                     with patch.dict(os.environ, environment, clear=True), patch.object(
-                            sessions, 'namespace', side_effect=PermissionError(errno.EPERM, 'denied', str(denied_path))), \
-                            patch.object(binding_requests, 'request_binding') as fallback, self.assertRaises(PermissionError):
+                            sessions, 'namespace', side_effect=OSError(code, 'denied', str(denied_path))), \
+                            patch.object(binding_requests, 'request_binding') as fallback, self.assertRaises(OSError):
                         session_bind.run(self.root, agent=directory.name, session_id=target)
                     fallback.assert_not_called()
                     self.assertEqual(read(directory / 'properties.json'), props)

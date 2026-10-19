@@ -44,7 +44,7 @@ def _write(path, value):
 
 
 def namespace_denied(root, error):
-    return (isinstance(error, PermissionError) and error.errno in (errno.EACCES, errno.EPERM)
+    return (isinstance(error, OSError) and error.errno in (errno.EACCES, errno.EPERM, errno.EROFS)
             and error.filename is not None
             and Path(error.filename).resolve() == sessions.top(root) / 'state' / '.sessions.lock')
 

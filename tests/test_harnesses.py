@@ -1,4 +1,5 @@
 """Harness contracts and real tmux launches, without accounts or model calls."""
+import errno
 import os
 import shlex
 from pathlib import Path
@@ -51,14 +52,14 @@ class HarnessLaunchTest(TerminalBase):
         lifecycle.terminal_action(self.root, agent["id"], "stop")
         time.sleep(0.1)
 
-    def deny_callback_namespace(self):
+    def deny_callback_namespace(self, denied_errno):
         launcher = Path(mv2_launcher(self.work))
         source = str(Path(__file__).resolve().parents[1] / 'src')
         code = (
             f"import sys; sys.path.insert(0, {source!r})\n"
             "from multiverse.universe import sessions\n"
             "def denied(root):\n"
-            "    raise PermissionError(1, 'sandbox denies universe write', str(sessions.top(root) / 'state/.sessions.lock'))\n"
+            f"    raise OSError({denied_errno}, 'sandbox denies universe write', str(sessions.top(root) / 'state/.sessions.lock'))\n"
             "sessions.namespace = denied\n"
             "from multiverse.cli import main\nmain()\n")
         launcher.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, '-c', code]) + ' "$@"\n')
@@ -66,18 +67,19 @@ class HarnessLaunchTest(TerminalBase):
     def test_codex_session_bind_from_inside_a_real_pane_and_exact_resume(self):
         """A plain Codex stand-in calls the real mv2 session-bind from inside its tmux pane, with a forbidden python
         first on PATH, and resume then uses exactly that id; a break goes unnoticed because every other binding test
-        mocks the runner, and denial of the universe lock can silently leave a working sandboxed agent unresumable."""
-        for denied in (False, True):
+        mocks the runner, and a platform-specific denial errno can silently leave a working sandboxed agent unresumable."""
+        for denied in (None, errno.EPERM, errno.EROFS):
             with self.subTest(namespace_denied=denied):
                 if denied:
-                    self.deny_callback_namespace()
+                    self.deny_callback_namespace(denied)
                 self.fake_cli("codex")
                 prompt = '--pretend-flag "quoted"\n$(touch MUST_NOT_EXIST) `echo no` {literal}'
                 with patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-session"}):
-                    first = lifecycle.start(self.root, "codex-denied" if denied else "codex", prompt, "codex", "chosen-model", socket_path=self.socket)
+                    first = lifecycle.start(self.root, f"codex-denied-{denied}" if denied else "codex", prompt, "codex", "chosen-model", socket_path=self.socket)
                 directory = agents.directory(self.root, first["id"])
                 seen = directory / "seen.json"
-                until(lambda: seen.exists())
+                until(lambda: seen.exists() or agents.runtime(directory).get('state') == 'failed')
+                self.assertTrue(seen.exists(), agents.runtime(directory))
                 received = read(seen)
                 argv = received["argv"]
                 self.assertNotIn("CODEX_THREAD_ID", received["parent_markers"])
