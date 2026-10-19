@@ -20,6 +20,26 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 
 The live Codex and Pi modules depend on the installed versions and on timing. They can fail on a machine for reasons unrelated to your change. Before blaming a change, run the same module on `main` in another worktree and compare.
 
+## Run them on Linux
+
+```sh
+scripts/linux-tests.sh                                  # the whole suite, on this checkout's working tree
+scripts/linux-tests.sh test_run test_native_processes   # some modules
+scripts/linux-tests.sh --commit HEAD --python 3.11      # a commit, as committed, on Python 3.11
+```
+
+`scripts/linux-tests.sh` runs `tests/run.py` in Docker:
+- **The image:** Ubuntu 24.04 with tmux, git and a system `python3`, and Python 3.11 or 3.13 (the default) from uv. The tests run as a user who isn't root. The first run builds the image, in about a minute, and later runs reuse it.
+- **The copy:** a clean copy of the checkout's working tree, uncommitted changes included, or of a commit with `--commit`. Submodules come too.
+- **What stays out:** nothing git ignores goes in, so no `.venv` and never the checkout's `.multiverse`. No `MV2_*` variable goes in either.
+- **The result:** its exit code is the suite's.
+
+Run it:
+- before landing a change to anything that differs on Linux: reading `/proc`, boot IDs, `sys.platform` branches, process identity, or the runner's process tracking;
+- in the pre-push gate, as one full run next to the macOS one.
+
+It can't run native Claude, Codex or Pi: none is installed there, so their live tests skip, as on CI. `test_pi_bridge` skips too, without Node. On a Mac, Docker runs aarch64 Linux, while CI runs x86-64.
+
 ## What deserves a test
 
 Fewer tests are better. A test earns its place only if it guards behaviour that is easy to break, or whose break would be hard to notice. Before adding one, write in one line which feature it tests and why. That line is its docstring:
