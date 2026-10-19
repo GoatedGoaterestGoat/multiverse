@@ -42,7 +42,7 @@ class CodexControlTest(unittest.TestCase):
     def test_send_plan_per_operation_and_thread_state(self):
         """Each operation, thread state and existing queue maps to the exact Codex RPC sequence (steer, queue, wake);
         fragile because steer needs expectedTurnId and the queue API is experimental, and a wrong plan delivers at the
-        wrong time with no error."""
+        wrong time or unpauses a queue on receipt retry with no error."""
         own = {'id': 'queue-item', 'clientUserMessageId': self.message.id}
         other = {'id': 'other', 'clientUserMessageId': 'another-message'}
         read = ['initialize', 'thread/read']
@@ -76,13 +76,22 @@ class CodexControlTest(unittest.TestCase):
                 elif wake == 'other work':
                     self.assertIn('other queued work', result.reason)
 
-        for state in (None, {'native_session_id': self.ctx.native_id, 'restart': {'id': 'other', 'state': 'claimed'}},
-                      {'native_session_id': self.ctx.native_id, 'restart': {'id': self.message.id, 'state': 'pending'}}):
-            with self.subTest(no_fresh_claim=state):
+        for restart, starts in ((None, 0), ({'id': 'other', 'state': 'claimed'}, 0),
+                                ({'id': self.message.id, 'state': 'pending'}, 0),
+                                ({'id': self.message.id, 'state': 'claimed'}, 1)):
+            with self.subTest(paused_queue_restart=restart):
+                state = {'native_session_id': self.ctx.native_id, 'state': 'paused'}
+                if restart is not None:
+                    state['restart'] = restart
                 self.ctx = replace(self.ctx, queue_state=state)
                 self.requests.clear()
-                self.assertEqual(self.run_plan('follow-up', state='idle').state, 'native_queued')
-                self.assertNotIn('thread/queue/start', [r.method for r in self.requests])
+                self.assertEqual(self.run_plan('follow-up', state='idle', overrides={
+                    'thread/queue/list': {'result': {'data': [other]}}}).state, 'native_queued')
+                methods = [r.method for r in self.requests]
+                self.assertEqual(methods.count('thread/queue/add'), 1)
+                self.assertEqual(methods.count('thread/queue/start'), starts)
+                if starts:
+                    self.assertEqual(self.requests[-1].params, {'threadId': self.ctx.native_id})
 
     def test_failure_after_acceptance_is_never_resent(self):
         """Every failure after Codex accepted a message is reported without a second submission; a break goes unnoticed
