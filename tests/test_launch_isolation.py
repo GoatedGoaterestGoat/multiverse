@@ -307,8 +307,11 @@ class LaunchIsolationTest(unittest.TestCase):
                     if found == 'unreadable' and Path(path) == homes['server'] / ('projects' if family == 'claude' else 'sessions'):
                         raise PermissionError('fixture denied candidate storage')
                     return original_scandir(path)
+                # These launches are stopped fixtures. A recorded PID is evidence
+                # of a possible past turn, not a process to inspect on the test host.
                 with patch.object(lifecycle, 'Tmux', return_value=backend), \
                         patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                        patch('multiverse.runtime.attachments._observation', return_value=(True, None)), \
                         patch.object(os, 'scandir', scandir), \
                         patch.dict(os.environ, {key: str(homes['caller'])}):
                     fresh = found == 'empty-before-child' and family == 'claude'
