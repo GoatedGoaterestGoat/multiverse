@@ -89,8 +89,12 @@ class NativeRefusalTest(TerminalBase):
         request('thread/name/set', {'threadId': thread, 'name': 'private refusal fixture'})
         until(lambda: any(home.glob('sessions/**/rollout-*' + thread + '.jsonl')))
         directory, properties, _, _ = lifecycle._record(self.root, 'refused', '', 'codex', None, None)
+        # This externally created conversation represents a current launch, whose
+        # storage snapshot proves absence as well as the selected home.
         properties.update(workspace=str(self.work), native_session_id=thread,
-                          native_environment={'CODEX_HOME': str(home)})
+                          native_environment={'CODEX_HOME': str(home)},
+                          native_storage_environment={'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': None,
+                                                      'CLAUDE_CONFIG_DIR': environment.get('CLAUDE_CONFIG_DIR')})
         write(directory / 'properties.json', properties)
         configuration = self.root / 'harnesses/codex/harness.json'
         with patch.dict(os.environ, environment, clear=True):
