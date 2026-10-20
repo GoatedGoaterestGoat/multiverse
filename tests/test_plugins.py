@@ -445,8 +445,10 @@ class ApiTest(PluginTestCase):
         storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown
         (None) for a launched agent with no proof, and this process's environment only for one never launched; and
         its recorded storage values, an explicit value kept apart from a recorded absence even where both name one
-        directory; a break goes unnoticed because tests run every process with one environment, while the dashboard
-        or the host may run with another and then read another store, or run Claude under another config."""
+        directory, completed with what resolves it (the launch HOME for an unset or empty home variable, the
+        workspace for a relative value) or None without it; a break goes unnoticed because tests run every process
+        with one environment and directory, while the dashboard or the host may run with another and then read
+        another store, or run Claude under another config."""
         self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read"]},
                           {"plugin.py": "def register(mv): pass\n"})
         self.enable("reader")
@@ -468,7 +470,13 @@ class ApiTest(PluginTestCase):
             "native-session-without-proof": ({"native_session_id": "c1"}, None, None),
             "damaged": ({"native_storage_environment": ["not", "a", "record"]}, None, None),
             "explicit-default-directory": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": str(
-                Path(os.environ["HOME"]) / ".claude")}}, None, Path(os.environ["HOME"]) / ".claude")}
+                Path(os.environ["HOME"]) / ".claude")}}, None, Path(os.environ["HOME"]) / ".claude"),
+            "empty-with-launch-home": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": ""}},
+                                       ({"HOME": str(launch_home)}, []), launch_home / ".claude"),
+            "relative-to-the-workspace": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": "relative-config"}},
+                                          None, self.work / "project" / "relative-config"),
+            "relative-without-an-absolute-workspace": ({"workspace": "somewhere", "native_storage_environment": {
+                "CLAUDE_CONFIG_DIR": "relative-config"}}, None, None)}
         old_codex = str(self.work / "proven-old-home")
         codex_rows = {  # agents from before storage was recorded: what a resume adopts, never the reader's
             "legacy-codex": ({"native_session_id": "x1", "native_service_identity": {
@@ -480,10 +488,11 @@ class ApiTest(PluginTestCase):
                 "no launch at all", Path(old_codex)),
             "codex-without-proof": ({"native_session_id": "x2"}, None, None)}
         old_codex_storage = {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}
-        storage_rows = {  # the recorded values, where proven (every other row: None)
+        storage_rows = {  # the environment that selects the same store, where proven (every other row: None)
             "storage": {"CLAUDE_CONFIG_DIR": str(recorded)},
-            "storage-unset-without-launch-home": {"CLAUDE_CONFIG_DIR": None},  # home unknown, absence proven
-            "storage-unset-with-launch-home": {"CLAUDE_CONFIG_DIR": None},
+            "storage-unset-with-launch-home": {"CLAUDE_CONFIG_DIR": None, "HOME": str(launch_home)},
+            "empty-with-launch-home": {"CLAUDE_CONFIG_DIR": "", "HOME": str(launch_home)},
+            "relative-to-the-workspace": {"CLAUDE_CONFIG_DIR": str(self.work / "project" / "relative-config")},
             "explicit-default-directory": {"CLAUDE_CONFIG_DIR": str(Path(os.environ["HOME"]) / ".claude")},
             "legacy-codex": old_codex_storage, "unbound-but-launched-codex": old_codex_storage,
             "legacy-scope-without-a-runtime": old_codex_storage}

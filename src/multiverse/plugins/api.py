@@ -551,10 +551,11 @@ class HarnessInfo:
 def _agent_storage(agent, harness, family, keys):
     """(home, storage) of an agent's harness as its launches use them, from its records only.
 
-    storage: the agent's storage variables (`keys`) as the shared evidence records them (universe.storage: the
-    storage map, or the legacy launch evidence a resume adopts), each to its value or to None where the launch had
-    it unset; None when that isn't proven. A value and an absence stay apart even where they name one directory:
-    an explicit CLAUDE_CONFIG_DIR moves Claude's login and global config.
+    storage: the environment that selects the same store as the agent's launches: its storage variables (`keys`)
+    as the shared evidence records them (universe.storage: the storage map, or the legacy launch evidence a resume
+    adopts), each to its value or to None where the launch had it unset, with what resolves them (see
+    _replayable); None when that isn't proven. A value and an absence stay apart even where they name one
+    directory: an explicit CLAUDE_CONFIG_DIR moves Claude's login and global config.
 
     home: the session home core recorded, else
     the storage its next resume would replay (universe.storage, which lifecycle shares: the storage map, or the
@@ -576,13 +577,15 @@ def _agent_storage(agent, harness, family, keys):
         return None, None
     from ..universe import storage
     recorded = storage.recorded_environment(agent.directory, properties, family, keys)
-    values = ({key: recorded[key] for key in keys}
+    values = (_replayable(family, recorded, keys, properties.get("workspace"))
               if recorded is not None and keys and all(key in recorded for key in keys) else None)
     home = properties.get("native_session_home")
     if isinstance(home, str) and home:
         return Path(home), values
     if recorded is not None:
-        return _recorded_home(family, {key: value for key, value in recorded.items() if value}), values
+        if values is None:
+            return None, None  # a value whose context isn't recorded: its home isn't known either
+        return _recorded_home(family, {key: value for key, value in values.items() if value}), values
     if _never_launched(agent.directory, properties):
         return _harness_home(family), None  # nothing of it in any store yet: where this process's would put it
     return None, None
@@ -590,6 +593,28 @@ def _agent_storage(agent, harness, family, keys):
 
 _HOME_VARIABLES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex"),
                    "pi": ("PI_CODING_AGENT_DIR", None)}
+
+
+def _replayable(family, recorded, keys, workspace):
+    """The storage variables `keys` from `recorded`, as an environment that selects the same store wherever it is
+    replayed, or None when what resolves them isn't recorded. A relative value is joined, lexically as Claude's
+    path.resolve does (no symlink resolution), to the directory it was set from: the agent's recorded workspace,
+    where its launches start. An unset (None) or empty home variable stays as recorded and brings the launch's
+    proven HOME, under which its default lies. Unset, empty and set stay apart."""
+    variable = _HOME_VARIABLES.get(family, (None, None))[0]
+    result = {}
+    for key in keys:
+        value = recorded[key]
+        if isinstance(value, str) and value and not os.path.isabs(value):
+            if not (isinstance(workspace, str) and os.path.isabs(workspace)):
+                return None
+            value = os.path.normpath(os.path.join(workspace, value))
+        result[key] = value
+    if variable in result and not result[variable]:
+        if not recorded.get("HOME"):
+            return None
+        result["HOME"] = recorded["HOME"]
+    return result
 
 
 def _recorded_home(family, recorded):
