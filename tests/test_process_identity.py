@@ -67,12 +67,15 @@ class ProcessEvidenceTest(BaseTest):
             token = 'linux:11111111-1111-4111-8111-111111111111:12345'
             for saved, gone in ((token, False), (token[:-5] + '12344', True),
                                 (token.replace('11111111-', '22222222-', 1), True),
-                                ('linux:damaged:12345', False)):
+                                ('linux:damaged:12345', False),
+                                ('Thu Jan 1 00:00:00 1970', False)):
                 with self.subTest(saved=saved), \
                         patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
                     self.assertEqual(attachments._gone(42, saved), gone)
             with patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
                 self.assertIsNotNone(attachments.attested_running({'pid': 42, 'pid_started': token}))
+            with patch.object(attachments, '_observation', return_value=(False, ('Thu Jan 1 00:00:00 1970', 'S'))):
+                self.assertFalse(attachments._gone(42, token))
         for boundary in ('dormant_at', 'started_at'):
             with self.subTest('legacy dormant or previous-boot record releases reused PIDs', boundary=boundary):
                 directory, launch, facts = self.attachment(finished=False)
@@ -165,7 +168,8 @@ class ProcessEvidenceTest(BaseTest):
                 self.assertTrue(attachments._gone(os.getpid(), reused))
                 problem = attachments.problem(directory, facts)
             self.assertIn(str(os.getpid()), problem)
-            self.assertIn(process_started(os.getpid()), problem)
+            self.assertIn('cannot prove', problem)
+            self.assertNotIn(process_started(os.getpid()), problem)
             self.assertIn(str(role.path), problem)
             self.assertIn('retry', problem)
         with self.subTest('malformed identity is no proof of reuse, and unknown inspection blocks'):
