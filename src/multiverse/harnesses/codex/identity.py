@@ -20,7 +20,12 @@ def resume_notice(caller_environment, effective_environment):
     notices = []
     for key, label in (('CODEX_HOME', 'Codex home'), ('CODEX_SQLITE_HOME', 'Codex database home')):
         requested, saved = caller_environment.get(key), effective_environment.get(key)
-        if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+        if not isinstance(requested, str) or not requested:
+            continue
+        if key == 'CODEX_SQLITE_HOME' and saved is None:
+            notices.append(f'Kept its saved Codex database home unset; ignored {key}={json.dumps(requested)}.')
+            continue
+        if not isinstance(saved, str) or not saved:
             continue
         try:
             kept = Path(saved).expanduser().resolve()
@@ -33,7 +38,7 @@ def resume_notice(caller_environment, effective_environment):
 
 
 def storage_environment(context):
-    storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
+    storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME') or '~/.codex').expanduser().resolve())}
     if context.environment.get('CODEX_SQLITE_HOME'):
         storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
     return storage

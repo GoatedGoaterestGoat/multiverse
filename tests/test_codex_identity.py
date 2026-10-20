@@ -235,6 +235,7 @@ class SharedIdentityTest(unittest.TestCase):
             self.assertEqual(values['MV2_MY_PLUGIN_SETTING'], 'plugin-value')
         for storage, expected in (
                 ({}, {'CODEX_HOME': '/launch/home/.codex'}),
+                ({'CODEX_HOME': ''}, {'CODEX_HOME': '/launch/home/.codex'}),
                 ({'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'},
                  {'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'}),
                 ({'CODEX_HOME': 'relative-home', 'CODEX_SQLITE_HOME': 'relative-database'},
