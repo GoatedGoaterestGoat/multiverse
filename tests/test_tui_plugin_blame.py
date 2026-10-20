@@ -37,7 +37,7 @@ from textual.screen import ModalScreen
 
 from textual.message import Message
 
-BOARD_ARMED, BOARD_TICKS, BOARD_IN_HANDLER, BOARD_RESUMED = [], [], [], []
+BOARD_ARMED, BOARD_TICKS, BOARD_IN_HANDLER, BOARD_RESUMED, BOARD_WATCHED = [], [], [], [], []
 
 class Probe(ModalScreen):
     def compose(self):
@@ -54,6 +54,13 @@ class Board(ModalScreen):
         yield Static("board", id="board")
     def on_mount(self):
         self.set_interval(0.05, self.tick)
+        self.watch(self.app, "title", self.app_title, init=False)  # a watcher on another object, registered by the board
+    def app_title(self):
+        if BOARD_ARMED:
+            BOARD_WATCHED.append("the title watcher")
+    def watch_stack_updates(self):  # the screen's own reactive changes whenever the screen above it opens or closes
+        if BOARD_ARMED:
+            BOARD_WATCHED.append("watch_stack_updates")
     def tick(self):
         BOARD_TICKS.append(1)
         if BOARD_ARMED and BOARD_IN_HANDLER:
@@ -110,9 +117,11 @@ class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_a_plugin_failure_closes_only_its_own_screens(self):
         """A plugin failing in a panel under another plugin's screen, in its screen beneath another's or on top of
-        one closes only the failing plugin's screens and keeps the other's half-written input; fragile because it
-        hooks Textual's private exception and screen-stack handling, and a break loses the user's unsaved edit
-        (3ce2b98)."""
+        one closes only the failing plugin's screens and keeps the other's half-written input, and none of the failed
+        plugin's own code runs on a screen of its that is waiting to close (its handlers, its watch_ methods, the
+        watchers it registered on the app); fragile because it hooks Textual's private exception, dispatch and
+        screen-stack handling, a break loses the user's unsaved edit (3ce2b98), and a watcher runs without any
+        message, so only a probe that records it shows it still runs."""
         rows = (("its panel, under another plugin's screen", self.panel_beneath),
                 ("its screen, beneath another plugin's", self.failure_beneath),
                 ("its screen's own loop ending, beneath another plugin's", self.handler_beneath),
@@ -158,10 +167,13 @@ class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         ticks = len(module.BOARD_TICKS)
         await asyncio.sleep(0.3)
         self.assertEqual(len(module.BOARD_TICKS), ticks, "the failed board's timer still runs under the notes")
+        d.app.title = "changed"  # a watcher the failed board registered on the app
+        await d.settle()
         await d.close_screen()  # the person closes the notes: the failed board goes with them, not shown again
         await d.until(lambda: len(d.app.screen_stack) == 1 or module.BOARD_RESUMED, "the failed board to close once it was on top")
         await d.settle()
         self.assertEqual(module.BOARD_RESUMED, [], "the failed board still ran its handler when it was shown again")
+        self.assertEqual(module.BOARD_WATCHED, [], "the failed board's watchers still ran")
         self.assertEqual(len(d.app.screen_stack), 1, "the failed board did not close")
         self.assertNotIn(board, d.app.screen_stack)
         self.assertTrue(d.app.is_running)
@@ -175,6 +187,7 @@ class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         await d.until(lambda: d.screen is notes, "fragile's board to close")
         self.assertEqual(notes.query_one("#note", Input).value, "half-written")
         self.assertEqual(len(d.app.screen_stack), 2)
+        self.assertEqual(self.panel_module().BOARD_WATCHED, [], "the failed board's watcher ran while it was closed")
 
     async def test_a_core_error_raised_while_handling_a_plugins_error_still_ends_the_dashboard(self):
         """A core error raised while handling a plugin's error still ends the dashboard; a break goes unnoticed by

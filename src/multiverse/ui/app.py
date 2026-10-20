@@ -526,8 +526,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         """Close the failing plugin's screens, and only its, leaving every other screen and its unsaved input alone,
         wherever it is in the stack. Textual closes only the top screen: the failing plugin's screens on top close now;
         one under another screen (a plugin's opened from the palette over it, or one it opened itself) stops running
-        at once, its own handlers (the one for being shown again, say) no longer running, and closes as soon as it is
-        on top again, so it is never shown in the meantime. Then take the plugin's
+        at once, none of its own code running any more (its handlers, such as the one for being shown again, and its
+        watchers), and closes as soon as it is on top again, so it is never shown in the meantime. Then take the plugin's
         widgets out of every screen that stays.
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
@@ -550,16 +550,21 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             return inside(type(node).__module__) or getattr(node, "mv_plugin_package", None) == package
 
 
+        silenced = []
+        for screen in self.screen_stack[1:]:  # all of its screens, before any is popped: popping one runs its watchers too
+            if theirs(screen):
+                for node in (screen, *screen.walk_children(with_self=False)):  # nothing of it runs from here on
+                    for timer in list(getattr(node, "_timers", ())):
+                        timer.stop()
+                    self.workers.cancel_node(node)
+                    self.silence(node, inside)
+                    silenced.append(node)
+        self.unwatch(silenced)
         while len(self.screen_stack) > 1 and theirs(self.screen):
             await self.pop_screen()
         for screen in self.screen_stack[1:]:
             if theirs(screen):
                 self.doomed.add(screen)
-                for node in (screen, *screen.walk_children(with_self=False)):  # nothing of it runs while it waits
-                    for timer in list(getattr(node, "_timers", ())):
-                        timer.stop()
-                    self.workers.cancel_node(node)
-                    self.silence(node, inside)
         views = []
         for screen in self.screen_stack:
             for widget in list(screen.walk_children(with_self=False)):
@@ -606,6 +611,21 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
 
         node._get_dispatch_methods = not_theirs
         node._dispatch_message = without_their_callbacks
+        # A reactive's watcher is not a message: Textual looks watch_NAME up on the object each time the reactive
+        # changes, and the screen's own stack_updates changes whenever the screen above it opens or closes.
+        for owner in type(node).__mro__:
+            if inside(owner.__module__):
+                for name, value in vars(owner).items():
+                    if name.startswith(("watch_", "_watch_")) and callable(value):
+                        setattr(node, name, lambda: None)  # called with no arguments, whatever the watcher took
+
+    def unwatch(self, nodes):
+        """Take the watchers `nodes` registered on other objects (`self.watch(other, "name", callback)`) off them:
+        Textual keeps those on the watched object, the app or another widget, and runs them until the node closes."""
+        ours = {id(node) for node in nodes}
+        for holder in (self, *(widget for screen in self.screen_stack for widget in screen.walk_children(with_self=True))):
+            for entries in (getattr(holder, "__watchers", None) or {}).values():
+                entries[:] = [(node, callback) for node, callback in entries if id(node) not in ours]
 
     def pop_screen(self):
         """Close the top screen, and then any failed plugin's screen that this leaves on top (close_plugin_screens)."""
