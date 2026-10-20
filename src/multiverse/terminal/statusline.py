@@ -42,11 +42,16 @@ def object_value(value):
 
 def read_object(path):
     try:
-        # Non-blocking, so a FIFO in a record's place never hangs the bar.
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as source:
-            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+        # Non-blocking, so a FIFO in a record's place never hangs the bar. The descriptor is closed here:
+        # wrapping a directory's would fail and leak it.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return {}
-            data = source.read(READ_LIMIT + 1)
+            with os.fdopen(descriptor, 'rb', closefd=False) as source:
+                data = source.read(READ_LIMIT + 1)
+        finally:
+            os.close(descriptor)
         return object_value(json.loads(data)) if len(data) <= READ_LIMIT else {}
     except (OSError, ValueError, TypeError, RecursionError):
         return {}
@@ -154,7 +159,8 @@ def focus_text(directory):
     try:
         moment(record['since'])
         turns = record.get('turns')
-        if turns is not None and (type(turns) is not int or turns < 1):
+        if record.get('by') not in ('agent', 'user') or turns is not None and (type(turns) is not int
+                                                                               or turns not in (1, 2)):
             return ''
         until = record.get('until')
         if until is None:

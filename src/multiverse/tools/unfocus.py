@@ -30,7 +30,8 @@ def summary(result, own=False):
                 else "You were not focused; messages already reach you normally.")
         if count:
             noun = "message" if count == 1 else "messages"
-            line += f" You have {count} unread inbox {noun}{while_focused(count, during, 'you')}: read them now with mv2 inbox."
+            line += (f" You have {count} unread inbox {noun}{while_focused(count, during, 'you')}: "
+                     f"read {'it' if count == 1 else 'them'} now with mv2 inbox.")
         return line
     line = (f"Unfocused {name}; messages reach it normally again." if result["was_focused"]
             else f"{name} was not focused.")
@@ -40,10 +41,12 @@ def summary(result, own=False):
 
 
 def while_focused(count, during, who):
-    """`, all sent while it was focused`, `, 1 sent while you were focused` or nothing; `who` is it or you."""
+    """`, all sent while it was focused`, `, 1 sent while you were focused`, `, sent while …` for the only one,
+    or nothing; `who` is it or you."""
     if not during:
         return ""
-    return f", {'all' if during == count else during} sent while {who} {'were' if who == 'you' else 'was'} focused"
+    which = "" if during == count == 1 else "all " if during == count else f"{during} "
+    return f", {which}sent while {who} {'were' if who == 'you' else 'was'} focused"
 
 
 if __name__ == "__main__":

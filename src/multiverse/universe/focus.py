@@ -4,7 +4,7 @@ An agent focuses when its answer needs the person's attention, so that steer and
 follow-up messages cannot start other work and bury the question. `focus.json` in
 the agent directory holds the focus while it lasts:
 
-    {"since": ISO time, "until": ISO time or null, "turns": count or null, "by": "agent" or "user"}
+    {"since": ISO time, "until": ISO time or null, "turns": 1, 2 or null, "by": "agent" or "user"}
 
 `until` ends it at a time. `turns` counts the turn ends still to come: when the
 harness status goes from working or waiting to idle, `turn_ended` counts one, and
@@ -55,14 +55,16 @@ def _time(value):
 def active(record, at=None):
     """Whether a focus record is still in effect. A damaged one is not: it must never block messages.
 
-    In effect means a readable `since`, `turns` absent or a positive count, and `until` absent or in
-    the future but no further than the longest focus, which also keeps `ends` and `short` in range.
+    In effect means a readable `since`, `by` the agent or the user, `turns` absent or 1 or 2 (all that
+    `start` writes), and `until` absent or in the future but no further than the longest focus, which also
+    keeps `ends` and `short` in range.
     """
     at = at or datetime.now(timezone.utc)
     try:
         _time(record["since"])
         turns = record.get("turns")
-        if turns is not None and (type(turns) is not int or turns < 1):
+        if record.get("by") not in ("agent", "user") or turns is not None and (type(turns) is not int
+                                                                               or turns not in (1, 2)):
             return False
         until = record.get("until")
         return until is None or at < _time(until) <= at + timedelta(seconds=LONGEST)
@@ -73,11 +75,16 @@ def active(record, at=None):
 def _read(agent_dir):
     """The focus record, or None for anything but a small JSON object in a regular file."""
     try:
-        # Non-blocking, so a FIFO in its place never hangs a reader.
-        with os.fdopen(os.open(agent_dir / FILE, os.O_RDONLY | os.O_NONBLOCK), "rb") as source:
-            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+        # Non-blocking, so a FIFO in its place never hangs a reader. The descriptor is closed here: wrapping
+        # a directory's would fail and leak it.
+        descriptor = os.open(agent_dir / FILE, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return None
-            data = source.read(READ_LIMIT + 1)
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                data = source.read(READ_LIMIT + 1)
+        finally:
+            os.close(descriptor)
         record = json.loads(data) if len(data) <= READ_LIMIT else None
     except (OSError, ValueError, TypeError, RecursionError):
         return None
@@ -108,7 +115,8 @@ def start(agent_dir, *, duration=None, turn=False, by="user"):
         raise ValueError("Choose a duration or the next turn, not both")
     from .agents import runtime
     # The send lock: a send or retry that found no focus finishes before this one starts.
-    # No lock creates a folder, so a moved or removed agent is never recreated.
+    # No lock creates a folder, so a removed agent isn't recreated here. The write below still would, if the
+    # agent were moved or removed while these are held.
     with (lock(agent_dir / ".send.lock", create_parent=False), lock(agent_dir / ".runtime.lock", create_parent=False),
           lock(agent_dir / ".focus.lock", create_parent=False)):
         status = runtime(agent_dir).get("status")
@@ -127,7 +135,9 @@ def end(agent_dir):
     """Remove the focus. Returns the record that was in effect, or None."""
     with lock(agent_dir / ".focus.lock", create_parent=False):
         record = current(agent_dir)
-        (agent_dir / FILE).unlink(missing_ok=True)
+        path = agent_dir / FILE
+        if path.is_symlink() or not path.is_dir():  # a directory in its place is no focus, and not ours to remove
+            path.unlink(missing_ok=True)
     return record
 
 

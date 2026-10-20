@@ -67,21 +67,28 @@ class FocusRecordTest(BaseTest):
     def test_a_damaged_focus_never_blocks_and_never_raises(self):
         """Any damaged focus.json counts as no focus, and reading, ending or counting a turn against it never raises;
         otherwise a bad file refuses every steer to that agent with no way to see why, crashes the dashboard and
-        list (a far-future until), or fails every status update (deep nesting)."""
+        list (a far-future until), fails every status update (deep nesting), or leaks a descriptor on every
+        dashboard refresh (a directory)."""
         now = datetime.now(timezone.utc)
-        since = now.isoformat()
+        valid = {'since': now.isoformat(), 'until': None, 'turns': 1, 'by': 'user'}
+        with self.subTest('the record each case damages'):
+            store.write(self.directory / focus.FILE, valid)
+            self.assertIsNotNone(focus.current(self.directory))
+            focus.end(self.directory)
         damaged = {
             'not json': '{not json',
             'not an object': '[1, 2]',
-            'deeply nested': '[' * 2000 + ']' * 2000,   # within the size limit, past the parser's depth
-            'too large': json.dumps({'since': since, 'until': None, 'pad': 'x' * focus.READ_LIMIT}),
-            'bad since': {'since': 'not-a-time', 'until': None},
-            'no since': {'until': None},
-            'bad until': {'since': since, 'until': 'soon'},
-            'far-future until': {'since': since, 'until': '9999-12-31T23:59:59-14:00'},
-            'until past the longest focus': {'since': since, 'until': (now + timedelta(days=2)).isoformat()},
-            **{f'turns {value!r}': {'since': since, 'until': None, 'turns': value}
-               for value in (0, -1, 'one', {}, True, 1.5)},
+            'deeply nested': '[' * 100000 + ']' * 100000,   # within the size limit, past the parser's depth
+            'too large': json.dumps({**valid, 'pad': 'x' * focus.READ_LIMIT}),
+            'bad since': {**valid, 'since': 'not-a-time'},
+            'no since': {key: value for key, value in valid.items() if key != 'since'},
+            'bad until': {**valid, 'until': 'soon'},
+            'far-future until': {**valid, 'until': '9999-12-31T23:59:59-14:00'},
+            'until past the longest focus': {**valid, 'until': (now + timedelta(days=2)).isoformat()},
+            # start writes 1 or 2 turns; a huge count would never run out.
+            **{f'turns {value!r}': {**valid, 'turns': value} for value in (0, -1, 3, 10**30, 'one', {}, True, 1.5)},
+            'no by': {key: value for key, value in valid.items() if key != 'by'},
+            **{f'by {value!r}': {**valid, 'by': value} for value in ('somebody', ['user'])},
         }
         for label, value in damaged.items():
             with self.subTest(label):
@@ -100,9 +107,15 @@ class FocusRecordTest(BaseTest):
             with self.subTest(label):
                 path = self.directory / focus.FILE
                 path.mkdir() if label == 'directory' else os.mkfifo(path)
-                self.assertIsNone(focus.current(self.directory))   # a FIFO must not block
-                self.assertEqual(statusline.focus_text(self.directory), '')
-                path.rmdir() if label == 'directory' else path.unlink()
+                descriptors = len(os.listdir('/dev/fd'))
+                for _ in range(20):
+                    self.assertIsNone(focus.current(self.directory))   # a FIFO must not block
+                    self.assertEqual(statusline.focus_text(self.directory), '')
+                self.assertEqual(len(os.listdir('/dev/fd')), descriptors)   # every read closes what it opened
+                self.status('working')
+                self.status('idle')
+                self.assertIsNone(focus.end(self.directory))
+                path.rmdir() if label == 'directory' else self.assertFalse(path.exists())
 
     def test_turn_focus_set_mid_turn_lasts_through_the_next_turn(self):
         """A turn focus started while working outlasts that turn and ends with the next one, and only a working or
@@ -275,6 +288,10 @@ class FocusCommandTest(BaseTest):
                          'normally. You have 2 unread inbox messages: read them now with mv2 inbox.\n')
         mailbox.inbox(self.directories['asker'])
         self.assertEqual(self.output('unfocus', 'asker'), 'asker was not focused.\n')
+        self.output('focus', agent='asker')
+        self.output('send', 'asker', '--text', 'only', '--delivery', 'inbox-only')
+        self.assertEqual(self.output('unfocus', agent='asker'), 'Unfocused; messages reach you normally again. You '
+                         'have 1 unread inbox message, sent while you were focused: read it now with mv2 inbox.\n')
 
     def test_agents_change_only_their_own_focus(self):
         """An agent can focus and unfocus only itself while the person can change any agent; otherwise one agent could
