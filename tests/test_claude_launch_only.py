@@ -1,10 +1,12 @@
 """What Claude's records tell about a conversation mv2 can't see: whether a resume that starts fresh lost one, whether a
 failed wake's prompt arrived, and that an unreadable folder never counts as absence."""
 from dataclasses import replace
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 from unittest.mock import patch
 from uuid import uuid4
@@ -114,6 +116,11 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
             fresh = self.adapter.resume_notice(self.session(str(uuid4())), {'CLAUDE_CONFIG_DIR': other}, self.environment)
             self.assertTrue(fresh.startswith(ignored + ' '), fresh)
             self.assertIn('stopped before its first message', fresh)
+            # Core already said the launch starts fresh (legacy storage proved unused): the note isn't repeated, the
+            # ignored override still is.
+            quiet = self.adapter.resume_notice(self.session(str(uuid4())), {'CLAUDE_CONFIG_DIR': other}, self.environment,
+                                               fresh_start=False)
+            self.assertEqual(quiet, ignored)
         with self.subTest('no evidence of a message'):
             self.forget()
             native = str(uuid4())
@@ -492,7 +499,17 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         self.project = self.storage / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(self.work))
 
     def session(self, native=...):
-        return SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native if native is ... else native)
+        return SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native if native is ... else native,
+                             session_file=str(self.work / 'agent' / 'session.jsonl'))
+
+    def receipts(self, written):
+        """The mod's receipts: {message id: (route, time it was written)}, in the agent folder."""
+        folder = self.work / 'agent' / 'claude-receipts'
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        for message, (route, at) in written.items():
+            stamp = int(datetime.fromisoformat(at.replace('Z', '+00:00')).timestamp() * 1000)
+            (folder / f'{message}.json').write_text(json.dumps({'id': message, 'route': route, 'at': stamp}) + '\n')
 
     def transcript(self, *rows, raw=''):
         self.project.mkdir(parents=True, exist_ok=True)
@@ -507,13 +524,14 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
 
     def prompt(self, text=None, at='2026-10-19T10:00:05.000Z'):
         """How a follow-up or idle steer is stored: the mod typed it in as the person's words."""
-        return {'type': 'user', 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
+        return {'type': 'user', 'uuid': str(uuid4()), 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
                 'origin': {'kind': 'plugin', 'name': 'multiverse', 'asUser': True}}
 
-    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=()):
+    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=(), ledger=None):
         result = self.adapter.accepted_message_evidence(session or self.session(), self.message, text, since,
                                                         home or str(self.storage), framed=framed,
-                                                        **({'cohort': cohort} if cohort else {}))
+                                                        **({'cohort': cohort} if cohort else {}),
+                                                        **({'receipts': ledger} if ledger else {}))
         return result.state, (result.value or {}).get('delivered')
 
     def test_accepted_message_delivered_lost_or_unknown(self):
@@ -539,6 +557,28 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
              {'cohort': [earlier]}, ('ok', False)),
             ('a steer confirmed by its id uses no copy', [self.steer(message=earlier[0]), self.prompt()], '',
              {'cohort': [earlier]}, ('ok', True)),
+            ("a newer identical message's prompt receipt keeps its copy", [self.prompt()], '',
+             {'cohort': [later], 'receipts': {later[0]: ('prompt', '2026-10-19T10:00:05.050Z')}}, ('unknown', None)),
+            ("an older one's receipt takes one copy and leaves the other", [self.prompt(), self.prompt(at='2026-10-19T10:00:06.000Z')],
+             '', {'cohort': [earlier], 'receipts': {earlier[0]: ('prompt', '2026-10-19T10:00:05.050Z')}}, ('ok', True)),
+            ('a mid-turn receipt takes no prompt copy', [self.prompt()], '',
+             {'cohort': [earlier], 'receipts': {earlier[0]: ('mid-turn', '2026-10-19T09:59:59.000Z')}}, ('ok', True)),
+            ('a receipt that two unused copies could match', [self.prompt(), self.prompt(at='2026-10-19T10:00:05.030Z')], '',
+             {'cohort': [earlier], 'receipts': {earlier[0]: ('prompt', '2026-10-19T10:00:05.050Z')}}, ('unknown', None)),
+            ("a receipt whose copy the transcript doesn't show", [self.prompt('something else')], '',
+             {'cohort': [later], 'receipts': {later[0]: ('prompt', '2026-10-19T10:00:05.050Z')}}, ('unknown', None)),
+            ("a newer one's receipt kept only in the ledger", [self.prompt()], '',
+             {'cohort': [later], 'ledger': {later[0]: {'transcript_confirmed': True, 'route': 'prompt',
+                                                       'delivered_at_ms': 1792404005050}}}, ('unknown', None)),
+            ("a ledger receipt that can't be placed in time", [self.prompt(), self.prompt(at='2026-10-19T10:00:06.000Z')], '',
+             {'cohort': [earlier], 'ledger': {earlier[0]: {'transcript_confirmed': True, 'route': 'prompt'}}}, ('unknown', None)),
+            ('our own receipt', [], '', {'receipts': {self.message: ('prompt', '2026-10-19T10:00:05.050Z')}}, ('ok', True)),
+            ('a copy of the transcript in another project folder counts once', [self.prompt()], '',
+             {'cohort': [earlier], 'duplicate': 'copy'}, ('unknown', None)),
+            ('a project folder reached through a link counts once', [self.prompt()], '',
+             {'cohort': [earlier], 'duplicate': 'link'}, ('unknown', None)),
+            ('a matching copy without a row id', [{key: value for key, value in self.prompt().items() if key != 'uuid'}], '',
+             {}, ('unknown', None)),
             ('a non-object row', [self.prompt('something else')], '[1, 2]\n', {}, ('unknown', None)),
             ('a user row whose content is a number', [{'type': 'user', 'timestamp': '2026-10-19T10:00:05.000Z',
                                                        'message': {'role': 'user', 'content': 123}}], '', {}, ('unknown', None)),
@@ -561,10 +601,24 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
             ('no session ID', [self.prompt()], '', {'session': self.session(native=None)}, ('unknown', None)),
             ('a relative home', [self.prompt()], '', {'home': 'relative/claude'}, ('unknown', None)),
         ]
+        other = self.project.with_name('-elsewhere')
         for case, written, raw, options, expected in rows:
             with self.subTest(case):
-                self.transcript(*written, raw=raw)
-                self.assertEqual(self.evidence(**options), expected)
+                options = dict(options)
+                self.receipts(options.pop('receipts', {}))
+                duplicate = options.pop('duplicate', None)
+                path = self.transcript(*written, raw=raw)
+                if duplicate == 'copy':  # a session resumed from another workspace leaves a copy there
+                    other.mkdir(exist_ok=True)
+                    (other / path.name).write_bytes(path.read_bytes())
+                elif duplicate == 'link':  # one project folder reached through two names
+                    other.symlink_to(self.project, target_is_directory=True)
+                try:
+                    self.assertEqual(self.evidence(**options), expected)
+                finally:
+                    if other.is_symlink():
+                        other.unlink()
+                    shutil.rmtree(other, ignore_errors=True)
         with self.subTest('no transcript at all'):
             (self.project / f'{self.native}.jsonl').unlink()
             self.assertEqual(self.evidence(), ('ok', False))

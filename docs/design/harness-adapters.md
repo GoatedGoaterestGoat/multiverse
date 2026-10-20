@@ -55,7 +55,13 @@ that launch has exited and a later one on the same session has come up idle, cor
 transcript holds the `queued_command` row carrying the message ID (a mid-turn steer) or
 a user row with the text from the accept time on (a follow-up or idle steer), lost only
 when every transcript that could hold it was read whole without either, else unknown.
-For an older record that kept only the body, a body match stays unknown. Missing reason hooks default to no additional
+For an older record that kept only the body, a body match stays unknown. It never confirms
+falsely: each stored copy of a text counts once (by its row uuid, across copies of the
+transcript, and once however many paths reach a file), and among the session's acceptances of
+the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt
+receipt the copy stored just before it, a mid-turn receipt none. The remaining copies go to the
+others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
+a copy left to another identical message makes the answer unknown. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
 Core retains the failed launch's exact prompt, start time, conversation identity

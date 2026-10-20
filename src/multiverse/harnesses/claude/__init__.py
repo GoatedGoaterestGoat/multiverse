@@ -24,7 +24,7 @@ hook that refuses Claude's own compaction should that ever fail to answer. Its
 Claude source (sources/claude) reads this harness's transcripts.
 """
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -123,14 +123,18 @@ def session_transcripts(native_id, environment=None, workspaces=(), links=False)
         return []
     except OSError as error:
         raise Unreadable(projects) from error
-    found = []
+    found, files = [], set()
     for entry in entries:
         candidate = Path(entry.path) / f'{native_id}.jsonl'
         try:
             if not entry.is_dir():
                 continue
             # `links` finds a link (even a dangling one) where a transcript should be, for readers that refuse it.
-            found.append(((candidate.lstat() if links else candidate.stat()).st_mtime, candidate))
+            status = candidate.lstat() if links else candidate.stat()
+            if (status.st_dev, status.st_ino) in files:
+                continue  # the same file through another path (a linked project folder): read it once
+            files.add((status.st_dev, status.st_ino))
+            found.append((status.st_mtime, candidate))
         except FileNotFoundError:
             continue
         except OSError as error:
@@ -461,6 +465,9 @@ def fresh_start(session, environment):
     return CONVERSATION_MISSING if had_conversation(session, environment) else NEVER_USED
 
 
+started_fresh = fresh_start  # resume_notice's `fresh_start` keyword shadows the function there
+
+
 def had_conversation(session, environment):
     """Whether this session ever had a message, from records that outlive Claude's transcript. False means no
     evidence, never proof: Claude prunes its prompt history too, and a person's prompts leave mv2 nothing else."""
@@ -628,26 +635,61 @@ def _delivery_row(row):
     return None
 
 
-def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=()):
+RECEIPT_WINDOW = timedelta(minutes=1)  # the mod writes a prompt receipt milliseconds after its row is stored
+
+
+def _receipt(directory, receipts, message_id):
+    """A message's delivery receipt: (route, time or None) from the mod's file, else the ledger's copy of it; None
+    when there is none; False when one exists but can't be read or isn't a receipt."""
+    value = None
+    if directory is not None:
+        path = Path(directory) / 'claude-receipts' / f'{message_id}.json'
+        try:
+            record = json.loads(path.read_text())
+            value = {'route': record.get('route'), 'delivered_at_ms': record.get('at')} if isinstance(record, dict) else False
+        except FileNotFoundError:
+            value = None
+        except (OSError, ValueError):
+            return False
+    if value is None:
+        value = (receipts or {}).get(message_id)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get('route') not in ('prompt', 'mid-turn'):
+        return False
+    at = value.get('delivered_at_ms')
+    when = datetime.fromtimestamp(at / 1000, timezone.utc) if type(at) is int and at > 0 else None
+    return value['route'], when
+
+
+def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=(),
+                      directory=None, receipts=None):
     """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
 
-    True for the queued_command row a mid-turn steer becomes, which carries our message ID. Otherwise a stored
-    copy of the framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once:
-    `cohort` holds the session's other acceptances as (message_id, framed text, since), and those with the
-    same text take the copies from their accept times on, oldest first, so one stored row never confirms two
-    messages. False when every transcript that could hold it was read whole and no copy is left from our accept
-    time on. None when that can't be told: damaged or malformed rows, an incomplete cohort, or copies all taken by
-    older acceptances. With `framed` False, `text` is only the body (older records): a match is not proof, since
-    another message can share it; its absence still is.
+    Never confirms falsely: when in doubt the answer is None (can't tell). True for our receipt, or the
+    queued_command row a mid-turn steer becomes, which carries our message ID. Otherwise a stored copy of the
+    framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once, by its row
+    uuid across transcript copies. `cohort` holds the session's other acceptances as (message_id, framed text,
+    since). Among those with our text, an exact receipt (the mod's file in `directory`, else the ledger's in
+    `receipts`) first takes its own copy: a prompt receipt the latest copy at or before it, within a minute; a
+    mid-turn receipt none, being a queued_command row. The remaining copies go to the others from their accept
+    times on, oldest first. False only when every transcript that could hold it was read whole and no copy is
+    left from our accept time on. With `framed` False, `text` is only the body (older records): a match is not
+    proof, since another message can share it; its absence still is.
     """
     start, needle = moment(since), (text or '').strip()
     if not native_id or not needle or start is None or start.tzinfo is None or not environment:
         return None, None
+    ours = _receipt(directory, receipts, message_id) if message_id else None
+    if ours:
+        return True, None
+    if ours is False:
+        return None, "This message's delivery receipt can't be read"
     try:
         paths = session_transcripts(native_id, environment, workspaces)
     except Unreadable as error:
         return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
-    damaged, ids, copies = None, set(), []
+    damaged, ids, copies, rows = None, set(), [], set()
     for path in paths:
         try:
             lines = path.read_bytes().split(b'\n')
@@ -657,7 +699,8 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
             if not raw.strip():
                 continue
             try:
-                seen = _delivery_row(json.loads(raw))
+                row = json.loads(raw)
+                seen = _delivery_row(row)
             except ValueError:  # damaged, or the last row cut short while it was being written
                 seen = False
             if seen is False:
@@ -665,10 +708,11 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
             elif seen and seen[0] == 'id':
                 ids.add(seen[1])
             elif seen and (seen[1].strip() == needle if framed else needle in seen[1]):
-                when = moment(seen[2])
-                if when is None or when.tzinfo is None:
-                    damaged = damaged or path  # a copy that can't be placed in time can't be counted
-                else:
+                when, uuid = moment(seen[2]), row.get('uuid')
+                if when is None or when.tzinfo is None or not isinstance(uuid, str) or not uuid:
+                    damaged = damaged or path  # a copy that can't be placed in time, or told from another copy
+                elif uuid not in rows:  # the same row in another copy of the transcript counts once
+                    rows.add(uuid)
                     copies.append(when)
     if message_id and message_id in ids:
         return True, None
@@ -679,7 +723,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
             return None, ("Only this message's body was recorded, and its conversation holds that body, which another "
                           "message could also carry: delivery can't be told from the text alone")
         return False, None
-    rivals = []
+    rivals, holders = [], []
     for entry in cohort or ():
         if not (isinstance(entry, (tuple, list)) and len(entry) == 3 and all(isinstance(part, str) for part in entry)):
             return None, 'An earlier acceptance on this session has an incomplete record'
@@ -689,15 +733,30 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         accepted = moment(other_since)
         if accepted is None or accepted.tzinfo is None:
             return None, 'An earlier acceptance of the same text has no usable accept time'
-        rivals.append((accepted, other, False))
+        if directory is None and not receipts:
+            return None, "Another acceptance of the same text can't be checked for a receipt: no agent folder"
+        receipt = _receipt(directory, receipts, other)
+        if receipt is False or receipt and receipt[0] == 'prompt' and receipt[1] is None:
+            return None, "Another acceptance of the same text has a receipt that can't be placed in time"
+        if receipt and receipt[0] == 'prompt':
+            holders.append((receipt[1], accepted))
+        elif not receipt:  # a mid-turn receipt is a queued_command row: it takes no prompt copy
+            rivals.append((accepted, other, False))
     free = sorted(copies)
-    for accepted, _, ours in sorted([*rivals, (start, message_id or '', True)]):
+    for written, accepted in sorted(holders):
+        mine = [index for index, when in enumerate(free) if accepted <= when <= written and written - when <= RECEIPT_WINDOW]
+        if not mine:
+            return None, "A receipt for another message of the same text names a copy the transcript doesn't show"
+        if len(mine) > 1:  # which copy it was is a guess, and the guess could decide another message
+            return None, "A receipt for another message of the same text could match more than one stored copy"
+        free.pop(mine[0])
+    for accepted, _, is_ours in sorted([*rivals, (start, message_id or '', True)]):
         taken = next((index for index, when in enumerate(free) if when >= accepted), None)
-        if ours:
+        if is_ours:
             if taken is not None:
                 return True, None
             if any(when >= start for when in copies):
-                return None, ("This text was stored fewer times than it was accepted, and the copies went to earlier "
+                return None, ("This text was stored fewer times than it was accepted, and the copies went to other "
                               "identical messages: delivery can't be told for this one")
             return False, None
         if taken is not None:
@@ -833,11 +892,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         # The note itself is the resume's notice (`resume_notice`), which core shows and keeps with the launch.
         return self._with_bridge(fresh or command, context)
 
-    def resume_notice(self, session, caller_environment, effective_environment):
+    def resume_notice(self, session, caller_environment, effective_environment, *, fresh_start=True):
         """What a resume result adds: a caller's CLAUDE_CONFIG_DIR it ignored for the storage recorded at spawn,
-        and a fresh start (same evidence as `resume`)."""
+        and a fresh start (same evidence as `resume`), unless core has already said the launch starts fresh."""
         notes = [ignored_storage(caller_environment, effective_environment, session.home),
-                 fresh_start(session, effective_environment)]
+                 started_fresh(session, effective_environment) if fresh_start else None]
         return ' '.join(note for note in notes if note) or None
 
     def startup_prompt_evidence(self, session, prompt, since, environment):
@@ -846,7 +905,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
                                (session.workspace,))[0]
 
-    def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=()):
+    def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=(),
+                                  receipts=None):
         """Whether a message Claude accepted reached this session's conversation, read from its transcript under
         the Claude storage `home`: ok with {'delivered': bool}, or unknown with the reason (LC-30).
 
@@ -856,8 +916,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         """
         if not isinstance(home, str) or not os.path.isabs(home):
             return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
+        directory = Path(session.session_file).parent if session.session_file else None
         answer, why = message_delivered(session.native_id, message_id, text, since, {'CLAUDE_CONFIG_DIR': home},
-                                        (session.workspace,), framed, cohort)
+                                        (session.workspace,), framed, cohort, directory, receipts)
         if answer is None:
             return NativeResult('unknown', why or "This message's session, text or accept time isn't recorded")
         return NativeResult('ok', value={'delivered': answer})
