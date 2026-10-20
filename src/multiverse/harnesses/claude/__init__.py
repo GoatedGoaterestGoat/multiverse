@@ -562,6 +562,69 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     return False, None
 
 
+def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True):
+    """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
+
+    True for the queued_command row a mid-turn steer becomes, which carries our message ID, or for a user
+    row from `since` on holding `text` (a follow-up or idle steer the mod typed in). False when every
+    transcript that could hold it was read whole without either. None when that can't be told. With
+    `framed` False, `text` is only the message body (older records), so a body match is not proof: another
+    message can share it. Its absence still is, since every delivered form contains it.
+    """
+    start, needle = moment(since), (text or '').strip()
+    if not native_id or not needle or start is None or start.tzinfo is None or not environment:
+        return None, None
+    try:
+        paths = session_transcripts(native_id, environment, workspaces)
+    except Unreadable as error:
+        return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
+    damaged, ambiguous = None, False
+    for path in paths:
+        try:
+            lines = path.read_bytes().split(b'\n')
+        except OSError:
+            return None, f"Claude's transcript {path} can't be read: restore read access to it"
+        for raw in lines:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:  # damaged, or the last row cut short while it was being written
+                damaged = damaged or path
+                continue
+            if not isinstance(row, dict):
+                continue
+            attachment = row.get('attachment') if row.get('type') == 'attachment' else None
+            if isinstance(attachment, dict) and attachment.get('type') == 'queued_command':
+                origin = attachment.get('origin')
+                if isinstance(origin, dict) and message_id and origin.get('msg_id') == message_id:
+                    return True, None
+                body = attachment.get('prompt') if isinstance(attachment.get('prompt'), str) else ''
+            elif row.get('type') == 'user':
+                message = row.get('message')
+                content = message.get('content') if isinstance(message, dict) else None
+                body = content if isinstance(content, str) else ' '.join(
+                    str(block.get('text', '')) for block in content if isinstance(block, dict)) if isinstance(content, list) else ''
+            else:
+                continue
+            if needle not in body:
+                continue
+            when = moment(row.get('timestamp') or (attachment or {}).get('timestamp'))
+            try:
+                after = when is None or when >= start  # a matching row with no usable time still counts
+            except TypeError:
+                after = True
+            if after:
+                if framed:
+                    return True, None
+                ambiguous = True
+    if ambiguous:
+        return None, 'Only the message body was recorded for this message, and another message in its conversation holds it'
+    if damaged:
+        return None, f"Claude's transcript {damaged} has a damaged or unfinished row: if Claude is still writing it, wait"
+    return False, None
+
+
 def prompt_recorded(native_id, prompt, since, environment):
     """prompt_evidence's answer alone: True, False or None."""
     return prompt_evidence(native_id, prompt, since, environment)[0]
@@ -702,6 +765,22 @@ class ClaudeAdapter(ConfiguredAdapter):
         Core makes the message a definite failure only on False; True or None keep it uncertain."""
         return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
                                (session.workspace,))[0]
+
+    def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True):
+        """Whether a message Claude accepted reached this session's conversation, read from its transcript under
+        the Claude storage `home`: ok with {'delivered': bool}, or unknown with the reason (LC-30).
+
+        Claude keeps accepted prompts only in memory, so one still queued when its process died is gone. Core
+        asks once the accepting launch has exited and a later launch on the same session has come up idle, so a
+        queue any Claude restored would already have run; False then means the message was lost.
+        """
+        if not isinstance(home, str) or not os.path.isabs(home):
+            return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
+        answer, why = message_delivered(session.native_id, message_id, text, since, {'CLAUDE_CONFIG_DIR': home},
+                                        (session.workspace,), framed)
+        if answer is None:
+            return NativeResult('unknown', why or "This message's session, text or accept time isn't recorded")
+        return NativeResult('ok', value={'delivered': answer})
 
     def startup_prompt_evidence_reason(self, session, prompt, since, environment):
         """Asked after startup_prompt_evidence said None: what can't be read and what to fix, in one line

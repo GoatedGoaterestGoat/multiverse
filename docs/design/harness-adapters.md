@@ -48,7 +48,14 @@ reading use `session.home` the same way, so a dashboard or CLI running with
 another `CLAUDE_CONFIG_DIR` still reads the launch's own transcripts. After a None, core asks the
 optional `startup_prompt_evidence_reason` with the same arguments: one line naming
 the folder or transcript that can't be read, or the damaged row, and what to fix,
-without the command, which core adds. Missing reason hooks default to no additional
+without the command, which core adds. Claude keeps an accepted message only in its in-memory prompt queue until
+it reaches the conversation, so one still queued when the process dies is gone. Once
+that launch has exited and a later one on the same session has come up idle, core asks
+`accepted_message_evidence(session, message_id, text, since, home)`: delivered when the
+transcript holds the `queued_command` row carrying the message ID (a mid-turn steer) or
+a user row with the text from the accept time on (a follow-up or idle steer), lost only
+when every transcript that could hold it was read whole without either, else unknown.
+For an older record that kept only the body, a body match stays unknown. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
 Core retains the failed launch's exact prompt, start time, conversation identity

@@ -457,3 +457,83 @@ class ClaudeUnreadableStorageTest(BaseTest):
             found = adapter.get_usage(session)
             self.assertEqual(found.state, 'error')  # not "has not written a transcript yet"
             self.assertIn("can't be read", found.reason)
+
+
+class ClaudeAcceptedMessageEvidenceTest(BaseTest):
+    """LC-30: a message Claude accepted waits in its in-memory prompt queue, which dies with the process. Once that
+    launch is gone and a later one has come up idle, the session's own transcript says whether it arrived."""
+
+    SINCE = '2026-10-19T10:00:00.000000+00:00'
+    TEXT = 'Message from lead:\nPlease rebase.'
+
+    def setUp(self):
+        super().setUp()
+        self.storage = self.work / 'claude-config'
+        self.adapter = harnesses.load(self.root, 'claude')
+        self.native, self.message = str(uuid4()), str(uuid4())
+        self.project = self.storage / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(self.work))
+
+    def session(self, native=...):
+        return SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native if native is ... else native)
+
+    def transcript(self, *rows, raw=''):
+        self.project.mkdir(parents=True, exist_ok=True)
+        path = self.project / f'{self.native}.jsonl'
+        path.write_text(''.join(json.dumps(row) + '\n' for row in rows) + raw)
+        return path
+
+    def steer(self, message=None, prompt=None, at='2026-10-19T10:00:05.000Z'):
+        """How a mid-turn steer is stored once the mod strips Claude's wrapper: a queued_command row with our msg_id."""
+        return {'type': 'attachment', 'timestamp': at, 'attachment': {'type': 'queued_command', 'prompt': prompt or self.TEXT,
+                'origin': {'kind': 'peer', 'from': 'uds:/x', 'msg_id': message or self.message}}}
+
+    def prompt(self, text=None, at='2026-10-19T10:00:05.000Z'):
+        """How a follow-up or idle steer is stored: the mod typed it in as the person's words."""
+        return {'type': 'user', 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
+                'origin': {'kind': 'plugin', 'name': 'multiverse', 'asUser': True}}
+
+    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True):
+        result = self.adapter.accepted_message_evidence(session or self.session(), self.message, text, since,
+                                                        home or str(self.storage), framed=framed)
+        return result.state, (result.value or {}).get('delivered')
+
+    def test_accepted_message_delivered_lost_or_unknown(self):
+        """A message Claude accepted is delivered when the session's transcript holds it, in either stored form, lost
+        only when every transcript that could hold it was read whole without it, and unknown otherwise; fragile because
+        it parses Claude's private rows, and a wrong False makes someone resend a message the agent already got, while
+        a wrong True hides a lost one (LC-30)."""
+        rows = [
+            ('a mid-turn steer, matched by its id', [self.steer(prompt='other text')], '', {}, ('ok', True)),
+            ('a follow-up typed in after the accept', [self.prompt()], '', {}, ('ok', True)),
+            ('an older prompt with the same text', [self.prompt(at='2026-10-19T09:59:00.000Z')], '', {}, ('ok', False)),
+            ("another message's steer", [self.steer(message=str(uuid4()), prompt='other text')], '', {}, ('ok', False)),
+            ('a complete transcript without it', [self.prompt('something else')], '', {}, ('ok', False)),
+            ('a damaged row and no match', [self.prompt('something else')], 'not json\n', {}, ('unknown', None)),
+            ('a damaged row beside the id', [self.steer()], '{"type": "user", "mess', {}, ('ok', True)),
+            ('raw body found: another message could share it', [self.prompt()], '', {'text': 'Please rebase.', 'framed': False},
+             ('unknown', None)),
+            ('raw body absent', [self.prompt('something else')], '', {'text': 'Please rebase.', 'framed': False}, ('ok', False)),
+            ('raw body with the id', [self.steer()], '', {'text': 'Please rebase.', 'framed': False}, ('ok', True)),
+            ('a naive accept time', [self.prompt()], '', {'since': '2026-10-19T10:00:00'}, ('unknown', None)),
+            ('no session ID', [self.prompt()], '', {'session': self.session(native=None)}, ('unknown', None)),
+            ('a relative home', [self.prompt()], '', {'home': 'relative/claude'}, ('unknown', None)),
+        ]
+        for case, written, raw, options, expected in rows:
+            with self.subTest(case):
+                self.transcript(*written, raw=raw)
+                self.assertEqual(self.evidence(**options), expected)
+        with self.subTest('no transcript at all'):
+            (self.project / f'{self.native}.jsonl').unlink()
+            self.assertEqual(self.evidence(), ('ok', False))
+        with self.subTest('a folder that could hold it is unreadable'):
+            if os.geteuid() == 0:
+                self.skipTest('root reads folders whatever their mode')
+            self.transcript(self.prompt('something else'))
+            self.project.chmod(0)
+            try:
+                found = self.adapter.accepted_message_evidence(self.session(), self.message, self.TEXT, self.SINCE,
+                                                               str(self.storage))
+            finally:
+                self.project.chmod(0o700)
+            self.assertEqual(found.state, 'unknown')
+            self.assertIn(str(self.project), found.reason)
