@@ -1,6 +1,7 @@
 """Offline regressions for launch environment and first-inbox checkpoints."""
 import contextlib
 from functools import partial
+from dataclasses import replace
 import io
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ from multiverse.universe import agents, storage as storage_records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import runner
 from multiverse import harnesses
-from multiverse.harnesses.types import LaunchContext, SessionHandle
+from multiverse.harnesses.types import LaunchContext, SessionHandle, SharedServiceSpec, ServiceIdentity, NativeEndpoint
 from multiverse.universe import templates
 import json
 from multiverse.cli import parser, run
@@ -224,7 +225,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
 
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
-        """A legacy resume must find its exact conversation before adopting storage; caller and tmux environments can silently split an existing conversation."""
+        """A legacy resume must find its exact conversation before adopting storage; caller and tmux environments can silently split an existing conversation, and second-stage service preparation can silently erase unknown storage keys."""
         from multiverse.harnesses.claude import project_key
         cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
@@ -307,6 +308,24 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertTrue(any('Adopted' in notice and str(chosen) in notice for notice in result['notices']))
                         again = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
+                        if family == 'codex' and found == 'server':
+                            # The real lifecycle prepares a shared adapter twice. The second
+                            # call must keep the partial storage mask from the first.
+                            adapter = harnesses.load(self.root, 'codex')
+                            prepare = adapter.resume
+                            masks = []
+                            def resume(session, context):
+                                masks.append(context.storage_keys)
+                                service = SharedServiceSpec(('fake-service',), 'socket', ('cli', 'daemon'),
+                                    environment={'CODEX_HOME': str(chosen)},
+                                    identity=ServiceIdentity('codex', {'CODEX_HOME': str(chosen)}))
+                                return replace(prepare(session, context), shared_service=service)
+                            with patch.object(harnesses, 'load', return_value=adapter), \
+                                    patch.object(adapter, 'resume', side_effect=resume), \
+                                    patch.object(lifecycle.native, 'start_shared_service',
+                                                 return_value=NativeEndpoint('unix-websocket', str(self.work / 'fake-service.sock'))):
+                                lifecycle.start(self.root, resume=directory.name)
+                            self.assertEqual([None if mask is None else set(mask) for mask in masks], [set(expected), set(expected)])
 
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,

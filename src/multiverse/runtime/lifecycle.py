@@ -445,7 +445,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 progress.mark('preparing native attachment')
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
-                                    agent_environment=agent_environment)
+                                    agent_environment=agent_environment, storage_keys=tuple(storage))
             if command.shared_service:
                 try:
                     command = _storage_command(adapter.resume(session, context) if resume else adapter.spawn(context), storage)
