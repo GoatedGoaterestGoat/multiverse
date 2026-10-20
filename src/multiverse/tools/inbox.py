@@ -42,7 +42,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         raise ValueError('--timeout requires --wait')
     seconds = timeout_seconds(timeout)
     deadline = time.monotonic() + seconds if seconds is not None else None
-    root, directory, launch_id = callback(root, agent)
+    root, directory, launch_id = callback(root, agent, agent_scoped=True)
     def public_result(result):
         if all_messages:
             return result
@@ -73,6 +73,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         # Serialize output/read position with launch replacement, but release
         # both locks between polls so senders and resume can make progress.
         with store.lock(directory / '.launch.lock'):
+            callback(root, agent, agent_scoped=True)
             if launch_id and agents.runtime(directory).get('launch_id') != launch_id:
                 raise ValueError('Outdated launch')
             if wait and not (directory / 'properties.json').is_file():
@@ -104,7 +105,17 @@ def timeout_seconds(value):
     return seconds
 
 
-def readable(root, result):
+def nothing(all_messages=False, since=None):
+    """What an inbox read that found no messages says: unread ones, or the history filter that matched none."""
+    if not all_messages:
+        return 'No unread messages.'
+    if since is None:
+        return 'No messages.'
+    return (f'No messages in the last {since}.' if re.fullmatch(r'\d+(?:\.\d+)?[smhdw]', str(since).strip())
+            else f'No messages since {since}.')
+
+
+def readable(root, result, empty='No unread messages.'):
     from ..runtime.native import framed_text
     blocks = []
     for message in result['messages']:
@@ -112,7 +123,7 @@ def readable(root, result):
         if not sender.get('agent_id'):
             sender = {**sender, 'name': 'user'}
         blocks.append(framed_text(root, {**message, 'from': sender}))
-    return '\n\n'.join(blocks) if blocks else 'No unread messages.'
+    return '\n\n'.join(blocks) if blocks else empty
 
 
 def cli_run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
@@ -120,7 +131,8 @@ def cli_run(root=None, *, agent=None, after=None, all_messages=False, peek=False
     if after is not None and not (json and all_messages):
         raise ValueError('--after requires --all --json')
     def present(root, result):
-        text = json_module.dumps(result, indent=2, ensure_ascii=False) if json else readable(root, result)
+        text = (json_module.dumps(result, indent=2, ensure_ascii=False) if json
+                else readable(root, result, nothing(all_messages, since)))
         print(text, flush=True)
     result = run(root, agent=agent, after=after, all_messages=all_messages, peek=peek,
         last=last, since=since, limit=None if last is not None or (all_messages and not json) else 50,

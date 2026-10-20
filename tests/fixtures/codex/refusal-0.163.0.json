@@ -1,0 +1,17 @@
+[
+  {
+    "width": 40,
+    "cursor_visible": false,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n/fixture/workspace\n\n  Tip: Use the desktop app. Run codex\n  app to open it. It installs\n  automatically if needed.\n\n\n  🔒  This conversation is open in\n  another app\n  r to retry\n      Close it there and press R to\n      continue here.\n\n   r retry   f fork   esc/⌃c/q exit   ⌃t\n  transcript\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+  },
+  {
+    "width": 80,
+    "cursor_visible": false,
+    "text": "\n\n  🔒  This conversation is open in another app                      r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   esc/⌃c/q exit   ⌃t transcript\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+  },
+  {
+    "width": 120,
+    "cursor_visible": false,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n/fixture/workspace\n\n  Tip: NEW: Prevent sleep while running is now available in /experimental.\n\n\n  🔒  This conversation is open in another app                                                              r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   esc/⌃c/q exit   ⌃t transcript\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+  }
+]

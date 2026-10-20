@@ -18,14 +18,22 @@ from multiverse.harnesses.codex import CodexAdapter
 from multiverse.store import read, write
 from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
-from native_safety import isolated_home
+from native_safety import require_checked_codex, isolated_home
+from native_cli import forbidden_python, mv2_launcher
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexPermissionTest(TerminalBase):
     def test_plain_full_access_survives_repeated_explicit_bridge_resume(self):
+        """On live Codex one thread keeps full access across plain spawn, plain wake, bridge wake and two bridge
+        resumes, with wakes through the CLI prompt; fragile because it depends on Codex applying thread/resume
+        overrides, and a break shows only as an agent mysteriously unable to write (e6a11a4)."""
+        require_checked_codex(self)
         completed, requests = set(), []
+        bad_python = forbidden_python(self.work)
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -54,7 +62,8 @@ class CodexPermissionTest(TerminalBase):
                             'sock.close(); pathlib.Path("permission-probe.sock").unlink(); '
                             f'pathlib.Path("permission-{stage}.json").write_text(json.dumps('
                             '{"native_id":os.environ["CODEX_THREAD_ID"],"cwd":os.getcwd()}))')
-                    command = ('"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; '
+                    command = ('PATH=' + shlex.quote(str(bad_python)) + ':"$PATH" '
+                               '"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; '
                                + shlex.quote(sys.executable) + ' -c ' + shlex.quote(code))
                     item = {'type': 'function_call', 'call_id': f'call-{index}', 'name': 'exec_command',
                             'arguments': json.dumps({'cmd': command, 'yield_time_ms': 10000, 'max_output_tokens': 200})}
@@ -91,8 +100,16 @@ class CodexPermissionTest(TerminalBase):
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
                'NO_PROXY': '127.0.0.1,localhost', 'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '',
                'http_proxy': '', 'https_proxy': '', 'all_proxy': ''}
-        self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
-                                               env=env, capture_output=True, timeout=20))
+        daemon_groups = PrivateDaemonGroups()
+        self.enterContext(daemon_groups.observe_starts())
+        def stop_owned_daemon():
+            try:
+                subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
+                               env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=20, check=True)
+            finally:
+                daemon_groups.close()
+        self.addCleanup(stop_owned_daemon)
         config = self.root / 'harnesses/codex/harness.json'
         spec = read(config)
         spec['settings'] = {'args': ['--dangerously-bypass-approvals-and-sandbox'], 'spawn_args': ['--no-daemon']}

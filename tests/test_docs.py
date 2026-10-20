@@ -95,30 +95,33 @@ def headings(text):
 
 class LinkTest(unittest.TestCase):
     def test_relative_links_and_images_resolve(self):
+        """Relative links, images and anchors in README, AGENTS and docs resolve; a break goes unnoticed because nobody
+        clicks a link broken by a moved file until a user hits it."""
+        with self.subTest("anchors follow GitHub's rules"):
+            text = ("# Getting started\n## Live connection or launch-only\n## `mv2 send` (CLI)\n## Keys\n## Keys\n"
+                    "```\n# not a heading\n```\n")
+            self.assertEqual(anchors(text),
+                             {"getting-started", "live-connection-or-launch-only", "mv2-send-cli", "keys", "keys-1"})
+        with self.subTest("links in code are ignored, external ones are found"):
+            text = ("[a](one.md) ![b](img/two.png \"t\") [c](https://x.org) [d](#here)\n"
+                    "`[e](code.md)`\n```sh\n[f](block.md)\n```\n[g]: ref.md\n<img src=\"three.png\">\n")
+            self.assertEqual(list(targets(text)),
+                             ["one.md", "img/two.png", "https://x.org", "#here", "ref.md", "three.png"])
         problems = [problem for page in pages() for problem in broken_links(page)]
         if problems:
             self.fail(f"{len(problems)} broken relative links; fix the path, or link a page or heading that exists:\n"
                       + "\n".join(problems))
 
-    def test_anchors_follow_github(self):
-        text = "# Getting started\n## Live connection or launch-only\n## `mv2 send` (CLI)\n## Keys\n## Keys\n```\n# not a heading\n```\n"
-        self.assertEqual(anchors(text), {"getting-started", "live-connection-or-launch-only", "mv2-send-cli", "keys", "keys-1"})
-
-    def test_link_parser_ignores_code_and_external_links(self):
-        text = ("[a](one.md) ![b](img/two.png \"t\") [c](https://x.org) [d](#here)\n"
-                "`[e](code.md)`\n```sh\n[f](block.md)\n```\n[g]: ref.md\n<img src=\"three.png\">\n")
-        self.assertEqual(list(targets(text)), ["one.md", "img/two.png", "https://x.org", "#here", "ref.md", "three.png"])
-
 
 class CliReferenceTest(unittest.TestCase):
-    def test_every_command_and_alias_has_a_heading(self):
+    def test_generated_reference_is_current(self):
+        """docs/cli/reference.md matches the parser, with a heading for every command and alias; a break goes unnoticed
+        because regenerating it is a manual step, and agents learn the flags from it."""
         parser = cli.parser()
         commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
         found = headings(REFERENCE.read_text(encoding="utf-8"))
         missing = [name for name in commands.choices if name not in found]
         self.assertEqual(missing, [], "Run python scripts/gen_cli_docs.py")
-
-    def test_generated_reference_is_current(self):
         result = subprocess.run([sys.executable, str(ROOT / "scripts" / "gen_cli_docs.py"), "--check"],
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -126,13 +129,17 @@ class CliReferenceTest(unittest.TestCase):
 
 class VersionBadgeTest(unittest.TestCase):
     def test_readme_badges_show_the_checked_versions(self):
+        """The README's Claude Code and Codex badges show the versions compatibility.md says were checked; a version
+        bump edits both by hand, and a badge left behind tells every reader the wrong version, with nothing to show it.
+        """
         table = (ROOT / "docs" / "reference" / "compatibility.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for harness, label in (("Claude Code", "Claude%20Code"), ("Codex CLI", "Codex")):
             with self.subTest(harness=harness):
                 checked = re.search(rf"^\| {harness} \| ([^ |]+) \|", table, re.MULTILINE).group(1)
                 badge = re.search(rf"img\.shields\.io/badge/{label}-([^-]+)-", readme).group(1)
-                self.assertEqual(badge, checked, f"Set the README's {harness} badge to {checked}, as docs/reference/compatibility.md says")
+                self.assertEqual(badge, checked, f"Set the README's {harness} badge to {checked}, "
+                                                 "as docs/reference/compatibility.md says")
 
 
 if __name__ == "__main__":

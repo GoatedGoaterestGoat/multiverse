@@ -1,0 +1,152 @@
+[
+  {
+    "cli_version": "0.163.0",
+    "width": 120,
+    "footer": "default",
+    "items": null,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 8,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-footer-probe-js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-footer-probe-js7nw_av/workspace"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 40,
+    "footer": "default",
+    "items": null,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 10,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/…/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol.\n  Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-fo…"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 24,
+    "footer": "default",
+    "items": null,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 12,
+    "text": "\n  >_ OpenAI Codex (v0.1…\n     …js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage\n  with GPT-6.1 Sol. Try\n  it on complex work for\n  near-Astra performance\n  at a lower cost.\n\n\n› Ask Codex to do anyth\n\n  fixture default · /pr…"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 120,
+    "footer": "seven",
+    "items": [
+      "model-with-reasoning",
+      "current-dir",
+      "git-branch",
+      "context-remaining",
+      "five-hour-limit",
+      "weekly-limit",
+      "codex-version"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 8,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-footer-probe-js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-footer-probe-js7nw_av/workspace · Context 100% left · 0.163.0"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 40,
+    "footer": "seven",
+    "items": [
+      "model-with-reasoning",
+      "current-dir",
+      "git-branch",
+      "context-remaining",
+      "five-hour-limit",
+      "weekly-limit",
+      "codex-version"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 10,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/…/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol.\n  Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-fo…"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 24,
+    "footer": "seven",
+    "items": [
+      "model-with-reasoning",
+      "current-dir",
+      "git-branch",
+      "context-remaining",
+      "five-hour-limit",
+      "weekly-limit",
+      "codex-version"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 12,
+    "text": "\n  >_ OpenAI Codex (v0.1…\n     …js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage\n  with GPT-6.1 Sol. Try\n  it on complex work for\n  near-Astra performance\n  at a lower cost.\n\n\n› Ask Codex to do anyth\n\n  fixture default · /pr…"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 120,
+    "footer": "off",
+    "items": [],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 8,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-footer-probe-js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  ? for shortcuts                                                                                    100% context left"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 40,
+    "footer": "off",
+    "items": [],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 10,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/…/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol.\n  Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  ? for shortcuts    100% context left"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 24,
+    "footer": "off",
+    "items": [],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 12,
+    "text": "\n  >_ OpenAI Codex (v0.1…\n     …js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage\n  with GPT-6.1 Sol. Try\n  it on complex work for\n  near-Astra performance\n  at a lower cost.\n\n\n› Ask Codex to do anyth\n\n     100% context left"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 120,
+    "footer": "one",
+    "items": [
+      "model-name"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 8,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-footer-probe-js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 40,
+    "footer": "one",
+    "items": [
+      "model-name"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 10,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/…/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol.\n  Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture"
+  },
+  {
+    "cli_version": "0.163.0",
+    "width": 24,
+    "footer": "one",
+    "items": [
+      "model-name"
+    ],
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 12,
+    "text": "\n  >_ OpenAI Codex (v0.1…\n     …js7nw_av/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage\n  with GPT-6.1 Sol. Try\n  it on complex work for\n  near-Astra performance\n  at a lower cost.\n\n\n› Ask Codex to do anyth\n\n  fixture"
+  }
+]

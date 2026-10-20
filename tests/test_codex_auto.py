@@ -11,7 +11,8 @@ from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse import harnesses
 from multiverse.runtime import native, runner
-from multiverse.harnesses.types import CommandSpec, NativeResult
+from multiverse.harnesses.codex import CodexAdapter
+from multiverse.harnesses.types import CommandSpec, LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.universe.mailbox import append_message, message_record, update_message
 from multiverse.store import read, write
 from multiverse.tools.capabilities import run as capabilities
@@ -32,6 +33,9 @@ class AutoTerminalTest(TerminalBase):
         self.executable.write_text(f'''#!{sys.executable}
 import json, os, pathlib, sys, time
 case = json.loads(pathlib.Path({str(self.case)!r}).read_text())
+if sys.argv[1:] == ['--version']:
+    print('codex-cli 0.162.1')  # This stand-in does not draw a supported startup screen.
+    sys.exit(0)
 with pathlib.Path({str(self.events)!r}).open('a') as out:
     out.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1:] == ['app-server', 'daemon', 'start']:
@@ -60,88 +64,155 @@ else:
         write(self.config, {'schema': 2, 'adapter': 'codex', 'settings': {
             'executable': str(self.executable), **settings}})
 
-    def launch(self, name='auto', resume=None, native_home=None, **kwargs):
+    def launch(self, name='auto', resume=None, native_home=None, rpc=None, **kwargs):
+        rpc = rpc or NativeResult('ok', value={'exclude': [], 'writable_roots': []})
         with patch.dict(os.environ, {'CODEX_HOME': str(native_home or self.work / 'native-home')}), \
-             patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('ok', value={'exclude': [], 'writable_roots': []})):
+             patch.object(native.NativeExecutor, 'rpc', return_value=rpc):
             result = lifecycle.start(self.root, name, 'literal task', resume=resume, socket_path=self.socket, **kwargs)
         directory = agents.directory(self.root, result['id'])
         until(lambda: (directory / 'executed.json').exists())
         return result, directory
 
-    def test_auto_uses_bridge_without_an_extra_service_start(self):
-        self.configure()
-        launched, directory = self.launch()
-        self.assertEqual(agents.runtime(directory)['native_mode'], {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
-        self.assertIn('--remote', read(directory / 'executed.json'))
-        calls = [json.loads(line) for line in self.events.read_text().splitlines()]
-        self.assertEqual(calls[:2], [['app-server', 'daemon', 'start'], ['--help']])
-        self.assertEqual(len(calls), 3)
-        self.assertIn('bridge (auto)', capabilities(self.root, agent=launched['id'])['spawn']['reason'])
-        self.assertEqual(capabilities(self.root, agent=launched['id'])['session_name']['state'], 'supported')
+    def calls(self):
+        return [json.loads(line) for line in self.events.read_text().splitlines()] if self.events.exists() else []
 
-    def test_auto_falls_back_before_child_for_each_unavailable_bridge(self):
-        cases = [({'failure': 'old CLI: no app-server daemon'}, 'no app-server daemon'),
-                 ({'failure': 'daemon start failed'}, 'daemon start failed'),
-                 ({'help': 'usage: codex [PROMPT]'}, '--remote')]
-        for index, (changes, reason) in enumerate(cases):
-            with self.subTest(reason=reason):
+    def test_mode_selection_falls_back_before_any_native_child(self):
+        """Each inbox_bridge policy and Codex condition picks bridge or plain before any native child starts, starting
+        the daemon at most once; fragile because it depends on Codex flags, daemon availability and config/read
+        support that change by version, and a wrong pick starts a second native child or silently makes a
+        temporary fallback's delivery refusal final."""
+        with self.subTest('harness auto capability is undecided, not launch-only'):
+            for setting, mechanism in (({}, None), ({'inbox_bridge': True}, None),
+                                       ({'inbox_bridge': False}, 'launch-only')):
+                self.configure(**setting)
+                found = capabilities(self.root, harness='codex')
+                for operation in ('send_steer', 'send_follow_up'):
+                    self.assertEqual(found[operation]['mechanism'], mechanism)
+        for setting, selection, final in (
+                (False, {'policy': 'plain', 'mode': 'plain'}, True),
+                (None, {'policy': 'auto', 'mode': 'plain'}, False),
+                (True, {'policy': 'plain', 'mode': 'plain'}, False),
+                (None, {'policy': 'plain', 'mode': 'plain'}, False)):
+            with self.subTest('plain refusal follows current policy', setting=setting, selection=selection):
+                adapter = CodexAdapter.configured('codex', {} if setting is None else {'inbox_bridge': setting})
+                session = SessionHandle('agent', 'codex', str(self.work), launch_id='launch',
+                                        native_id=str(uuid4()), state='running', native_mode=selection)
+                for operation in ('send_steer', 'send_follow_up'):
+                    self.assertEqual(adapter.capabilities(session)[operation].mechanism,
+                                     'launch-only' if final else None)
+                result = adapter.send(session, Message(str(uuid4()), 'saved follow-up', delivery='follow-up'), Mock())
+                self.assertEqual(result.value, {'launch_only': True, 'final': final})
+        start = ['app-server', 'daemon', 'start']
+        plain = []  # launches checked once all have started, so their readiness waits overlap
+        def launch(name, rpc=None, **settings):
+            self.configure(**settings)
+            before, config = len(self.calls()), self.config.read_bytes()
+            launched, directory = self.launch(name=name, rpc=rpc)
+            self.assertLessEqual(self.calls()[before:].count(start), 1)
+            self.assertEqual(self.config.read_bytes(), config)
+            return launched, directory, self.calls()[before:]
+        with self.subTest('auto with a working daemon'):
+            launched, directory, calls = launch('auto')
+            self.assertEqual(agents.runtime(directory)['native_mode'],
+                             {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
+            self.assertIn('--remote', read(directory / 'executed.json'))
+            self.assertEqual(calls[:2], [start, ['--help']])
+            self.assertEqual(len(calls), 3)
+            self.assertIn('bridge (auto)', capabilities(self.root, agent=launched['id'])['spawn']['reason'])
+            self.assertEqual(capabilities(self.root, agent=launched['id'])['session_name']['state'], 'supported')
+        unavailable = [({'failure': 'old CLI: no app-server daemon'}, 'no app-server daemon'),
+                       ({'failure': 'daemon start failed'}, 'daemon start failed'),
+                       ({'help': 'usage: codex [PROMPT]'}, '--remote')]
+        for index, (changes, reason) in enumerate(unavailable):
+            with self.subTest('auto without a bridge', reason=reason):
                 self.set_case(**changes)
-                self.configure(args=['--dangerously-bypass-approvals-and-sandbox'])
-                before = self.config.read_bytes()
-                launched, directory = self.launch(name=f'fallback-{index}', wait=True, wait_timeout=5)
-                self.assertTrue(launched['ready'], launched)
-                facts = agents.runtime(directory)
-                self.assertEqual(facts['native_mode']['mode'], 'plain')
-                self.assertIn(reason, facts['native_mode']['fallback_reason'])
-                self.assertIsNone(facts['control_endpoint'])
-                argv = read(directory / 'executed.json')
-                self.assertNotIn('--remote', argv)
-                self.assertIn('--dangerously-bypass-approvals-and-sandbox', argv)
-                caps = capabilities(self.root, agent=launched['id'])
-                self.assertIn(reason, caps['resume']['reason'])
-                self.assertEqual(caps['session_name']['state'], 'unavailable')
-                self.assertIsNone(harnesses.load(self.root, 'codex').status_watch(
-                    native.context(self.root, launched['id'])[2]))
-                self.assertEqual(self.config.read_bytes(), before)
-                lifecycle.kill(self.root, launched['id'])
-        self.assertTrue(self.address.exists(), 'Fallback must not remove the shared service socket')
-
-    def test_different_versions_allow_auto_and_required_bridge_with_visible_evidence(self):
+                launched, directory, _ = launch(f'fallback-{index}',
+                                                args=['--dangerously-bypass-approvals-and-sandbox'])
+                plain.append(('fallback', launched, directory, harnesses.load(self.root, 'codex'), reason))
         self.set_case(info={**self.info, 'cliVersion': '0.159.3', 'appServerVersion': '0.160.0'})
+        unsupported = NativeResult('unavailable', 'config/read unsupported')
         for policy in ({}, {'inbox_bridge': True}):
-            with self.subTest(policy=policy):
-                self.configure(**policy)
-                launched, directory = self.launch(name='required' if policy else 'auto')
+            with self.subTest('different versions', policy=policy):
+                launched, directory, _ = launch('required' if policy else 'auto-versions', **policy)
                 self.assertEqual(launched['runtime']['native_mode']['mode'], 'bridge')
                 self.assertEqual(launched['runtime']['native_versions'], {'cli': '0.159.3', 'daemon': '0.160.0'})
                 self.assertIn('--remote', read(directory / 'executed.json'))
                 self.assertIn('versions differ', capabilities(self.root, agent=launched['id'])['resume']['reason'])
                 # Different versions must still pass the real configuration API.
-                with patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('unavailable', 'config/read unsupported')):
-                    if policy:
-                        with self.assertRaisesRegex(RuntimeError, 'config/read unsupported'):
-                            lifecycle.start(self.root, 'bad-required', socket_path=self.socket)
-                    else:
-                        fallback = lifecycle.start(self.root, 'bad-auto', socket_path=self.socket, wait=True, wait_timeout=5)
-                        self.assertEqual(fallback['runtime']['native_mode']['mode'], 'plain')
-                        self.assertIn('config/read unsupported', fallback['runtime']['native_mode']['fallback_reason'])
-
-    def test_explicit_true_is_strict_and_false_never_prepares_bridge(self):
-        self.set_case(failure='daemon unavailable')
-        self.configure(inbox_bridge=True)
-        with self.assertRaisesRegex(RuntimeError, 'daemon unavailable'):
-            self.launch('strict')
-        strict_dir = agents.directory(self.root, 'strict')
-        self.assertEqual(agents.runtime(strict_dir)['state'], 'failed')
-        self.assertEqual(agents.runtime(strict_dir)['native_mode']['policy'], 'required')
-        self.assertFalse((strict_dir / 'executed.json').exists())
-        self.configure(inbox_bridge=False)
-        with patch.object(native, 'start_shared_service', side_effect=AssertionError('Plain must not start a service')):
-            result, directory = self.launch('plain', wait=True, wait_timeout=5)
-        self.assertTrue(result['ready'])
-        self.assertEqual(agents.runtime(directory)['native_mode'], {'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
+                if policy:
+                    with self.assertRaisesRegex(RuntimeError, 'config/read unsupported'):
+                        self.launch('bad-required', rpc=unsupported)
+                else:
+                    launched, directory, _ = launch('bad-auto', rpc=unsupported)
+                    plain.append(('config', launched, directory, harnesses.load(self.root, 'codex'),
+                                  'config/read unsupported'))
+        with self.subTest('required without a daemon'):
+            self.set_case(failure='daemon unavailable')
+            self.configure(inbox_bridge=True)
+            with self.assertRaisesRegex(RuntimeError, 'daemon unavailable'):
+                self.launch('strict')
+            strict_dir = agents.directory(self.root, 'strict')
+            self.assertEqual(agents.runtime(strict_dir)['state'], 'failed')
+            self.assertEqual(agents.runtime(strict_dir)['native_mode']['policy'], 'required')
+            self.assertFalse((strict_dir / 'executed.json').exists())
+        with self.subTest('plain never prepares a bridge'):
+            with patch.object(native, 'start_shared_service',
+                              side_effect=AssertionError('Plain must not start a service')):
+                launched, directory, _ = launch('plain', inbox_bridge=False)
+            plain.append(('plain', launched, directory, harnesses.load(self.root, 'codex'), None))
+        with self.subTest('auto without config/read'):
+            self.set_case()
+            launched, directory, _ = launch('config-fallback', rpc=NativeResult('unavailable', 'old config API'))
+            plain.append(('config', launched, directory, harnesses.load(self.root, 'codex'), 'old config API'))
+        for row, launched, directory, adapter, reason in plain:
+            with self.subTest('plain launch', row=row, reason=reason):
+                ready = lifecycle.wait_ready(self.root, directory, launched['runtime']['launch_id'], adapter, 5)
+                self.assertTrue(ready['ready'], ready)
+                if row == 'plain':
+                    self.assertEqual(agents.runtime(directory)['native_mode'],
+                                     {'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
+                    continue
+                self.assertEqual(ready['runtime']['native_mode']['mode'], 'plain')
+                self.assertIn(reason, ready['runtime']['native_mode']['fallback_reason'])
+                if row == 'fallback':
+                    facts = agents.runtime(directory)
+                    self.assertIsNone(facts['control_endpoint'])
+                    argv = read(directory / 'executed.json')
+                    self.assertNotIn('--remote', argv)
+                    self.assertIn('--dangerously-bypass-approvals-and-sandbox', argv)
+                    caps = capabilities(self.root, agent=launched['id'])
+                    self.assertIn(reason, caps['resume']['reason'])
+                    self.assertEqual(caps['session_name']['state'], 'unavailable')
+                    self.assertIsNone(harnesses.load(self.root, 'codex').status_watch(
+                        native.context(self.root, launched['id'])[2]))
+                    lifecycle.kill(self.root, launched['id'])
+        self.assertTrue(self.address.exists(), 'Fallback must not remove the shared service socket')
+        with self.subTest('deleted daemon working directory'):
+            executor = Mock()
+            executor.rpc.return_value = NativeResult('error', 'Native RPC -32603: failed to resolve feature override '
+                                                     'precedence: No such file or directory (os error 2)')
+            native_id = str(uuid4())
+            values = {'name': 'worker', 'workspace': '/workspace', 'agent_dir': '/outside/state/agent',
+                      'bootstrap_json': json.dumps('bootstrap'), 'task': '--literal prompt',
+                      'session_id': native_id, 'control_socket': '/tmp/owned/rpc.sock'}
+            context = LaunchContext('spawn', values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'),
+                                    executor=executor, environment={'CODEX_HOME': '/native storage'})
+            session = SessionHandle('agent', 'codex', '/workspace', native_id=native_id)
+            strict = CodexAdapter.configured('codex', {'inbox_bridge': True})
+            with self.assertRaisesRegex(ValueError, 'deleted working directory') as raised:
+                strict.resume(session, context)
+            self.assertIn('daemon restart', str(raised.exception))
+            self.assertIn("CODEX_HOME='/native storage'", str(raised.exception))
+            self.assertIn('when other Codex work is idle', str(raised.exception))
+            command = CodexAdapter.configured('codex', {}).resume(session, context)
+            self.assertEqual(command.native_mode['mode'], 'plain')
+            self.assertIn('deleted working directory', command.native_mode['fallback_reason'])
+            self.assertIn(native_id, command.argv)
+            self.assertEqual(executor.rpc.call_count, 2, 'Diagnosis must not mutate or restart the daemon')
 
     def test_resume_reselects_mode_and_preserves_exact_identity(self):
+        """Resume may change the mode but keeps the exact native thread, workspace, task and saved CODEX_HOME; a break
+        goes unnoticed because Codex quietly opens or creates a different conversation."""
         self.set_case(failure='temporarily unavailable')
         self.configure(args=['--dangerously-bypass-approvals-and-sandbox'])
         first, directory = self.launch(wait=True, wait_timeout=5)
@@ -176,17 +247,12 @@ else:
         self.assertIn(native_id, request['argv'])
         self.assertEqual(request['env']['CODEX_HOME'], str(self.work / 'native-home'))
 
-    def test_config_rpc_unavailability_falls_back_before_any_native_child(self):
-        self.configure()
-        with patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('unavailable', 'old config API')):
-            launched = lifecycle.start(self.root, 'config-fallback', 'task', socket_path=self.socket, wait=True, wait_timeout=5)
-        self.assertTrue(launched['ready'], launched)
-        self.assertEqual(launched['runtime']['native_mode']['mode'], 'plain')
-        self.assertIn('old config API', launched['runtime']['native_mode']['fallback_reason'])
-
 
 class AutoRunnerTest(BaseTest):
     def test_relay_start_failure_only_falls_back_before_child_start(self):
+        """The runner falls back to plain only if the relay failed before the bridge child started, and fails a
+        message queued during startup instead of replaying it; fragile because relay start and child start race, and
+        a break runs two native frontends on one thread."""
         for auto, bound in ((True, False), (False, False), (True, True)):
             with self.subTest(auto=auto, bound=bound):
                 directory = self.root / 'state/agents' / str(uuid4())
@@ -208,6 +274,7 @@ class AutoRunnerTest(BaseTest):
                 process.poll.return_value = 0
                 process.wait.return_value = 0
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                     patch.object(runner, 'process_started', return_value=None), \
                      patch.object(runner.subprocess, 'Popen', return_value=process) as child, \
                      patch('multiverse.terminal.tmux.owned', return_value=(Mock(**{'run.return_value': ''}), '%1')), \
                      patch.object(harnesses, 'load'), patch('multiverse.runtime.rpc.LaunchProxy', return_value=proxy):

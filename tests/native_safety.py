@@ -82,3 +82,12 @@ def install():
             check_connect(args[1])
     sys.addaudithook(audit)
     _installed = True
+
+
+def require_checked_codex(test):
+    """Skip native fixtures before setup on releases older than the checked CLI."""
+    from multiverse.harnesses.codex.plugins import CHECKED_VERSION, codex_version, version_text
+    version = codex_version('codex', str(Path.cwd()))
+    if version is None or version < CHECKED_VERSION:
+        test.skipTest(f'Native Codex fixtures require checked CLI {version_text(CHECKED_VERSION)} or newer; '
+                      f'installed version: {version_text(version) or "unknown"}')

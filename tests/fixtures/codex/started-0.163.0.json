@@ -1,0 +1,23 @@
+[
+  {
+    "width": 40,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 10,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/…/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol.\n  Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-st…\n"
+  },
+  {
+    "width": 80,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 9,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /fixture/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /fixture/workspace\n"
+  },
+  {
+    "width": 120,
+    "cursor_visible": true,
+    "cursor_x": 2,
+    "cursor_y": 9,
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /fixture/workspace\n  permissions: YOLO mode\n\n  Tip: Maximize usage with GPT-6.1 Sol. Try it on complex work for near-Astra\n  performance at a lower cost.\n\n\n› Ask Codex to do anything\n\n  fixture default · /fixture/workspace\n"
+  }
+]

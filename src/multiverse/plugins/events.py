@@ -31,6 +31,7 @@ import fcntl
 import fnmatch
 import json
 from pathlib import Path
+import re
 import time
 import uuid
 
@@ -56,13 +57,34 @@ def directory(root):
 ID = "journal-id"  # made with a journal, gone when its state is removed: a reader tells a journal that started again
 
 
+ID_COPY = "journal-id.copy"  # a second copy, so a journal-id that was lost or cannot be read is not taken for a new
+# journal. Files of their own: the counter keeps the format every mv2 since the journal began reads (a plugin host
+# started before an update runs the old code until it stops).
+
+
 def journal_id(root):
     """The id of `root`'s journal, made when it is first written; None while there is none (or before mv2 made
     them: such a journal gets one at its next event)."""
+    for name in (ID, ID_COPY):
+        try:
+            value = (directory(root) / name).read_text().strip()
+        except OSError:
+            continue
+        if _ID_FORMAT.fullmatch(value):
+            return value
+    return None
+
+
+_ID_FORMAT = re.compile(r"[0-9a-f]{32}")
+
+
+def _counter(base):
+    """The next sequence number, from the counter file `seq`; None when it is not there or cannot be read."""
     try:
-        return (directory(root) / ID).read_text().strip() or None
+        parts = (Path(base) / "seq").read_text().split()
     except OSError:
         return None
+    return int(parts[0]) if parts and parts[0].isdigit() else None
 
 
 def segments(root):
@@ -144,16 +166,19 @@ def _bounded_lock(path, seconds=None):
 
 def _append(root, event):
     base = directory(root)
-    if not (base / ID).is_file():
-        temporary = base / f".{ID}.tmp"
-        temporary.write_text(uuid.uuid4().hex + "\n")
-        temporary.replace(base / ID)
+    known = journal_id(root) or uuid.uuid4().hex
+    for name in (ID, ID_COPY):  # a new journal, or one of its two id files lost: written again from the other
+        try:
+            stored = (base / name).read_text().strip()
+        except OSError:
+            stored = ""
+        if stored != known:
+            temporary = base / f".{name}.tmp"
+            temporary.write_text(known + "\n")
+            temporary.replace(base / name)
     counter = base / "seq"
     found = segments(root)
-    try:
-        sequence = int(counter.read_text().strip() or "1")
-    except (OSError, ValueError):
-        sequence = 1
+    sequence = _counter(base) or 1
     if found:
         # A crash after writing an event but before counting it: never reuse its number.
         sequence = max(sequence, _last_sequence(found[-1][1]) + 1, found[-1][0])
@@ -275,11 +300,9 @@ def _read(root, after, limit):
     oldest = found[0][0]
     if after + 1 < oldest:
         gap = {"missed": oldest - after - 1, "from": after + 1, "to": oldest - 1}
-    try:  # nothing written since `after` (a worker polls every half second): no segment is read at all
-        if int((directory(root) / "seq").read_text().strip()) <= after + 1:
-            return [], gap
-    except (OSError, ValueError):
-        pass
+    number = _counter(directory(root))  # nothing written since `after` (a worker polls every half second):
+    if number is not None and number <= after + 1:  # no segment is read at all
+        return [], gap
     events = []
     for index, (first, path) in enumerate(found):
         following = found[index + 1][0] if index + 1 < len(found) else None

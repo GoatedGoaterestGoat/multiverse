@@ -43,7 +43,7 @@ def _git(checkout, *args, timeout=120):
     env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(["git", "-c", "merge.autostash=false", "-c", "submodule.recurse=false",
                            "-C", str(checkout), *args], env=env,
-                          capture_output=True, text=True, timeout=timeout)
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
 
 
 def _detail(process):
@@ -455,7 +455,7 @@ def run(root=None, *, check=False, json=False, plugin_fetch_timeout=PLUGIN_FETCH
             env["UV_PROJECT_ENVIRONMENT"] = str(checkout / ".venv")
             try:
                 synced = subprocess.run([uv, "sync", "--locked"], cwd=checkout,
-                                        env=env, capture_output=True, text=True, timeout=600)
+                                        stdin=subprocess.DEVNULL, env=env, capture_output=True, text=True, timeout=600)
                 problem = _detail(synced) if synced.returncode else None
             except subprocess.TimeoutExpired as error:
                 problem = f"uv did not finish within {error.timeout:g} s"
@@ -501,7 +501,7 @@ def _convert_settings(checkout, root):
         converted = subprocess.run([str(python) if python.is_file() else sys.executable, "-m", "multiverse.cli",
                                     "-u", str(target), "plugins", "migrate", "--apply", "--recursive", "--json"],
                                    cwd=checkout, env=env, capture_output=True, text=True, errors="replace",
-                                   timeout=300)
+                                   stdin=subprocess.DEVNULL, timeout=300)
     except subprocess.TimeoutExpired as error:
         return {"state": "failed", "universe": str(target), "reason": f"it did not finish within {error.timeout:g} s"}
     except (OSError, subprocess.SubprocessError) as error:

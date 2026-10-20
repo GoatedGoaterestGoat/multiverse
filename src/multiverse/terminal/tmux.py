@@ -10,12 +10,29 @@ from . import statusline
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
 
 
+def status_setup(root, properties, launch_id, family):
+    """Prepare pane-independent status configuration before creating the waiting runner."""
+    _, interval = statusline.config(statusline.read_object(root / 'statusline.json'), family)
+    argv = [sys.executable, '-S', str(Path(statusline.__file__).resolve()),
+            str(root), properties['id'], launch_id, family]
+    # Indirection inserts the option literally, without recursive tmux format expansion.
+    # The renderer command still needs shell quoting for unusual paths and text.
+    options = (('@mv2_status_command', shlex.join(argv)), ('status', 'on'),
+               ('status-position', 'bottom'), ('status-interval', str(interval)),
+               ('status-left', ''), ('status-right', ''),
+               ('status-format[0]', ' #(#{@mv2_status_command})'))
+    return statusline.clean(properties['name']) or 'agent', options
+
+
 class Tmux:
     def __init__(self, socket_path=None):
         self.prefix = ["tmux", "-S", socket_path] if socket_path else ["tmux", "-L", "multiverse-v2"]
 
     def run(self, *args):
-        result = subprocess.run([*self.prefix, *args], text=True, capture_output=True, timeout=10)
+        # A tmux client resets stdin's O_NONBLOCK flag, even for capture/list commands.
+        # Never share the native TUI's terminal file description with these helpers.
+        result = subprocess.run([*self.prefix, *args], stdin=subprocess.DEVNULL,
+                                text=True, capture_output=True, timeout=10)
         if result.returncode or result.stderr.startswith("error "):
             raise RuntimeError(result.stderr.strip() or "tmux command failed")
         return result.stdout.rstrip("\n")
@@ -64,24 +81,21 @@ class Tmux:
         self.run('respawn-pane', '-t', pane['pane_id'], '-c', str(cwd), *argv)
         return runtime['tmux']
 
-    def configure_status(self, terminal, root, properties, launch_id, family):
+    def configure_status(self, terminal, root, properties, launch_id, family, *, prepared=None):
         """Configure only a newly created, tagged agent wrapper before native startup."""
         session, pane = terminal['session'], terminal['pane']
-        self.run('set-option', '-w', '-t', pane, 'automatic-rename', 'off')
-        self.run('set-option', '-w', '-t', pane, 'allow-rename', 'off')
-        self.run('rename-window', '-t', pane, statusline.clean(properties['name']) or 'agent')
-        _, interval = statusline.config(statusline.read_object(root / 'statusline.json'), family)
-        argv = [sys.executable, '-S', str(Path(statusline.__file__).resolve()),
-                str(root), properties['id'], launch_id, family]
-        # Indirection keeps path text out of tmux format parsing: option values
-        # are inserted literally (without recursive expansion). Shell quoting
-        # still applies; the server's environment may be another agent's.
-        command = shlex.join(argv)
-        for name, value in (('@mv2_status_command', command), ('status', 'on'),
-                            ('status-position', 'bottom'), ('status-interval', str(interval)),
-                            ('status-left', ''), ('status-right', ''),
-                            ('status-format[0]', ' #(#{@mv2_status_command})')):
-            self.run('set-option', '-t', session, name, value)
+        name, options = prepared if prepared is not None else status_setup(root, properties, launch_id, family)
+        commands = [('set-option', '-w', '-t', pane, 'automatic-rename', 'off'),
+                    ('set-option', '-w', '-t', pane, 'allow-rename', 'off'),
+                    ('rename-window', '-t', pane, name),
+                    *(('set-option', '-t', session, key, value) for key, value in options)]
+        # Literal argv separators, never a shell command. Every command retains its explicit target.
+        arguments = []
+        for command in commands:
+            if arguments:
+                arguments.append(';')
+            arguments.extend(command)
+        self.run(*arguments)
 
     def signal_child(self, properties, runtime, signum):
         """Signal only the recorded child of this launch's currently owned runner."""
@@ -100,7 +114,7 @@ class Tmux:
         if not isinstance(child_pid, int) or child_pid <= 0 or runner_pid <= 0:
             raise ValueError('Native process has not registered yet; retry after startup')
         parent = subprocess.run(['ps', '-p', str(child_pid), '-o', 'ppid='],
-                                capture_output=True, text=True, timeout=2)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
         if parent.returncode == 1 and not parent.stdout.strip():
             return  # The native child exited; its runner is finishing cleanup.
         if parent.returncode or parent.stdout.strip() != str(runner_pid):
@@ -117,6 +131,14 @@ def matches(pane, properties, runtime):
         ("@mv2_universe_id", properties["universe_id"]),
         ("@mv2_launch_id", runtime.get("launch_id")),
     )))
+
+
+def observation_key(properties, runtime):
+    """Fields used by observe(), copied so reconciliation cannot mutate a cache key."""
+    terminal = runtime.get('tmux')
+    fields = {key: runtime[key] for key in ('launch_id', 'state', 'exit_code', 'ending_at', 'error') if key in runtime}
+    return (properties.get('id'), properties.get('universe_id'), fields,
+            dict(terminal) if isinstance(terminal, dict) else terminal)
 
 
 def observe(properties, runtime, snapshots=None):
@@ -148,5 +170,6 @@ def observe(properties, runtime, snapshots=None):
 def owned(properties, runtime, *, states=('alive',)):
     result = observe(properties, runtime)
     if result["live"] not in states:
-        raise ValueError(f'Cannot operate on agent: {result["live"]}: {result["reason"]}')
+        reason = f': {result["reason"]}' if result["reason"] else ''
+        raise ValueError(f'Cannot operate on agent: {result["live"]}{reason}')
     return Tmux(runtime["tmux"]["socket"]), runtime["tmux"]["pane"]

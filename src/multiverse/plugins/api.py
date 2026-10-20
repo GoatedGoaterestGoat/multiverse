@@ -20,11 +20,12 @@ Versioning: VERSION's minor rises when something is added, its major when
 something changes or goes. Fields of `record` (an operation's full result)
 are not covered.
 """
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
-from . import harness, loader, settings as settings_files
+from . import agent_files, harness, loader, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
 
 VERSION = loader.API_VERSION
@@ -37,13 +38,33 @@ class Error(ValueError):
     """An operation a plugin asked for could not be done; the message says why."""
 
 
+class Gone(Error, OSError):
+    """A write was for an agent or a universe that is gone (removed, or moved): nothing of it is made again, so a
+    late write never brings it back as an orphan. Stop working for it. Also an OSError, which is what
+    agent_state_dir, state_dir and files.lock raised before 1.10, so code that catches that still does."""
+
+
+class AgentGone(Gone):
+    """The agent a write was for is gone: its folder (state/agents/<id>) was removed or moved."""
+
+
+class UniverseGone(Gone):
+    """The universe a write was for is gone: its root was removed or moved."""
+
+
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except Error:
         raise
+    except agent_files.Gone as error:
+        raise _gone(error) from error
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         raise Error(str(error)) from error
+
+
+def _gone(error):
+    return (UniverseGone if isinstance(error, agent_files.UniverseGone) else AgentGone)(str(error))
 
 
 class _Points:
@@ -430,15 +451,29 @@ class Files:
 
     @staticmethod
     def write_json(path, value):
-        """Write JSON so a reader sees the old or the new file, never part of one (parents are created)."""
-        from ..store import write
-        return _call(write, path, value)
+        """Write JSON so a reader sees the old or the new file, never part of one. Its missing parents are made,
+        but never an agent's folder (state/agents/<id>) or, for a plugin's state (state/plugins/...), its
+        universe's root: AgentGone or UniverseGone for one that is gone, and nothing is made."""
+        return _call(agent_files.write_json, path, value)
 
     @staticmethod
+    @contextmanager
     def lock(path):
-        """An exclusive lock on `path` while the `with` block runs, across processes (it waits)."""
-        from ..store import lock
-        return lock(path)
+        """An exclusive lock on `path` while the `with` block runs, across processes (it waits). Its missing
+        parents are made, as for write_json: AgentGone or UniverseGone for one that is gone."""
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(agent_files.lock(path))
+            except agent_files.Gone as error:
+                raise _gone(error) from error
+            yield
+
+    @staticmethod
+    def ensure_dir(path):
+        """Directory `path`, with its missing parents; returns it. Never an agent's folder or, for a plugin's state,
+        its universe's root: below one, only while it exists (AgentGone or UniverseGone once it is gone). Use it,
+        not a mkdir with parents, for anything under an agent or a plugin's state."""
+        return _call(agent_files.ensure_dir, path)
 
     @staticmethod
     def now():
@@ -610,19 +645,20 @@ class Plugin:
                            bool(settings.get("inbox_bridge")), dict(settings), _harness_home(family))
 
     def state_dir(self, universe=None):
-        """state/plugins/NAME/ of a universe, created on first use."""
-        directory = _root(universe) / "state" / "plugins" / self.name
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        """state/plugins/NAME/ of a universe, made on first use while the universe exists; UniverseGone once it
+        was removed or moved (its root is never made again)."""
+        root = _root(universe)
+        return _call(agent_files.ensure_dir, root / "state" / "plugins" / self.name, root=root)
 
     def agent_state_dir(self, agent):
-        """state/agents/<id>/NAME/ of an agent, created on first use."""
-        directory = agent.universe.path / "state" / "agents" / agent.id / self.name
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        """state/agents/<id>/NAME/ of an agent, made on first use while the agent's folder exists; AgentGone once
+        it was removed or moved (its folder is never made again). Make what goes below it with
+        api.files.ensure_dir, write_json or lock, never a mkdir with parents, which would bring a removed agent
+        back as an orphan."""
+        return _call(agent_files.ensure_dir, agent.universe.path / "state" / "agents" / agent.id / self.name)
 
     def log(self, text, universe=None):
-        """Append a line to state/plugins/NAME/plugin.log."""
+        """Append a line to state/plugins/NAME/plugin.log; for a universe that is gone, nothing is written."""
         from ..store import now
         try:
             loader.append_log(self.state_dir(universe) / "plugin.log", f"{now()} {text}")
@@ -754,7 +790,8 @@ class Agent:
         return self.universe.agent(self.id)
 
     def session(self):
-        """This agent's session as the harness side sees it: native ID, launch, state, native mode and plugins."""
+        """This agent's session as the harness side sees it: native ID, launch, state, native mode, plugins and
+        its recorded workspace."""
         family = ""
         try:
             family = self._plugin.harness_info(self.universe, self.harness).family
@@ -763,7 +800,8 @@ class Agent:
         runtime = self.record.get("runtime") or {}
         return SessionInfo(self.universe.path, self.id, self.harness or "", family,
                            self.record.get("native_session_id"), runtime.get("launch_id"),
-                           runtime.get("state", "unknown"), runtime.get("native_mode"), runtime.get("plugins"))
+                           runtime.get("state", "unknown"), runtime.get("native_mode"), runtime.get("plugins"),
+                           self.record.get("workspace") or None)
 
     def terminal(self, lines=30):
         """The last `lines` lines of the agent's terminal, or why there is none (needs agents.read)."""

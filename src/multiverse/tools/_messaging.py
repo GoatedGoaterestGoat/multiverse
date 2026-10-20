@@ -1,16 +1,19 @@
 """Human summaries of delivery evidence; internal receipts stay unchanged."""
 import re
 import json
+from ..display import clean
 
 
 def failure_reason(reason, text=''):
     reason = str(reason or 'the session could not accept the message')
     if text:
-        reason = reason.replace(text, 'the message')
-        reason = reason.replace(json.dumps(text, ensure_ascii=False)[1:-1], 'the message')
-        for line in text.splitlines():
-            if line.strip():
-                reason = reason.replace(line, 'the message')
+        # Replace whole reflected values once. Short conversational tokens are
+        # not secrets and occur inside ordinary diagnostic prose.
+        pieces = {text, json.dumps(text, ensure_ascii=False)[1:-1], *text.splitlines()}
+        pieces = {piece for piece in pieces if len(piece.strip()) >= 7 or (len(piece.strip()) >= 3 and any(char.isspace() for char in piece.strip()))}
+        if pieces:
+            pattern = r'(?<!\w)(?:' + '|'.join(re.escape(piece) for piece in sorted(pieces, key=len, reverse=True)) + r')(?!\w)'
+            reason = re.sub(pattern, 'the message', reason)
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'
@@ -36,25 +39,52 @@ def failure_reason(reason, text=''):
     return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
 
 
-def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text=''):
+def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text='', running=False):
     state = receipt.get('state')
-    value = receipt.get('value') or {}
+    value = receipt.get('value')
+    value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    if state == 'cancelled':
+        return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
+    if value.get('paused') is True:
+        return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
-        why = failure_reason(reason, text)
+        # A file path is actionable evidence, not an opaque native identifier.
+        why = clean(reason) if value.get('pre_submission_failure') is True else failure_reason(reason, text)
+        if value.get('launch_only') is True and value.get('final') is False:
+            return (f"Not delivered to {name}: {why}. Saved; fix the reason and resume with a working bridge, "
+                    f"then mv2 deliver {name} --retry.")
+        if value.get('launch_only') is True:
+            return (f"Not delivered to {name}: {why}. Saved; resend it with --delivery inbox-only "
+                    f"for manual reading, or attach with mv2 attach {name}.")
+        if value.get('pre_submission_failure') is True:
+            return (f"Not delivered to {name}: {why}. Saved without submission; repair the named file, "
+                    f"then mv2 deliver {name} --retry.")
+        if value.get('repair_runtime'):
+            return (f"Not delivered to {name}: {why}. Saved; restore {clean(value['repair_runtime'])}, "
+                    f"or run mv2 kill {name} to close its verified terminal, then mv2 deliver {name} --retry.")
+        if value.get('wake_refused') is True or value.get('definite_failure') is True:
+            return (f"Not delivered to {name}: {why}. Saved; fix the reason, "
+                    f"then mv2 deliver {name} --retry.")
         if check:
             return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."
+        if running:
+            return (f"Not delivered to {name}: {why}. Saved; restart it with mv2 kill {name}, "
+                    f"then mv2 resume {name}, then mv2 deliver {name} --retry.")
         return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry."
     if state == 'unknown':
         if accepted:
             return f'{name}: message accepted; no confirmation yet. Do not resend.'
+        if value.get('evidence_problem'):
+            return (f"{name}: cannot yet tell whether it received the message. {clean(value['evidence_problem']).rstrip('.')}; "
+                    f"then run mv2 deliver {name} --check. Do not resend.")
         return f"{name}: cannot yet tell whether it received the message. Saved; run mv2 deliver {name} --check before sending again."
+    if value.get('transcript_confirmed') is True:
+        return f'{name}: message confirmed in its conversation.'
     if wake or 'interactive starting prompt' in reason or 'interactive prompt' in reason:
         return f'{name} was stopped; resuming it with your message.'
     if state == 'pending':
         return f'{name} is starting; your message will be delivered when ready.'
-    if value.get('transcript_confirmed') is True:
-        return f'{name}: message confirmed in its conversation.'
     if check:
         if 'queue' in reason.lower():
             return f'{name}: message is queued for its next turn. Do not resend.'

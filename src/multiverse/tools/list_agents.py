@@ -1,6 +1,6 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import error_text, shorten, state
+from ..display import error_text, shorten, state, live_label
 from ..runtime import lifecycle
 from .. import universe
 
@@ -40,12 +40,25 @@ def run(root=None, *, recursive=False, json=False, wide=False):
         where = place(row, root)
         line = f'{row["name"]:{width}}  {state(row):8}  {row.get("phase", "?"):8}  {summary}'
         lines.append((line + (f"  [{where}]" if where else "")).rstrip())
-        error = row.get("connection_error") or row.get("launch_error")
+        damage = row.get('damaged')
+        error = (f"{damage['file']}: {damage['reason']}" if damage else None) or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
         if error:
             lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide else error_text(error)))
+        if row.get('delivery_problem'):
+            lines.append('  ! ' + row['delivery_problem'])
         if row.get('recovery_note'):
             lines.append('  Note: Reconnected automatically.')
     return "\n".join(lines)
+
+
+def cli_run(root=None, *, recursive=False, json=False, wide=False):
+    result = run(root, recursive=recursive, json=json, wide=wide)
+    if not json:
+        return result
+    # The dashboard uses run(json=True) and retains the core observation enum.
+    return [{**row, 'live': live_label(row),
+             **({'reason': 'Launch is being prepared'} if live_label(row) == 'starting' else {})}
+            for row in result]
 
 
 if __name__ == "__main__":

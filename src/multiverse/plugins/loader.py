@@ -34,7 +34,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 9)
+API_VERSION = (1, 11)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -52,6 +52,7 @@ _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
 _loading = {}  # resolved plugin directory -> (Event set when its load in the background ends, when it started)
+_attempts = {}  # resolved plugin directory -> loads started for it in this process
 _log_lock = threading.Lock()
 _entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
 _generation = 0  # rises whenever a plugin is loaded or fails to load
@@ -240,29 +241,60 @@ def _environment_signature():
     return parts
 
 
+INSTALLED_KEPT = 4  # sys.path signatures remembered per Python: processes started differently (a runner, the CLI)
+USED_EVERY = 3600  # seconds between noting that a remembered signature was used again (a write)
+
+
 def _installed_remembered():
-    """installed_directories, from the last scan when nothing was installed or removed since: importing
-    importlib.metadata to scan costs every mv2 command more than the rest of plugin discovery together."""
-    from ..store import read, write
+    """installed_directories, from an earlier scan when nothing was installed or removed since: importing
+    importlib.metadata to scan costs every mv2 command more than the rest of plugin discovery together.
+
+    Up to INSTALLED_KEPT signatures are kept per Python executable, the least recently used dropped, so processes
+    whose sys.path differs do not make each other scan and rewrite in turn. The newest stays in the entry's own
+    fields, which older mv2 reads; the others are in its `recent`, which it ignores."""
+    from ..store import read
     path, key, signature = trust.user_directory() / INSTALLED, sys.executable, _environment_signature()
     try:
-        remembered = read(path).get("environments", {}).get(key) or {}
+        data = read(path)
+        entry = data.get("environments", {}).get(key)
     except (OSError, ValueError, AttributeError):
-        remembered = {}
-    directories = remembered.get("directories")
-    if remembered.get("signature") == signature and isinstance(directories, list) and all(
-            isinstance(item, str) and (Path(item) / manifests.FILE).is_file() for item in directories):
-        return [Path(item) for item in directories]
+        data, entry = {}, None
+    entries = _installed_entries(entry)
+    for item in entries:
+        directories = item.get("directories")
+        if item.get("signature") == signature and isinstance(directories, list) and all(
+                isinstance(found, str) and (Path(found) / manifests.FILE).is_file() for found in directories):
+            if time.time() - item.get("used", 0) > USED_EVERY:  # noted now and then, not on every command
+                item["used"] = time.time()
+                _write_installed(path, data, key, entries)
+            return [Path(found) for found in directories]
     found = _scan_installed()
+    fresh = {"signature": signature, "directories": [str(item) for item in found], "used": time.time()}
+    kept = sorted([item for item in entries if item.get("signature") != signature],
+                  key=lambda item: item.get("used", 0), reverse=True)[:INSTALLED_KEPT - 1]
+    _write_installed(path, data, key, [fresh, *kept])
+    return found
+
+
+def _installed_entries(entry):
+    """The signatures remembered for one Python, newest first: the entry itself, then its `recent`."""
+    if not isinstance(entry, dict):
+        return []
+    recent = entry.get("recent") if isinstance(entry.get("recent"), list) else []
+    first = {name: entry[name] for name in ("signature", "directories", "used") if name in entry}
+    return [item for item in [first, *recent] if isinstance(item, dict) and "signature" in item]
+
+
+def _write_installed(path, data, key, entries):
+    from ..store import write
     try:
-        data = read(path) if path.is_file() else {}
         environments = data.get("environments") if isinstance(data, dict) else None
         environments = environments if isinstance(environments, dict) else {}
-        environments[key] = {"signature": signature, "directories": [str(item) for item in found]}
+        entries = sorted(entries, key=lambda item: item.get("used", 0), reverse=True)
+        environments[key] = {**entries[0], "recent": entries[1:]}
         write(path, {"schema": 1, "environments": environments})
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         pass  # unremembered: scanned again next time
-    return found
 
 
 def _scan_installed():
@@ -417,7 +449,13 @@ def _entries_uncached(root):
         # A pre-plugin settings file turns nothing on: its first-use conversion writes the switch into plugins.json.
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
-        result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        try:
+            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        except Exception as error:  # whatever happens with one plugin, every other one is still listed
+            text = str(error).strip().splitlines()
+            result[name] = Entry(name, "failed", on, source, directory, found, problem=(
+                f"{name} could not be read: {type(error).__name__}" + (f": {text[0]}" if text else "")),
+                shadowed=shadowed.get(name, []))
         result[name].set_aside = aside.get(name, [])
     for name, (source, directory, problem) in invalid.items():
         if name not in result:
@@ -462,7 +500,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None)
     if isinstance(known, Failed) and known.files == _files(running):
         entry.state, entry.problem = "failed", known.problem
         return entry
-    if known is not None:
+    if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
         entry.state, entry.loaded = "loaded", known
     if root is not None and found.settings is not None:
         # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
@@ -563,10 +601,11 @@ def _start_loading(found, directory, files):
             return done, time.monotonic()
         done, started = threading.Event(), time.monotonic()
         _loading[directory] = (done, started)
+    home = trust.user_directory()  # read here, in the caller's thread: the load may start after HOME changed
 
     def run():
         try:
-            _load(found, directory)
+            _load(found, directory, home)
         except BaseException:
             pass  # kept as Failed: callers say why
         finally:
@@ -578,24 +617,39 @@ def _start_loading(found, directory, files):
     return done, started
 
 
-def _load(found, directory):
+def _load(found, directory, home=None):
     """Import and register a plugin in a thread of its own, waiting LOAD_SECONDS for it.
 
     A load past the limit is failed for now, not for good: its thread goes on, and what it ends with lands when
     it ends (a slow cold import on a slow disk is loaded then; an error replaces the timeout). A hang is also
     remembered against the plugin's files (LOAD_TIMEOUTS), so the next process does not wait the limit again."""
     from . import api  # the API imports this module
-    package = _package_name(found)
+    with _lock:
+        attempt = _attempts.get(directory, 0)
+        _attempts[directory] = attempt + 1
+    # Every attempt after the first imports under a package of its own: one still running late (or what it left in
+    # sys.modules) can never hand a later attempt, after an edit, the code it started with.
+    package = _package_name(found) + (f"_{attempt}" if attempt else "")
     registrations = Registrations()
     _keep_bytecode_out(directory)
-    outcome, done, gate, late = {}, threading.Event(), threading.Lock(), []
+    outcome, done, gate, late, timed_out = {}, threading.Event(), threading.Lock(), [], []
+    files_at_start = _files(directory)
+    # What this load records goes to the home it was asked for under (the caller's), never a later one.
+    home = trust.user_directory() if home is None else home
 
     def forget_modules():
         for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
             del sys.modules[name]  # tried again from scratch once its files change
 
     def land(loaded=None, error=None):
-        """Keep what a load ended with."""
+        """Keep what a load ended with. One that ends late is kept only while it is still the plugin's latest
+        attempt and its files are still those it started with."""
+        if late:
+            with _lock:
+                superseded = not timed_out or _loaded.get(directory) is not timed_out[0]
+            if superseded or _files(directory) != files_at_start:
+                forget_modules()  # this attempt's own package: a later one has its own
+                return None
         if error is not None:
             forget_modules()
             problem = f"{found.name} failed to load: {_describe(error)}"
@@ -606,7 +660,7 @@ def _load(found, directory):
         with _lock:
             _loaded[directory] = loaded
             _changed()
-        _remember_slow(directory, None)
+        _remember_slow(directory, None, home)
         return None
 
     def run():
@@ -635,10 +689,11 @@ def _load(found, directory):
             late.append(True)
             error = TimeoutError(f"took longer than {LOAD_SECONDS:g} s to load")
             problem = f"{found.name} failed to load: {_describe(error)}"
+            timed_out.append(Failed(found.manifest, found.source, problem, files_at_start))
             with _lock:
-                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                _loaded[directory] = timed_out[0]
                 _changed()
-            _remember_slow(directory, _files(directory))
+            _remember_slow(directory, _files(directory), home)
             raise PluginError(problem) from error
     if "error" in outcome:
         raise PluginError(land(error=outcome["error"])) from outcome["error"]
@@ -648,19 +703,29 @@ def _load(found, directory):
 
 LOAD_TIMEOUTS = "plugin-load-timeouts.json"  # in ~/.multiverse: plugins whose load ran past LOAD_SECONDS
 KNOWN_SLOW_WAIT = 0.5  # seconds a caller that would wait in full waits for a plugin that hung before
+KNOWN_SLOW_FOR = 600  # seconds a hang is remembered: then one caller waits in full again (a short process such as
+# `mv2 spawn` ends before a load it waited 0.5 s for could clear the mark)
 
 
 def _digest(files):
     return hashlib.sha256(repr(files).encode()).hexdigest()
 
 
-def _remember_slow(directory, files):
-    """Record (files given) or forget (None) that this plugin's load ran past the limit. Never raises."""
+def _remember_slow(directory, files, home=None):
+    """Record (files given) or forget (None) that this plugin's load ran past the limit, in `home` (the
+    ~/.multiverse the load started under), and never in a home that is gone (a test's, removed). Never raises."""
     from ..store import lock, read, write
-    path = trust.user_directory() / LOAD_TIMEOUTS
+    home = Path(home) if home is not None else trust.user_directory()
+    if not home.parent.is_dir():
+        return
+    path = home / LOAD_TIMEOUTS
     try:
-        if files is None and not path.is_file():
-            return
+        if files is None:  # forgetting: nothing is written (not even the lock) unless the plugin is there
+            try:
+                if str(directory) not in (read(path).get("plugins") or {}):
+                    return
+            except (OSError, ValueError, AttributeError):
+                return
         with lock(path.with_name(f".{LOAD_TIMEOUTS}.lock")):
             try:
                 plugins = read(path).get("plugins") or {}
@@ -671,7 +736,7 @@ def _remember_slow(directory, files):
                     return
                 plugins.pop(str(directory), None)
             else:
-                plugins[str(directory)] = {"files": _digest(files), "at": now()}
+                plugins[str(directory)] = {"files": _digest(files), "at": now(), "until": time.time() + KNOWN_SLOW_FOR}
             write(path, {"schema": 1, "plugins": plugins})
     except (OSError, ValueError):
         pass
@@ -686,7 +751,9 @@ def _known_slow(found):
         return False
     directory = Path(found.manifest.directory).resolve()
     item = recorded.get(str(directory))
-    return isinstance(item, dict) and item.get("files") == _digest(_files(directory))
+    until = item.get("until") if isinstance(item, dict) else None
+    return (isinstance(until, (int, float)) and not isinstance(until, bool) and until > time.time()
+            and item.get("files") == _digest(_files(directory)))
 
 
 def _keep_bytecode_out(directory):
@@ -779,19 +846,26 @@ def log_lock_path(path):
     return path.with_name(f".{path.name}.lock")
 
 
-def append_log(path, line, limit=None):
+def append_log(path, line, limit=None, root=None):
     """Append text to a log, rotating it to NAME.1 (one old file kept) once it is past `limit` (LOG_BYTES).
 
     The size check, the rotation and the append happen under a file lock, so two processes writing one log never
-    both rotate it (which would overwrite NAME.1, or rename a file that is already gone)."""
-    from ..store import lock
+    both rotate it (which would overwrite NAME.1, or rename a file that is already gone). A log in a universe's
+    plugin state (or under `root`) that is gone is not written: a log line never brings a removed universe or
+    agent back (agent_files)."""
+    from . import agent_files
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _log_lock, lock(log_lock_path(path)):
-        if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
-            path.replace(path.with_name(path.name + ".1"))
-        with path.open("a") as handle:
-            handle.write(line.rstrip("\n") + "\n")
+    guarded = agent_files.required_folder(path, root)[0] is not None
+    try:
+        agent_files.ensure_dir(path.parent, root)
+        with _log_lock, agent_files.lock(log_lock_path(path), root):
+            if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
+                path.replace(path.with_name(path.name + ".1"))
+            with path.open("a") as handle:
+                handle.write(line.rstrip("\n") + "\n")
+    except FileNotFoundError:
+        if not guarded:
+            raise  # removed meanwhile, with the folder it must find
 TRACEBACK_EVERY = 60.0  # seconds: at most one traceback per plugin and call site in this long
 _logged = {}  # (id(Loaded), what) -> (when a traceback was last written, failures not written since)
 
@@ -904,5 +978,7 @@ def reset():
         _entries.clear()
         _declared.clear()
         _loading.clear()
+        # _attempts stays: an attempt still running late (a test's hung register()) must never share a package
+        # name with a later one, whose modules it would remove when it is dropped.
         for name in [name for name in sys.modules if name == PACKAGE or name.startswith(PACKAGE + ".")]:
             del sys.modules[name]

@@ -14,7 +14,7 @@ import threading
 
 from rich.text import Text
 
-from ..display import clean
+from ..display import clean, live_label
 from . import theme
 
 # Below this table width, columns that are not `compact` are hidden.
@@ -23,7 +23,7 @@ COMPACT_WIDTH = 110
 # Words that carry their own color wherever an agent cell shows them.
 STATE_COLORS = {"alive": theme.GREEN, "ending": theme.PEACH, "stopped": theme.OVERLAY1, "dormant": theme.OVERLAY1,
                 "unknown": theme.YELLOW, "blocked": theme.YELLOW, "done": theme.TEAL, "working": theme.BLUE,
-                "waiting": theme.PEACH, "disconnected": f"bold {theme.RED}"}
+                "waiting": theme.PEACH, "disconnected": f"bold {theme.RED}", "starting": theme.BLUE}
 
 
 @dataclass(frozen=True)
@@ -60,10 +60,16 @@ class NameColumn(Column):
         label.append(clean(row["name"]))
         if not group and row.get("status") == "waiting":
             label.append(" ●", style=f"bold {theme.PEACH}")
+        if not group and row.get("damaged"):
+            label.append(" ⚠", style=f"bold {theme.RED}")
         return label
 
 
 class LiveColumn(Column):
+    def agent(self, row):
+        value = clean(live_label(row)) if "live" in row else "—"  # an agent still being prepared reads `starting`
+        return Text(value, style=STATE_COLORS.get(value, theme.SUBTEXT0))
+
     def group_value(self, row):
         return f'{row["alive"]}/{row["total"]}'
 

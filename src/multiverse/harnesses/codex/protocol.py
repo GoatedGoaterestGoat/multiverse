@@ -7,6 +7,11 @@ from pathlib import Path
 
 from ..types import NativeResult, RpcRequest, RpcNotification, NativeActivity
 
+RESTORATION_PAGES = 32
+# initialize, two initial reads, three inventories and the final read, plus pages.
+RECOVERY_MAX_REQUESTS = RESTORATION_PAGES + 7
+CONTINUATION_MAX_REQUESTS = 4
+
 
 def object_field(value, name):
     field = value.get(name)
@@ -36,13 +41,17 @@ def result(response):
 
 
 def _thread(session, *, allow_unloaded=False):
-    native_id = session.native_id
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
         'capabilities': {'experimentalApi': True},
     }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
+    return (yield from _read_thread(session, allow_unloaded=allow_unloaded))
+
+
+def _read_thread(session, *, allow_unloaded=False):
+    native_id = session.native_id
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
     if isinstance(observed, NativeResult):
         return observed
@@ -80,9 +89,37 @@ def check_connection(session):
 
 def recovery_check(session):
     """Read-only proof that restarting this exact thread's TUI is safe."""
-    thread = yield from _thread(session)
+    thread = yield from _thread(session, allow_unloaded=True)
     if isinstance(thread, NativeResult):
         return thread
+    if thread['status']['type'] == 'notLoaded':
+        # Codex serves requests while restoring its daemon snapshot. Inventory
+        # is read-only and never loads a thread. Its default is all loaded IDs,
+        # but honor pagination rather than assuming the first page is complete.
+        cursor, seen = None, set()
+        for _ in range(RESTORATION_PAGES):
+            observed = result((yield RpcRequest('thread/loaded/list',
+                                                {} if cursor is None else {'cursor': cursor})))
+            if isinstance(observed, NativeResult):
+                return observed
+            data, next_cursor = observed.get('data'), observed.get('nextCursor')
+            if not isinstance(data, list) or any(not isinstance(item, str) or not item for item in data):
+                raise ValueError('Native loaded thread data must be a list of nonempty IDs')
+            if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor
+                                            or next_cursor in seen):
+                raise ValueError('Native loaded thread cursor is malformed or cyclic')
+            if session.native_id in data or next_cursor is None:
+                break
+            seen.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise ValueError('Native loaded thread inventory exceeds the page bound')
+        # A loaded ID alone proves neither identity/workspace nor inactivity.
+        thread = yield from _read_thread(session, allow_unloaded=True)
+        if isinstance(thread, NativeResult):
+            return thread
+        if thread['status']['type'] == 'notLoaded':
+            return NativeResult('pending', 'Codex did not restore this conversation after its restart')
     if thread['status']['type'] != 'idle':
         return NativeResult('unavailable', 'Native thread is active or waiting for approval/input')
     for method, params, reason in (
@@ -113,35 +150,71 @@ def recovery_check(session):
                                        'idle', False, False, False, False))
 
 
+def _queue_head(session):
+    queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 1})))
+    if isinstance(queued, NativeResult):
+        return queued
+    items, cursor = records(queued), queued.get('nextCursor')
+    if (len(items) > 1 or any(not isinstance(item.get('id'), str) or not item['id'] for item in items)
+            or (cursor is not None and (not isinstance(cursor, str) or not cursor or not items))):
+        raise ValueError('Native queue head is malformed')
+    return bool(items)
+
+
+def _start_head(session):
+    # Omit the ID deliberately: the dispatch lock chooses the FIFO head even
+    # when native input raced the earlier inventory. Never select the new tail.
+    started = result((yield RpcRequest('thread/queue/start', {'threadId': session.native_id})))
+    if isinstance(started, NativeResult):
+        return started
+    turn = object_field(started, 'turn')
+    if not isinstance(turn.get('id'), str) or not turn['id']:
+        raise ValueError('Native queue start returned no turn ID')
+    return turn['id']
+
+
 def _start_idle_submission(session, item, receipt):
-    """Interrupt can pause native auto-draining. Start only our sole queued item."""
+    """A new message may unpause the queue once, never by receipt replay."""
+    from .queue_events import restart_claimed
+    if not restart_claimed(session, item['clientUserMessageId']):
+        return receipt
     try:
-        queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 2})))
+        queued = yield from _queue_head(session)
         if isinstance(queued, NativeResult):
             raise ValueError(queued.reason)
-        items = records(queued)
-        if not items:
-            return receipt  # Native auto-draining already took it.
-        if (len(items) != 1 or queued.get('nextCursor') or items[0].get('id') != item['id']
-                or items[0].get('clientUserMessageId') != item['clientUserMessageId']):
-            return NativeResult('native_queued',
-                'Accepted by native queue; other queued work exists, so no explicit start attempted. '
-                'Consumption unconfirmed; an interrupted queue may need native continuation.', receipt.value)
-        started = result((yield RpcRequest('thread/queue/start', {
-            'threadId': session.native_id, 'queuedSubmissionId': item['id']})))
+        if not queued:
+            return receipt
+        started = yield from _start_head(session)
         if isinstance(started, NativeResult):
             raise ValueError(started.reason)
-        turn = object_field(started, 'turn')
-        if not isinstance(turn.get('id'), str) or not turn['id']:
-            raise ValueError('Native queue start returned no turn ID')
-        return NativeResult('native_queued', 'Accepted and started from the native idle queue; consumption unconfirmed',
-                            {**receipt.value, 'turn_id': turn['id']})
+        # This turn may belong to an older native head, not our accepted tail.
+        return NativeResult('native_queued', 'Accepted; native FIFO queue started, consumption unconfirmed',
+                            {**receipt.value, 'queue_started_turn_id': started})
     except ValueError as error:
-        # Acceptance is already established. A racing automatic start, an active
-        # turn, or an unsupported method must never make this message retryable.
         return NativeResult('native_queued',
             f'Accepted by native queue; explicit idle start was not confirmed: {error}. '
             'Use deliver AGENT --check; do not resend.', {**receipt.value, 'idle_start_error': str(error)})
+
+
+def continue_queued(session, accepted):
+    """Consume one explicit new-message restart intent, preserving native FIFO."""
+    from .queue_events import restart_claimed
+    if not restart_claimed(session):
+        return NativeResult('ok', 'No newly claimed message permits queue continuation', {'continued': False})
+    thread = yield from _thread(session)
+    if isinstance(thread, NativeResult):
+        return thread
+    if thread['status']['type'] != 'idle':
+        return NativeResult('unavailable', 'Native thread is not idle; no queue continuation attempted')
+    queued = yield from _queue_head(session)
+    if isinstance(queued, NativeResult):
+        return queued
+    if not queued:
+        return NativeResult('ok', 'No native input remains queued', {'continued': False})
+    started = yield from _start_head(session)
+    if isinstance(started, NativeResult):
+        return started
+    return NativeResult('ok', 'Started the native FIFO queue after a new message', {'continued': True, 'turn_id': started})
 
 
 def send_message(session, message, mode):
@@ -191,8 +264,13 @@ def get_delivery(session, message_id):
         return queued
     for item in records(queued):
         if item.get('clientUserMessageId') == message_id:
-            return NativeResult('native_queued', 'Message remains in native queue',
-                                {'queued_submission_id': item.get('id'), 'transcript_confirmed': False})
+            state = session.queue_state
+            paused = (isinstance(state, dict) and state.get('native_session_id') == session.native_id
+                      and state.get('state') == 'paused')
+            return NativeResult('native_queued', 'Message remains paused in native queue' if paused else
+                                'Message remains in native queue',
+                                {'queued_submission_id': item.get('id'), 'transcript_confirmed': False,
+                                 **({'paused': True} if paused else {})})
     turns = result((yield RpcRequest('thread/turns/list', {
         'threadId': session.native_id, 'limit': 20, 'itemsView': 'full', 'sortDirection': 'desc'})))
     if isinstance(turns, NativeResult):

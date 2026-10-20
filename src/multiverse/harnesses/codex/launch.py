@@ -32,6 +32,36 @@ def tui_arguments(argv):
     return argv
 
 
+def plain_arguments(argv, recipe, values):
+    """Prepare a retry removing only mv2's root, with no native-policy guess."""
+    argv = list(argv)
+    own_root = next((index for index in range(len(recipe) - 1)
+                     if recipe[index:index + 2] == ['--add-dir', '{agent_dir}']), None)
+    if own_root is None or argv[own_root:own_root + 2] != ['--add-dir', values['agent_dir']]:
+        return argv, False
+    del argv[own_root:own_root + 2]
+    return argv, True
+
+
+def startup_retryable(snapshot):
+    """The native TUI rejected add-dir before startup; a live warning is not a retry."""
+    if type(snapshot.get('exit_code')) is not int or snapshot['exit_code'] == 0:
+        return False
+    text = snapshot.get('text')
+    if not isinstance(text, str) or len(text) > 32768 or '\x1b' in text or '\0' in text:
+        return False
+    directory = snapshot.get('agent_dir')
+    if not isinstance(directory, str) or not directory or '\x1b' in directory or '\0' in directory:
+        return False
+    # The native error may sit inside an inline screen or wrap inside words and
+    # paths. Its complete diagnostic must name the exact core-owned agent root;
+    # banners, abbreviated working directories and composer markers are irrelevant.
+    compact = ''.join(text.split())
+    diagnostic = ('Erroraddingdirectories:Ignoring--add-dir(' + ''.join(directory.split()) + ')because'
+                  'theeffectivepermissionsdonotallowadditionalwritableroots.')
+    return diagnostic in compact
+
+
 def remote_arguments(argv, context):
     """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)
@@ -140,13 +170,24 @@ class LaunchProtocol:
         self.settings = settings
         self.native_id = settings.get('native_id')
         self.pending = None
+        self.pending_method = None
         self.bound = False
+        self.launch_refusal = None
         self.prompt_request = None
         self.prompt_submitted = False
         self.prompt_error = None
 
+    def for_connection(self, connection_id, owns_primary):
+        from .side import LaunchConnection
+        return LaunchConnection(self, connection_id, owns_primary)
+
     def outgoing(self, value):
         method = value.get('method')
+        if method in ('turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'):
+            if self.launch_refusal:
+                raise ValueError(self.launch_refusal['message'])
+            if not self.bound:
+                raise ValueError('Native conversation binding is not confirmed; input was not submitted')
         if (method == 'turn/start' and 'id' in value and self.bound and not self.prompt_submitted
                 and self.prompt_request is None and (value.get('params') or {}).get('threadId') == self.native_id):
             self.prompt_request = value['id']
@@ -194,12 +235,21 @@ class LaunchProtocol:
                         server['env'] = {**forwarded, **object_field(server, 'env')} if server.get('env') is not None else forwarded
                         server['env_vars'] = [key for key in server['env_vars'] if key not in forwarded]
                         servers[name] = server
+        if 'agent_environment' in self.settings:
+            from .identity import session_environment
+            native = config_tree((params.get('config') or {}).items())
+            params['config'] = session_environment(deepcopy(native), self.settings['agent_environment'])
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         self.pending = value['id']
+        self.pending_method = method
         return {**value, 'params': params}
 
     def incoming(self, value):
+        # Native R may succeed later, but only a new mv2 launch can revalidate
+        # a refused attachment. Never turn that retry into binding/readiness.
+        if self.launch_refusal is not None:
+            return None
         if 'method' not in value and self.prompt_request is not None and value.get('id') == self.prompt_request:
             self.prompt_request = None
             observed = result(value)
@@ -209,9 +259,15 @@ class LaunchProtocol:
                 self.prompt_submitted = True
         if 'method' in value or self.pending is None or value.get('id') != self.pending:
             return None
-        self.pending = None
+        method = self.pending_method
+        self.pending = self.pending_method = None
         observed = result(value)
         if isinstance(observed, NativeResult):
+            if not self.bound:
+                error = object_field(value, 'error')
+                self.launch_refusal = {'source': 'native-rpc', 'method': method,
+                    'code': error['code'], 'message': error['message'],
+                    'native_id': self.native_id}
             return None
         thread = object_field(observed, 'thread')
         native_id = normalize_session_id(thread.get('id'))
@@ -228,11 +284,10 @@ class LaunchProtocol:
                             'danger-full-access': 'dangerFullAccess'}[expected]
             if actual != expected:
                 raise ValueError(f'Native resume did not apply requested {key}: expected {expected}, got {actual}. '
-                                 'An already-loaded thread may retain its existing permissions. Stop this mv2 agent, '
-                                 'close other clients for this thread, let it become idle and wait for native unload '
-                                 '(thread_unload_delay_secs, 60 seconds by default), then resume again. '
+                                 'A shared Codex conversation keeps its current grants. Use those grants or '
+                                 'deliberately change them through Codex before a new mv2 resume. '
                                  'This launch cannot accept input until its requested grant is verified; '
-                                 'Multiverse will not restart the shared daemon.')
+                                 'Multiverse will not reconfigure or restart the shared daemon.')
         self.native_id = native_id
         self.bound = True
         return native_id

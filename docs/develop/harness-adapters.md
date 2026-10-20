@@ -69,6 +69,12 @@ A `reported` harness binds its ID in one of two ways:
 - A bridge returns it from a validating launch relay (`RpcProxySpec.binds_session`).
 - A plain launch uses the harness `bootstrap` to tell the agent to run `"$MV2_CLI" session-bind --session-id ID`. Codex does this with `$CODEX_THREAD_ID`.
 
+### Session changes
+
+An adapter can report a verified native session change, such as Claude's `/clear`, without replacing the mv2 agent. Core records the change in the agent's session lineage, keeps the earlier conversations owned by that agent, and follows the current one for delivery, usage and resume. An adapter that reports no changes keeps exact-session behavior. See [session lineage](../design/session-lineage.md).
+
+A bridged Codex conversation can have several clients at once. Its shell holds only agent-stable values, so `report` and `inbox` work from any client, while runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
+
 ## Bridge and plain
 
 The user docs call these a **live connection** and **launch-only**. In both, mv2 never types into the terminal.
@@ -86,6 +92,10 @@ A **plain** launch is the CLI in its pane. mv2 sees whether it is alive, can sto
 When the bridge can't be prepared, an adapter in auto mode returns the plain spec with `native_mode.fallback_reason` set. With the bridge required, it raises instead.
 
 Core can also meet failures later: starting the shared service, a `BridgeUnavailable` from the adapter once the service is up, or the relay. For those, put the plain spec in `CommandSpec.fallback`. The choice is saved in `runtime.json` as `native_mode`, with `policy`, `mode` and `fallback_reason`.
+
+`CommandSpec.startup_retry` describes a separate, single retry after an exited native process fails before startup. Its `StartupRetrySpec` carries only replacement argv and conditional notices. The adapter's `startup_retryable(snapshot)` must return exactly `True` for its specific native diagnostic; core checks exit, readiness and launch ownership before using it. The snapshot includes the exact agent directory and owned-pane text with only the runner's actually printed leading notices removed. Native screen chrome stays in the text; the adapter can recognize a complete diagnostic naming that exact directory without parsing the screen layout. Other command fields stay unchanged. This is not a general retry of native work.
+
+An optional relay view's `primary_event(direction, value)` describes exact-primary turn events after protocol validation: `interrupt`, `started`, or `completed`, with `native_session_id` and `turn_id`; completed events also have `status` (`interrupted` or `finished`). Side traffic and stale turn completions must return nothing. Core records an outgoing interrupt before forwarding it. `SessionHandle.queue_state` carries core's exact-conversation pause and explicit restart context to receipt and continuation operations; it grants no additional authority.
 
 A bridged launch takes messages once it is ready. Until then, core holds them as `pending`, and the runner delivers them in order. Readiness comes from the integration registering itself, or from the relay validating the binding:
 

@@ -17,13 +17,21 @@ from multiverse.runtime import native, rpc
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.universe.mailbox import inbox, append_message
 from multiverse.store import read, write
-from native_safety import isolated_home
+from native_safety import require_checked_codex, isolated_home
+from native_cli import mv2_launcher
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexTimingTest(TerminalBase):
     def test_native_tui_steering_and_after_turn_queue(self):
+        """On live Codex a steer reaches the next model request, a follow-up waits for the turn's end, receipts become
+        transcript-confirmed, and after an interrupt mv2 recovers the accepted item without resending; fragile because
+        every step depends on app-server queue and turn semantics, and timing bugs show only as late or doubled
+        messages."""
+        require_checked_codex(self)
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         records = []
         work = self.work
 
@@ -92,8 +100,16 @@ class CodexTimingTest(TerminalBase):
         test_env = dict(CODEX_HOME=str(native_home), NO_COLOR='1', NO_PROXY='127.0.0.1,localhost',
                         HTTP_PROXY='', HTTPS_PROXY='', ALL_PROXY='', http_proxy='', https_proxy='', all_proxy='')
         daemon_env = {**os.environ, **test_env}
-        self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=daemon_env,
-                                               capture_output=True, timeout=20))
+        daemon_groups = PrivateDaemonGroups()
+        self.enterContext(daemon_groups.observe_starts())
+        def stop_owned_daemon():
+            try:
+                subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
+                               env=daemon_env, stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=20, check=True)
+            finally:
+                daemon_groups.close()
+        self.addCleanup(stop_owned_daemon)
         with patch.dict(os.environ, test_env):
             result = lifecycle.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket,
                                   wait=True, wait_timeout=30)

@@ -126,9 +126,10 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         removed = [str(path) for path in events.prune(root)] if prune else []
         return {**events.summary(root), "pruned": removed}
     if plugin_action == "list":
-        return {"universe": str(root), "plugins": plugins.listing(root), "problems": plugins.problems(root, reserved())}
+        return {"universe": str(root), "plugins": plugins.listing(root, wait=None),
+                "problems": plugins.problems(root, reserved())}
     if plugin_action == "info":
-        for item in plugins.listing(root):
+        for item in plugins.listing(root, wait=None):
             if item["name"] == name:
                 return {"universe": str(root), **item}
         plugins.entry(root, name)  # raises with the reason
@@ -145,11 +146,12 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
                 "needs_host": needs_host, "host_running": host.running(top) if needs_host else None}
     if plugin_action == "settings":
         changes = _changes(assignments, removals)
+        unchecked = plugins.settings_checked(root, name)  # its own check, run before anything is written
         if changes:
             plugins.edit_settings(root, name, changes)
         values, problem, path = plugins.settings_of(root, name)
         return {"universe": str(root), "name": name, "path": str(path), "values": values, "problem": problem,
-                "changed": sorted(changes)}
+                "changed": sorted(changes), "unchecked": unchecked}
     # This universe's own copy, even when another source has a plugin of that name: while untrusted it hides
     # nothing, so looking the name up would find the other one.
     copy = plugins.universe_copy(root, name)
@@ -371,6 +373,9 @@ def text(action, result):
             lines.append(f'Changed: {", ".join(result["changed"])}')
         if result["problem"]:
             lines.append(f'! Cannot be used, so the plugin is off here until fixed: {result["problem"]}')
+        if result.get("unchecked"):
+            lines.append(f'! {result["name"]}\'s own settings check did not run ({result["unchecked"]}): '
+                         'only its schema was checked.')
         lines.append(json.dumps(result["values"], indent=2, ensure_ascii=False))
         return "\n".join(lines)
     if action == "trust":
@@ -414,6 +419,8 @@ def text(action, result):
     if action == "host":
         state = "running" if result["running"] else "not running"
         lines = [f'The plugin host for {result["universe"]} is {state}' + (f' (pid {result["pid"]}).' if result["running"] and result.get("pid") else ".")]
+        if result.get("problem"):
+            lines.append(f'! {result["problem"]}; the host rewrites it when it starts.')
         if result.get("needed"):
             lines.append(f'Plugins that need it: {", ".join(result["needed"])}.')
         elif result["action"] in ("start", "status"):

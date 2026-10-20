@@ -44,6 +44,10 @@ function tagged(text: string): Message | undefined {
 // the main loop's turns count, or a background subagent would leave "working".
 let turnRunning = false
 
+// The native session this process is on. A /clear moves the same process to a new one, which mv2 is told so
+// it rebinds the agent: messages, usage and resume then follow the new session.
+let sessionId: string | undefined
+
 // What waits on the person, by key (`question:<id>`, `permission:<id>`,
 // `elicitation:<id>`), with the tool it waits for. Any entry makes the session
 // `waiting`.
@@ -211,6 +215,46 @@ async function report($: EngineInterface) {
   }
 }
 
+// Tell mv2 this process moved to another session (a /clear), once Claude's own process file names it. Core also
+// reads that file, so reporting only after it has changed means no later read of it can still show the old session
+// (its writes only move forward). Claude starts that write before the SessionStart hooks but does not wait for it.
+// Once: core refuses what it cannot prove (an outdated launch, a session that is not this agent's); a refusal, or a
+// file that never shows the new session, is logged and never retried.
+const PROCESS_FILE_WAIT_MS = 5000
+const PROCESS_FILE_POLL_MS = 100
+
+async function processFileSession($: EngineInterface) {
+  try {
+    const result = await $.process.run(["sh", "-c", 'cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$PPID.json"'],
+      { timeoutMs: 2000 })
+    const record = JSON.parse(result.stdout) as { sessionId?: unknown }
+    return typeof record.sessionId === "string" ? record.sessionId : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function moved($: EngineInterface, previous: string, session: string) {
+  const python = await $.env.get("MV2_PYTHON")
+  if (!python) return
+  let published = false
+  for (let waited = 0; waited <= PROCESS_FILE_WAIT_MS; waited += PROCESS_FILE_POLL_MS) {
+    if (await processFileSession($) === session) { published = true; break }
+    await $.clock.sleep(PROCESS_FILE_POLL_MS)
+  }
+  if (!published) {
+    $.ui.log("multiverse: the move to a new session was not recorded: Claude's process file never named it")
+    return
+  }
+  try {
+    const result = await $.process.run([python, "-m", "multiverse.tools.runtime_update", "--native-session-id", session,
+      "--previous-session-id", previous, "--session-reason", "clear"], { timeoutMs: 10000 })
+    if (result.exitCode !== 0) $.ui.log(`multiverse: the move to a new session was not recorded: ${result.stderr.trim()}`)
+  } catch (error) {
+    $.ui.log(`multiverse: the move to a new session was not recorded: ${String(error)}`)
+  }
+}
+
 // A call has finished or run: nothing of it waits on the person any more. A
 // prompt that matched no call ends with the next finished call of its tool.
 function settle($: EngineInterface, id: string | undefined, tool?: string) {
@@ -270,6 +314,7 @@ export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     const result = await next(e)
     void report($)
+    void $.session.id().then((id) => { sessionId = id }, () => {})
     $.command.register({ name: NAME, description: DESCRIPTION, argumentHint: HINT, immediate: true })
       .catch((error: unknown) => $.ui.log(`multiverse: could not register /${NAME}: ${String(error)}`))
     // A new session (or a reload) knows nothing of what is on screen or on disk.
@@ -283,6 +328,14 @@ export const register: Register = (on) => {
     for (const name of Object.keys(itemTexts)) delete itemTexts[name]
     statusTimer = $.clock.every(REFRESH_MS, () => { void refreshStatus($) })
     void refreshStatus($)
+    return result
+  })
+
+  on("classic.SessionStart", { source: "clear" }, async ($, e, next) => {
+    const result = await next(e)
+    const previous = sessionId
+    sessionId = e.session_id
+    if (previous && e.session_id && previous !== e.session_id) void moved($, previous, e.session_id)
     return result
   })
 

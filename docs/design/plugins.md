@@ -311,7 +311,10 @@ settings file to convert, an event someone subscribes to, a usage adjuster)
 read manifests only, never the trust check that hashes a universe plugin's
 files. The list of pip-installed plugins is remembered per Python environment
 in `~/.multiverse/installed-plugins.json`, scanned again when a package is
-installed or removed (the package directories on `sys.path` change). The
+installed or removed (the package directories on `sys.path` change). It keeps
+the last 4 `sys.path` signatures per Python, the least recently used dropped,
+so processes started differently (a runner, the CLI) do not make each other
+scan again. The
 one exception is `mv2 NAME --help` for a plugin's command: its options come from
 its `configure`, so that help imports the plugin. A plugin command that fails
 in a way it did not mean to (anything but `ValueError`, `OSError`, `KeyError`
@@ -351,8 +354,14 @@ where they happen and delivered where plugins run**:
     time, holds only itself: its siblings go on, past any number of events,
     and an event a handler finished is never given to it again while a sibling
     catches up, however many polls that takes. A journal whose state was
-    removed starts again with a new id (`state/events/journal-id`), and only
-    then does the host forget what its handlers finished. A call counts one try when it runs out of time and one more for
+    removed starts again with a new id (`state/events/journal-id`, with a
+    second copy in `journal-id.copy`, so a lost or unreadable id file is not
+    taken for a new journal), and only then does the host forget what its
+    handlers finished. Beside each plugin's cursor, `events.cursor.journal`
+    names the journal it belongs to, so a journal that started again is
+    delivered from its start, whatever the old cursor said. The cursor and the
+    journal's counter keep their plain-number format, so a plugin host started
+    before an update, still running the old code, keeps its place. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
     on for that event, and its next events get calls of their own. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
@@ -360,9 +369,11 @@ where they happen and delivered where plugins run**:
     two calls that never returned restarts itself (the supervisor starts a
     fresh one, which has no stuck threads). Each worker runs in a process group
     of its own, and the supervisor ends that group with it, so a stuck call's
-    child processes (a hung `subprocess.run`) go too. Such restarts are counted
-    however far apart they are: after 3, the plugin is left stopped, and
-    `mv2 plugins` says its handlers kept hanging. What each handler finished is
+    child processes (a hung `subprocess.run`) go too; a worker whose supervisor
+    died (`kill -9`) ends its own group as it stops. Such restarts are counted
+    over a day, however long each run takes: after 3, the plugin is left
+    stopped, and `mv2 plugins`, `doctor` and the Plugins screen say its
+    handlers kept hanging. What each handler finished is
     kept next to the cursor (`state/plugins/NAME/handlers.json`, for that
     journal), so a fresh worker never gives a handler an event it finished.
     Handlers that are not held read on from their own place, so siblings keep
@@ -400,6 +411,7 @@ caller can forget one:
 | `agent.exited` | the runner, once, where the process's end is known | state (`stopped`/`failed`), exit code, reason |
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
+| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`) or a session pointer is recovered, for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
@@ -515,7 +527,11 @@ So the host is a general **supervisor** for plugins' long-running work:
   stop`, and stops its workers first. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
   second that its parent process changed, stops its services and exits, so
-  nothing keeps holding a socket or running a handler.
+  nothing keeps holding a socket or running a handler. The supervisor gives each
+  worker its own pid, so this holds even when it died while the worker was
+  still starting. It tells a worker has exited without reaping it (`waitid`,
+  or a kqueue on macOS before Python 3.13), so it can still end what the worker
+  left in its process group.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own
@@ -539,7 +555,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 9)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 11)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -605,7 +621,15 @@ Plugin utilities:
 
 - `mv.state_dir(universe)`: `state/plugins/NAME/` of a universe.
 - `mv.agent_state_dir(agent)`: `state/agents/<id>/NAME/`. Compaction's existing
-  `state/agents/<id>/compaction/` already fits.
+  `state/agents/<id>/compaction/` already fits. The API never makes an agent's
+  own folder: below it, directories are made one level at a time without their
+  parents, and files are written without making their directory, so an agent
+  removed or moved at any moment (its folder renamed away or deleted) makes a
+  late write fail with `api.AgentGone` instead of bringing it back as an orphan.
+  No lock against removal is needed (1.10). A universe's root is kept the same
+  way: `mv.state_dir`, files in a plugin's state (`state/plugins/...`), `mv.log`
+  and mv2's own plugin logs never make it again (`api.UniverseGone`; logs write
+  nothing).
 - `mv.agent_at(directory)` and `mv.current_agent()` (from `MV2_AGENT_DIR`, else
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage
@@ -616,7 +640,7 @@ Plugin utilities:
   directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
   Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
-  processes) and `now`.
+  processes), `ensure_dir` (1.10) and `now`.
 - `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
   the way the rest of mv2 does.
 - `mv.helper.command(name, *args, universe=)` is the argv that runs one of the
@@ -670,10 +694,13 @@ thread of their own and get 10 s. One that takes longer is left out as failed
 for now, and the Plugins screen, `mv2 plugins` and `doctor` say so; it never
 hangs `mv2`. Its load goes on: what it ends with lands when it ends, so a slow
 cold import is loaded then. The hang is also remembered against the plugin's
-files (`~/.multiverse/plugin-load-timeouts.json`): later processes wait for it
-at most 0.5 s, and a launch leaves it out while it still loads, saying so in
-the launch's `plugins` record and fallback reason, until it loads or its files
-change. A caller waits
+files (`~/.multiverse/plugin-load-timeouts.json`): for the next 10 minutes,
+processes wait for it at most 0.5 s, and a launch leaves it out while it still
+loads, saying so in the launch's `plugins` record and fallback reason; it is
+forgotten once it loads, its files change or the 10 minutes pass. A late
+result is kept only while it is still the plugin's latest attempt with the
+files it started with: after an edit, the new code loads (under a package of
+its own), and the old load's result is dropped when it ends. A caller waits
 for a plugin still loading only up to a deadline counted from when its load
 started: a launch plan waits until it ends; the dashboard's refreshes (columns,
 panels, inspector lines) wait at most `loader.REFRESH_WAIT` (0.5 s) in all, so
@@ -890,12 +917,27 @@ launch.
     argv.
   - **Agent identity:** a server that needs it declares `env_vars` such as
     `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_UNIVERSE`, `MV2_CLI` or `MV2_PYTHON`.
+    In bridge mode the launch-specific `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET`
+    and `MV2_TMUX_SOCKET` are refused: a bridged conversation outlives a
+    launch, so its tools carry the agent's identity, never one launch's.
+    Refused entries keep their reason in the launch record. `CODEX_HOME`,
+    `CODEX_SQLITE_HOME` and `CODEX_THREAD_ID` references are forbidden;
+    declaring identity references does not grant an MCP helper the
+    conversation shell's authority.
   - **Tool environment:** the variables the harness and plugins set for tools
     go through the bridge session RPC, and through the process environment in
     a plain launch. An exact, normal, exclusive resume of an idle thread
     applies them; rejoining a native thread that is subscribed or active may
     keep its old config, and mv2 never forces an unload or restart to change
-    that.
+    that. Bridge tool identity is per agent, through the session RPC: the same shared
+    conversation is one agent. Restart running Codex bridge agents once after
+    updating: `mv2 kill NAME`, then `mv2 resume NAME`, with no other client
+    attached so Codex can reload the conversation environment. There is no
+    automatic adoption or update hook.
+  - **Sharing and refusals:** same-server sharing that Codex accepts is
+    normal. A separate-writer native refusal is retained as the launch's
+    primary error, even if native retry later succeeds; only a successful new
+    `mv2 resume` clears it.
 
   This is the only v1 way for a plugin to add MCP config, and
   `config.mcp_servers` is refused.
@@ -1498,8 +1540,18 @@ multiverse-v2/
   universe made from the base template with the plugin (its `plugin`
   directory) found and turned on. It also gives a temporary home, a temporary
   `CLAUDE_CONFIG_DIR`, a `bin/` directory first on `PATH` and no inherited
-  agent identity. Nothing in it starts an agent, tmux or a harness. Its
-  helpers:
+  agent identity. Nothing in it starts an agent, tmux or a harness. It runs
+  guarded: a write under your real `~/.multiverse` (the one before any test
+  moved `HOME`), by the test or by a thread it started, is refused with
+  `PermissionError` and fails that test, never a later one. Writes no test can
+  be charged with (a test class that never names itself, or a thread that
+  outlived its test) are printed at the end and fail the run. A path given
+  relative to a directory file descriptor (as `shutil.rmtree` removes files)
+  is resolved through that descriptor, so the working directory never decides
+  it, and every path is checked as written and as resolved, so a write through
+  a link elsewhere that points into the home is refused too. The plugin under test's own directory, and Python's bytecode in a
+  personal plugin (`~/.multiverse/plugins/NAME`), are not guarded: a personal
+  plugin runs its tests from its own directory. Its helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it
     would load it. Its `registrations` hold what `register` added, such as
     columns, handlers, launch contributions and helpers, to call directly.

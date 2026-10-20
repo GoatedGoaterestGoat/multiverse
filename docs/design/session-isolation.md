@@ -20,9 +20,12 @@ session, or change its status/runtime. Offline regression coverage exercises
 those callback guards without launching any workers.
 
 These are cooperative identity checks, not a security boundary. Explicit binding
-trusts the caller to report its actual native session. Two records can currently
-be explicitly bound to the same UUID; there is no global session registry across
-universes. A shell's inherited environment is insufficient evidence of ownership.
+trusts the caller to report its actual native session. Claims scan the universe
+tree for current and historical ownership in the same provider and storage home.
+A renamed home with a symlink at its old path remains the same storage for claims;
+historical journal paths are preserved, never rewritten through a later symlink.
+Separate universe trees have no shared registry. A shell's inherited environment
+is insufficient evidence of ownership.
 Use the session UUID supplied by the current harness and preserve that binding
 for exact resume. A queued message is not evidence that the intended native
 session has read it.

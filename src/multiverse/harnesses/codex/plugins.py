@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlsplit
 from ...plugins import harness, manifest, trust
 
 
+CHECKED_VERSION = (0, 163, 0)  # native layouts and unmanaged side-thread protocol
 CONFIG_VERSION = (0, 159, 3)  # checked versioned config schema
 MCP_VERSION = (0, 162, 1)     # isolated native spawn verified on this release
 _versions = {}
@@ -80,7 +81,7 @@ def codex_version(executable, workspace):
         key = (str(resolved), stat.st_mtime_ns, stat.st_size)
         if key not in _versions:
             output = subprocess.run([str(resolved), '--version'], capture_output=True, text=True,
-                                    cwd=workspace, timeout=5, check=False)
+                                    stdin=subprocess.DEVNULL, cwd=workspace, timeout=5, check=False)
             match = re.fullmatch(r'(?:codex-cli\s+)?(\d+)\.(\d+)\.(\d+)\s*', output.stdout)
             _versions[key] = tuple(map(int, match.groups())) if output.returncode == 0 and match else None
         return _versions[key]
@@ -372,7 +373,12 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
                 if not isinstance(local, str) or not _name.fullmatch(local):
                     raise ValueError('MCP server names must contain lowercase letters, digits, hyphens or underscores')
                 native_name = 'mv2_' + name.replace('-', '_') + '_' + local.replace('-', '_')
-                checked.append((native_name, _server(definition, plugin_dir, permissions)))
+                server = _server(definition, plugin_dir, permissions)
+                if bridge:
+                    from .identity import VOLATILE
+                    if VOLATILE.intersection(server.get('env_vars', [])):
+                        raise ValueError('Shared Codex MCP servers cannot reference launch identity or attachment sockets')
+                checked.append((native_name, server))
             text = None
             if 'instructions' in fields:
                 path = _inside(plugin_dir, fields['instructions'], 'instructions')

@@ -80,7 +80,7 @@ mv2 resume NAME
 
 ### "Outdated launch"
 
-`report`, `inbox` and `session-bind` print `mv2: Outdated launch` when they run with the `MV2_AGENT_ID` and `MV2_LAUNCH_ID` of an earlier launch of that agent. The command came from one of these:
+For launch-scoped agents, `report`, `inbox` and `session-bind` print `mv2: Outdated launch` when their `MV2_LAUNCH_ID` names an earlier launch. The command came from one of these:
 
 - A shell or background job left over from before the agent was resumed.
 - A terminal that copied an agent's environment.
@@ -90,10 +90,14 @@ mv2 refuses so that an old process can't act as the current one.
 Run the command from the agent's current session instead. To run it yourself, clear those variables and name the agent:
 
 ```sh
-env -u MV2_AGENT_ID -u MV2_LAUNCH_ID mv2 inbox --agent NAME --peek
+env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 inbox --agent NAME --peek
 ```
 
 `Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.
+
+Connected Codex tools do not carry a launch ID. Their `report`, `inbox` and message sender use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
+
+If a connected Codex conversation says it still has values from before the update, restart it as described in [updating](updating.md). No other client should be attached during that restart. Do not work around the error by copying identity values into the old conversation.
 
 ### A name is taken or ambiguous
 
@@ -129,14 +133,16 @@ Every message is saved before delivery, so nothing is lost. What to do depends o
 
 ### Claude starts launch-only (`plain`)
 
-`spawn` prints `Started NAME (Claude, plain).` Find the reason on `mv2 inspect NAME`'s `Note:` line, or in `mv2 capabilities --agent NAME` as `Launched without the bridge: REASON`. It is recorded in the agent's `runtime.json` as `native_mode.fallback_reason`.
+`spawn` prints `Started NAME (Claude, plain).` Find the reason on `mv2 inspect NAME`'s `Note:` line, or in `mv2 capabilities --agent NAME` as `This agent is launch-only: REASON`. A send to it says it is launch-only, too. It is recorded in the agent's `runtime.json` as `native_mode.fallback_reason`.
 
 | Reason | Fix |
 | --- | --- |
 | `Claude Code X is older than Y, which the multiverse mod needs` | Update Claude Code, then kill and resume the agent. With `"inbox_bridge": true` the launch fails instead. |
-| No reason, and the dashboard inspector shows `Mode: plain (plain)` | `harness.json` sets `"inbox_bridge": false`. Remove it, then kill and resume. |
-| `Launched without compaction: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable. `mv2 doctor` names the problem, so fix it and relaunch. |
-| `No saved Claude conversation for this session; started it fresh under the same session ID` | This is not launch-only. The agent was stopped before its first message, so there was nothing to resume. |
+| `its harness sets inbox_bridge to false`, and the dashboard inspector shows `Mode: plain (plain)` | Remove `"inbox_bridge": false` from `harness.json`, then kill and resume. |
+| `Launched without compaction: compaction.json has not been converted: ...` | This is not launch-only. The connection works, but an old `compaction.json` hasn't been converted yet. Run `mv2 plugins migrate --apply`, then kill and resume the agent. |
+| `plugin compaction was left out: its settings cannot be used: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable, so Claude's own `/compact` applies. `mv2 doctor` names the problem, so fix it and relaunch. |
+| `Claude has no saved conversation for this session: the agent was stopped before its first message, ...` | This is not launch-only. There was nothing to resume, so the agent started fresh under the same session ID. `mv2 resume` prints the same line. |
+| `Claude's saved conversation for this session is missing (Claude deletes conversations older than its cleanupPeriodDays setting): ...` | This is not launch-only. The agent had a conversation, but Claude's file for it is gone, so it started fresh without its earlier context. `mv2 resume` prints the same line. mv2 tells the two cases apart from its delivery receipts, the context the agent last reported, and Claude's prompt history. To keep conversations, set a large `cleanupPeriodDays` in Claude's settings. |
 
 Sometimes a connected launch never becomes ready: `--wait` times out, and sends report `messaging is not connected for this session`. The launch may be waiting at a Claude login or workspace trust prompt. Attach and answer it.
 
@@ -156,6 +162,24 @@ mv2 deliver NAME --retry
 
 If the reason says `Kill this unbound launch and spawn again.`, the launch never recorded a session. Kill it, remove it and spawn again. mv2 never restarts the shared daemon. It also never replays a message that may have arrived.
 
+### Codex: "restart the agent (mv2 kill, then mv2 resume) with no other client attached"
+
+`mv2 report` and `mv2 inbox` print this for a Codex agent whose conversation still holds environment values from an older mv2. Close any other client that has the conversation open, such as a `codex resume` window, so Codex reloads the conversation. Then run:
+
+```sh
+mv2 kill NAME
+mv2 resume NAME
+```
+
+### Codex: "This conversation is open in another app"
+
+A connected launch reports the same refusal as "thread … already has an active writer". A different Codex server, or a `codex resume --no-daemon` session, holds the conversation. mv2 shows Codex's refusal as the launch's error, and pressing R in Codex doesn't clear it. Close the other session, then close mv2's terminal without cancelling the conversation's work, and resume:
+
+```sh
+mv2 kill NAME --attachment-only
+mv2 resume NAME
+```
+
 ### Codex: "failed to resolve feature override precedence"
 
 A launch error or `Note:` reads `Cannot isolate shared native session environment: ... failed to resolve feature override precedence: No such file or directory`. The shared Codex daemon was started from a directory that has since been deleted, such as a removed worktree. With `inbox_bridge` unset, the agent runs plain. With `true`, the launch fails.
@@ -173,6 +197,7 @@ mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socke
 | `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |
 | `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET` |
 | `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -L multiverse-v2 ls` |
+| `server exited unexpectedly` on spawn, and the server's other sessions are gone | `MV2_TMUX_SOCKET` names a server with a global `window-size manual`; tmux 3.6a crashes on any new session there, with or without mv2 | Use mv2's own server, or unset `window-size` on yours (`tmux set -gu window-size`) |
 
 ### The dashboard doesn't show your agents
 
@@ -182,6 +207,12 @@ mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socke
 - **It shows an error row.** An agent whose record can't be read shows `unknown`, and `mv2 doctor` names the problem.
 
 The dashboard refreshes every 1.5 seconds, and F5 refreshes it at once. `mv2 list --recursive` shows the same agents.
+
+### The dashboard says "mv2 changed"
+
+The header shows `mv2 changed: reopen`, or an action fails with `mv2 changed since this dashboard started; quit and reopen it`, followed by the import or attribute error it hit.
+
+mv2's source changed on disk after the dashboard started, for example from `mv2 update` or a `git pull`. The dashboard keeps running the code it loaded and loads the rest from disk when it first needs it, so an action can pair new code with old and fail with an error the new code would not give. Press `q` and run `mv2` again. Agents keep running.
 
 ### `mv2 update` refuses
 

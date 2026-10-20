@@ -39,9 +39,10 @@ def write(path, value):
 
 
 @contextmanager
-def lock(path):
+def lock(path, *, create_parent=True):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         try:

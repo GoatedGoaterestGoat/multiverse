@@ -1,9 +1,7 @@
 """Native exits detach only the agent's clients and remove its owned wrapper."""
 import os
 import pty
-import signal
 import subprocess
-import sys
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -36,6 +34,9 @@ class AutoExitTest(TerminalBase):
         return process, master
 
     def test_ctrl_c_detaches_attached_client_instead_of_switching_to_another_agent(self):
+        """On real tmux a native exit detaches only the clients viewing that agent, removes its pane, and resume keeps
+        the session in one new tagged pane; fragile because tmux moves attached clients to another session when a pane
+        dies, so a break drops the user into another agent's pane to type there."""
         result, directory = self.start_ready()
         native_id = str(uuid4())
         agents.bind_session(self.root, result['id'], native_id)
@@ -53,62 +54,45 @@ class AutoExitTest(TerminalBase):
         self.assertIn(other, self.backend.snapshot()[0])
         self.assertNotIn(pane, self.backend.snapshot()[0])
         self.assertEqual(agents.runtime(directory)['state'], 'dormant')
+        self.assertEqual(lifecycle.listing(self.root)[0]['status'], '-')
         self.assertEqual(read(directory / 'properties.json')['native_session_id'], native_id)
         resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(resumed['ready'], resumed)
         self.assertEqual(resumed['native_session_id'], native_id)
-
-    def test_ctrl_c_that_native_handles_without_exiting_keeps_wrapper_and_client(self):
-        script = self.root / 'harnesses/fake/worker.py'
-        script.write_text('import signal\nsignal.signal(signal.SIGINT, lambda *_: print("TURN INTERRUPTED", flush=True))\n'
-                          + script.read_text())
-        result, directory = self.start_ready()
-        pane = result['runtime']['tmux']['pane']
-        attached, terminal = self.attach_client(pane)
-        os.write(terminal, b'\x03')
-        until(lambda: 'TURN INTERRUPTED' in self.backend.run('capture-pane', '-p', '-t', pane))
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
-        self.assertIsNone(attached.poll())
-        os.kill(agents.runtime(directory)['pid'], signal.SIGTERM)
-        until(lambda: agents.runtime(directory).get('state') == 'dormant')
-        self.assertEqual(attached.wait(timeout=5), 0)
-
-    def test_clean_native_exit_removes_wrapper_without_an_attached_client(self):
-        script = self.root / 'harnesses/fake/worker.py'
-        script.write_text('import sys,time\nprint("NATIVE READY", flush=True)\ntime.sleep(3)\nsys.exit(0)\n')
-        result, directory = self.start_ready()
-        until(lambda: agents.runtime(directory).get('state') == 'dormant')
-        self.assertEqual(agents.runtime(directory)['exit_code'], 0)
-        self.assertEqual(agents.runtime(directory)['state'], 'dormant')
-        self.assertNotIn(result['runtime']['tmux']['pane'], self.backend.snapshot()[0])
+        self.assertNotEqual(resumed['runtime']['launch_id'], result['runtime']['launch_id'])
+        panes = self.backend.snapshot()[0]
+        self.assertEqual(set(panes), {other, resumed['runtime']['tmux']['pane']})
+        self.assertEqual(panes[resumed['runtime']['tmux']['pane']]['@mv2_launch_id'], resumed['runtime']['launch_id'])
 
 
 class AutoExitOwnershipTest(BaseTest):
-    def test_old_cleanup_cannot_touch_replacement_launch(self):
-        directory = self.root / 'state/agents/agent'
-        write(directory / 'runtime.json', {'launch_id': 'replacement'})
-        with patch('multiverse.terminal.tmux.owned', side_effect=AssertionError('Must not control replacement')):
-            runner.cleanup_wrapper(directory / 'launches/old')
-        self.assertEqual(read(directory / 'runtime.json'), {'launch_id': 'replacement'})
-
-    def test_detach_precedes_kill_and_only_targets_clients_viewing_owned_pane(self):
-        directory = self.root / 'state/agents/agent'
-        write(directory / 'properties.json', {'id': 'agent', 'universe_id': 'universe'})
-        write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0,
-                                          'tmux': {'socket': '/fake', 'pane': '%1'}})
-        backend = Mock()
-        backend.run.side_effect = ['own\t%1\nother\t%2', '', '']
-        with patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
-            runner.cleanup_wrapper(directory / 'launches/old')
-        self.assertEqual(backend.run.call_args_list[1].args, ('detach-client', '-t', 'own'))
-        self.assertEqual(backend.run.call_args_list[2].args, ('kill-pane', '-t', '%1'))
-        self.assertEqual(agents.runtime(directory)['state'], 'dormant')
-
-    def test_cleanup_failure_leaves_wrapper_retryable(self):
-        directory = self.root / 'state/agents/agent'
-        write(directory / 'properties.json', {'id': 'agent', 'universe_id': 'universe'})
-        write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0})
-        with patch('multiverse.terminal.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
-            runner.cleanup_wrapper(directory / 'launches/old')
-        self.assertEqual(agents.runtime(directory)['state'], 'stopped')
-        self.assertIn('tmux unavailable', agents.runtime(directory)['error'])
+    def test_stale_runner_cleanup_never_touches_a_replacement(self):
+        """runner.cleanup_wrapper touches nothing once a replacement launch owns the runtime, detaches before it kills,
+        and stays retryable when tmux fails; fragile because cleanup runs late and asynchronously, and a break kills a
+        freshly resumed agent with nothing to say why."""
+        with self.subTest('a replacement owns the runtime'):
+            directory = self.root / 'state/agents/replaced'
+            write(directory / 'runtime.json', {'launch_id': 'replacement'})
+            with patch('multiverse.terminal.tmux.owned', side_effect=AssertionError('Must not control replacement')):
+                runner.cleanup_wrapper(directory / 'launches/old')
+            self.assertEqual(read(directory / 'runtime.json'), {'launch_id': 'replacement'})
+        with self.subTest('detach precedes kill, only for clients viewing the owned pane'):
+            directory = self.root / 'state/agents/owned'
+            write(directory / 'properties.json', {'id': 'owned', 'universe_id': 'universe'})
+            write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0,
+                                              'tmux': {'socket': '/fake', 'pane': '%1'}})
+            backend = Mock()
+            backend.run.side_effect = ['own\t%1\nother\t%2', '', '']
+            with patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
+                runner.cleanup_wrapper(directory / 'launches/old')
+            self.assertEqual(backend.run.call_args_list[1].args, ('detach-client', '-t', 'own'))
+            self.assertEqual(backend.run.call_args_list[2].args, ('kill-pane', '-t', '%1'))
+            self.assertEqual(agents.runtime(directory)['state'], 'dormant')
+        with self.subTest('a tmux failure leaves the wrapper retryable'):
+            directory = self.root / 'state/agents/failing'
+            write(directory / 'properties.json', {'id': 'failing', 'universe_id': 'universe'})
+            write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0})
+            with patch('multiverse.terminal.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
+                runner.cleanup_wrapper(directory / 'launches/old')
+            self.assertEqual(agents.runtime(directory)['state'], 'stopped')
+            self.assertIn('tmux unavailable', agents.runtime(directory)['error'])

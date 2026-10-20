@@ -55,6 +55,12 @@ describe('reading the catalog and the agents', () => {
     ])
     expect(agentRows([{ id: 'x', name: 'two words', universe: UNIVERSE }, { id: 'y', name: 'a,b', universe: UNIVERSE },
                       { id: 'z', name: 7 }, null], undefined, UNIVERSE)).toEqual([])
+    // list --json shows rows built from damaged records too; send can't reach them (Shao, a8925af).
+    const orphan = '0f0e0d0c-0b0a-4908-8706-050403020100'
+    expect(agentRows([{ id: orphan, name: orphan, harness: '', universe: UNIVERSE, damaged: { file: 'properties.json', reason: 'missing' } },
+                      { id: 'w', name: 'worker', harness: 'claude', universe: UNIVERSE, damaged: { file: 'runtime.json', reason: 'torn' } },
+                      { id: 'v', name: 'viewer', harness: 'claude', universe: UNIVERSE }], undefined, UNIVERSE))
+      .toEqual([{ text: 'viewer', description: '' }])
     expect(agentRows({ agents: [] })).toEqual([])
   })
 })

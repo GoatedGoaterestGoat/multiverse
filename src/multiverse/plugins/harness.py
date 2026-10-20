@@ -16,12 +16,14 @@ import re
 import shutil
 import subprocess
 
-from . import loader
+from . import agent_files, loader
 
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
 CORE_ENVIRONMENT = frozenset({"MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
                               "MV2_CLI", "MV2_PYTHON", "MV2_TMUX_SOCKET", "MV2_PLUGINS", "MV2_PLUGIN_PATH",
+                              # The shared-agent authority an adapter declares: a plugin never overrides it.
+                              "MV2_IDENTITY_MODE",
                               # Where a session's account, history and executables come from: core and the
                               # user decide these, never a plugin.
                               "HOME", "PATH", "CODEX_HOME", "CODEX_SQLITE_HOME", "CLAUDE_CONFIG_DIR",
@@ -81,8 +83,11 @@ class LaunchPlan:
     error: str | None = None  # why no plugin could be considered at all
 
     def record(self):
-        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing."""
-        return {"plugins": self.plugins, "status_items": self.status_items, **({"error": self.error} if self.error else {})}
+        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing, and the
+        launch's plugin problems (a plugin left out because it broke), which mv2 inspect shows."""
+        return {"plugins": self.plugins, "status_items": self.status_items,
+                **({"problems": list(self.problems)} if self.problems else {}),
+                **({"error": self.error} if self.error else {})}
 
     def skip(self, name, reason):
         entry = self.plugins.setdefault(name, {})
@@ -299,7 +304,8 @@ def version_of(executable):
     key = (real, status.st_mtime_ns, status.st_size)
     if key not in _versions:
         try:
-            result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             return None
         found = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout) if result.returncode == 0 else None
@@ -374,6 +380,9 @@ class SessionInfo:
     state: str = "unknown"
     native_mode: dict | None = None
     plugins: dict | None = None  # this launch's runtime.json `plugins` record
+    # The agent's current workspace as properties.json records it (saved on every launch; the core
+    # SessionHandle's), or None when none is recorded (1.11).
+    workspace: str | None = None
 
     @property
     def directory(self):
@@ -386,7 +395,7 @@ def session_info(session, family, runtime=None):
     return SessionInfo(directory.parent.parent.parent, session.agent_id, session.harness, family or "",
                        session.native_id, session.launch_id, session.state,
                        dict(session.native_mode) if session.native_mode else None,
-                       (runtime or {}).get("plugins"))
+                       (runtime or {}).get("plugins"), session.workspace or None)
 
 
 def capabilities(info, taken):
@@ -487,10 +496,13 @@ def write_item(agent_dir, name, text):
     if not text:
         path.unlink(missing_ok=True)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text + "\n")
-    temporary.replace(path)
+    try:
+        agent_files.ensure_dir(path.parent)  # never the agent's folder: a removed agent gets nothing written
+        temporary.write_text(text + "\n")
+        temporary.replace(path)
+    except FileNotFoundError:
+        return
 
 
 def as_json(plan):

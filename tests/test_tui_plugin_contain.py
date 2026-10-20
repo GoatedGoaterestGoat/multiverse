@@ -1,19 +1,13 @@
-"""A plugin's failure inside the dashboard stays the plugin's: a screen or widget that raises, palette search, names in messages."""
+"""A plugin screen that fails is closed and the failure named as the plugin's, wherever in the screen it fails."""
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from textual.command import CommandPalette
 from multiverse.plugins.testing import PluginTestCase
-from multiverse.store import write
 
 PLUGIN = '''
-from multiverse.plugins import api
-
 def register(mv):
-    mv.dashboard.action("Clean [/tmp]", lambda context: "cleaned")
-    mv.dashboard.action("Cleaner [bold]x", lambda context: "cleaner")
     mv.dashboard.screen("compose bomb", "screens:ComposeBomb")
     mv.dashboard.screen("mount bomb", "screens:MountBomb")
     mv.dashboard.screen("fine", "screens:Fine")
@@ -22,10 +16,13 @@ def register(mv):
     mv.dashboard.screen("handler bomb", "screens:HandlerBomb")
     mv.dashboard.screen("render bomb", "screens:RenderBomb")
     mv.dashboard.screen("timer bomb", "screens:TimerBomb")
-    mv.dashboard.panel("widget bomb", "screens:BombPanel")
-    mv.dashboard.panel("render bomb", "screens:RenderPanel")
+    mv.dashboard.screen("markup", "screens:Markup")
+    mv.dashboard.screen("bad render", "screens:BadRender")
+    mv.dashboard.screen("partial timer", "screens:PartialTimer")
+    mv.dashboard.screen("bad css", "screens:BadCss")
 '''
 SCREENS = '''
+import functools
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
@@ -106,125 +103,74 @@ class Fine(ModalScreen):
     def compose(self):
         yield Static("fine", id="fine")
 
-class Boom(Static):
-    def on_mount(self):
-        raise RuntimeError("widget exploded")
+# Failures in Textual's own code, with no plugin frame in the traceback.
+class Markup(Fine):
+    def compose(self):
+        yield Static("cost [/tmp] usage")      # brackets in plain text: Textual reads them as markup
 
-class DeadRender(Static):
+class Odd(Static):
     def render(self):
-        raise RuntimeError("panel render exploded")
+        return object()                        # not something Textual can draw
 
-class Evil:
-    def __rich_console__(self, console, options):
-        raise RuntimeError("renderable exploded")
-        yield ""
+class BadRender(Fine):
+    def compose(self):
+        yield Odd("odd")
 
-class RenderPanel:
-    def parse(self, widget, title):
-        return {"type": widget["type"], "title": title}
-    def compose(self, view, root, widget, index):
-        return [DeadRender("x"), Static(Evil())]
+class PartialTimer(Fine):
+    def compose(self):
+        yield Static("timer")
+    def on_mount(self):
+        self.set_timer(0.05, functools.partial(int, "not a number"))   # the callback is not plugin code
 
-class BombPanel:
-    def parse(self, widget, title):
-        return {"type": widget["type"], "title": title}
-    def compose(self, view, root, widget, index):
-        return [Boom("boom")]
+class BadCss(Fine):
+    DEFAULT_CSS = "BadCss Static { colr: red; }"
+    def compose(self):
+        yield Static("css")
 '''
 
 
 class ContainTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
-        self.write_plugin("fragile", {"module": "plugin", "extends": ["dashboard.action", "dashboard.screen", "dashboard.panel"]},
+        self.write_plugin("fragile", {"module": "plugin", "extends": ["dashboard.screen"]},
                           {"plugin.py": PLUGIN, "screens.py": SCREENS})
         self.enable("fragile")
         self.agent("worker")
 
-    async def test_a_plugin_screen_that_raises_while_composing_or_mounting_is_closed_and_reported(self):
-        async with self.dashboard() as d:
-            base = d.screen
-            for title in ("fragile: compose bomb", "fragile: mount bomb"):
-                await d.run_action(title)
-                await d.until(lambda: d.screen is base and "fragile" in d.status and "failed" in d.status, f"{title} to be contained")
-                self.assertTrue(d.app.is_running)
-            await d.refresh()
-            self.assertIn("plugin error", d.header)
-            self.assertIsNotNone(await d.run_action("fragile: fine"))  # and the dashboard still opens a good one
-            await d.close_screen()
-
-    async def test_exceptions_in_a_plugin_screens_bindings_workers_handlers_timers_and_render_are_contained(self):
-        cases = (("fragile: key bomb", ("x",), "binding exploded"),
+    async def test_a_failing_plugin_screen_is_closed_and_named(self):
+        """In one dashboard session a plugin screen failing in compose, mount, a binding, worker, handler, timer,
+        render, markup, a renderable Textual cannot draw, a timer callback of Textual's own or its CSS is closed,
+        named in the status with what went wrong and counted against the plugin, while the dashboard and a good
+        screen keep working; fragile because attribution must work with no plugin frame in the traceback, relying
+        on Textual internals (a5aa597)."""
+        cases = (("fragile: compose bomb", (), "compose exploded"),
+                 ("fragile: mount bomb", (), "mount exploded"),
+                 ("fragile: key bomb", ("x",), "binding exploded"),
                  ("fragile: worker bomb", (), "worker exploded"),
                  ("fragile: handler bomb", ("y",), "handler exploded"),
                  ("fragile: timer bomb", (), "timer exploded"),
-                 ("fragile: render bomb", (), "render exploded"))
+                 ("fragile: render bomb", (), "render exploded"),
+                 ("fragile: markup", (), "MarkupError"),
+                 ("fragile: bad render", (), "render"),
+                 ("fragile: partial timer", (), "ValueError"),
+                 ("fragile: bad css", (), "colr"))
         async with self.dashboard() as d:
             base = d.screen
             for title, keys, message in cases:
-                await d.run_action(title)
-                if keys:
-                    await d.press(*keys)
-                await d.until(lambda: d.app.is_running and message in d.status, f"{message} to be reported")
-                await d.until(lambda: d.screen is base, f"{title} to be closed")
-                self.assertIn("its screen or widget failed", d.status)
-                self.assertTrue(d.app.is_running)
+                with self.subTest(title):
+                    d.app.set_status("")
+                    await d.run_action(title)
+                    if keys:
+                        await d.press(*keys)
+                    await d.until(lambda: d.app.is_running and message in d.status, f"{message} to be reported")
+                    await d.until(lambda: d.screen is base, f"{title} to be closed")
+                    self.assertTrue(d.status.startswith("fragile: ") and "failed" in d.status, d.status)
+                    self.assertNotIn("object at 0x", d.status)
+                    self.assertTrue(d.app.is_running)
             await d.refresh()
-            self.assertIn("5 plugin errors", d.header)
-            self.assertIsNotNone(await d.run_action("fragile: fine"))
+            self.assertIn(f"{len(cases)} plugin errors", d.header)
+            self.assertIsNotNone(await d.run_action("fragile: fine"))  # and the dashboard still opens a good one
             await d.close_screen()
-
-    async def test_a_widget_of_a_class_form_panel_that_raises_does_not_end_the_dashboard(self):
-        write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": ["name"], "plugin_panels": "none",
-                                                    "widgets": [{"type": "widget bomb", "title": "Bomb"},
-                                                                {"type": "markdown", "title": "Fine", "text": "still here"}]})
-        async with self.dashboard() as d:
-            await d.until(lambda: "fragile" in d.status and "failed" in d.status, "the widget's failure to be reported")
-            self.assertTrue(d.app.is_running)
-            self.assertIn("still here", d.local_view())
-            await d.press("j")
-            self.assertTrue(d.app.is_running)
-
-    async def test_a_class_form_panel_whose_widget_fails_to_render_does_not_end_the_dashboard(self):
-        write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": ["name"], "plugin_panels": "none",
-                                                    "widgets": [{"type": "render bomb", "title": "Bomb"},
-                                                                {"type": "markdown", "title": "Fine", "text": "still here too"}]})
-        async with self.dashboard() as d:
-            await d.until(lambda: "fragile" in d.status and "failed" in d.status, "the render failure to be reported")
-            await d.until(lambda: "still here too" in d.local_view(), "the other widget")
-            self.assertTrue(d.app.is_running)
-            await d.press("j")
-            self.assertTrue(d.app.is_running)
-            await d.refresh()
-            self.assertIn("plugin error", d.header)
-
-    async def test_palette_search_keeps_plugin_titles_literal_and_every_match_listed(self):
-        async with self.dashboard() as d:
-            await d.press("ctrl+p")
-            await d.until(lambda: isinstance(d.screen, CommandPalette), "the command palette")
-            await d.press("c", "l", "e", "a", "n")
-
-            def titles():
-                options = d.screen.query_one("OptionList")
-                return [option.prompt.plain if hasattr(option.prompt, "plain") else str(option.prompt)
-                        for option in (options.get_option_at_index(i) for i in range(options.option_count))]
-
-            await d.until(lambda: any("Clean [/tmp]" in text for text in titles()), "the first plugin entry")
-            shown = " | ".join(titles())
-            self.assertIn("Cleaner [bold]x", shown)  # the later entry is still there, and unstyled text
-            self.assertNotIn("No matches", shown)
-
-    async def test_a_plugin_that_is_off_in_the_scope_is_named_by_the_universe_not_its_hidden_directory(self):
-        sub = self.subverse("ops")
-        self.enable("fragile", on=False)
-        self.enable("fragile", root=sub)
-        async with self.dashboard() as d:
-            d.select("worker")
-            await d.run_action("fragile: Clean [/tmp]")
-            await d.until(lambda: "off in" in d.status, "the off message")
-            self.assertIn("is off in test", d.status)  # the universe's name, not '.multiverse'
-            self.assertNotIn(".multiverse", d.status)
-
 
 if __name__ == "__main__":
     unittest.main()

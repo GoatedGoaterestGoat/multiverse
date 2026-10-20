@@ -19,6 +19,9 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('pi') and shutil.which('tmux'), 'Pi and tmux required')
 class PiTimingTest(TerminalBase):
     def test_steering_arrives_after_tool_before_followup_without_aborting(self):
+        """In a real Pi with an offline provider a steer lands at the next tool boundary and a follow-up after the turn,
+        nothing is aborted and receipts confirm; fragile because it depends on Pi's internal steering queue, which
+        changes between versions."""
         path = self.root / 'harnesses/pi/harness.json'
         spec = read(path)
         spec['settings'] = {'inbox_bridge': True, 'args': ['--offline', '--no-extensions', '--no-skills',

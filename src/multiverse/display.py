@@ -36,11 +36,19 @@ def error_text(error, tail=2):
     return " | ".join(line if line == "…" else shorten(line, ERROR_LENGTH) for line in lines)
 
 
+def live_label(row):
+    """A proven in-progress preparation has no native process to call alive yet."""
+    facts = row.get('runtime') or {}
+    if row['live'] == 'unknown' and facts.get('preparing') is True and facts.get('state') == 'starting':
+        return 'starting'
+    return row['live']
+
+
 def state(row):
     """What a person asks first: what a live agent is doing, otherwise why it is not live."""
     if row["live"] == "alive":
         return row["status"] if row.get("status") not in (None, "unknown", "—") else "alive"
-    return row["live"]
+    return live_label(row)
 
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
@@ -59,16 +67,55 @@ def label(record):
 
 
 def outcome(record, verb, failure):
-    """One plain line for a finished launch; a failed wait raises with its reason."""
+    """A launch summary and optional explanations; a failed wait raises with its reason."""
     name = record["name"]
     if record.get("ok") is False:
         raise ValueError(f"{name} {failure}: {record.get('error') or 'the launch did not finish'}")
-    return f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
+    summary = f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
+    return with_notices(summary, record)
+
+
+def with_notices(summary, record):
+    return "\n".join([summary, *notice_lines(record.get('notices'))])
+
+
+def notice_lines(*groups):
+    """Optional presentation strings: one line each, no duplicates or coercion."""
+    result = []
+    seen = set()
+    for group in groups:
+        if not isinstance(group, (list, tuple)):
+            continue
+        for value in group:
+            if isinstance(value, str):
+                line = clean(value).strip()
+                if line and line not in seen:
+                    seen.add(line)
+                    result.append(line)
+    return result
+
+
+def agent_name(root, reference):
+    """The agent's name for a sentence, or the reference as given when its record can't be read."""
+    from .universe import agents
+    from .store import read
+    try:
+        return read(agents.directory(root, reference) / "properties.json").get("name") or reference
+    except (OSError, ValueError, KeyError, TypeError):
+        return reference
+
+
+def sentence(text):
+    """`text` cleaned for one line, starting with a capital and ending with a period."""
+    text = " ".join(clean(text).split()).rstrip(".")
+    return (text[:1].upper() + text[1:] + ".") if text else ""
 
 
 def cause(error, name, failure):
     """The reason behind a failed launch, without the record ID and recovery advice around it."""
-    return ValueError(f"{name} {failure}: {error.__cause__ or error}")
+    from .universe.records import RecordError
+    reason = f'{error.file}: {error.reason}' if isinstance(error, RecordError) else error.__cause__ or error
+    return ValueError(f"{name} {failure}: {reason}")
 
 
 # Measured usage: a NativeResult dict whose value holds cumulative counters,

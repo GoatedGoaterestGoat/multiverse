@@ -27,7 +27,7 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
-function world(on: On) {
+function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined } = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
   const clock = mock.clock(on)
   // Claude's core for the engine events the tests raise: each passes through.
@@ -39,23 +39,36 @@ function world(on: On) {
   const appended: unknown[] = []
   on('session.append', async ($, e, next) => { appended.push(e.message.content); return next(e) })
   on('classic.PermissionRequest', async () => ({}))
+  on('classic.SessionStart', async () => ({}))
   on('prompt.attachment', async ($, e) => ({ text: e.text }))
-  on('ui.log', async () => ({ value: undefined }))
   // The host: files the mod writes and the status reports it runs.
   const files = new Map<string, string>()
   on('fs.write', async ($, e) => { files.set(e.path, e.text); return { value: undefined } })
   const statuses: string[] = []
+  const moves: string[][] = []
+  const reads: (string | undefined)[] = []
   on('process.run', async ($, e) => {
     const index = e.argv.indexOf('--status')
     if (index >= 0) statuses.push(e.argv[index + 1] ?? '')
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv[0] === 'sh') {  // the mod reading Claude's process file
+      reads.push(options.file?.())
+      const id = reads.at(-1)
+      return { value: { exitCode: id ? 0 : 1, stdout: id ? JSON.stringify({ sessionId: id }) : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    const move = e.argv.includes('--native-session-id')
+    if (move) moves.push([...e.argv])
+    const exitCode = move ? options.moveExit ?? 0 : 0
+    return { value: { exitCode, stdout: '', stderr: exitCode ? 'refused: bound to another agent' : '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  on('session.id', async () => ({ value: options.sessionId ?? '11111111-1111-4111-8111-111111111111' }))
+  const logs: string[] = []
+  on('ui.log', async ($, e) => { logs.push(String(e.text ?? e)); return { value: undefined } })
   const submitted: Submitted[] = []
   on('prompt.submit', async ($, e) => {
     submitted.push({ text: e.text, asUser: e.origin.kind === 'plugin' && e.origin.asUser === true })
     return { text: e.text, origin: e.origin }
   })
-  return { clock, files, statuses, submitted, appended }
+  return { clock, files, statuses, submitted, appended, moves, logs, reads }
 }
 
 function wrapped(text: string, midTurn = true) {
@@ -65,6 +78,72 @@ function wrapped(text: string, midTurn = true) {
 
 const turnComplete = (turnId: string) =>
   ({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'answer' as const })
+
+describe('session moves', () => {
+  const OLD = '11111111-1111-4111-8111-111111111111'
+  const NEW = '22222222-2222-4222-8222-222222222222'
+
+  test('a /clear tells mv2 the session this process moved to, once', async ($, on) => {
+    let file = NEW
+    const w = world(on, { sessionId: OLD, file: () => file })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
+    await w.clock.settle()
+    expect(w.moves).toEqual([['/python', '-m', 'multiverse.tools.runtime_update', '--native-session-id', NEW,
+                              '--previous-session-id', OLD, '--session-reason', 'clear']])
+    // A second /clear moves on from the new session.
+    const NEXT = '33333333-3333-4333-8333-333333333333'
+    file = NEXT
+    await $.classic.SessionStart({ source: 'clear', session_id: NEXT } as never)
+    await w.clock.settle()
+    expect(w.moves.at(-1)?.slice(4, 7)).toEqual([NEXT, '--previous-session-id', NEW])
+  })
+
+  test('nothing is reported when the session did not change or was never known', async ($, on) => {
+    const w = world(on, { sessionId: OLD })
+    await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)  // before the mod knew its session
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await $.classic.SessionStart({ source: 'clear', session_id: OLD } as never)
+    await w.clock.settle()
+    expect(w.moves).toEqual([])
+  })
+
+  test("the move is reported only once Claude's process file names the new session", async ($, on) => {
+    let polls = 0
+    const w = world(on, { sessionId: OLD, file: () => (++polls < 4 ? OLD : NEW) })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
+    for (let i = 0; i < 10 && w.moves.length === 0; i++) await w.clock.advance(100)
+    expect(w.reads.slice(0, 4)).toEqual([OLD, OLD, OLD, NEW])  // still the old session three times, then the new one
+    expect(w.moves.length).toBe(1)
+  })
+
+  test('a process file that never names the new session reports nothing', async ($, on) => {
+    const w = world(on, { sessionId: OLD, file: () => OLD })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
+    for (let i = 0; i < 60; i++) await w.clock.advance(100)
+    await w.clock.settle()
+    expect(w.moves).toEqual([])
+    expect(w.logs).toContain("multiverse: the move to a new session was not recorded: Claude's process file never named it")
+  })
+
+  test('a refused move is logged once and never retried', async ($, on) => {
+    const w = world(on, { sessionId: OLD, moveExit: 1, file: () => NEW })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
+    await w.clock.settle()
+    await w.clock.advance(60000)
+    expect(w.moves.length).toBe(1)
+    expect(w.logs.filter((line) => line.includes('not recorded'))).toEqual([
+      'multiverse: the move to a new session was not recorded: refused: bound to another agent'])
+  })
+})
 
 describe('status', () => {
   test('idle when the session starts, working in a turn, waiting on a question, idle after', async ($, on) => {

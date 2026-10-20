@@ -2,13 +2,20 @@
 
 For harness integrations (the Claude mod, the Pi extension), run as
 `python -m multiverse.tools.runtime_update`; it is not an `mv2` command.
+An integration also reports here that its process moved to another native
+session (Claude's /clear), and core rebinds the agent to it.
 """
 import argparse
 import json
+import os
 import re
 
+from ..store import read
 from ..universe import agents
 from ._common import add_agent, callback
+
+# What an integration itself can know moved its session; core records "detected" and "seeded".
+SESSION_REASONS = ("clear", "new", "resume", "fork")
 
 BRIDGE_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 BRIDGE_ID_LENGTH = 40
@@ -43,6 +50,9 @@ def configure(parser):
 
     parser.add_argument("--bridge", type=bridge_argument, metavar="ID",
                         help="the integration's own bridge id, for example claude-mod-v1, or none")
+    parser.add_argument("--native-session-id", metavar="ID", help="the native session this process is on now")
+    parser.add_argument("--previous-session-id", metavar="ID", help="the native session it moved from")
+    parser.add_argument("--session-reason", choices=SESSION_REASONS, help="why it moved, for example clear")
 
 def number(value, low=0, high=None):
     ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= low
@@ -71,10 +81,16 @@ def usage(text):
     return value
 
 
-def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None):
-    if status is None and usage_json is None:
-        raise ValueError("Specify --status or --usage-json")
+def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
+        native_session_id=None, previous_session_id=None, session_reason=None):
+    session = (native_session_id, previous_session_id, session_reason)
+    if any(session) and not all(session):
+        raise ValueError("--native-session-id, --previous-session-id and --session-reason go together")
+    if status is None and usage_json is None and native_session_id is None:
+        raise ValueError("Specify --status, --usage-json or --native-session-id")
     root, directory, launch_id = callback(root, agent)
+    if native_session_id is not None:
+        return rebind(root, directory, launch_id, previous_session_id, native_session_id, session_reason)
     changes = {}
     if status is not None:
         changes["status"] = status
@@ -83,6 +99,27 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None):
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
     return agents.update_runtime(directory, launch_id, **changes)
+
+
+def rebind(root, directory, launch_id, previous, session_id, reason):
+    """Move this exact launch's agent to the session its process is on now.
+
+    Core refuses an outdated launch, a previous session that is no longer the agent's and a session bound to
+    another agent. Where the harness can observe its process's session (Claude's process file), the move must be
+    to the session it shows. Where it cannot, any process holding this launch's identity can move the pointer.
+    `home` is the harness's storage as this launch sees it: an integration runs in the launch's environment.
+    """
+    from .. import harnesses
+    from ..harnesses.types import SessionHandle
+    properties = read(directory / "properties.json")
+    adapter = harnesses.load(root, properties.get("harness", ""))
+    home = getattr(adapter, "session_home", lambda environment: None)(dict(os.environ))
+    observer = getattr(adapter, "observed_binding", None)
+    if callable(observer) and properties.get("workspace"):
+        observed = observer(SessionHandle.from_records(properties, read(directory / "runtime.json"), directory))
+        if observed is not None and observed.native_id != session_id:
+            raise ValueError("Not moved: this launch's process is on another session")
+    return agents.rebind_session(root, directory.name, previous, session_id, reason, launch_id, home=home)
 
 
 if __name__ == "__main__":

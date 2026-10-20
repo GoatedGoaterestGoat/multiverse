@@ -14,10 +14,22 @@ BUILTINS = {'codex': CodexAdapter, 'claude': ClaudeAdapter, 'pi': PiAdapter}
 
 def load(root: Path, name: str) -> HarnessAdapter:
     # Avoid importing universe here: core depends on adapters, not vice versa.
-    if not name or Path(name).name != name or name in ('.', '..'):
+    if not isinstance(name, str) or not name or Path(name).name != name or name in ('.', '..'):
         raise ValueError('Invalid harness name')
     path = root / 'harnesses' / name / 'harness.json'
-    config = json.loads(path.read_text())
+    try:
+        config = json.loads(path.read_text())
+    except FileNotFoundError as error:
+        raise ValueError(f'Unknown harness {name!r}; configuration not found: {path}') from None
+    except (OSError, ValueError, RecursionError) as error:
+        raise ValueError(f'{path}: {error}') from None
+    try:
+        return _configured(name, config)
+    except (OSError, ValueError) as error:
+        raise ValueError(f'{path}: {error}') from None
+
+
+def _configured(name, config):
     if not isinstance(config, dict):
         raise ValueError('Harness configuration must be an object')
     if config.get('schema') == 1:

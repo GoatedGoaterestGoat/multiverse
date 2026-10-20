@@ -35,26 +35,36 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 | `follow-up` | The next thing to do | After the current turn ends |
 | `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it, with the message as its first prompt. An `inbox-only` message never wakes an agent.
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+
+If a name or UUID prefix matches several agents, the error lists their names
+and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
 
 A running agent without a live connection can't receive `steer` or `follow-up` messages, so send it `inbox-only` messages instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
 
 ## Read the result
 
-`send` prints one line per recipient. These are the common ones:
+`send` prints one line per recipient. Confirmations go to stdout. Failures and uncertain deliveries go to stderr, so redirecting stdout doesn't hide them. These are the common ones:
 
 | Result | Meaning | What to do |
 | --- | --- | --- |
 | `NAME: message confirmed in its conversation.` | The agent's session recorded it | Nothing |
-| `NAME has your message for its next turn.` / `queued for its next turn` | It was accepted and waits for the turn to end | Nothing. Don't resend it |
+| `Sent to NAME; it reads this at its next pause.` | A Claude agent took it; it joins the running turn at the next tool result, or starts a turn if idle | Nothing |
+| `NAME has your message for its next turn.` | A `follow-up` was accepted. It waits for the turn to end, or starts one at once if the agent is idle | Nothing. Don't resend it |
+| `NAME has your message queued for its next turn.` | It's in a connected Codex agent's queue, waiting for the turn to end | Nothing. Don't resend it |
+| `NAME started a turn with your message.` | The agent was idle, so the message started a turn | Nothing |
+| `NAME has your message queued; its next turn has not started.` | It's queued, but the turn didn't start | Run `mv2 deliver NAME --check` later; don't resend |
 | `NAME: message accepted; no confirmation yet. Do not resend.` | The session took it, but no confirmation has arrived | Run `mv2 deliver NAME --check` later |
 | `NAME was stopped; resuming it with your message.` | The agent is starting with your message as its prompt | Nothing |
 | `NAME is starting; your message will be delivered when ready.` | It's waiting for the session to be ready | Nothing |
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
-| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry` |
+| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
+
+Failed delivery and check lines go to stderr and exit nonzero; successful lines
+go to stdout. With `--json`, the result stays on stdout.
 
 ## Check and retry deliveries
 
@@ -63,7 +73,38 @@ mv2 deliver worker --check    # settle uncertain deliveries, record confirmation
 mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
+`--check` also reports definite failures and exits nonzero while any checked
+message failed. It does not resend them. List, inspect and doctor show how many
+messages were not delivered and the `mv2 deliver NAME --retry` command.
+
+Older definite refusals receive the same classification when list, inspect and
+doctor count failures; reading does not rewrite the ledger. If `deliver --retry`
+finalizes earlier refusals, it says how many and does not resend them. After an
+explicit ledger reset, `--check` gives the manual-reading advice for untracked
+messages on a running launch-only agent, without repeatedly asking an unsupported
+receipt API. This launch-only classification never makes accepted or uncertain
+tracking retryable.
+
+A refused live delivery is final when the harness is configured without messaging. It stays in inbox
+history as `launch-only`, but is not counted as a failure to retry and does not
+make doctor report a problem. Resend with `--delivery inbox-only` for manual
+reading, or attach. A new send to a stopped agent still wakes it when its harness
+supports that; a failed wake remains retryable when consumption is ruled out.
+
+A plain launch caused by an automatic fallback is temporary: fix its cause, then
+resume with a working bridge and run `mv2 deliver NAME --retry`. The same applies
+after enabling messaging for an agent originally launched without it. Once the
+connection is ready, an explicit `--retry` rechecks even a refusal recorded as
+final. If delivery is still unavailable, the refusal stays final; `--check` and
+ordinary reads never reopen it. Older refusals that lack explicit final evidence are classified by the current harness
+setting; accepted and uncertain deliveries are never reopened.
+
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
+
+An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
+until its message is confirmed in the conversation. The check reports an entry
+that is still queued without resending it. `--retry` selects definite failures;
+it never resends an accepted or uncertain submission.
 
 ## Read an inbox
 
@@ -77,7 +118,12 @@ mv2 inbox --agent worker --all --since 2h
 mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
 ```
 
-Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details.
+Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
+
+An unreadable or damaged delivery ledger is reported with its full file path and
+a repair/reset hint, including for `inbox --all` and `--peek`. Back it up before
+repairing or resetting it. Check uncertain deliveries before retrying; resetting
+bookkeeping is not evidence that the agent never received an older message.
 
 `--wait` without `--timeout` waits indefinitely. When a timeout runs out, `inbox` prints a line and exits 1.
 
@@ -103,6 +149,36 @@ With a live connection, Claude Code and Pi have a `/multiverse` command you can 
 
 In Codex and launch-only sessions, ask the agent in words instead, such as "Please run /multiverse list". You can also run `mv2 catalog` yourself.
 
+## Ask a side question
+
+```sh
+mv2 ask worker --question 'Which file holds the parser?'
+```
+
+`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. Only Claude Code with a live connection supports it. When there is no answer, `ask` prints why and exits 1. Right after a start, a resume or `/clear`, Claude can't answer until the agent finishes its next turn.
+
 ## Scripts
 
 Every command on this page takes `--json` and then prints the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
+
+If inbox-state.json is damaged, send still saves the new message, names the file,
+and makes no native submission. Repair or reset that file before retrying.
+Only messages with saved proof that submission never began become retryable;
+resetting delivery state does not make older accepted or uncertain messages safe
+to resend. Doctor names damaged delivery state and incomplete inbox tails.
+Back up an incomplete log before repairing its final line; complete messages
+remain readable and are never overwritten.
+
+A wake launch that exits during startup becomes a definite failure only when
+the harness's exact conversation record shows no consumption of its starting
+prompt. The result says it was saved for explicit retry. If the evidence was
+unreadable, restore access to the named storage path and run `mv2 deliver NAME --check`.
+It rechecks the original launch's conversation, prompt and start time without
+sending anything. Recorded consumption confirms the message; proven absence
+makes it retryable. Missing original launch facts or unreadable records keep it
+uncertain and explain what to repair. Harnesses without this check stay uncertain.
+
+A send from a legacy launch must carry that agent's exact current launch ID,
+just as report does. An outdated launch is refused before any message is saved.
+Declared stable conversation identities retain their existing native-session
+and storage proof; they do not acquire a replacement terminal's launch ID.

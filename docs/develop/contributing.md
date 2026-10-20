@@ -53,11 +53,11 @@ For a quick look at a UI change, `scripts/render_tui.py --output DIR` saves SVG 
 ## Run tests
 
 ```sh
-cd tests
-PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" -m unittest test_refresh
+PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" tests/run.py test_refresh
+PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" tests/run.py
 ```
 
-Run modules one at a time, with `PYTHONPATH` pinned to your checkout. [Testing](testing.md) explains why, what needs tmux or native CLIs, and which fixtures to use.
+Name modules for a focused run, or run the whole suite in about two and a half minutes. Pin `PYTHONPATH` to your checkout. [Testing](testing.md) explains why, what needs tmux or native CLIs, and which fixtures to use.
 
 ## Work in a worktree
 

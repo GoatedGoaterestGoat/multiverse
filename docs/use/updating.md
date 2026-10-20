@@ -21,6 +21,7 @@ After updating, do these three things:
 
 1. **Restart the dashboard.**
 2. **Restart running agents** when convenient. Stop each one with `K` and resume it with `r`. Until then, they keep running the old code.
+   A Codex agent whose `report` or `inbox` says to restart it can't report until you do. Close any other Codex client that has its conversation open, then stop and resume it. See [troubleshooting](troubleshooting.md#codex-restart-the-agent-mv2-kill-then-mv2-resume-with-no-other-client-attached).
 3. **Refresh each universe**, as described below.
 
 ## Refresh a universe

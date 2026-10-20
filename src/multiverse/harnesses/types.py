@@ -8,6 +8,26 @@ class BridgeUnavailable(ValueError):
     """Preparation failed before a native child or conversation was started."""
 
 
+class LocalProtocolError(Exception):
+    """Reject one correlated relay frame without changing launch health.
+
+    The connection view supplies a previously correlated request ID. None drops
+    the frame. Client replies reject client requests or native responses;
+    upstream replies reject native server requests. No primary callbacks run.
+    """
+    def __init__(self, message: str, *, request_id=None, destination='client', code=-32602):
+        if request_id is not None and (isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
+            raise ValueError('Local protocol request ID must be a string or integer')
+        if destination not in ('client', 'upstream'):
+            raise ValueError('Local protocol reply destination must be client or upstream')
+        if isinstance(code, bool) or not isinstance(code, int) or not -(2 ** 31) <= code < 2 ** 31:
+            raise ValueError('Local protocol error code must be a signed 32-bit integer')
+        if not isinstance(message, str):
+            raise ValueError('Local protocol error message must be a string')
+        super().__init__(message)
+        self.request_id, self.destination, self.code = request_id, destination, code
+
+
 def normalize_session_id(value: str) -> str:
     """Normalize the UUID used by current harnesses; never discover a session."""
     try:
@@ -108,6 +128,30 @@ class RpcProxySpec:
 
 
 @dataclass(frozen=True)
+class AgentIdentitySpec:
+    """Adapter-declared authority of tools in one agent's shared conversation.
+
+    This does not authorize runner callbacks or attachment control. The native
+    marker and storage names are provider-owned; core validates persisted scope.
+    """
+    mode: str
+    native_id_env: str
+    storage_env: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StartupRetrySpec:
+    """One replacement argv after a proved, exited pre-start native refusal.
+
+    Core retains every other selected command field. The adapter's
+    startup_retryable snapshot predicate must identify the exact native error;
+    only core can authorize a retry and publish these conditional notices.
+    """
+    argv: tuple[str, ...]
+    notices: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """`environment` is set for the launched process; core identity variables win."""
     argv: tuple[str, ...]
@@ -122,6 +166,10 @@ class CommandSpec:
     # What the plugins on in the agent's universe added to this launch, as the adapter applied them
     # (multiverse.plugins.harness.LaunchPlan.record()); lifecycle stores it as runtime.json `plugins`.
     plugins: Mapping[str, Any] | None = None
+    agent_identity: AgentIdentitySpec | None = None
+    # Presentation for this selected candidate, including a late plain fallback.
+    notices: tuple[str, ...] = ()
+    startup_retry: StartupRetrySpec | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +203,7 @@ class LaunchContext:
     endpoint: NativeEndpoint | None = None
     executor: 'Executor | None' = None
     resume_prompt: str | None = None
+    agent_environment: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -194,10 +243,20 @@ class SessionHandle:
     native_relay: Mapping[str, Any] | None = None
     service: NativeServiceHandle | None = None
     attachment: AttachmentSpec | None = None
+    home: str | None = None
+    pid: int | None = None
+    pid_started: str | None = None
+    # Core's exact-conversation pause/restart context; no native ownership grant.
+    queue_state: Mapping[str, Any] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
         endpoint = runtime.get('control_endpoint')
+        queue = runtime.get('queue_state')
+        if not isinstance(queue, dict) or queue.get('native_session_id') != properties.get('native_session_id'):
+            queue = None
+        elif queue:
+            queue = {key: value for key, value in queue.items() if key != 'restart'}
         return cls(properties['id'], properties['harness'], properties['workspace'],
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
@@ -205,7 +264,20 @@ class SessionHandle:
                    runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
                    runtime.get('native_versions'), runtime.get('native_relay'),
                    NativeServiceHandle.from_record(runtime.get('native_service')),
-                   AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None)
+                   AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None,
+                   properties.get('native_session_home'), runtime.get('pid'), runtime.get('pid_started'), queue)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservedBinding:
+    """Adapter-verified identity of the exact launch process, never history inference."""
+    native_id: str
+    home: str
+    evidence: str
+
+
+class BindingObserver(Protocol):
+    def observed_binding(self, session: SessionHandle) -> ObservedBinding | None: ...
 
 @dataclass(frozen=True)
 class Message:

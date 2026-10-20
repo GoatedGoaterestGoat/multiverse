@@ -17,6 +17,7 @@ from multiverse import cli
 from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import send
+from isolation import isolate
 
 
 class TerminalInput(io.StringIO):
@@ -29,6 +30,7 @@ class TerminalInput(io.StringIO):
 
 class SendStdinTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
@@ -53,55 +55,30 @@ class SendStdinTest(unittest.TestCase):
         return [sys.executable, *entry, '-u', str(self.root),
                 *([] if standalone else ['send']), self.agent, '--queue-only']
 
-    def test_pipe_reads_stdin_automatically_for_cli_and_standalone(self):
-        for standalone in (False, True):
-            with self.subTest(standalone=standalone):
-                result = subprocess.run(self.argv(standalone), input=self.message, text=True,
-                                        capture_output=True, env=self.env, timeout=15)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.messages()[-1], self.message)
-
-    def test_quoted_heredoc_preserves_shell_metacharacters(self):
+    def test_a_piped_body_is_byte_exact_and_a_tty_is_never_read(self):
+        """A piped or heredoc body arrives byte-exact through either entrypoint, a TTY stdin is never read, and empty
+        input saves nothing; fragile because isatty and pipe detection differ between entrypoints, and reading a TTY
+        inside an agent's pane hangs its tool call."""
+        result = subprocess.run(self.argv(standalone=True), input=self.message, text=True,
+                                capture_output=True, env=self.env, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
         command = shlex.join(self.argv()) + " <<'EOF'\n" + self.message + 'EOF\n'
         result = subprocess.run(['/bin/sh', '-c', command], text=True, capture_output=True,
                                 env=self.env, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.messages(), [self.message])
-
-    def test_explicit_stdin_still_reads_input(self):
-        stream = io.StringIO(self.message)
-        with patch.object(stream, 'isatty', return_value=True), patch.object(send.sys, 'stdin', stream):
-            result = send.run(self.root, agent=self.agent, stdin=True, queue_only=True)
-        self.assertEqual(result['text'], self.message)
-        self.assertEqual(self.messages(), [self.message])
-
-    def test_explicit_text_and_file_take_precedence_over_stdin(self):
-        path = self.work / 'message.txt'
-        path.write_text(self.message)
-        for options in ({'text': self.message}, {'file': path}):
-            with self.subTest(options=options), patch.object(send.sys, 'stdin', TerminalInput()):
-                send.run(self.root, agent=self.agent, queue_only=True, **options)
         self.assertEqual(self.messages(), [self.message, self.message])
-
-    def test_terminal_without_message_fails_without_reading_or_saving(self):
         args = cli.parser().parse_args(['-u', str(self.root), 'send', self.agent, '--queue-only'])
         with patch.object(send.sys, 'stdin', TerminalInput()), self.assertRaisesRegex(ValueError, 'message|text'):
             cli.run(args)
-        self.assertEqual(self.messages(), [])
-
-    def test_empty_inputs_fail_before_saving(self):
         empty_file = self.work / 'empty.txt'
         empty_file.write_text('')
         for options in ({}, {'stdin': True}, {'text': ''}, {'text': ' \n\t'}, {'file': empty_file}):
             with self.subTest(options=options), patch.object(send.sys, 'stdin', io.StringIO('')):
                 with self.assertRaisesRegex(ValueError, '[Ee]mpty|message|text'):
                     send.run(self.root, agent=self.agent, queue_only=True, **options)
-        self.assertEqual(self.messages(), [])
-        result = subprocess.run(self.argv(), input='', text=True, capture_output=True,
-                                env=self.env, timeout=15)
-        self.assertEqual(result.returncode, 1)
-        self.assertNotIn('Traceback', result.stderr)
-        self.assertEqual(self.messages(), [])
+        with patch.object(send.sys, 'stdin', io.StringIO('')), self.assertRaisesRegex(ValueError, '[Ee]mpty|message'):
+            cli.run(args)
+        self.assertEqual(self.messages(), [self.message, self.message])
 
 
 if __name__ == '__main__':

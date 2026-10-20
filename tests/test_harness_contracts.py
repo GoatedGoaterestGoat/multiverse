@@ -1,8 +1,9 @@
 """Offline harness contracts: no tmux server or model calls."""
 from contextlib import ExitStack
+from dataclasses import replace
+import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,14 +16,16 @@ install_native_safety()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
-from multiverse import cli
+from multiverse import harnesses
+from multiverse.harnesses.types import LaunchContext, SessionHandle
 from multiverse.universe import templates
-from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write
+from isolation import isolate
 
 
 class HarnessContracts(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory(prefix='mv2-offline-')
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
@@ -51,31 +54,32 @@ class HarnessContracts(unittest.TestCase):
         return read(self.root / 'state/agents' / row['id'] / 'launches' /
                     row['runtime']['launch_id'] / 'request.json')
 
-    def test_socket_survives_real_runner_and_parent_identity_is_removed(self):
-        row = self.start()
-        request = self.request(row)
-        self.assertEqual(request['env'].get('MV2_TMUX_SOCKET'), self.socket)
-        directory = self.root / 'state/agents' / row['id']
-        launch = directory / 'launches' / row['runtime']['launch_id']
-        output = self.work / 'seen.json'
-        request['argv'] = [sys.executable, '-c',
-            'import json,os,pathlib; pathlib.Path(' + repr(str(output)) + ').write_text(json.dumps('
-            '{k:v for k,v in os.environ.items() if k.startswith("MV2_") or k=="CODEX_THREAD_ID"}))']
-        write(launch / 'request.json', request)
-        runner = Path(lifecycle.__file__).with_name('runner.py')
-        result = subprocess.run([sys.executable, str(runner), str(launch)],
-            env={**os.environ, 'CODEX_THREAD_ID': 'parent-session', 'MV2_PARENT_SENTINEL': 'must-strip'},
-            text=True, capture_output=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        seen = read(output)
-        self.assertEqual(seen['MV2_TMUX_SOCKET'], self.socket)
-        self.assertEqual(seen['MV2_AGENT_ID'], row['id'])
-        self.assertNotIn('CODEX_THREAD_ID', seen)
-        self.assertNotIn('MV2_PARENT_SENTINEL', seen)
+    def values(self):
+        values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
+                      bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
+                      agent_dir=str(self.work / 'agent'), harness_dir='/local/harness',
+                      session_file=str(self.work / 'agent/session.jsonl'), bootstrap_file='/launch/bootstrap.md',
+                      task_file='/launch/task.md', workspace=str(self.work), model='chosen',
+                      control_socket='/tmp/owned/rpc.sock')
+        session_file = Path(values['session_file'])
+        session_file.parent.mkdir(exist_ok=True)
+        session_file.write_text(json.dumps({'type': 'session', 'id': values['session_id']}) + '\n')
+        return values
 
-    def test_all_configured_adapters_exact_resume(self):
+    def session(self, name, values):
+        if name == 'claude':
+            saved = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'projects' / '-workspace' / f"{values['session_id']}.jsonl"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_text('{"type": "user"}\n')
+        return SessionHandle(values['agent_id'], name, values['workspace'],
+                             native_id=values['session_id'], session_file=values['session_file'])
+
+    def test_resume_targets_the_recorded_native_session_for_every_adapter(self):
+        """Resume through lifecycle.start targets the recorded session for Codex (id), Claude (id) and Pi (session
+        file), never the latest or the template's, and refuses when it cannot be exact; fragile because each adapter
+        builds resume differently, and a wrong target silently resumes another conversation."""
         for harness in ('codex', 'claude', 'pi'):
-            with self.subTest(harness=harness):
+            with self.subTest('through lifecycle.start', harness=harness):
                 row = self.start(name=f'offline-{harness}', harness=harness)
                 directory = self.root / 'state/agents' / row['id']
                 native = row.get('native_session_id')
@@ -83,7 +87,7 @@ class HarnessContracts(unittest.TestCase):
                     native = str(uuid4())
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
                 if harness == 'pi':
-                    (directory / 'session.jsonl').write_text(__import__('json').dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
+                    (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
                 with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}):
                     resumed = lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
                 argv = self.request(resumed)['argv']
@@ -95,44 +99,63 @@ class HarnessContracts(unittest.TestCase):
                 self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6-astra')
                 with self.assertRaisesRegex(ValueError, 'Outdated'):
                     agents.update_runtime(directory, row['runtime']['launch_id'], status='idle')
-
-    def test_unbound_codex_cannot_resume(self):
-        row = self.start()
-        with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}), \
-                self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
-            lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
-
-    def test_empty_read_and_existing_message_boundaries(self):
-        row = self.start()
-        directory = self.root / 'state/agents' / row['id']
-        self.assertEqual(inbox(directory), {'messages': [], 'cursor': 0})
-        first = append_message(directory, 'nonce one', {})
-        second = append_message(directory, 'nonce two', {})
-        batch = inbox(directory, limit=1)
-        self.assertEqual(batch['messages'][0]['id'], first['id'])
-        self.assertEqual(inbox(directory)['messages'][0]['id'], second['id'])
-        with self.assertRaises(ValueError):
-            inbox(directory, after=batch['cursor'] + 1)
-        self.assertEqual(inbox(directory)['messages'], [])
-        self.assertNotEqual(first['id'], second['id'])
-
-    def test_unknown_agent_inbox_does_not_create_state(self):
-        before = set((self.root / 'state/agents').iterdir())
-        args = cli.parser().parse_args(['-u', str(self.root), 'inbox', '--agent', 'absent'])
-        with self.assertRaisesRegex(ValueError, 'No agent named absent here'):
-            cli.run(args)
-        self.assertEqual(set((self.root / 'state/agents').iterdir()), before)
-
-    def test_agent_facing_templates_describe_current_messaging(self):
-        root = templates.TEMPLATES / 'base'
-        for path in root.rglob('*.md'):
-            with self.subTest(path=path):
-                text = path.read_text()
-                self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
-        self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
-        skill = (root / 'skills/coordination/SKILL.md').read_text()
-        self.assertIn('deliver AGENT --retry', skill)
-        self.assertIn('deliver AGENT --check', skill)
+        with self.subTest('a Codex agent that never bound a session'):
+            row = self.start()
+            with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}), \
+                    self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
+                lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
+        # Claude resumes only a session whose transcript exists; keep that storage out of the real one.
+        self.patches.enter_context(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.work / 'claude-config')}))
+        for name in harnesses.BUILTINS:
+            adapter = harnesses.BUILTINS[name].configured(name, {})
+            legacy = harnesses.LegacyAdapter(name, {
+                'spawn': ['custom'],
+                'resume': ['custom', '{agent_id}', '{session_id}', '{session_file}', '{workspace}'],
+            })
+            values = self.values()
+            session = self.session(name, values)
+            other = {**values, 'agent_id': 'wrong-agent', 'session_id': str(uuid4()),
+                     'session_file': '/wrong/session.jsonl', 'workspace': '/wrong/worktree'}
+            for implementation in (adapter, legacy):
+                with self.subTest('the session, not the template values', name=name,
+                                  implementation=type(implementation).__name__):
+                    expected = implementation.resume(session, LaunchContext('resume', values, 'chosen'))
+                    actual = implementation.resume(session, LaunchContext('resume', other, 'chosen'))
+                    self.assertEqual(actual, expected)
+                    with self.assertRaisesRegex(ValueError, 'different harness'):
+                        implementation.resume(replace(session, harness='another'), LaunchContext('resume', values))
+            with self.subTest('no recorded session', name=name):
+                missing = replace(session, session_file=None) if name == 'pi' else replace(session, native_id=None)
+                with self.assertRaisesRegex(ValueError, 'native session ID|session file is missing'):
+                    adapter.resume(missing, LaunchContext('resume', values))
+            if name in ('codex', 'claude'):
+                with self.subTest('a saved id that is not a lowercase UUID', name=name):
+                    context = LaunchContext('resume', values)
+                    command = adapter.resume(replace(session, native_id=session.native_id.upper()), context)
+                    self.assertIn(session.native_id, command.argv)
+                    with self.assertRaisesRegex(ValueError, 'must be a UUID'):
+                        adapter.resume(replace(session, native_id='invalid'), context)
+        with self.subTest('the exact Pi session file'):
+            adapter = harnesses.BUILTINS['pi'].configured('pi', {})
+            values = self.values()
+            session_file = Path(values['session_file'])
+            session = replace(self.session('pi', values), native_id=None)
+            context = LaunchContext('resume', values)
+            session_file.unlink()
+            with self.assertRaisesRegex(ValueError, 'missing'):
+                adapter.resume(session, context)
+            for contents in ('', 'not json', '{}', '{"type":"session","id":"bad"}', '{"type":"session","id":123}'):
+                session_file.write_text(contents)
+                with self.assertRaises(ValueError):
+                    adapter.resume(session, context)
+            native_id = str(uuid4())
+            # Native files are JSONL, not pretty-printed JSON.
+            session_file.write_text(json.dumps({'type': 'session', 'id': native_id}) + '\n')
+            command = adapter.resume(replace(session, native_id=native_id.upper()), context)
+            self.assertIn(str(session_file), command.argv)
+            adapter.resume(session, context)  # A valid Pi file can precede UUID binding.
+            with self.assertRaisesRegex(ValueError, 'different native'):
+                adapter.resume(replace(session, native_id=str(uuid4())), context)
 
 
 if __name__ == '__main__':

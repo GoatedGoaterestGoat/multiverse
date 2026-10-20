@@ -6,11 +6,13 @@ import tomllib
 from ..base import ConfiguredAdapter
 from functools import partial
 from dataclasses import replace
+from collections.abc import Mapping
 
 from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
-                     RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
-from .launch import launch_settings, tui_arguments
-from .protocol import check_connection, send_message, get_delivery, stop_session, recovery_check
+                     StartupRetrySpec, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
+from .launch import launch_settings, tui_arguments, plain_arguments
+from .protocol import (check_connection, send_message, get_delivery, stop_session, recovery_check,
+                       RECOVERY_MAX_REQUESTS, continue_queued, CONTINUATION_MAX_REQUESTS)
 from ..types import BridgeUnavailable
 
 
@@ -20,6 +22,38 @@ class CodexAdapter(ConfiguredAdapter):
     family = 'codex'
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
+
+    def agent_identity_policy(self):
+        from .identity import POLICY
+        return POLICY
+
+    def resume_notice(self, session, caller_environment, effective_environment):
+        from .identity import resume_notice
+        return resume_notice(caller_environment, effective_environment)
+
+    def agent_identity_problem(self, session, environment):
+        if (environment.get('MV2_IDENTITY_MODE') is None and environment.get('MV2_LAUNCH_ID')
+                and environment.get('CODEX_THREAD_ID') and environment.get('MV2_AGENT_ID') == session.agent_id
+                and (session.native_mode or {}).get('mode') == 'bridge'):
+            return ('This Codex conversation still has values from before the update: restart the agent '
+                    '(mv2 kill, then mv2 resume) with no other client attached.')
+        return None
+
+    def supports_launch_refusal(self, cli_version):
+        from .refusal import supports_plain_refusal
+        return supports_plain_refusal(cli_version)
+
+    def startup_retryable(self, snapshot):
+        from .launch import startup_retryable
+        return startup_retryable(snapshot)
+
+    def launch_refusal(self, evidence):
+        from .refusal import plain_refusal
+        return plain_refusal(evidence)
+
+    def launch_started(self, evidence):
+        from .refusal import plain_started
+        return plain_started(evidence)
 
     def _configure_launch(self):
         if self.settings.get('inbox_bridge') is True:
@@ -31,13 +65,30 @@ class CodexAdapter(ConfiguredAdapter):
     def _launch_command(self, context):
         command = super()._launch_command(context)
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
-        from .plugins import prepare
+        from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
+        version = codex_version(command.argv[0], context.values['workspace'])
+        if version is not None and version < CHECKED_VERSION:
+            note = (f'Codex {version_text(version)} is older than the checked release {version_text(CHECKED_VERSION)}; '
+                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
+            command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = None
         if setting is not True:
+            from .identity import storage_environment
             additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
-            plain = replace(additions.apply(command),
+            plain_command = additions.apply(command)
+            argv, removable = plain_arguments(command.argv, self.spec[context.mode], context.values)
+            retry = None
+            if removable:
+                name = json.dumps(context.values['name'])
+                directory = json.dumps(context.values['agent_dir'])
+                retry_argv = additions.apply(replace(command, argv=tuple(argv))).argv
+                retry = StartupRetrySpec(retry_argv, (*plain_command.notices,
+                    f"Codex runs this folder read-only, so {name}'s agent folder ({directory}) is not writable; "
+                    "session-bind, report and inbox need approval. To allow it, give the harness --sandbox workspace-write."))
+            plain = replace(plain_command, startup_retry=retry,
+                            environment={**plain_command.environment, **storage_environment(context)},
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain
@@ -86,13 +137,23 @@ class CodexAdapter(ConfiguredAdapter):
                                'mv2 does not restart shared daemons.')
                 raise BridgeUnavailable(reason)
             native_settings = observed.value
-        from .plugins import prepare
-        additions = prepare(context, command, bridge=True, daemon=native_settings.get('daemon_version'),
+        from .identity import tool_environment, storage_environment
+        stable = tool_environment(context)
+        storage = storage_environment(context)
+        tool_context = replace(context, environment={
+            **{key: value for key, value in context.environment.items() if not key.startswith('MV2_')}, **stable})
+        from .plugins import prepare, overrides
+        additions = prepare(tool_context, command, bridge=True, daemon=native_settings.get('daemon_version'),
                             final=context.executor is not None, settings=getattr(self, 'settings', {}),
                             harness_name=self.name)
         command = additions.apply(command)
         argv = list(command.argv)
         argv, bootstrap, roots, permissions = remote_arguments(argv, context)
+        # Bridge registration is the generation-owned relay's job. Cached old
+        # bootstrap instructions are handled by core's already-bound verifier.
+        explicit_instructions = any(key == 'developer_instructions' for key, _ in overrides(args))
+        if self.bootstrap and not explicit_instructions:
+            bootstrap = bootstrap.replace(self.bootstrap, '').strip()
         position = argv.index('--') if '--' in argv else len(argv)
         workspace_policy = native_settings.get('workspace_policy', {})
         options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
@@ -114,11 +175,6 @@ class CodexAdapter(ConfiguredAdapter):
                     raise ValueError('Shared daemon mode requires individual shell_environment_policy keys; configuration unchanged')
             excludes = list(dict.fromkeys([*excludes, 'MV2_*', *command.unset_env]))
             options += ['-c', 'shell_environment_policy.exclude=' + json.dumps(excludes)]
-        # Tools run in the daemon, not the terminal process. Forward only this
-        # launch's identity explicitly; never inherit another client's MV2_*.
-        for key, value in context.environment.items():
-            if key.startswith('MV2_') or key == 'PATH':
-                options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
         # Harness/plugin variables can contain credentials. Pass them to native
         # shell tools in the session RPC, never as process-list-visible flags.
         from .plugins import merge_config
@@ -126,11 +182,9 @@ class CodexAdapter(ConfiguredAdapter):
             {'shell_environment_policy': {'set': dict(command.environment)}} if command.environment else {},
             additions.session_config)
         argv[position:position] = options
-        storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
-        if context.environment.get('CODEX_SQLITE_HOME'):
-            storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
-        return CommandSpec(tuple(argv), command.unset_env,
+        return CommandSpec(tuple(argv), command.unset_env, notices=command.notices,
                            environment=command.environment, plugins=command.plugins,
+                           agent_identity=self.agent_identity_policy(),
                            attachment=AttachmentSpec('service', 'binding', 'idle-existing-service', True, True),
                            control_endpoint=NativeEndpoint('unix-websocket', context.values['control_socket']),
                            rpc_proxy=RpcProxySpec(context.values['control_socket'],
@@ -140,6 +194,7 @@ class CodexAdapter(ConfiguredAdapter):
                                 'name': context.values['name'],
                                 'resume_permissions': permissions,
                                 'plugin_config': session_config,
+                                'agent_environment': stable,
                                 'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
@@ -161,7 +216,7 @@ class CodexAdapter(ConfiguredAdapter):
                 or session.endpoint != session.service.endpoint
                 or session.endpoint.transport != 'unix-websocket' or not session.native_id):
             return None
-        return RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=6)
+        return RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=RECOVERY_MAX_REQUESTS)
 
     def retained_usage(self, session, runtime):
         from .usage import last_measurement
@@ -226,6 +281,8 @@ class CodexAdapter(ConfiguredAdapter):
         if session.native_relay and session.native_relay.get('state') == 'lost':
             result['send_steer'] = result['send_follow_up'] = Capability(
                 'unavailable', session.native_relay['reason'], required=True)
+        if self._plain_delivery(session) and self.settings.get('inbox_bridge') is False:
+            result['send_steer'] = result['send_follow_up'] = replace(result['send_steer'], mechanism='launch-only')
         if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
         elif self.get_usage(session).state == 'ok':
@@ -249,10 +306,31 @@ class CodexAdapter(ConfiguredAdapter):
         return bool((session.endpoint and session.endpoint.transport == 'unix-websocket') or
                     (not session.launch_id and self.settings.get('inbox_bridge') is True))
 
+    def _plain_delivery(self, session):
+        if session.native_mode:
+            return session.native_mode.get('mode') == 'plain'
+        return not session.endpoint and self.settings.get('inbox_bridge') is False
+
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
             return NativeResult('unavailable', 'No Codex app-server endpoint')
         return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
+
+    def continue_queued(self, session, accepted_receipts, executor):
+        if (not isinstance(accepted_receipts, Mapping) or any(
+                not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                for key, value in accepted_receipts.items())
+                or len(set(accepted_receipts.values())) != len(accepted_receipts)):
+            return NativeResult('error', 'Accepted native queue receipts must have unique nonempty IDs')
+        from .queue_events import restart_claimed
+        if not restart_claimed(session):
+            return NativeResult('ok', 'No newly claimed message permits queue continuation', {'continued': False})
+        if (not self._uses_bridge(session) or session.state != 'running' or not session.native_id
+                or not session.endpoint or session.endpoint.transport != 'unix-websocket'
+                or (session.native_relay and session.native_relay.get('state') == 'lost')):
+            return NativeResult('unavailable', 'No running bound Codex bridge for queue continuation')
+        return executor.rpc(RpcSpec(session.endpoint.address,
+            partial(continue_queued, session, dict(accepted_receipts)), max_requests=CONTINUATION_MAX_REQUESTS), timeout=5)
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
         if session.native_relay and session.native_relay.get('state') == 'lost':
@@ -261,7 +339,9 @@ class CodexAdapter(ConfiguredAdapter):
         if mode not in ('steer', 'follow-up'):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
-            return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID')
+            value = ({'launch_only': True, 'final': self.settings.get('inbox_bridge') is False}
+                     if self._plain_delivery(session) else None)
+            return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID', value)
         if session.state != 'running':
             return NativeResult('unavailable', 'Native launch is still binding; retry after validation completes, or inspect runtime.json for a launch error')
         return executor.rpc(RpcSpec(session.endpoint.address, partial(send_message, session, message, mode)))

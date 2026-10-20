@@ -1,10 +1,11 @@
 """Check local definitions and report uncertain agent state."""
 import sys
+from pathlib import Path
 
 from ..runtime import lifecycle
 from .. import compaction, universe
-from ..universe import catalog
-from ..universe.mailbox import inbox
+from ..universe import agents, catalog
+from ..universe.mailbox import inbox_problem
 
 def configure(parser):
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
@@ -21,14 +22,35 @@ def check(root, notes=None):
         try:
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
-            catalog.catalog(scope)
+            catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
             for item in lifecycle.listing(scope):
+                damage = item.get('damaged')
+                if damage:
+                    directory = scope / 'state/agents' / item['id']
+                    try:
+                        orphan = agents.orphaned(directory)
+                    except OSError:
+                        orphan = False  # Keep the named unreadable-record diagnostic.
+                    problem = (f"{scope}: {item['name']}: orphan agent folder {directory}; no core records remain; "
+                               f"remove it with mv2 remove {item['id']}" if orphan else
+                               f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}")
+                    found.append((problem, problem))
+                    continue  # No inbox, compaction or process action on damaged records.
+                workdir = item.get('workspace')
+                if isinstance(workdir, str) and workdir and not Path(workdir).is_dir():
+                    problem = f"{item['name']}: missing workspace folder: {workdir}"
+                    found.append((problem, problem))
                 runtime = item.get("runtime", {})
+                if item.get('delivery_problem'):
+                    problem = f"{item['name']}: {item['delivery_problem']}"
+                    found.append((problem, problem))
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
                 recovery = runtime.get('auto_recovery') or {}
                 connection_error = item.get('connection_error')
-                if item["live"] == "unknown" or failed or connection_error or recovery.get('state') in ('failed', 'skipped'):
-                    reason = connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
+                preparing = runtime.get('preparing') is True and runtime.get('state') == 'starting'
+                if ((item["live"] == "unknown" and not preparing) or failed or connection_error
+                        or recovery.get('state') in ('failed', 'skipped')):
+                    reason = (runtime.get('native_refusal') or {}).get('message') or connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
                     found.append((f'{item["name"]}: {reason}', f"{item['name']}'s " +
                                   ("last launch failed: " if failed else "connection was lost: " if connection_error
                                    else "automatic reconnect failed: " if recovery.get('state') in ('failed', 'skipped')
@@ -38,7 +60,8 @@ def check(root, notes=None):
                 if compaction.old_guard(scope / "state" / "agents" / item["id"], runtime):
                     problem = f"{item['name']} runs the compaction guard from before compaction became a plugin"
                     found.append((problem, f"{problem}: restart it to use tree compaction."))
-                inbox(scope / "state" / "agents" / item["id"], all_messages=True)
+                if problem := inbox_problem(scope / "state" / "agents" / item["id"]):
+                    found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
         found.extend((problem, problem) for problem in _plugins(scope))

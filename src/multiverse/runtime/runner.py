@@ -12,8 +12,9 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from multiverse.universe.agents import update_runtime, bind_session, runtime
+from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime
 from multiverse.store import lock, now, read, write
+from multiverse.runtime.process import process_started
 
 
 STARTUP_SECONDS = 2
@@ -140,15 +141,29 @@ class RelayPublisher:
         self.agent_dir, self.launch_id = agent_dir, launch_id
 
     def __call__(self, detail):
-        facts = runtime(self.agent_dir)
-        if facts.get('launch_id') != self.launch_id or facts.get('state') not in ('starting', 'running'):
-            return
-        bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+        try:
+            bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+        except FileNotFoundError:
+            return  # Removed agents have no transport state to publish.
         recovery = ('Kill then resume the agent; native work may still be running.' if bound else
                     'Kill this unbound launch and spawn again.')
         reason = 'Native relay lost. ' + recovery
-        update_runtime(self.agent_dir, self.launch_id, status='unknown', native_relay={
-            'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()})
+        def changes(facts):
+            if facts.get('state') not in ('starting', 'running'):
+                return None
+            # Legacy records may not yet have an independent native status.
+            # Save it before transport loss makes the display unknown.
+            result = {'status': 'unknown', 'native_relay': {
+                'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()}}
+            known = facts.get('native_status_value', facts.get('status'))
+            if known in ('working', 'waiting', 'idle'):
+                result['native_status_value'] = known
+            return result
+        try:
+            if mutate_runtime(self.agent_dir, self.launch_id, changes) is None:
+                return
+        except (FileNotFoundError, ValueError):
+            return  # A replaced launch cannot publish transport loss.
         from multiverse.runtime.recovery import schedule
         schedule(self.agent_dir, self.launch_id)
 
@@ -165,7 +180,9 @@ class StatusWatcher:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native status connection is still closing')
 
     def _run(self):
         try:
@@ -178,14 +195,23 @@ class StatusWatcher:
         if status not in ('working', 'waiting', 'idle', 'unknown'):
             status = 'unknown'
         try:
-            facts = read(self.agent_dir / 'runtime.json')
-            if (facts.get('launch_id') == self.launch_id and facts.get('state') == 'running'
-                    and facts.get('status') != status):
+            def changes_for(facts):
+                if facts.get('state') != 'running':
+                    return None
+                known = facts.get('native_status_value', facts.get('status'))
                 changes = {}
+                if known in ('working', 'waiting', 'idle'):
+                    changes['native_status_value'] = known
                 if status != 'unknown':
-                    changes = {'recovery_snapshot': None,
-                               'native_status_version': facts.get('native_status_version', 0) + 1}
-                update_runtime(self.agent_dir, self.launch_id, status=status, **changes)
+                    changes['native_status_value'] = status
+                    if known != status:
+                        changes.update(recovery_snapshot=None,
+                                       native_status_version=facts.get('native_status_version', 0) + 1)
+                # An optional observer never restores the primary connection.
+                lost = (facts.get('native_relay') or {}).get('state') == 'lost'
+                changes['status'] = 'unknown' if lost else status
+                return changes if any(facts.get(key) != value for key, value in changes.items()) else None
+            mutate_runtime(self.agent_dir, self.launch_id, changes_for)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -218,7 +244,9 @@ class StatusWatcher:
                     if specification is None:
                         return
                     native_id = session.native_id
-                    task = asyncio.create_task(rpc.watch(*specification, self._publish))
+                    from multiverse.runtime.attachments import connection_logger
+                    task = asyncio.create_task(rpc.watch(*specification, self._publish,
+                                              record_connection=connection_logger(self.agent_dir / 'launches' / self.launch_id)))
                 await asyncio.sleep(1)
         finally:
             if task is not None:
@@ -240,7 +268,9 @@ class StartupDelivery:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Startup delivery is still closing')
 
     def _run(self):
         from multiverse.runtime import lifecycle
@@ -250,7 +280,8 @@ class StartupDelivery:
         try:
             adapter = harnesses.load(self.root, read(self.agent_dir / 'properties.json')['harness'])
             while not self.stopped.is_set():
-                result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5, include_delivery=False)
+                result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5,
+                                              include_delivery=False, settle_on_timeout=False)
                 if result['ready']:
                     if self.prompt_protocol is not None:
                         if self.prompt_protocol.prompt_error:
@@ -278,6 +309,101 @@ class StartupDelivery:
                 pass
 
 
+class RefusalMonitor:
+    """Observe only this owned pane's current visible native startup screen."""
+    def __init__(self, agent_dir, launch_id, root, adapter, executable):
+        self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
+        self.describe, self.executable = adapter.launch_refusal, executable
+        self.supports = getattr(adapter, 'supports_launch_refusal', None)
+        self.started = getattr(adapter, 'launch_started', None)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='native-launch-refusal', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native refusal observation is still closing')
+
+    def _settled(self, state, *, deadline=None):
+        from multiverse.runtime.refusal import settle_startup
+        try:
+            if settle_startup(self.agent_dir, self.launch_id, state, deadline=deadline):
+                from multiverse.runtime.lifecycle import note_ready
+                note_ready(self.root, self.agent_dir, self.launch_id)
+        except (OSError, ValueError):
+            pass  # Never recreate a removed launch or follow a replacement.
+
+    def _run(self):
+        from multiverse.plugins.harness import version_of
+        from multiverse.runtime import native, refusal
+        from multiverse.terminal.tmux import owned
+        facts = runtime(self.agent_dir)
+        deadline = refusal.startup_deadline(facts)
+        if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
+                or facts.get('state') not in ('starting', 'running')
+                or (facts.get('native_relay') or {}).get('state') == 'lost'):
+            return
+        versions = facts.get('native_versions')
+        version = (versions.get('cli') if isinstance(versions, dict) else None) or version_of(self.executable)
+        if self.supports is not None and not self.supports(version):
+            self._settled('unsupported')
+            return  # No known native layout: do no pane observation or launch locking.
+        while not self.stopped.is_set() and time.monotonic() < deadline:
+            try:
+                # Never wait behind a long send/stop. The snapshot is exact and
+                # contains no scrollback, command transcript or inferred status.
+                with native._snapshot_lock(self.agent_dir):
+                    facts = runtime(self.agent_dir)
+                    if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
+                            or facts.get('state') not in ('starting', 'running') or facts.get('native_refusal')
+                            or (facts.get('native_relay') or {}).get('state') == 'lost'):
+                        return
+                    if ((facts.get('attachment') or {}).get('readiness') in ('binding', 'legacy-binding')
+                            and facts.get('state') == 'running'
+                            and (facts.get('native_relay') or {}).get('state') == 'ready'):
+                        return  # Structured binding succeeded; later navigation is not a launch refusal.
+                    properties = read(self.agent_dir / 'properties.json')
+                    backend, pane = owned(properties, facts)
+                    text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
+                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}\t#{pane_width}').split('\t')
+                    # Recheck tags after both observations as well as before.
+                    owned(properties, facts)
+                if time.monotonic() >= deadline:
+                    break  # A slow pane query cannot extend startup classification.
+                x = y = width = None
+                if len(cursor) in (3, 4):
+                    try:
+                        x, y = int(cursor[1]), int(cursor[2])
+                    except ValueError:
+                        pass  # Unknown position cannot identify a successful composer.
+                if len(cursor) == 4:
+                    try:
+                        width = int(cursor[3])
+                        if width <= 0:
+                            width = None
+                    except ValueError:
+                        pass
+                snapshot = {'cli_version': version, 'text': text,
+                            'cursor_visible': {'0': False, '1': True}.get(cursor[0]) if len(cursor) in (3, 4) else None,
+                            'cursor_x': x, 'cursor_y': y, 'width': width, 'native_id': properties.get('native_session_id')}
+                evidence = self.describe(snapshot)
+                if evidence is not None:
+                    refusal.record(self.agent_dir, self.launch_id, evidence, observation_deadline=deadline)
+                    return
+                if callable(self.started) and self.started(snapshot) is True:
+                    self._settled('started', deadline=deadline)
+                    return  # Settles startup observation only; no binding or permission authority.
+            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+                pass  # Unavailable or unknown evidence cannot identify a refusal.
+            self.stopped.wait(min(.25, max(0, deadline - time.monotonic())))
+        if not self.stopped.is_set():
+            self._settled('unverified')
+
+
 def launch_environment(request):
     env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
     for key in request.get('unset_env', []):
@@ -289,6 +415,148 @@ def launch_environment(request):
     return env
 
 
+def startup_output(text, prelude):
+    """Remove only this runner's actually printed leading notices, once."""
+    text = bounded_output(text)
+    expected = ''.join(character for line in prelude for character in line if not character.isspace())
+    if not expected:
+        return text
+    position = 0
+    for character in expected:
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text) or text[position] != character:
+            return text  # Cleared, truncated or different prelude: do not guess.
+        position += 1
+    if position < len(text) and not text[position].isspace():
+        return text  # Printed notices ended with a newline, not a native word continuation.
+    return text[position:].lstrip()
+
+
+def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_id, prelude=()):
+    """Select one argv-only retry while the exited child still owns this launch."""
+    from multiverse.display import notice_lines
+    from multiverse.runtime.native import adapter_hook
+    from multiverse.terminal.tmux import owned
+    candidate = request.get('startup_retry')
+    hook = adapter_hook(adapter, 'startup_retryable')
+    code = process.poll()
+    if (not isinstance(candidate, dict) or hook is None or type(code) is not int or code == 0
+            or elapsed < 0 or request.get('rpc_proxy')
+            or request.get('control_endpoint') or request.get('shared_service')):
+        return None
+    argv = candidate.get('argv')
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
+        return None
+    directory = launch.parent.parent
+    def eligible(facts):
+        from multiverse.runtime.refusal import STARTUP_WINDOW_SECONDS
+        observed = (facts.get('native_startup_observation') or {}).get('state')
+        pending = observed == 'pending'
+        return (facts.get('launch_id') == launch.name and facts.get('pid') == process.pid
+                and facts.get('state') in ('starting', 'running') and not facts.get('ending_at')
+                and (not facts.get('startup_checked') or pending)
+                and observed in (None, 'pending', 'unsupported')
+                and elapsed <= (STARTUP_WINDOW_SECONDS if pending else STARTUP_SECONDS)
+                and not facts.get('startup_retry') and not facts.get('native_refusal')
+                and facts.get('startup_delivery') not in ('waiting', 'ready')
+                and (facts.get('native_relay') or {}).get('state') != 'ready')
+    with lock(directory / '.launch.lock', create_parent=False):
+        facts = runtime(directory)
+        if (not eligible(facts)
+                or (launch / 'ready-event').exists() or read(launch / 'request.json') != request):
+            return None
+        try:
+            properties = read(directory / 'properties.json')
+            if properties.get('native_session_id') != native_id:
+                return None  # A newly bound conversation is already native startup evidence.
+            backend, pane = owned(properties, facts, states=('alive', 'stopped'))
+            text = startup_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane), prelude)
+            if hook({'text': text, 'exit_code': code, 'argv': request['argv'], 'elapsed': elapsed,
+                     'agent_dir': str(directory)}) is not True:
+                return None
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
+            return None  # Unknown output/ownership never authorizes another process.
+        notices = notice_lines(request.get('resume_notices'), candidate.get('notices'))
+        selected = {**request, 'argv': list(argv), 'startup_retry': None, 'notices': notices}
+        # Serialize with the screen/caller deadline. Once claimed, readiness
+        # cannot describe the old child during the gap before its replacement.
+        def claim(current):
+            if not eligible(current):
+                return None
+            return dict(startup_checked=False, pid=None, launch_notices=notices,
+                        startup_retry={'exit_code': code, 'at': now()})
+        if mutate_runtime(directory, launch.name, claim) is None:
+            return None
+        # Durable selection precedes Popen. No binding or input has been accepted.
+        write(launch / 'request.json', selected)
+        for notice in notices:
+            print(notice, flush=True)
+        child = spawn(selected)
+        return selected, child
+
+
+def wait_startup_candidate(directory, launch_id, process, child_at):
+    """Keep an unstarted screen eligible without delaying a recognized composer."""
+    from multiverse.runtime.refusal import STARTUP_WINDOW_SECONDS
+    while True:
+        elapsed = time.monotonic() - child_at
+        facts = runtime(directory)
+        if facts.get('launch_id') != launch_id or facts.get('ending_at'):
+            return False
+        if elapsed >= STARTUP_SECONDS:
+            pending = (facts.get('native_startup_observation') or {}).get('state') == 'pending'
+            if not pending or facts.get('native_refusal') or elapsed >= STARTUP_WINDOW_SECONDS:
+                return process.poll() is None
+            if not facts.get('startup_checked'):
+                update_runtime(directory, launch_id, startup_checked=True)
+        try:
+            process.wait(timeout=.1)
+            return False
+        except subprocess.TimeoutExpired:
+            pass
+
+
+
+def finish_failed_wake(launch, request, environment, process, reason):
+    """A failed startup is retryable only with exact harness negative evidence."""
+    message_id = request.get('resume_message_id')
+    if not message_id:
+        return
+    from multiverse import harnesses
+    from multiverse.harnesses.types import SessionHandle
+    from multiverse.runtime.native import adapter_hook
+    from multiverse.runtime.wake import prompt_context
+    from multiverse.universe.mailbox import finish_wake
+    evidence = None
+    snapshot = None
+    if process is None:
+        evidence = False  # No child was ever created.
+    elif process.poll() is not None:
+        try:
+            directory = launch.parent.parent
+            properties, facts = read(directory / 'properties.json'), runtime(directory)
+            if facts.get('launch_id') == launch.name:
+                adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
+                hook = adapter_hook(adapter, 'startup_prompt_evidence')
+                from multiverse.universe.mailbox import message_record
+                message, tracking = message_record(directory, message_id)
+                target = tracking.get('target_session') or message.get('target_session')
+                if target and properties.get('native_session_id') != target:
+                    raise ValueError('The wake conversation changed before startup evidence was recorded')
+                session = SessionHandle.from_records(properties, facts, directory)
+                prompt, since = (launch / 'task.md').read_text(), facts.get('started_at')
+                snapshot = prompt_context(adapter, session, prompt, since, environment)
+                if hook is not None:
+                    evidence = hook(session, prompt, since, dict(environment))
+        except Exception:
+            evidence = None  # Missing or unreadable evidence can never authorize replay.
+    if evidence is False and process is not None:
+        reason += '\nThe harness recorded no consumption of this startup prompt; saved for explicit retry'
+    finish_wake(launch.parent.parent, launch.name, message_id, False, reason,
+                uncertain=evidence is not False, prompt_context=snapshot)
+
+
 def main():
     launch = Path(sys.argv[1])
     agent_dir = launch.parent.parent
@@ -298,11 +566,19 @@ def main():
     proxy = None
     startup = None
     recovery_monitor = None
+    refusal_monitor = None
+    binding_requests = None
     startup_checked = False
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
     request = {}
+    env = {}
     diagnostic = {}
+    roles = {}
+    printed_prelude = ()
+    from multiverse.runtime import attachments, refusal, registration
+    runner_started = process_started(os.getpid())
+    attachments.begin(launch, runner_started)
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -312,11 +588,7 @@ def main():
     # handler resets to the default on exec, unlike inheriting SIG_IGN.
     previous_handlers[signal.SIGINT] = signal.signal(signal.SIGINT, lambda *_: None)
     try:
-        deadline = time.monotonic() + 15
-        while not (launch / "ready").exists():
-            if time.monotonic() > deadline:
-                raise RuntimeError("Spawn did not finish registering this pane")
-            time.sleep(0.05)
+        registration.wait_for_release(launch)
         request = read(launch / "request.json")
         env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
@@ -333,23 +605,31 @@ def main():
             from multiverse.runtime.native import legacy_attachment
             attachment = asdict(legacy_attachment(request.get('shared_service')))
         update_runtime(agent_dir, launch.name, state="starting" if attachment.get('readiness') in ('binding', 'legacy-binding') else "running", status="unknown",
-                       runner_pid=os.getpid(), startup_checked=False, attachment=attachment or None)
+                       runner_pid=os.getpid(), runner_started=runner_started,
+                       startup_checked=False, attachment=attachment or None)
         if request.get('rpc_proxy'):
             from multiverse import harnesses
             from multiverse.runtime import rpc
             properties = read(agent_dir / 'properties.json')
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             def bound(native_id):
+                if runtime(agent_dir).get('native_refusal'):
+                    raise ValueError(runtime(agent_dir)['native_refusal']['message'])
                 if not request['rpc_proxy'].get('binds_session') and attachment.get('readiness') != 'legacy-binding':
                     raise ValueError('Relay did not declare validated session binding')
                 bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
                 update_runtime(agent_dir, launch.name, state='running', native_relay={'state': 'ready'})
                 from multiverse.runtime.recovery import reconnected
                 reconnected(agent_dir, launch.name)
+            from multiverse.runtime.queue_continuation import record_primary_event
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
-                UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name))
+                UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name),
+                record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
+                record_connection=attachments.connection_logger(launch, started=runner_started),
+                record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event))
+            roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()
             except Exception as error:
@@ -357,12 +637,17 @@ def main():
                 if fallback is None or getattr(proxy.protocol, 'bound', False):
                     raise
                 proxy.close()
+                roles['relay'].close()
                 proxy = None
+                from multiverse.display import notice_lines
+                notices = notice_lines(request.get('resume_notices', request.get('notices')),
+                                       fallback.get('notices'))
                 selection = {**(fallback.get('native_mode') or {}), 'fallback_reason': f'Native launch relay unavailable: {error}'}
                 request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
                            'env': {**fallback.get('environment', {}), **request['env']},
                            'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
-                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment')}
+                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
+                           'notices': notices, 'startup_retry': fallback.get('startup_retry')}
                 write(launch / 'request.json', request)
                 env = launch_environment(request)
                 # A sender may have queued input while relay startup was still
@@ -384,8 +669,20 @@ def main():
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
                                    startup_delivery=None, native_mode=selection, native_relay=None, error=None,
                                    native_service=None, attachment=fallback.get('attachment'),
+                                   launch_notices=notices,
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
                                    plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
+                    with lock(agent_dir / '.properties.lock'):
+                        current_properties = read(agent_dir / 'properties.json')
+                        if request.get('previous_agent_identity') is None:
+                            current_properties.pop('agent_identity', None)
+                        else:
+                            current_properties['agent_identity'] = request['previous_agent_identity']
+                        if request.get('previous_agent_environment') is None:
+                            current_properties.pop('agent_environment', None)
+                        else:
+                            current_properties['agent_environment'] = request['previous_agent_environment']
+                        write(agent_dir / 'properties.json', current_properties)
                     from multiverse.universe.mailbox import end_startup_messages
                     end_startup_messages(agent_dir, launch.name,
                         'Launch selected plain mode before delivery; message saved. '
@@ -394,25 +691,73 @@ def main():
                     shutil.rmtree(service_dir, ignore_errors=True)
                     service_dir = None
                 attachment = fallback.get('attachment') or {}
-        process = subprocess.Popen(request["argv"], env=env)
-        update_runtime(agent_dir, launch.name, pid=process.pid)
+                for notice in notices:
+                    print(notice, flush=True)
+                printed_prelude = tuple(notices)
+        # Load before publishing pending observation: a configuration error must
+        # fail startup, not leave an observer that was never started pending.
+        adapter = None
+        if request.get('observe_refusal') or request.get('startup_retry'):
+            from multiverse import harnesses
+            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
+        # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
+        if request.get('observe_refusal') and attachment.get('readiness') == 'process':
+            update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
+        def spawn(selected):
+            nonlocal process
+            process = subprocess.Popen(selected['argv'], env=env, stdin=None)
+            child_started = process_started(process.pid)
+            try:
+                attachments.record_child(launch, process.pid, child_started)
+            except (OSError, ValueError):
+                pass  # Extra recovery evidence must not prevent primary PID registration.
+            update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=child_started)
+            return process
+        child_at = time.monotonic()
+        initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
+        spawn(request)
+        if initial_native_id is None and not request.get('control_endpoint') and not request.get('rpc_proxy'):
+            from multiverse.runtime.binding_requests import BindingRequests
+            binding_requests = BindingRequests(Path(env['MV2_UNIVERSE']), launch,
+                lambda facts: process is not None and process.poll() is None and facts.get('pid') == process.pid)
+            roles['session binding'] = attachments.Role(launch, 'session binding', started=runner_started)
+            binding_requests.start()
+        if request.get('observe_refusal'):
+            refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
+            roles['refusal observer'] = attachments.Role(launch, 'refusal observer', started=runner_started)
+            refusal_monitor.start()
+        survived_startup = False
+        if request.get('startup_retry'):
+            survived_startup = wait_startup_candidate(agent_dir, launch.name, process, child_at)
+            if not survived_startup:
+                selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
+                                         native_id=initial_native_id, prelude=printed_prelude)
+                if selected is not None:
+                    request, process = selected
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
                                       proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
+            roles['startup delivery'] = attachments.Role(launch, 'startup delivery', started=runner_started)
             startup.start()
         if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            roles['status observer'] = attachments.Role(launch, 'status observer', started=runner_started)
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
             from multiverse.runtime.recovery import RecoveryMonitor
             recovery_monitor = RecoveryMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            roles['recovery monitor'] = attachments.Role(launch, 'recovery monitor', started=runner_started)
             recovery_monitor.start()
         try:
+            if survived_startup:
+                raise subprocess.TimeoutExpired(request['argv'], STARTUP_SECONDS)
             code = process.wait(timeout=STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
             startup_checked = True
-            finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
+            native_refusal = runtime(agent_dir).get('native_refusal')
+            finish_wake(agent_dir, launch.name, request.get('resume_message_id'), not native_refusal,
+                        native_refusal['message'] if native_refusal else '', uncertain=bool(native_refusal))
             update_runtime(agent_dir, launch.name, startup_checked=True)
             from multiverse.runtime.lifecycle import note_ready
             note_ready(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)
@@ -423,6 +768,9 @@ def main():
         if not ending and (code != 0 or not startup_checked):
             reason = f'Native process exited with code {code}' + (' during startup.' if not startup_checked else '.')
             diagnostic = launch_diagnostic(agent_dir, launch.name, reason)
+        if not startup_checked:
+            finish_failed_wake(launch, request, env, process,
+                               diagnostic.get('reason') or 'Runner ended before launch readiness')
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code == 0 or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
@@ -434,6 +782,7 @@ def main():
             'reason': diagnostic.get('reason')})
         if watcher is not None:
             watcher.close()
+            roles['status observer'].close()
             watcher = None
         return code
     except Exception as error:
@@ -446,23 +795,29 @@ def main():
                 'state': 'failed', 'exit_code': None, 'reason': f'Multiverse launch failed: {error}'})
         return 1
     finally:
-        if request.get('resume_message_id') and not startup_checked:
-            from multiverse.universe.mailbox import finish_wake
-            finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
-                        diagnostic.get('reason') or 'Runner ended before launch readiness',
-                        uncertain=process is not None)
+        cleanup_errors = []
+        def close_role(name, instance):
+            if instance is None:
+                return
+            try:
+                instance.close()
+                roles[name].close()
+            except Exception as error:
+                cleanup_errors.append(f'{name}: {error}')
         if startup is not None:
-            startup.close()
+            close_role('startup delivery', startup)
         elif request.get('control_endpoint'):
-            from multiverse.runtime.native import flush_startup
-            flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
-                          diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
-        if proxy is not None:
-            proxy.close()
-        if watcher is not None:
-            watcher.close()
-        if recovery_monitor is not None:
-            recovery_monitor.close()
+            try:
+                from multiverse.runtime.native import flush_startup
+                flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
+                              diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
+            except Exception as error:
+                cleanup_errors.append('startup bookkeeping: ' + str(error))
+        close_role('session binding', binding_requests)
+        close_role('refusal observer', refusal_monitor)
+        close_role('relay', proxy)
+        close_role('status observer', watcher)
+        close_role('recovery monitor', recovery_monitor)
         if process is not None and process.poll() is None:
             process.terminate()
             try:
@@ -470,9 +825,16 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        if request.get('resume_message_id') and not startup_checked:
+            try:
+                finish_failed_wake(launch, request, env, process,
+                    diagnostic.get('reason') or 'Runner ended before launch readiness')
+            except Exception as error:
+                cleanup_errors.append('startup bookkeeping: ' + str(error))
         # Shared services deliberately outlive terminal clients and monitors.
         if service_dir:
             shutil.rmtree(service_dir, ignore_errors=True)
+        attachments.finish(launch, cleanup_errors)
         if remove_wrapper:
             schedule_wrapper_cleanup(launch)
         for signum, handler in previous_handlers.items():

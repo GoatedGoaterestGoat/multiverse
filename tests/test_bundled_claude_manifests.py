@@ -12,8 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 class PackagingTest(unittest.TestCase):
     def test_every_bundled_plugins_claude_manifest_is_packaged(self):
-        # Without its hidden .claude-plugin/plugin.json an installed copy's Claude directory is refused. `**` does
-        # not reach hidden directories in package-data, so only an explicit pattern counts.
+        """Each bundled plugin's hidden .claude-plugin/plugin.json is in package data; a break goes unnoticed because
+        `**` skips hidden directories and an editable checkout still has the file, so only a pip install loses it and
+        Claude refuses the plugin."""
         import tomllib
         from pathlib import PurePosixPath
         import multiverse
