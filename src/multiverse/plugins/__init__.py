@@ -312,13 +312,15 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 schema, schema_problem = settings_files.schema_of(manifest), None
             except ValueError as error:
                 schema, schema_problem = None, str(error)
+            view, unviewed = _settings_view(found)
+            registered = view.registrations if view is not None else None
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
-                                or schema_problem, "schema": schema,
+                                or schema_problem or unviewed, "schema": schema,
                                 "values": {} if waiting else current.values,
-                                "screen": _settings_screen(found),
-                                "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
-                                           if found.loaded and found.loaded.registrations.settings_fields else None)}
+                                "screen": registered.settings_screen if registered else None,
+                                "fields": ([asdict(item) for item in registered.settings_fields]
+                                           if registered and registered.settings_fields else None)}
         result.append(item)
     return result
 
@@ -877,17 +879,19 @@ def anchor_events(root, name, again=False):
         pass
 
 
-def _settings_screen(found):
-    """A plugin's own settings screen ("module:Class"), loading it to learn it when needed: its screen is where
-    unusable settings are fixed, so it is offered whether or not this process has loaded the plugin yet."""
-    loaded = found.loaded
-    if loaded is None and found.on and found.state in ("on", "unusable") and found.manifest is not None \
-            and "dashboard.settings" in found.manifest.extends:
+def _settings_view(found):
+    """(the plugin's Loaded record or None, why its own settings view can't be learned or None), loading it when
+    needed: its screen or fields are where settings are edited and unusable ones fixed, so they are offered whether
+    or not this process has loaded the plugin yet, and where it is off too, as `mv2 plugins settings` edits there."""
+    loaded = found.loaded if isinstance(found.loaded, loader.Loaded) else None
+    if loaded is None and found.manifest is not None and "dashboard.settings" in found.manifest.extends:
         try:
-            loaded = loader.load(found, wait=loader.REFRESH_WAIT)  # still loading: offered once it has
-        except PluginError:
-            return None
-    return loaded.registrations.settings_screen if loaded is not None else None
+            loaded = loader.load(found, off=not found.on, wait=loader.REFRESH_WAIT)
+        except loader.StillLoading:
+            return None, f"{found.name} is still loading"  # offered once it has
+        except PluginError as error:
+            return None, str(error)
+    return loaded, None
 
 
 def settings_checked(root, name, wait=None):

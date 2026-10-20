@@ -564,7 +564,10 @@ def load(found, off=False, wait=None):
     wait=0 never waits, and many callers with a short wait (a dashboard refresh)
     pay for a slow register() once, not once each: the dashboard's first screen
     is drawn while plugins load, and shows each one on the refresh after it is.
+    Under MV2_PLUGINS=off nothing loads, `off` or not.
     """
+    if safe_mode():  # an entry that is off here never reaches the safe-mode state, so check it here as well
+        raise PluginError(f"{SAFE_MODE}=off: no plugins are loaded")
     if not (found.on and found.state in ("on", "loaded", "unusable")) and not (off and found.state == "off"):
         raise PluginError(found.problem or f"{found.name} is off here")
     directory = Path(found.manifest.directory).resolve()  # a trusted universe plugin runs from its copy
