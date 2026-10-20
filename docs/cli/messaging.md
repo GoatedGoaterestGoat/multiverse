@@ -126,6 +126,7 @@ While an agent is focused:
 - `inbox-only` messages are saved as usual.
 - `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
 - What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
+- One exception for now: a `steer` or `follow-up` that was sent before the focus began, to an agent that was still starting, is delivered once the agent is up.
 
 `unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
 
