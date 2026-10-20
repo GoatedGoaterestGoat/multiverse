@@ -31,7 +31,7 @@ class CodexLaunchTest(unittest.TestCase):
     def test_update_check_is_off_on_every_launch_path_unless_set(self):
         """Every launch path passes check_for_update_on_startup=false exactly once unless the user set it; fragile
         because Codex accepts five -c spellings across three argument sources, and a miss leaves a wake prompt stuck
-        behind the update dialog (2fd65b2)."""
+        behind the update dialog (2fd65b2); unchecked releases must disclose disabled startup checks or that guarantee silently disappears."""
         session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
         unrelated = ['-c', 'developer_instructions="check_for_update_on_startup=true"']
         for settings in ({}, {'inbox_bridge': True}, {'inbox_bridge': False},
@@ -73,16 +73,19 @@ class CodexLaunchTest(unittest.TestCase):
                                 self.assertEqual(observed[0].rsplit('=', 1)[1].strip(), expected)
                         self.assertEqual(settings[source], flags)
 
-        with self.subTest('older CLI cannot silently disable pinned native features'):
-            for version, warned in (((0, 154, 0), True), ((0, 162, 1), True), ((0, 163, 0), False),
-                                    ((0, 164, 0), False), (None, False)):
+        with self.subTest('unchecked CLI cannot silently disable pinned native features'):
+            for version, relation in (((0, 154, 0), 'older'), ((0, 162, 1), 'older'), ((0, 163, 0), None),
+                                      ((0, 164, 0), 'newer'), (None, None)):
                 with patch('multiverse.harnesses.codex.plugins.codex_version', return_value=version):
                     for mode in ('spawn', 'resume'):
                         adapter = CodexAdapter.configured('codex', {})
                         command = adapter.spawn(self.context) if mode == 'spawn' else adapter.resume(session, self.context)
                         for candidate in (command, command.fallback):
                             if candidate is not None:
-                                self.assertEqual(any('older than' in note for note in candidate.notices), warned)
+                                notices = [note for note in candidate.notices if 'startup screen checks are disabled' in note]
+                                self.assertEqual(len(notices), int(relation is not None))
+                                if relation is not None:
+                                    self.assertIn(relation + ' than the checked release', notices[0])
 
     def test_resume_permission_flags_become_grants(self):
         """Resume flags (--sandbox, -s, --ask-for-approval, -a, --dangerously-bypass...) become thread/resume grants

@@ -67,8 +67,9 @@ class CodexAdapter(ConfiguredAdapter):
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
         version = codex_version(command.argv[0], context.values['workspace'])
-        if version is not None and version < CHECKED_VERSION:
-            note = (f'Codex {version_text(version)} is older than the checked release {version_text(CHECKED_VERSION)}; '
+        if version is not None and version != CHECKED_VERSION:
+            relation = 'older' if version < CHECKED_VERSION else 'newer'
+            note = (f'Codex {version_text(version)} is {relation} than the checked release {version_text(CHECKED_VERSION)}; '
                     'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
             command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
