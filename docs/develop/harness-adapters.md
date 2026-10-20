@@ -31,11 +31,15 @@ Core also looks for these optional methods and attributes:
 | Method or attribute | Used for |
 | --- | --- |
 | `family` | Which status line defaults apply: `claude`, `codex`, `pi` or `''` |
+| `session_home(environment)` | Resolve an explicit candidate storage home; return `None` when its supplied environment cannot identify one. |
+| `session_storage_evidence(session, home)` | Read-only proof that this exact conversation exists under an absolute candidate home: `ok` with `value.present` true or false, or `unknown` with a reason for incomplete evidence. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
 | `status_watch(session)` | A passive status stream the runner follows |
 | `attachment_recovery(session)` | A read-only check that an idle terminal can be reconnected |
 | `retained_usage(session, runtime)` | The last usage reading, kept across resume |
+
+Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Unreadable or malformed metadata, compressed-only or linked storage and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
 
 ### Types
 

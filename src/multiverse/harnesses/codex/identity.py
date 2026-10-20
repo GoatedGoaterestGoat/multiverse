@@ -38,7 +38,13 @@ def resume_notice(caller_environment, effective_environment):
 
 
 def storage_environment(context):
-    storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME') or '~/.codex').expanduser().resolve())}
+    from .storage import session_home
+    # Core supplies HOME. Keep rendering partial contexts and relative explicit
+    # paths compatible; candidate proof never falls back to this process's HOME.
+    home = session_home(context.environment)
+    if home is None:
+        home = str(Path(context.environment.get('CODEX_HOME') or '~/.codex').expanduser().resolve())
+    storage = {'CODEX_HOME': home}
     if context.environment.get('CODEX_SQLITE_HOME'):
         storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
     return storage

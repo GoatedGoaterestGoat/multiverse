@@ -23,6 +23,14 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
+    def session_home(self, environment):
+        from .storage import session_home
+        return session_home(environment)
+
+    def session_storage_evidence(self, session, home):
+        from .storage import session_storage_evidence
+        return session_storage_evidence(session, home)
+
     def agent_identity_policy(self):
         from .identity import POLICY
         return POLICY
