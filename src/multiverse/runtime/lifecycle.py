@@ -300,7 +300,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
         environment = {**ambient, **saved, **target}
-        storage = _storage_environment(adapter, properties, environment, ambient, resume)
+        storage = _storage_environment(adapter, properties, environment, ambient, resume, agent_dir, previous)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
@@ -328,9 +328,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
             selected_storage.update({key: selected[key] for key in storage if key in selected})
         if resume:
-            recorded_storage = {**saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
+            recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
                                 **(properties.get('native_storage_environment') or {})}
             for key, value in selected_storage.items():
+                if key not in getattr(adapter, 'storage_env', ()):
+                    continue  # Other harnesses' settings are inherited by future children, not this conversation.
                 recorded = recorded_storage.get(key)
                 if recorded not in (None, '') and recorded != value:
                     raise _storage_difference(recorded, value, variable=key)
@@ -698,21 +700,69 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_environment(adapter, properties, environment, ambient, resume):
+def _storage_request(directory, previous):
+    identifier = (previous or {}).get('launch_id')
+    if missing_runtime._uuid(identifier):
+        try:
+            return records.properties(directory / 'launches' / identifier / 'request.json')
+        except records.RecordError:
+            pass
+    return {}
+
+
+def _legacy_codex_storage(properties, directory, request):
+    """Adopt historical launch evidence, never today's caller or tmux environment."""
+    keys = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
+    identity = properties.get('native_service_identity') or {}
+    scope = identity.get('scope') if isinstance(identity, dict) and identity.get('provider') == 'codex' else None
+    if isinstance(scope, dict) and scope.get('CODEX_HOME'):
+        saved = {key: scope.get(key) for key in keys}
+    else:
+        env, unset = request.get('env'), request.get('unset_env', [])
+        saved = {key: None if key in unset else env[key] for key in keys
+                 if isinstance(env, dict) and isinstance(unset, list) and (key in unset or key in env)}
+        # Codex's default follows the launch HOME, which old tmux inherited.
+        # An absent request key is not proof that the server had it unset.
+        if 'CODEX_HOME' in saved and not saved['CODEX_HOME']:
+            home = env.get('HOME')
+            if isinstance(home, str) and Path(home).is_absolute():
+                saved['CODEX_HOME'] = str(Path(home) / '.codex')
+    if (set(saved) != set(keys) or not saved.get('CODEX_HOME')
+            or any(value is not None and (not isinstance(value, str) or not value or '\0' in value
+                   or not Path(value).is_absolute() or os.path.normpath(value) != value) for value in saved.values())):
+        raise ValueError(f'The original Codex storage was not recorded reliably for {directory / "properties.json"}. '
+            'Restore native_storage_environment from verified original launch settings '
+            '(CODEX_HOME and CODEX_SQLITE_HOME, null for an unset database home), or spawn a new agent. '
+            'The current shell and tmux server cannot prove which storage the old launch used')
+    return saved
+
+
+def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous):
     """Replay storage values and explicit absence before the adapter computes home."""
-    keys = getattr(adapter, 'storage_env', ())
+    own_keys = getattr(adapter, 'storage_env', ())
+    keys = tuple(dict.fromkeys([*own_keys, *(key for cls in harnesses.BUILTINS.values()
+                                           for key in getattr(cls, 'storage_env', ()))]))
     saved = properties.get('native_storage_environment') if resume else None
+    if saved is not None and (not isinstance(saved, dict) or any(
+            value is not None and (not isinstance(value, str) or '\0' in value) for value in saved.values())):
+        raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
+    historical = {}
+    request = _storage_request(directory, previous) if resume and (saved is None or any(key not in saved for key in keys)) else {}
+    request_env, request_unset = request.get('env', {}), request.get('unset_env', [])
+    if isinstance(request_env, dict) and isinstance(request_unset, list):
+        historical = {key: None if key in request_unset else request_env[key] for key in keys
+                      if key in request_unset or isinstance(request_env.get(key), str)}
     scope = (properties.get('native_service_identity') or {}).get('scope', {}) if resume else {}
-    for key in keys:
+    for key in own_keys:
         if scope and key not in scope and ambient.get(key):
             raise ValueError(f'Cannot add {key}={ambient[key]!r} to this saved native storage scope; '
                              f'unset {key} to resume, or spawn a new agent for that storage')
     if saved is None:
-        return {key: environment.get(key) for key in keys}
-    if (not isinstance(saved, dict) or any(value is not None and (not isinstance(value, str) or '\0' in value)
-                                          for value in saved.values())):
-        raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
-    return {key: saved.get(key) for key in keys}
+        if resume and getattr(adapter, 'family', None) == 'codex' and properties.get('native_session_id'):
+            adopted = _legacy_codex_storage(properties, directory, request)
+            return {key: adopted[key] if key in adopted else historical.get(key) for key in keys}
+        return {key: environment.get(key) if not resume or key in own_keys else historical.get(key) for key in keys}
+    return {key: saved[key] if key in saved else historical.get(key) for key in keys}
 
 
 def _storage_command(command, storage):

@@ -97,9 +97,8 @@ class RuntimeWriterUpgradeTest(BaseTest):
         self.assertEqual(len(profiles), 9)
 
     def test_live_records_refuse_duplicates_and_ended_records_reach_resume_preparation(self):
-        """On real writer records, resume refuses live ones as duplicates and takes ended ones to terminal creation for
-        each real adapter; fragile because resume reads adapter fields older writers lack, exercised only after an
-        upgrade."""
+        """Real writer records refuse duplicate launches and resume only with known storage; older plain Codex omitted
+        its inherited home, so silently adopting today's caller can open the wrong account only after an upgrade."""
         # Process/IPC observations describe the recorded stage. This exercises
         # the real resume entry point and each real adapter, up to (but never
         # through) creating a new terminal. The capture generator separately
@@ -144,6 +143,14 @@ class RuntimeWriterUpgradeTest(BaseTest):
                         elif adapter.family == 'pi' and not row['ready']:
                             with self.assertRaisesRegex(ValueError, 'Native session file is missing'):
                                 lifecycle.start(self.root, resume=props['id'])
+                        elif adapter.family == 'codex' and row['profile'] in ('codex-plain', 'codex-fallback'):
+                            # The real writers saved neither the tmux-inherited
+                            # home nor a service scope for these bound sessions.
+                            before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
+                            with self.assertRaisesRegex(ValueError, 'original Codex storage.*not recorded'):
+                                lifecycle.start(self.root, resume=props['id'])
+                            self.assertEqual({path: path.read_bytes() for path in before}, before)
+                            backend.create.assert_not_called()
                         else:
                             with self.assertRaisesRegex(RuntimeError, 'upgrade reached terminal creation') as caught:
                                 lifecycle.start(self.root, resume=props['id'])

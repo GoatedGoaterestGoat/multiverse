@@ -63,7 +63,11 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` | Sets it to `1` for Claude bridge launches, because the multiverse mod needs it. |
 | `TMUX`, `TMUX_PANE` | `mv2 attach` reads them to return to the dashboard pane it was started from. |
 
-The launch records the harness's storage environment and replays it on resume.
+The launch records every built-in harness's storage variables and replays them
+on resume, including variables for other harnesses an agent may spawn. They come
+from the spawning command, not the tmux server. An absent variable is explicitly
+unset in the child. Older snapshots missing another harness's variable use a
+recorded launch request if it has that value; otherwise they leave it unset.
 Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
 unset; setting it to a default-looking path can change where Claude reads its
 login and global settings. Codex selects canonical storage paths for its
@@ -74,3 +78,12 @@ would change the saved conversation's storage, including a plain launch whose
 saved path now follows a different symlink, is refused before its launch records
 change. The error shows both paths; restore the original storage at the saved
 path, or spawn a new agent for the new storage.
+
+Older Codex agents may lack a storage snapshot. Resume adopts their recorded
+service scope or explicit launch-request environment only when it proves both
+the Codex home and whether a separate database home was set. Main-era plain
+launches usually recorded neither, so resume refuses before changing any records.
+Restore `native_storage_environment` in the named properties file from verified
+original settings (`CODEX_HOME` and `CODEX_SQLITE_HOME`, with `null` for an unset
+database home), or spawn a new agent. Today's shell and tmux server are not
+evidence of what an earlier launch used.

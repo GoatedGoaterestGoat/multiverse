@@ -65,11 +65,12 @@ class LaunchIsolationTest(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_launch_storage_presence_survives_tmux_and_resume(self):
-        """Storage values, absence and alias identity must survive tmux and resume; inherited variables or retargeted paths can silently select another account or transcript store."""
+        """Storage values, absence, legacy evidence and aliases must survive tmux and resume; inherited or guessed homes silently select another account, including for children using a different harness."""
         for family, selected in (
                 ('claude', {'CLAUDE_CONFIG_DIR': None}),
                 ('claude', {'CLAUDE_CONFIG_DIR': ''}),
                 ('claude', {'CLAUDE_CONFIG_DIR': str(self.work / 'claude-storage')}),
+                ('pi', {'CODEX_HOME': str(self.work / 'codex-from-pi')}),
                 ('codex', {'CODEX_HOME': None, 'CODEX_SQLITE_HOME': None}),
                 ('codex', {'CODEX_HOME': str(self.work / 'codex-storage'),
                            'CODEX_SQLITE_HOME': str(self.work / 'database')})):
@@ -84,6 +85,9 @@ class LaunchIsolationTest(unittest.TestCase):
                 write(manifest, definition)
                 backend = Mock()
                 backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
+                selected = {**{key: None for key in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME')}, **selected}
+                foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
+                selected[foreign] = str(self.work / ('other-harness-' + family))
                 caller = {key: value for key, value in os.environ.items() if key not in selected}
                 caller.update({key: value for key, value in selected.items() if value is not None})
                 expected = dict(selected)
@@ -96,6 +100,8 @@ class LaunchIsolationTest(unittest.TestCase):
                     directory = self.root / 'state/agents' / result['id']
                     if family == 'codex':
                         agents.bind_session(self.root, result['id'], str(uuid4()))
+                    elif family == 'pi':
+                        (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
                     for mode in ('spawn', 'resume'):
                         if mode == 'resume':
                             for key in selected:
@@ -144,6 +150,57 @@ class LaunchIsolationTest(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, 'Cannot add CODEX_SQLITE_HOME'):
                             lifecycle.start(self.root, resume=result['id'])
                         self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+        # A main-era plain launch inherited tmux's home, which may differ from
+        # this caller. Only its saved service scope or explicit request is proof.
+        with self.subTest('legacy storage must come from the launch, never the current caller'):
+            properties = read(directory / 'properties.json')
+            facts = read(directory / 'runtime.json')
+            request_path = directory / 'launches' / facts['launch_id'] / 'request.json'
+            request = read(request_path)
+            legacy = {key: value for key, value in properties.items()
+                      if key not in ('native_storage_environment', 'native_environment', 'native_service_identity')}
+            storage = {'CODEX_HOME': str(self.work / 'actual-old-home'),
+                       'CODEX_SQLITE_HOME': str(self.work / 'actual-old-database')}
+            for proof in ('missing', 'request', 'service', 'partial-request', 'request-unset', 'request-alias'):
+                with self.subTest(proof=proof):
+                    old_request = {**request, 'env': {key: value for key, value in request['env'].items()
+                                   if key not in (*storage, 'HOME')},
+                                   'unset_env': [key for key in request['unset_env'] if key not in storage]}
+                    old_properties = dict(legacy)
+                    expected = dict(storage)
+                    if proof in ('request', 'partial-request', 'request-alias'):
+                        old_request['env'].update({'CODEX_HOME': storage['CODEX_HOME']} if proof == 'partial-request' else storage)
+                    elif proof == 'service':
+                        old_properties['native_service_identity'] = {'provider': 'codex', 'scope': dict(storage)}
+                        old_properties['native_environment'] = dict(storage)
+                    elif proof == 'request-unset':
+                        old_request['env']['HOME'] = str(self.work / 'original-home')
+                        old_request['unset_env'].extend(storage)
+                        expected = {'CODEX_HOME': str(self.work / 'original-home/.codex'), 'CODEX_SQLITE_HOME': None}
+                    if proof == 'request-alias':
+                        path = Path(storage['CODEX_HOME'])
+                        path.symlink_to(self.work / 'different-home', target_is_directory=True)
+                        self.addCleanup(path.unlink, missing_ok=True)
+                    write(directory / 'properties.json', old_properties)
+                    write(directory / 'runtime.json', facts)
+                    write(request_path, old_request)
+                    paths = [directory / 'properties.json', directory / 'runtime.json', request_path]
+                    before = {path: path.read_bytes() for path in paths}
+                    backend.reset_mock()
+                    with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                            patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                            patch.dict(os.environ, {key: str(self.work / ('wrong-caller-' + key)) for key in storage}):
+                        if proof in ('missing', 'partial-request', 'request-alias'):
+                            reason = 'Native session storage differs' if proof == 'request-alias' else 'original Codex storage.*not recorded'
+                            with self.assertRaisesRegex(ValueError, reason):
+                                lifecycle.start(self.root, resume=directory.name)
+                            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                            backend.create.assert_not_called()
+                        else:
+                            result = lifecycle.start(self.root, resume=directory.name)
+                            actual = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                            self.assertEqual({key: actual['env'].get(key) for key in storage}, expected)
+                            self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
 
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,
