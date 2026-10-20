@@ -19,6 +19,9 @@ class PiAdapter(ConfiguredAdapter):
     supports_bridge = True
     family = 'pi'
     resume_prompt_args = ('--', '{task}')
+    # Pi's agent directory (settings, auth, extensions). Core records it at spawn, value or absence, and
+    # replays it on resume, so a Pi child never takes the tmux server's; settings.env can't set it.
+    storage_env = ('PI_CODING_AGENT_DIR',)
 
     def spawn(self, context):
         return self._with_extension(super().spawn(context), context)

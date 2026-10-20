@@ -155,7 +155,7 @@ class NativeDeliveryTest(BaseTest):
             with self.subTest(harness=name, key='an ordinary name'):
                 self.assertEqual(adapter.configured(name, {'env': {'DEBUG': '1'}}).environment, {'DEBUG': '1'})
         self.assertEqual({key for adapter in harnesses.BUILTINS.values() for key in adapter.storage_env},
-                         {'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME'})
+                         {'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'PI_CODING_AGENT_DIR'})
 
     def test_native_subprocess_scrubs_identity_and_preserves_literal_argv(self):
         """Native helper commands run without the caller's MV2_*, CODEX_THREAD_ID or CLAUDECODE and with literal argv;
