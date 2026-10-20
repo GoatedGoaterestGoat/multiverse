@@ -712,8 +712,8 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
                 continue
             uuid = row.get('uuid') if isinstance(row.get('uuid'), str) and row.get('uuid') else None
             if uuid is not None:  # every copy of a row must agree on what it proves
-                proof = (row.get('type'), seen[0] if seen else None, seen[1].strip() if seen else None,
-                         row.get('timestamp'))
+                # Exactly what allocation reads: the raw ID or text, and a text row's own time selection.
+                proof = (row.get('type'), *(seen if seen else (None,)))
                 if prints.setdefault(uuid, proof) != proof:
                     conflicting.add(uuid)
             if seen and seen[0] == 'id':

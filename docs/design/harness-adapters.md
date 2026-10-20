@@ -63,7 +63,8 @@ receipt the copy stored just before it, a mid-turn receipt none. The remaining c
 others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
 a copy left to another identical message makes the answer unknown. So does an identical message the
 current live launch accepted that has no receipt yet, since it may still write one for a copy, and
-copies of one row uuid that disagree on its type, text or time, whatever order they're read in. Missing reason hooks default to no additional
+copies of one row uuid that disagree on anything allocation reads (its type, its raw text or
+message ID, or its time, an attachment's own when the row has none), whatever order they're read in. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
 Core retains the failed launch's exact prompt, start time, conversation identity
