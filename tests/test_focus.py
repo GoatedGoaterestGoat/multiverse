@@ -453,6 +453,18 @@ class FocusCommandTest(BaseTest):
         self.assertEqual(len(self.calls), 1)
         self.assertIn('The rest were not retried: asker is focused until unfocused', self.stderr)
 
+    def test_the_dashboard_backend_reads_a_damaged_focus_as_none(self):
+        """The dashboard's real backend lists an agent whose focus.json has a far-future until as not focused, and
+        list and send keep working; a break crashed every refresh with "date value out of range"."""
+        from multiverse.ui.backend import LocalBackend
+        directory = self.directories['asker']
+        store.write(directory / focus.FILE, {'since': datetime.now(timezone.utc).isoformat(),
+                                             'until': '9999-12-31T23:59:59-14:00', 'turns': None, 'by': 'user'})
+        rows = {row['name']: row for row in LocalBackend().snapshot(self.root)['agents']}
+        self.assertIsNone(rows['asker']['focus'])
+        self.assertNotIn('Focused', self.output('list'))
+        self.output('send', 'asker', '--text', 'ping')
+
     def test_list_inspect_and_the_tmux_bar_show_focus(self):
         """list, list --json, inspect and the tmux bar show the focus and when it ends, and stop once it expires;
         senders and the user otherwise cannot tell why sends are refused."""
