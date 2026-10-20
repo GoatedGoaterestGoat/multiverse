@@ -71,7 +71,10 @@ path) or starts with that key plus `-`, which covers Claude's own worktrees unde
 the workspace and the hashed long form. Another workspace's unreadable folder is
 skipped; with no absolute workspace, every unreadable folder blocks. The handle's
 workspace is the launch's own, so a recheck of a failed wake reads that launch's
-folder even after the agent moved on. GOAT applies the same rule to its search.
+folder even after the agent moved on. GOAT applies the same rule to its search. The
+same scan answers core's `session_storage_evidence(session, home)` for each
+candidate home of an agent with no recorded storage: present, absent only when
+every folder that could hold the transcript was read, or unknown.
 When part of the storage that could hold the session can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as
 proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on

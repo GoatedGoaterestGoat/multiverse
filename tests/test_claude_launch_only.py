@@ -347,6 +347,29 @@ class ClaudeUnreadableStorageTest(BaseTest):
             self.assertEqual(found, (None, f"Claude's transcript {transcript} can't be read: restore read access to it"))
             self.assertIs(ask('startup_prompt_evidence'), False)
             self.assertIsNone(ask('startup_prompt_evidence_reason'))
+        with self.subTest("a legacy agent's storage is adopted only on proof"):
+            # LC-28: core asks each candidate home whether this session's own transcript is there, and adopts
+            # one only when exactly one says present and the others absent; anything unreadable is unknown.
+            adapter = harnesses.load(self.root, 'claude')
+            self.saved()
+            session = SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native)
+            empty = self.work / 'other-claude'
+            (empty / 'projects' / '-private-tmp-scratch').mkdir(parents=True)
+            evidence = lambda home, handle=session: adapter.session_storage_evidence(handle, home)
+            self.assertEqual((evidence(str(self.storage)).state, evidence(str(self.storage)).value), ('ok', {'present': True}))
+            self.assertEqual((evidence(str(empty)).state, evidence(str(empty)).value), ('ok', {'present': False}))
+            self.assertEqual(evidence(str(self.work / 'no-such-home')).value, {'present': False})
+            self.lock(empty / 'projects' / '-private-tmp-scratch')  # another workspace's folder proves nothing either way
+            self.assertEqual(evidence(str(empty)).value, {'present': False})
+            (empty / 'projects' / '-private-tmp-scratch').chmod(0o700)
+            self.lock(self.project)  # the folder that could hold it
+            found = evidence(str(self.storage))
+            self.project.chmod(0o700)
+            self.assertEqual(found.state, 'unknown')
+            self.assertIn(str(self.project), found.reason)
+            for home, handle in (('relative/claude', session), (str(self.storage), replace(session, native_id=None))):
+                with self.subTest(home=home, native=handle.native_id):
+                    self.assertEqual(evidence(home, handle).state, 'unknown')
         with self.subTest("another workspace's unreadable folder"):
             # Another tester's scratch folder, or a root-owned one a `sudo claude` left, is no place Claude files this
             # agent's sessions, so it must not stop this agent's lookups.

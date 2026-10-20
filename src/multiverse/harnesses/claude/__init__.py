@@ -808,6 +808,25 @@ class ClaudeAdapter(ConfiguredAdapter):
         """Claude's storage for a launch: CLAUDE_CONFIG_DIR, else HOME/.claude, of that launch's environment."""
         return os.path.realpath(claude_home(environment))
 
+    def session_storage_evidence(self, session, home):
+        """Whether this session's own transcript is under the Claude storage `home` (an absolute storage root,
+        as session_home gives it): ok with {'present': bool}, or unknown with the reason.
+
+        Core adopts a legacy agent's storage only when exactly one candidate home says present and the
+        others absent (LC-28). Absent means every project folder that could hold it was read (the folder
+        rule): another workspace's unreadable folder doesn't count, but one that could hold it, or an
+        unreadable projects folder, is unknown.
+        """
+        if not session.native_id:
+            return NativeResult('unknown', 'No Claude session ID to look for')
+        if not isinstance(home, str) or not os.path.isabs(home):
+            return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
+        try:
+            found = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+        except Unreadable as error:
+            return NativeResult('unknown', f"Claude's storage folder {error.path} can't be read")
+        return NativeResult('ok', value={'present': bool(found)})
+
     def observed_binding(self, session):
         """The session this launch's exact process is on now, from Claude's own process file, or None.
 
