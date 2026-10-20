@@ -81,7 +81,8 @@ class LaunchConnection:
             from .identity import session_environment
             from .plugins import config_tree
             native = config_tree(object_field(params, 'config').items()) if params.get('config') is not None else {}
-            params['config'] = session_environment(native, self.root.settings['agent_environment'])
+            params['config'] = session_environment(native, self.root.settings['agent_environment'],
+                                                   self.root.settings.get('storage_keys'))
         self.fork_request = identifier
         return {**value, 'params': params}
 

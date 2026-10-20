@@ -244,7 +244,8 @@ class LaunchProtocol:
         if 'agent_environment' in self.settings:
             from .identity import session_environment
             native = config_tree((params.get('config') or {}).items())
-            params['config'] = session_environment(deepcopy(native), self.settings['agent_environment'])
+            params['config'] = session_environment(deepcopy(native), self.settings['agent_environment'],
+                                                   self.settings.get('storage_keys'))
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         self.pending = value['id']

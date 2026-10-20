@@ -205,6 +205,7 @@ class CodexAdapter(ConfiguredAdapter):
                                 'resume_permissions': permissions,
                                 'plugin_config': session_config,
                                 'agent_environment': stable,
+                                'storage_keys': context.storage_keys,
                                 'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},

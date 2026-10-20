@@ -58,19 +58,29 @@ def _storage_keys():
                                for key in getattr(adapter, 'storage_env', ())))
 
 
+def _session_storage_keys(selected):
+    declared = _storage_keys()
+    if selected is None:
+        return declared  # Existing callers describe a complete selection.
+    if not isinstance(selected, (tuple, list)) or any(key not in declared for key in selected):
+        raise ValueError('Native storage keys must name declared harness storage variables')
+    # Foreign-key uncertainty never weakens this conversation's own identity.
+    return tuple(dict.fromkeys([*POLICY.storage_env, *selected]))
+
+
 def tool_environment(context):
     # Core resolves these paths once for the agent; never derive them from a
     # parent's ambient identity or duplicate core's CLI/interpreter discovery.
     env = {key: value for key, value in context.agent_environment.items() if key in STABLE}
     # Even an incomplete caller-supplied context must not look like an operator.
     env['MV2_IDENTITY_MODE'] = POLICY.mode
-    env.update({key: context.environment[key] for key in _storage_keys()
+    env.update({key: context.environment[key] for key in _session_storage_keys(context.storage_keys)
                 if key not in POLICY.storage_env and key in context.environment})
     env.update(storage_environment(context))
     return env
 
 
-def session_environment(config, stable):
+def session_environment(config, stable, storage_keys=None):
     """Native/user defaults cannot put launch identity back into shared tools."""
     policy = config.setdefault('shell_environment_policy', {})
     if not isinstance(policy, dict) or not isinstance(policy.get('set', {}), dict):
@@ -79,7 +89,7 @@ def session_environment(config, stable):
     if not isinstance(excludes, list) or any(not isinstance(key, str) for key in excludes):
         raise ValueError('Native shell environment exclusions must be an array of strings')
     values = dict(policy.get('set') or {})
-    storage = _storage_keys()
+    storage = _session_storage_keys(storage_keys)
     for key in (*VOLATILE, *STABLE, *storage, 'CODEX_THREAD_ID'):
         values.pop(key, None)
     values.update(stable)
