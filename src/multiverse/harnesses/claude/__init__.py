@@ -619,7 +619,8 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
                     return True, None
                 ambiguous = True
     if ambiguous:
-        return None, 'Only the message body was recorded for this message, and another message in its conversation holds it'
+        return None, ("Only this message's body was recorded, and its conversation holds that body, which another message "
+                      'could also carry: delivery can\'t be told from the text alone')
     if damaged:
         return None, f"Claude's transcript {damaged} has a damaged or unfinished row: if Claude is still writing it, wait"
     return False, None
