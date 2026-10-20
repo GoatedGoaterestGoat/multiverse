@@ -247,6 +247,35 @@ describe('delivery', () => {
     }
   })
 
+  test('identical messages each get their own receipt, oldest first', async ($, on) => {
+    // Two follow-ups or steers with the same text are stored twice; each stored copy confirms the oldest one still
+    // waiting, so neither is left "accepted, no confirmation" while the agent is live (CLAUDE-14).
+    const w = world(on)
+    const second = (id: string) => id.slice(0, -1) + (id === STEER ? '7' : '8')
+    const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts'))
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    for (const id of [FOLLOW_UP, second(FOLLOW_UP)]) {
+      await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${id}>>Please continue.<</MV2>>` })
+    }
+    for (const id of [STEER, second(STEER)]) {
+      await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${id}>>Rebase first.<</MV2>>` })
+    }
+    await w.clock.settle()
+    const steered = async () => append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped('Rebase first.') }] }, door: 'delivery', origin: { kind: 'peer' } })
+    const prompted = async () => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Please continue.' }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
+    const stored = await steered()
+    if (!stored) return  // a kit with no core to store rows writes no receipts
+    await w.clock.settle()
+    expect(receipts()).toEqual([`/agent/claude-receipts/${STEER}.json`])
+    await steered()
+    await prompted()
+    await prompted()
+    await w.clock.settle()
+    expect(receipts()).toEqual([STEER, second(STEER), FOLLOW_UP, second(FOLLOW_UP)].map((id) => `/agent/claude-receipts/${id}.json`))
+  })
+
   test('a steer no tool result took is dropped as a peer prompt and submitted instead', async ($, on) => {
     const w = world(on)
     await $.turn.start({ text: 'work', turnId: 't1' })
