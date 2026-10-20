@@ -545,10 +545,13 @@ class HarnessInfo:
                               # environment names it, or, asked for an agent (1.12), as its launches do
 
 
-def _agent_home(agent, harness, family):
-    """An agent's harness home as its launches use it: the session home core recorded, else its recorded storage
-    variables (None: the default), else, for an agent no launch recorded either for, this process's environment.
-    None for a record that can't be read."""
+def _agent_home(agent, harness, family, keys):
+    """An agent's harness home as its launches use it, from its records only: the session home core recorded, else
+    the storage its next resume would replay (universe.storage, which lifecycle shares: the storage map, or the
+    legacy launch evidence a resume adopts; a variable recorded as unset is its default under the launch's HOME,
+    which must be recorded too). None (unknown) when a launched agent has no such proof, or a record can't be
+    read. Only an agent that was never launched (no launch evidence of any kind: see _never_launched), so
+    nothing of it in any store yet, gets this process's environment."""
     if not isinstance(agent, Agent):
         hint = f"mv.universe(universe).agent({agent!r})" if isinstance(agent, str) else "mv.universe(universe).agent(NAME)"
         raise Error(f"agent must be an Agent, not {type(agent).__name__}: pass {hint}")
@@ -562,14 +565,54 @@ def _agent_home(agent, harness, family):
     home = properties.get("native_session_home") if isinstance(properties, dict) else None
     if isinstance(home, str) and home:
         return Path(home)
-    storage = properties.get("native_storage_environment") if isinstance(properties, dict) else None
-    if storage is None:
-        return _harness_home(family)
-    if not isinstance(storage, dict) or any(value is not None and not isinstance(value, str)
-                                            for value in storage.values()):
+    if not isinstance(properties, dict):
         return None
-    return _harness_home(family, {"HOME": os.path.expanduser("~"),
-                                  **{key: value for key, value in storage.items() if value}})
+    from ..universe import storage
+    recorded = storage.recorded_environment(agent.directory, properties, family, keys)
+    if recorded is not None:
+        return _recorded_home(family, {key: value for key, value in recorded.items() if value})
+    if _never_launched(agent.directory, properties):
+        return _harness_home(family)  # nothing of it in any store yet: where this process's would put it
+    return None
+
+
+_HOME_VARIABLES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex"),
+                   "pi": ("PI_CODING_AGENT_DIR", None)}
+
+
+def _recorded_home(family, recorded):
+    """A family's home from recorded launch values alone: its variable, else its default under the recorded
+    launch HOME; None when neither is recorded (never this process's HOME or ~)."""
+    variable, default = _HOME_VARIABLES.get(family, (None, None))
+    if variable and recorded.get(variable):
+        return Path(recorded[variable])
+    if default and recorded.get("HOME"):
+        return Path(recorded["HOME"]) / default
+    return None
+
+
+_LAUNCH_PROPERTIES = ("native_session_id", "native_session_home", "native_storage_environment",
+                      "native_service_identity", "native_environment")
+
+
+def _never_launched(directory, properties):
+    """Whether an agent has no launch evidence of any kind: none of the launch properties, a runtime record that
+    is missing or empty, no session journal, and no launch records. An older plain launch may have records but no
+    bound session, and a damaged runtime is still a launch, so no one of these alone decides it."""
+    if any(properties.get(key) not in (None, "", {}) for key in _LAUNCH_PROPERTIES):
+        return False
+    from ..store import read
+    directory = Path(directory)
+    try:
+        runtime = directory / "runtime.json"
+        if runtime.exists() and read(runtime) != {}:
+            return False
+        if (directory / "sessions.jsonl").exists():
+            return False
+        launches = directory / "launches"
+        return not launches.exists() or (launches.is_dir() and not any(launches.iterdir()))
+    except (OSError, ValueError):
+        return False
 
 
 def _harness_home(family, environment=None):
@@ -697,7 +740,8 @@ class Plugin:
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
         family = getattr(adapter, "family", "") or ""
-        home = _harness_home(family) if agent is None else _agent_home(agent, harness, family)
+        home = (_harness_home(family) if agent is None
+                else _agent_home(agent, harness, family, tuple(getattr(adapter, "storage_env", ()))))
         return HarnessInfo(harness, family, executable, tuple(spec.get("unset_env", ())),
                            bool(settings.get("inbox_bridge")), dict(settings), home)
 
