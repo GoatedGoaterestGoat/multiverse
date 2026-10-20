@@ -311,6 +311,9 @@ class SettingsScreenTests(DashboardCase):
                                   edit.widgets["limits.max"].value), ("hello", "3", "9"))
                 self.assertEqual(edit.widgets["greeting"].placeholder, "hello")
                 self.assertIn("tags", str(edit.query(".cwarn").first().render()))
+                # A selector keeps the field screen's look; app.tcss once restyled it through a screen named Choice.
+                self.assertEqual(edit.widgets["loud"].styles.background, edit.widgets["ratio"].styles.background)
+                self.assertEqual(edit.widgets["loud"].styles.align_horizontal, "left")
                 self.assertIsNone(await self.save(pilot, screen), "an unchanged save edited the settings")
                 screen, edit = await self.open_settings(pilot)
                 edit.widgets["greeting"].value = ""
