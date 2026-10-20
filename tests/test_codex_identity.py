@@ -203,7 +203,7 @@ class SharedIdentityTest(unittest.TestCase):
             'params': {'config': config or {}}})
 
     def test_tool_shell_identity_is_stable_and_never_per_launch(self):
-        """Codex tools keep stable identity and every frontend selects the same canonical storage; drift can silently authorize the wrong launch or open another home."""
+        """Codex tools keep stable identity and storage, including another harness's values or absence; drift can silently authorize the wrong launch or open another home."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
         with self.subTest(source='two launches'):
             a, b = (adapter.spawn(self.context(launch)) for launch in ('old', 'new'))
@@ -236,6 +236,7 @@ class SharedIdentityTest(unittest.TestCase):
         for storage, expected in (
                 ({}, {'CODEX_HOME': '/launch/home/.codex'}),
                 ({'CODEX_HOME': ''}, {'CODEX_HOME': '/launch/home/.codex'}),
+                ({'CODEX_SQLITE_HOME': ''}, {'CODEX_HOME': '/launch/home/.codex'}),
                 ({'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'},
                  {'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'}),
                 ({'CODEX_HOME': 'relative-home', 'CODEX_SQLITE_HOME': 'relative-database'},
@@ -262,6 +263,34 @@ class SharedIdentityTest(unittest.TestCase):
                             self.assertEqual({key: plain.environment[key] for key in adapter.storage_env
                                               if key in plain.environment}, expected)
                             self.assertEqual(plain.environment['DEBUG'], 'keep')
+        for foreign_home in (None, '', '/launch/claude-home'):
+            for mode in ('spawn', 'resume'):
+                with self.subTest(foreign_home=foreign_home, mode=mode):
+                    context = self.context('foreign-storage')
+                    environment = dict(context.environment)
+                    if foreign_home is not None:
+                        environment['CLAUDE_CONFIG_DIR'] = foreign_home
+                    context = replace(context, mode=mode, environment=environment)
+                    adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+                    session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
+                    command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                    native = {'shell_environment_policy': {'set': {
+                        'CLAUDE_CONFIG_DIR': '/daemon/claude-home', 'KEEP_SETTING': 'keep'}, 'exclude': ['AWS_*']}}
+                    original = deepcopy(native)
+                    request = LaunchProtocol(command.rpc_proxy.settings).outgoing({'id': 1,
+                        'method': 'thread/start' if mode == 'spawn' else 'thread/resume',
+                        'params': {'threadId': session.native_id, 'config': native}})
+                    policy = request['params']['config']['shell_environment_policy']
+                    if foreign_home is None:
+                        self.assertNotIn('CLAUDE_CONFIG_DIR', policy['set'])
+                    else:
+                        self.assertEqual(policy['set']['CLAUDE_CONFIG_DIR'], foreign_home)
+                    self.assertIn('CLAUDE_CONFIG_DIR', policy['exclude'])
+                    self.assertIn('AWS_*', policy['exclude'])
+                    self.assertEqual(policy['set']['KEEP_SETTING'], 'keep')
+                    self.assertEqual(policy['set']['CODEX_HOME'], '/native/home')
+                    self.assertEqual(policy['set']['MV2_AGENT_ID'], 'agent')
+                    self.assertEqual(native, original)
         with tempfile.TemporaryDirectory(prefix='mv2-codex-storage-alias-') as temporary:
             for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
                 with self.subTest(retargeted_storage=key):

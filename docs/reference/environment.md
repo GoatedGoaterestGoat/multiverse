@@ -65,8 +65,13 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 
 The launch records every built-in harness's storage variables and replays them
 on resume, including variables for other harnesses an agent may spawn. They come
-from the spawning command, not the tmux server. An absent variable is explicitly
-unset in the child. Older snapshots missing another harness's variable use a
+from the spawning command, not the tmux server. Connected Codex tool shells
+receive these launch-selected values and exclude absent storage keys from the
+inherited daemon environment. A value you explicitly set in Codex's
+`shell_environment_policy.set` can supply a variable the launch left absent;
+mv2 does not replace absence with an empty value. A recorded non-empty launch
+value still wins. In a direct launch, an absent variable is explicitly unset in
+the child. Older snapshots missing another harness's variable use a
 recorded launch request if it has that value; otherwise they leave it unset.
 Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
 unset; setting it to a default-looking path can change where Claude reads its

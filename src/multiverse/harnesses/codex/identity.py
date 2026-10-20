@@ -44,12 +44,22 @@ def storage_environment(context):
     return storage
 
 
+def _storage_keys():
+    # Resolve after adapter imports finish; keep the same source-owned union as
+    # core's launch snapshot without treating foreign storage as Codex authority.
+    from .. import BUILTINS
+    return tuple(dict.fromkeys(key for adapter in BUILTINS.values()
+                               for key in getattr(adapter, 'storage_env', ())))
+
+
 def tool_environment(context):
     # Core resolves these paths once for the agent; never derive them from a
     # parent's ambient identity or duplicate core's CLI/interpreter discovery.
     env = {key: value for key, value in context.agent_environment.items() if key in STABLE}
     # Even an incomplete caller-supplied context must not look like an operator.
     env['MV2_IDENTITY_MODE'] = POLICY.mode
+    env.update({key: context.environment[key] for key in _storage_keys()
+                if key not in POLICY.storage_env and key in context.environment})
     env.update(storage_environment(context))
     return env
 
@@ -63,9 +73,10 @@ def session_environment(config, stable):
     if not isinstance(excludes, list) or any(not isinstance(key, str) for key in excludes):
         raise ValueError('Native shell environment exclusions must be an array of strings')
     values = dict(policy.get('set') or {})
-    for key in (*VOLATILE, *STABLE, 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'CODEX_THREAD_ID'):
+    storage = _storage_keys()
+    for key in (*VOLATILE, *STABLE, *storage, 'CODEX_THREAD_ID'):
         values.pop(key, None)
     values.update(stable)
     policy['set'] = values
-    policy['exclude'] = list(dict.fromkeys([*excludes, 'MV2_*']))
+    policy['exclude'] = list(dict.fromkeys([*excludes, 'MV2_*', *storage]))
     return config
