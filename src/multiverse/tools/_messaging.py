@@ -44,6 +44,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    if state == 'cancelled' and value.get('lost_when_stopped') is True:
+        return (f'{name}: message not delivered: lost when the agent stopped. It may still be drafted in its terminal. '
+                'Send a new message if you still want it delivered.')
     if state == 'cancelled':
         return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
     if value.get('paused') is True:

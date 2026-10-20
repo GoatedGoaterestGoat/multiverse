@@ -109,7 +109,14 @@ setting; accepted and uncertain deliveries are never reopened.
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
 until its message is confirmed in the conversation. The check reports an entry
 that is still queued without resending it. `--retry` selects definite failures;
-it never resends an accepted or uncertain submission.
+it never resends an accepted or uncertain submission. An unconfirmed acceptance
+stays visible after a stop or resume. For Claude, once the accepting process is
+proved gone and the same conversation is ready and idle again, a check can use
+its transcript to confirm delivery or prove that the message was lost when the
+agent stopped. Unreadable or incomplete evidence stays uncertain. A proved loss
+is reported once as not delivered, with advice to send a new message deliberately;
+`--retry` does not resend it. The text may still be drafted in the terminal.
+The final result remains in inbox history.
 
 ## Read an inbox
 

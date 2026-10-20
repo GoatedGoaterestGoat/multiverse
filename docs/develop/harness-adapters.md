@@ -146,7 +146,7 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `unavailable` or `error` | `failed` | Definitely not delivered; `mv2 deliver NAME --retry` may resend |
 | `unknown`, or an exception | `unknown` | May have arrived; never resent automatically |
 
-A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages the current launch accepted without a receipt. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
+A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages any launch accepted without transcript confirmation. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
 
 | Harness | Receipt |
 | --- | --- |
@@ -155,6 +155,19 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 | Pi | The extension answers from its transcript metadata and in-process records |
 
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
+
+An optional `accepted_message_evidence(session, message_id, text, since, home,
+framed=True)` hook returns `ok` with `delivered: true|false`, or `unknown` with a
+named reason. Core calls it only after proving the accepting runner and child
+have exited and a newer ready, idle launch uses the same session and storage.
+The hook reads the accepting workspace and exact saved framing. For older records,
+`framed=False` supplies only the body, and an unknown workspace is an empty string
+so every storage folder remains a candidate. Absence can prove loss, but a body match
+cannot confirm delivery without an exact message ID. Unreadable or unfinished
+transcripts must not become a negative answer; missing launch or process facts
+prevent core from calling the hook. A proved loss is retained
+as a final cancelled record with `final_reason: lost`, reported once by `--check`,
+and never retried automatically.
 
 ## Command harnesses
 

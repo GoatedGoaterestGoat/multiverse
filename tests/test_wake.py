@@ -74,7 +74,7 @@ class WakeTest(BaseTest):
         self.assertIsNone(self.messages()[0]['tracking']['native_receipt']['transcript_confirmed'])
         # Pre-binding recovery checks must not attempt a native call.
         checked = deliver.run(self.root, agent=self.agent, check=True)
-        self.assertEqual(len(checked['messages']), 15)
+        self.assertEqual(len(checked['messages']), 16)  # The accepted wake prompt remains unconfirmed and visible too.
         self.adapter.get_delivery.assert_not_called()
         agents.update_runtime(self.directory, self.new_launch, state='running')
         native.flush_startup(self.root, self.directory, self.new_launch)

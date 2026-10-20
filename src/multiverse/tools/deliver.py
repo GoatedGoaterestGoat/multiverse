@@ -22,8 +22,6 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
     name = store.read(directory / 'properties.json')['name']
-    launch_id = agents.runtime(directory).get('launch_id')
-    native_id = store.read(directory / 'properties.json').get('native_session_id')
     results = []
     finalized = 0
     for message in mailbox.inbox(directory, limit=None, all_messages=True)['messages']:
@@ -33,19 +31,12 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         state = tracking['submission_state']
         if state == 'cancelled' and tracking.get('cancelled_reported_at'):
             continue
-        # An accepted submission can gain receipt evidence while the launch that
-        # took it runs; check it until consumption is confirmed. A queue acceptance
-        # receipt is not transcript evidence. Accepted resume prompts have no
-        # native receipt ID; failed-startup uncertainty has its own evidence check.
+        # Acceptance is not delivery. Replacing a launch must never hide an
+        # unconfirmed message; reconciliation fences its exact conversation.
         attempts = tracking.get('attempts') or [{}]
         evidence = tracking.get('native_receipt')
         confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True
-        accepted = (not retry and state == 'accepted' and not confirmed
-                    and tracking.get('delivery_method') != 'resume_prompt'
-                    and (attempts[-1].get('launch_id') == launch_id
-                         or isinstance(evidence, dict) and evidence.get('queued_submission_id')
-                         and native_id and attempts[-1].get('native_session_id') == native_id
-                         and (tracking.get('target_session') or message.get('target_session')) == native_id))
+        accepted = not retry and state == 'accepted' and not confirmed
         if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
@@ -77,11 +68,15 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False}
+        if check and state != 'cancelled' and receipt.get('state') == 'cancelled':
+            # Another checker may have selected the same still-accepted snapshot.
+            if mailbox.claim_cancelled_report(directory, message['id']) is None:
+                continue
         summary = delivery_summary(receipt)
         notices = display.notice_lines(receipt.get('notices'))
         if notices:
             summary['notices'] = notices
-        if accepted and receipt.get('state') != 'error':
+        if accepted and receipt.get('state') not in ('error', 'cancelled'):
             # Missing evidence for an accepted message is not a failure.
             summary['ok'] = True
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message}, **summary})
