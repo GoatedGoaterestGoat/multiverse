@@ -440,6 +440,36 @@ class ApiTest(PluginTestCase):
                                                                             set()).agents], ["worker"])
             self.assertEqual(plugins.panel_context(found["blind"], self.root, {}, rows, set()).agents, ())
 
+    def test_an_agents_harness_home_is_its_recorded_storage(self):
+        """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
+        else storage), never this process's environment, which only an agent with neither falls back to; a break
+        goes unnoticed because tests run every process with one environment, while the dashboard or the host may
+        run with another and then read another store."""
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("reader")
+        mv = api.Plugin(loader.load(self.entry("reader")))
+        mine = Path(os.environ["CLAUDE_CONFIG_DIR"])  # this process's Claude home
+        recorded = self.work / "launch-claude"
+        rows = {  # name: (properties, expected home)
+            "session-home": ({"native_session_home": str(recorded)}, recorded),
+            "storage": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": str(recorded)}}, recorded),
+            "storage-unset": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": None}},
+                              Path(os.environ["HOME"]) / ".claude"),
+            "nothing-recorded": ({}, mine),
+            "damaged": ({"native_storage_environment": ["not", "a", "record"]}, None)}
+        for name, (properties, expected) in rows.items():
+            with self.subTest(name):
+                self.agent(name, **properties)
+                agent = mv.universe(self.root).agent(name)
+                self.assertEqual(mv.harness_info(self.root, "claude", agent=agent).home, expected)
+        with self.subTest("without an agent: this process's environment, as before"):
+            self.assertEqual(mv.harness_info(self.root, "claude").home, mine)
+        with self.subTest("an agent of another harness is refused"):
+            self.agent("coder", harness="codex")
+            with self.assertRaisesRegex(api.Error, "coder runs harness 'codex', not 'claude'"):
+                mv.harness_info(self.root, "claude", agent=mv.universe(self.root).agent("coder"))
+
     def test_a_filesystem_failure_is_an_oserror_too(self):
         """A filesystem failure in an API call (EACCES, ENOSPC) is an api.Error and also the OSError it was, errno
         kept, as state_dir and agent_state_dir raised in 1.9; a break goes unnoticed because tests rarely fill a

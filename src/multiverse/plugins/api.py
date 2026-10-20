@@ -541,11 +541,38 @@ class HarnessInfo:
     settings: dict       # harness.json's settings, as written
     home: Path | None = None  # the harness's own data directory, where mv2 knows it (API 1.7):
                               # Claude's CLAUDE_CONFIG_DIR or ~/.claude, Codex's CODEX_HOME or ~/.codex,
-                              # Pi's PI_CODING_AGENT_DIR when set; None otherwise
+                              # Pi's PI_CODING_AGENT_DIR when set; None otherwise. As this process's
+                              # environment names it, or, asked for an agent (1.12), as its launches do
+
+
+def _agent_home(agent, harness, family):
+    """An agent's harness home as its launches use it: the session home core recorded, else its recorded storage
+    variables (None: the default), else, for an agent no launch recorded either for, this process's environment.
+    None for a record that can't be read."""
+    if not isinstance(agent, Agent):
+        raise Error("agent must be an Agent, as mv.universe(...).agent gives")
+    if agent.harness != harness:
+        raise Error(f"{agent.name} runs harness {agent.harness!r}, not {harness!r}")
+    from ..store import read
+    try:
+        properties = read(agent.directory / "properties.json")
+    except (OSError, ValueError):
+        return None
+    home = properties.get("native_session_home") if isinstance(properties, dict) else None
+    if isinstance(home, str) and home:
+        return Path(home)
+    storage = properties.get("native_storage_environment") if isinstance(properties, dict) else None
+    if storage is None:
+        return _harness_home(family)
+    if not isinstance(storage, dict) or any(value is not None and not isinstance(value, str)
+                                            for value in storage.values()):
+        return None
+    return _harness_home(family, {"HOME": os.path.expanduser("~"),
+                                  **{key: value for key, value in storage.items() if value}})
 
 
 def _harness_home(family, environment=None):
-    """A harness family's data directory as this process's environment names it, or None."""
+    """A harness family's data directory as this process's environment names it (or `environment`), or None."""
     source = os.environ if environment is None else environment
     if family == "claude":
         from ..harnesses.claude import claude_home
@@ -658,8 +685,10 @@ class Plugin:
         identity = os.environ.get("MV2_AGENT_ID")
         return self.universe().agent(identity) if identity else None
 
-    def harness_info(self, universe, harness):
-        """HarnessInfo for a harness configured in a universe (its harnesses/NAME/harness.json)."""
+    def harness_info(self, universe, harness, agent=None):
+        """HarnessInfo for a harness configured in a universe (its harnesses/NAME/harness.json). With `agent`
+        (an Agent of that harness; 1.12), `home` is the one that agent's launches use, from its records, not
+        this process's environment, which a dashboard or the plugin host may not share with it."""
         from .. import harnesses
         root = _root(universe)
         adapter = _call(harnesses.load, root, harness)
@@ -667,8 +696,9 @@ class Plugin:
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
         family = getattr(adapter, "family", "") or ""
+        home = _harness_home(family) if agent is None else _agent_home(agent, harness, family)
         return HarnessInfo(harness, family, executable, tuple(spec.get("unset_env", ())),
-                           bool(settings.get("inbox_bridge")), dict(settings), _harness_home(family))
+                           bool(settings.get("inbox_bridge")), dict(settings), home)
 
     def state_dir(self, universe=None):
         """state/plugins/NAME/ of a universe, made on first use while the universe exists; UniverseGone once it

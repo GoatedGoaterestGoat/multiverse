@@ -137,7 +137,7 @@ Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTH
 These need no permission:
 
 - `agent.session()`, the `SessionInfo` that capability and usage functions get. Its `workspace` (1.11) is the agent's current workspace as `properties.json` records it, the same value the harness adapters use, or `None` when none is recorded.
-- `mv.harness_info(universe, name)`, a harness's `family`, `executable`, `unset_env`, `bridge`, `settings` and `home`.
+- `mv.harness_info(universe, name)`, a harness's `family`, `executable`, `unset_env`, `bridge`, `settings` and `home`. `home` is as this process's environment names it. Pass `agent=` (an `Agent` of that harness, 1.12) for the home that agent's launches use, from its records: the dashboard or the plugin host may run with another environment than the agent.
 - `mv.settings` ([settings](#settings)).
 - `mv.state_dir(universe=None)` and `mv.agent_state_dir(agent)`, which give `state/plugins/NAME/` and `state/agents/ID/NAME/`.
 - (1.10) An agent's folder (`state/agents/ID/`) and a universe's root are core's. The plugin API never makes them, so a late write can't bring back an agent or a universe that was removed or moved: `mv.agent_state_dir`, `mv.state_dir`, `api.files.write_json`, `lock` and `ensure_dir` raise `api.AgentGone` or `api.UniverseGone` (both `api.Gone`, which is also an `OSError`, as these raised before 1.10) for one that is gone, and `mv.statusline.write` and `mv.log` write nothing. Make anything under an agent's folder or a plugin's state with these, never with a `mkdir` that creates parents. To keep writing for one exact universe, keep its `Universe` object (from `mv.universe`): a plain path is resolved at or above, so for a removed subverse it would find its parent.
