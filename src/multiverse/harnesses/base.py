@@ -183,6 +183,10 @@ class ConfiguredAdapter:
         """Optional native storage root, resolved from the launch's environment."""
         return None
 
+    def session_storage_evidence(self, session, home) -> NativeResult:
+        """Read-only exact conversation evidence in an explicit absolute storage root."""
+        return NativeResult('unknown', 'This harness cannot verify a legacy conversation storage location')
+
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}

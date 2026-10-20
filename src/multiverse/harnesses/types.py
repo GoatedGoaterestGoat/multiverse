@@ -204,6 +204,9 @@ class LaunchContext:
     executor: 'Executor | None' = None
     resume_prompt: str | None = None
     agent_environment: Mapping[str, str] = field(default_factory=dict)
+    # None preserves the complete selection used by existing callers; an empty
+    # tuple proves no storage keys. Omitted legacy keys retain native inheritance.
+    storage_keys: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
