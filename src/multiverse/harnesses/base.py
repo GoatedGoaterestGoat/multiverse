@@ -15,6 +15,16 @@ ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 # mv2 sets PATH for every launch, always removes the parent markers, and resolves
 # native storage from HOME; a harness cannot replace them (nor any MV2_* name).
 RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
+# What a parent Claude Code session leaves in its subprocesses' environment, and so in a tmux server first started
+# from one: its identity, which a Claude reads at startup (CLAUDECODE, the child-session marker that turns
+# transcript saving off, the session, attended and bridge IDs, the entry point and worktree), its IDE port and inbox,
+# and its tool shells' own values. Claude Code removes the same identity when it starts a fresh Claude itself
+# (2.1.303). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone.
+PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
+                 'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
+                 'CLAUDE_CODE_HOST_WORKTREE_FENCE', 'CLAUDE_CODE_EVAL_INTERVIEW_SESSION',
+                 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
+                 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_INVOKED_SKILLS')
 
 
 def arguments(value, label, required=False):
@@ -137,9 +147,7 @@ class ConfiguredAdapter:
         # Scrubbing parent identity is a core invariant, including legacy definitions, and so is Claude's
         # child-session marker, which turns transcript saving off, and a parent Claude's IDE port and inbox path
         # and secret (an agent spawned from inside Claude inherits them): a harness replacing unset_env keeps them.
-        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION',
-                                     'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
-                                     *self.spec.get('unset_env', [])]))
+        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', *PARENT_CLAUDE, *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 
     def spawn(self, context: LaunchContext) -> CommandSpec:

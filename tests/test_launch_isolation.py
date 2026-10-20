@@ -388,7 +388,13 @@ class LaunchIsolationTest(unittest.TestCase):
         manifests = sorted(templates.TEMPLATES.glob("*/harnesses/*/harness.json"))
         self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi'})
         markers = ("CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT",
-                   "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
+                   "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+                   # A parent Claude session's identity, which a Claude reads at startup, and its tool shells' own
+                   # values: a tmux server first started from a Claude Code session passes them to every pane.
+                   "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
+                   "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
+                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_TMPDIR",
+                   "CLAUDE_CODE_INVOKED_SKILLS")
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
                   **{name: "parent" for name in markers}, "CLAUDE_CODE_CHILD_SESSION": "1", "NO_COLOR": "1",
                   "TERM": "tmux-256color"}
