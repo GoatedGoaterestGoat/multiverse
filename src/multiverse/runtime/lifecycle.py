@@ -830,6 +830,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     exit_deadline = None
     screen_deadline = None
     screen_expired = False
+    caller_unverified = False
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
@@ -848,7 +849,12 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
                 refusal.settle_startup(agent_dir, launch_id, 'unverified')
                 continue  # Re-read refusal/generation/state after atomic settlement.
         live = observe(result, facts)['live']
-        if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
+        # A caller deadline changes only this answer. The runner keeps its own
+        # observation/retry window, and a re-read catches a refusal or retry claim.
+        unverified = (caller_unverified and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
+                      and (facts.get('attachment') or {}).get('readiness') == 'process')
+        ready_facts = {**facts, 'native_startup_observation': None} if unverified else facts
+        if launch_ready(adapter, result, ready_facts, agent_dir, request, live, include_delivery=include_delivery):
             if screen_expired and launch_ready(adapter, result, facts, agent_dir, request, live):
                 try:
                     from ..plugins import events
@@ -856,7 +862,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
                         _record_ready(agent_dir, launch_id, result)
                 except Exception:
                     pass  # Optional events never hold up readiness.
-            if (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
+            if unverified or (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
                 result = {**result, 'notices': [*result.get('notices', []),
                     'Startup could not be confirmed from the native screen; continuing with process readiness.']}
             return {**result, 'ok': True, 'ready': True}
@@ -882,14 +888,13 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            if (settle_on_timeout and not screen_expired
+            if (settle_on_timeout and not caller_unverified and not screen_expired
                     and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
                     and (facts.get('attachment') or {}).get('readiness') == 'process'
                     and launch_ready(adapter, result, {**facts, 'native_startup_observation': None},
                                      agent_dir, request, live, include_delivery=include_delivery)):
-                screen_expired = True
-                refusal.settle_startup(agent_dir, launch_id, 'unverified', require_process_ready=True)
-                continue  # A concurrent refusal or retry claim must win over this old snapshot.
+                caller_unverified = True
+                continue  # Re-read without settling the runner's observation.
             return {**result, 'ok': False, 'ready': False, 'timed_out': True,
                     'error': f'Timed out after {timeout:g}s waiting for launch readiness; '
                              'the launch was not stopped. Inspect its runtime or terminal before retrying.'}

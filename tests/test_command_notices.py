@@ -98,10 +98,14 @@ class CommandNoticeTest(NativeBackendTest):
                 self.assertEqual(child.wait.call_count, 2 if exited else 1)
                 if exited:
                     self.assertTrue(agents.runtime(self.directory)['startup_checked'])
-        with self.subTest('slow native setup can fail before its pending screen ever starts'):
+        with self.subTest('a short caller wait leaves a slow startup eligible for its retry'):
             write(launch / 'request.json', request)
             write(self.directory / 'runtime.json', {**baseline, 'startup_checked': True,
                 'native_startup_observation': {'state': 'pending'}})
+            agents.update_runtime(self.directory, launch.name, attachment={'readiness': 'process'})
+            with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+                waited = lifecycle.wait_ready(self.root, self.directory, launch.name, self.adapter, 0)
+            self.assertTrue(waited['ready'], waited)
             child = Mock(return_value=second)
             with patch.object(self.adapter, 'startup_retryable', return_value=True, create=True), \
                     patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')):
@@ -118,7 +122,7 @@ class CommandNoticeTest(NativeBackendTest):
                 self.assertIsNotNone(runner.retry_startup(launch, request, self.adapter, first, .1,
                     child, native_id=self.properties.get('native_session_id')))
             child.assert_called_once()
-        with self.subTest('a wait settling the screen during diagnostic capture wins over retry'):
+        with self.subTest('screen-window expiry during diagnostic capture wins over retry'):
             write(launch / 'request.json', request)
             write(self.directory / 'runtime.json', {**baseline, 'startup_checked': True,
                 'native_startup_observation': {'state': 'pending'}})
@@ -157,7 +161,8 @@ class CommandNoticeTest(NativeBackendTest):
         with self.subTest('a native binding during the first attempt rules out a retry'):
             write(self.directory / 'runtime.json', baseline)
             write(self.directory / 'properties.json', {**self.properties, 'native_session_id': 'new binding'})
-            with patch.object(self.adapter, 'startup_retryable', return_value=True, create=True):
+            with patch.object(self.adapter, 'startup_retryable', return_value=True, create=True), \
+                    patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')):
                 self.assertIsNone(runner.retry_startup(launch, request, self.adapter, first, 0,
                     Mock(side_effect=AssertionError('a bound conversation must not start twice')),
                     native_id=self.properties.get('native_session_id')))
