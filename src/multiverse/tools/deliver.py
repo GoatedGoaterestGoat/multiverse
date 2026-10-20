@@ -55,7 +55,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 continue
             if state == 'cancelled':
                 receipt = {**(tracking.get('last_receipt') or {}),
-                           'state': 'cancelled', 'ok': True, 'reused': True}
+                           'state': 'cancelled', 'ok': False, 'reused': True}
             elif final is not None:
                 receipt = final
             elif retry:

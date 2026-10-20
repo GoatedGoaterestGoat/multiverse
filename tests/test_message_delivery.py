@@ -171,7 +171,7 @@ class InboxDeliveryTest(DeliveryFixture):
                 # Final cancellation remains reportable even if the harness can no longer load.
                 with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
                     checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
-                    self.assertTrue(checked['ok'], checked)
+                    self.assertFalse(checked['ok'], checked)
                     self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
                     self.assertIn('Send a new message', lines[0])
                     self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])

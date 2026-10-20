@@ -110,6 +110,7 @@ class QueueContinuationWorkerTest(DeliveryFixture):
         result = deliver.run(self.root, agent=self.agent, check=True)
         self.assertEqual(result['messages'][0]['state'], 'cancelled')
         self.assertFalse(result['ok'])
+        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True), {'messages': [], 'ok': True})
         self.assertEqual(len(self.calls), 1)
 
 
