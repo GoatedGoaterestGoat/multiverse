@@ -102,7 +102,7 @@ The live connection runs through Codex's shared app-server daemon. There is one 
 
 **Permissions.** Put sandbox and approval flags that must hold on resume in `args`, not `spawn_args`. On a connected resume, mv2 applies `--sandbox`, `--ask-for-approval` and `--dangerously-bypass-approvals-and-sandbox` to the saved conversation. It then checks that Codex accepted them.
 
-On launch-only spawn and resume, including automatic fallback, mv2 requests an extra writable root for the agent folder. Codex decides whether its effective permissions allow it, including project trust and named profiles. If Codex exits before startup because it runs the folder read-only, mv2 retries once without its own root and prints a note, including with `--no-alt-screen`. The agent then needs approval for session-bind, report and inbox. Any `--add-dir` arguments you supply remain unchanged and Codex validates them.
+On launch-only spawn and resume, including automatic fallback, mv2 requests an extra writable root for the agent folder. Codex decides whether its effective permissions allow it, including project trust and named profiles. If Codex exits before startup because it runs the folder read-only, mv2 retries once without its own root and prints a note, including with `--no-alt-screen`. The retry requires the complete read-only diagnostic in the final output paragraph. The agent then needs approval for session-bind, report and inbox. Any `--add-dir` arguments you supply remain unchanged and Codex validates them.
 
 ```json
 {"schema": 2, "adapter": "codex", "settings": {"args": ["--sandbox", "workspace-write"]}}

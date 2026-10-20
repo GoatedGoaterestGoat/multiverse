@@ -45,6 +45,7 @@ def plain_arguments(argv, recipe, values):
 
 def startup_retryable(snapshot):
     """The native TUI rejected add-dir before startup; a live warning is not a retry."""
+    import re
     if type(snapshot.get('exit_code')) is not int or snapshot['exit_code'] == 0:
         return False
     text = snapshot.get('text')
@@ -53,13 +54,18 @@ def startup_retryable(snapshot):
     directory = snapshot.get('agent_dir')
     if not isinstance(directory, str) or not directory or '\x1b' in directory or '\0' in directory:
         return False
-    # The native error may sit inside an inline screen or wrap inside words and
-    # paths. Its complete diagnostic must name the exact core-owned agent root;
-    # banners, abbreviated working directories and composer markers are irrelevant.
-    compact = ''.join(text.split())
+    # Ignore earlier output, without interpreting native layout. The complete
+    # error must occupy the final paragraph, including any wrapped continuation.
+    paragraph = re.split(r'\n\s*\n', text.strip())[-1]
+    if paragraph.startswith('›'):
+        if not paragraph.startswith('› '):
+            return False
+        paragraph = paragraph[2:]
+    compact = ''.join(paragraph.split())
     diagnostic = ('Erroraddingdirectories:Ignoring--add-dir(' + ''.join(directory.split()) + ')because'
-                  'theeffectivepermissionsdonotallowadditionalwritableroots.')
-    return diagnostic in compact
+                  'theeffectivepermissionsdonotallowadditionalwritableroots.'
+                  'Switchtoworkspace-writeordanger-full-accesstoallowthem.')
+    return compact == diagnostic
 
 
 def remote_arguments(argv, context):

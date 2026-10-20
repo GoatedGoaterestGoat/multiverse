@@ -1,5 +1,7 @@
 """Native validation chooses whether mv2's own plain writable root is usable."""
 import json
+import re
+import textwrap
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -60,7 +62,12 @@ class PlainPermissionsTest(unittest.TestCase):
                                   ({'agent_dir': '/different/agent'}, False),
                                   ({'agent_dir': capture['agent_dir'] + '-sibling'}, False),
                                   ({'agent_dir': None}, False),
-                                  ({'text': capture['text'] + '\nDifferent startup failure'}, True)):
+                                  ({'text': capture['text'] + '\nDifferent startup failure'}, False),
+                                  ({'text': 'Wake prompt: "' + capture['text'] + '"\nPlease continue.'}, False),
+                                  ({'text': 'Prompt prefix ' + capture['text']}, False),
+                                  ({'text': '› › ' + capture['text']}, False),
+                                  ({'text': '›' + capture['text']}, False),
+                                  ({'text': '› ' + capture['text']}, True)):
             with self.subTest(evidence=changed):
                 self.assertIs(adapter.startup_retryable({**evidence, **changed}), expected)
         inline = next(row for row in captures if row['case'] == 'inline-readonly-spawn')
@@ -68,7 +75,10 @@ class PlainPermissionsTest(unittest.TestCase):
                 (inline['text'], inline['agent_dir'], True),
                 (inline['text'].replace(inline['workspace'], '~/project'), inline['agent_dir'], True),
                 (inline['text'].replace(inline['workspace'], '/long/…/project'), inline['agent_dir'], True),
-                (''.join(char + '\n' for char in inline['text']), inline['agent_dir'], True),
+                ('\n\n'.join('\n'.join(textwrap.wrap(' '.join(paragraph.split()), width=24,
+                                                   break_on_hyphens=False))
+                             for paragraph in re.split(r'\n\s*\n', inline['text'].strip())),
+                 inline['agent_dir'], True),
                 ('Saved native storage retained.\n' + inline['text'], inline['agent_dir'], True),
                 (inline['text'], None, False),
                 (inline['text'], {'damaged': 'directory'}, False),
