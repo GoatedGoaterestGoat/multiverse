@@ -293,9 +293,10 @@ class ClaudeUnreadableStorageTest(BaseTest):
         """A new session whose transcript, with the prompt and one response, is in a readable project folder."""
         self.native = str(uuid4())
         self.project.mkdir(parents=True, exist_ok=True)
-        row = {'type': 'user', 'message': {'role': 'user', 'content': self.PROMPT}, 'timestamp': '2026-10-18T10:00:05.000Z'}
+        row = {'type': 'user', 'message': {'role': 'user', 'content': self.PROMPT}, 'timestamp': '2026-10-18T10:00:05.000Z',
+               'sessionId': self.native}
         response = {'type': 'assistant', 'message': {'id': 'msg_1', 'usage': {'input_tokens': 10, 'output_tokens': 5}},
-                    'timestamp': '2026-10-18T10:00:06.000Z'}
+                    'timestamp': '2026-10-18T10:00:06.000Z', 'sessionId': self.native}
         (self.project / f'{self.native}.jsonl').write_text(json.dumps(row) + '\n' + json.dumps(response) + '\n')
 
     def lock(self, path):
@@ -370,6 +371,23 @@ class ClaudeUnreadableStorageTest(BaseTest):
             for home, handle in (('relative/claude', session), (str(self.storage), replace(session, native_id=None))):
                 with self.subTest(home=home, native=handle.native_id):
                     self.assertEqual(evidence(home, handle).state, 'unknown')
+            # Presence is proved by the session's own rows in a regular file, never by a name (reviewer, 5cf3f78).
+            transcript = self.project / f'{self.native}.jsonl'
+            saved = transcript.read_bytes()
+            foreign = json.dumps({'type': 'user', 'sessionId': str(uuid4()), 'message': {'content': 'x'}}) + '\n'
+            for case, make in (('a directory', lambda: transcript.mkdir()), ('an empty file', lambda: transcript.write_text('')),
+                               ("another session's rows", lambda: transcript.write_text(foreign)),
+                               ('a link to the real rows', lambda: transcript.symlink_to(self.work / 'real.jsonl')),
+                               ('a dangling link', lambda: transcript.symlink_to(self.work / 'nowhere.jsonl'))):
+                with self.subTest(proof=case):
+                    (self.work / 'real.jsonl').write_bytes(saved)
+                    transcript.unlink()
+                    make()
+                    found = evidence(str(self.storage))
+                    self.assertEqual(found.state, 'unknown', found.value)
+                    self.assertIn(str(transcript), found.reason)
+                    transcript.rmdir() if transcript.is_dir() and not transcript.is_symlink() else transcript.unlink()
+                    transcript.write_bytes(saved)
         with self.subTest("another workspace's unreadable folder"):
             # Another tester's scratch folder, or a root-owned one a `sudo claude` left, is no place Claude files this
             # agent's sessions, so it must not stop this agent's lookups.
@@ -492,9 +510,10 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         return {'type': 'user', 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
                 'origin': {'kind': 'plugin', 'name': 'multiverse', 'asUser': True}}
 
-    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True):
+    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=()):
         result = self.adapter.accepted_message_evidence(session or self.session(), self.message, text, since,
-                                                        home or str(self.storage), framed=framed)
+                                                        home or str(self.storage), framed=framed,
+                                                        **({'cohort': cohort} if cohort else {}))
         return result.state, (result.value or {}).get('delivered')
 
     def test_accepted_message_delivered_lost_or_unknown(self):
@@ -502,11 +521,35 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         only when every transcript that could hold it was read whole without it, and unknown otherwise; fragile because
         it parses Claude's private rows, and a wrong False makes someone resend a message the agent already got, while
         a wrong True hides a lost one (LC-30)."""
+        earlier = (str(uuid4()), self.TEXT, '2026-10-19T09:59:58.000000+00:00')  # the same text, accepted first
+        later = (str(uuid4()), self.TEXT, '2026-10-19T10:00:02.000000+00:00')
         rows = [
             ('a mid-turn steer, matched by its id', [self.steer(prompt='other text')], '', {}, ('ok', True)),
             ('a follow-up typed in after the accept', [self.prompt()], '', {}, ('ok', True)),
             ('an older prompt with the same text', [self.prompt(at='2026-10-19T09:59:00.000Z')], '', {}, ('ok', False)),
-            ("another message's steer", [self.steer(message=str(uuid4()), prompt='other text')], '', {}, ('ok', False)),
+            ("another message's steer, even with our text", [self.steer(message=str(uuid4()))], '', {}, ('ok', False)),
+            ('a longer message holding our text', [self.prompt(self.TEXT + '\nAnd more.')], '', {}, ('ok', False)),
+            ('one copy, two identical acceptances: the older takes it', [self.prompt()], '', {'cohort': [later]},
+             ('ok', True)),
+            ('one copy, two identical acceptances: the newer is left unknown', [self.prompt()], '', {'cohort': [earlier]},
+             ('unknown', None)),
+            ('two copies, two identical acceptances', [self.prompt(), self.prompt(at='2026-10-19T10:00:06.000Z')], '',
+             {'cohort': [earlier]}, ('ok', True)),
+            ('a copy stored before ours belongs to the older one', [self.prompt(at='2026-10-19T09:59:59.000Z')], '',
+             {'cohort': [earlier]}, ('ok', False)),
+            ('a steer confirmed by its id uses no copy', [self.steer(message=earlier[0]), self.prompt()], '',
+             {'cohort': [earlier]}, ('ok', True)),
+            ('a non-object row', [self.prompt('something else')], '[1, 2]\n', {}, ('unknown', None)),
+            ('a user row whose content is a number', [{'type': 'user', 'timestamp': '2026-10-19T10:00:05.000Z',
+                                                       'message': {'role': 'user', 'content': 123}}], '', {}, ('unknown', None)),
+            ('a queued command whose prompt is a number', [{'type': 'attachment', 'attachment': {
+                'type': 'queued_command', 'prompt': 5}}], '', {}, ('unknown', None)),
+            ('a matching row with no time', [{**self.prompt(), 'timestamp': None}], '', {}, ('unknown', None)),
+            ('malformed rows beside the id', [self.steer(), {'type': 'user', 'message': {'content': 123}}], '', {},
+             ('ok', True)),
+            ('tool results and images are not damage', [{'type': 'user', 'timestamp': '2026-10-19T10:00:05.000Z',
+                'message': {'role': 'user', 'content': [{'type': 'tool_result', 'content': [{'type': 'text', 'text': 'x'}]},
+                                                        {'type': 'image', 'source': {}}]}}], '', {}, ('ok', False)),
             ('a complete transcript without it', [self.prompt('something else')], '', {}, ('ok', False)),
             ('a damaged row and no match', [self.prompt('something else')], 'not json\n', {}, ('unknown', None)),
             ('a damaged row beside the id', [self.steer()], '{"type": "user", "mess', {}, ('ok', True)),

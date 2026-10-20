@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import unicodedata
 import shutil
 import subprocess
@@ -107,7 +108,7 @@ def could_hold(name, workspaces):
     return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
 
 
-def session_transcripts(native_id, environment=None, workspaces=()):
+def session_transcripts(native_id, environment=None, workspaces=(), links=False):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
 
     Raises Unreadable when a folder can't be listed or searched and could hold the session: Claude files it
@@ -128,13 +129,45 @@ def session_transcripts(native_id, environment=None, workspaces=()):
         try:
             if not entry.is_dir():
                 continue
-            found.append((candidate.stat().st_mtime, candidate))
+            # `links` finds a link (even a dangling one) where a transcript should be, for readers that refuse it.
+            found.append(((candidate.lstat() if links else candidate.stat()).st_mtime, candidate))
         except FileNotFoundError:
             continue
         except OSError as error:
             if could_hold(entry.name, workspaces):  # a project folder that can't be searched could hold it
                 raise Unreadable(entry.path) from error
     return [path for _, path in sorted(found)]
+
+
+IDENTITY_BYTES = 1 << 20
+
+
+def transcript_identity(path, native_id):
+    """None when `path` is a regular file whose rows name session `native_id` (read within its first MiB), else
+    why it proves nothing: a link, a directory or other non-regular file, an unreadable or empty file, or rows of
+    no session or another one."""
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            return f'{path} is a link, not a transcript'
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return f'{path} is not a regular file'
+        with open(path, 'rb') as handle:
+            head = handle.read(IDENTITY_BYTES)
+    except OSError as error:
+        return f"{path} can't be read ({error.strerror or error})"
+    named = set()
+    for raw in head.split(b'\n')[:-1] if len(head) == IDENTITY_BYTES else head.split(b'\n'):
+        try:
+            row = json.loads(raw) if raw.strip() else None
+        except ValueError:
+            continue
+        if isinstance(row, dict) and isinstance(row.get('sessionId'), str):
+            named.add(row['sessionId'])
+    if named - {native_id}:
+        return f"{path} holds another session's rows"
+    if native_id not in named:
+        return f'{path} has no row naming this session'
+    return None
 
 
 def subagent_transcripts(main):
@@ -563,14 +596,49 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     return False, None
 
 
-def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True):
+def _delivery_row(row):
+    """What one transcript row says about mv2's deliveries: ('id', msg_id) for the queued_command a mid-turn steer
+    becomes, ('text', text, timestamp) for a prompt, None for any other row, or False when a row of either kind
+    is malformed (valid JSON in the wrong shape is damage, never an empty message)."""
+    if not isinstance(row, dict):
+        return False
+    if row.get('type') == 'attachment':
+        attachment = row.get('attachment')
+        if not isinstance(attachment, dict):
+            return False
+        if attachment.get('type') != 'queued_command':
+            return None
+        origin = attachment.get('origin', {})
+        if not isinstance(attachment.get('prompt'), str) or not isinstance(origin, dict) \
+                or not isinstance(origin.get('msg_id', ''), str):
+            return False
+        if origin.get('msg_id'):
+            return 'id', origin['msg_id']
+        return 'text', attachment['prompt'], row.get('timestamp') or attachment.get('timestamp')
+    if row.get('type') == 'user':
+        message = row.get('message')
+        content = message.get('content') if isinstance(message, dict) else None
+        if isinstance(content, str):
+            return 'text', content, row.get('timestamp')
+        if not isinstance(content, list) or not all(isinstance(block, dict) and isinstance(block.get('type'), str)
+                                                    and (block['type'] != 'text' or isinstance(block.get('text'), str))
+                                                    for block in content):
+            return False
+        return 'text', '\n'.join(block['text'] for block in content if block['type'] == 'text'), row.get('timestamp')
+    return None
+
+
+def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=()):
     """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
 
-    True for the queued_command row a mid-turn steer becomes, which carries our message ID, or for a user
-    row from `since` on holding `text` (a follow-up or idle steer the mod typed in). False when every
-    transcript that could hold it was read whole without either. None when that can't be told. With
-    `framed` False, `text` is only the message body (older records), so a body match is not proof: another
-    message can share it. Its absence still is, since every delivered form contains it.
+    True for the queued_command row a mid-turn steer becomes, which carries our message ID. Otherwise a stored
+    copy of the framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once:
+    `cohort` holds the session's other acceptances as (message_id, framed text, since), and those with the
+    same text take the copies from their accept times on, oldest first, so one stored row never confirms two
+    messages. False when every transcript that could hold it was read whole and no copy is left from our accept
+    time on. None when that can't be told: damaged or malformed rows, an incomplete cohort, or copies all taken by
+    older acceptances. With `framed` False, `text` is only the body (older records): a match is not proof, since
+    another message can share it; its absence still is.
     """
     start, needle = moment(since), (text or '').strip()
     if not native_id or not needle or start is None or start.tzinfo is None or not environment:
@@ -579,7 +647,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         paths = session_transcripts(native_id, environment, workspaces)
     except Unreadable as error:
         return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
-    damaged, ambiguous = None, False
+    damaged, ids, copies = None, set(), []
     for path in paths:
         try:
             lines = path.read_bytes().split(b'\n')
@@ -589,42 +657,52 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
             if not raw.strip():
                 continue
             try:
-                row = json.loads(raw)
+                seen = _delivery_row(json.loads(raw))
             except ValueError:  # damaged, or the last row cut short while it was being written
+                seen = False
+            if seen is False:
                 damaged = damaged or path
-                continue
-            if not isinstance(row, dict):
-                continue
-            attachment = row.get('attachment') if row.get('type') == 'attachment' else None
-            if isinstance(attachment, dict) and attachment.get('type') == 'queued_command':
-                origin = attachment.get('origin')
-                if isinstance(origin, dict) and message_id and origin.get('msg_id') == message_id:
-                    return True, None
-                body = attachment.get('prompt') if isinstance(attachment.get('prompt'), str) else ''
-            elif row.get('type') == 'user':
-                message = row.get('message')
-                content = message.get('content') if isinstance(message, dict) else None
-                body = content if isinstance(content, str) else ' '.join(
-                    str(block.get('text', '')) for block in content if isinstance(block, dict)) if isinstance(content, list) else ''
-            else:
-                continue
-            if needle not in body:
-                continue
-            when = moment(row.get('timestamp') or (attachment or {}).get('timestamp'))
-            try:
-                after = when is None or when >= start  # a matching row with no usable time still counts
-            except TypeError:
-                after = True
-            if after:
-                if framed:
-                    return True, None
-                ambiguous = True
-    if ambiguous:
-        return None, ("Only this message's body was recorded, and its conversation holds that body, which another message "
-                      'could also carry: delivery can\'t be told from the text alone')
+            elif seen and seen[0] == 'id':
+                ids.add(seen[1])
+            elif seen and (seen[1].strip() == needle if framed else needle in seen[1]):
+                when = moment(seen[2])
+                if when is None or when.tzinfo is None:
+                    damaged = damaged or path  # a copy that can't be placed in time can't be counted
+                else:
+                    copies.append(when)
+    if message_id and message_id in ids:
+        return True, None
     if damaged:
         return None, f"Claude's transcript {damaged} has a damaged or unfinished row: if Claude is still writing it, wait"
-    return False, None
+    if not framed:
+        if any(when >= start for when in copies):
+            return None, ("Only this message's body was recorded, and its conversation holds that body, which another "
+                          "message could also carry: delivery can't be told from the text alone")
+        return False, None
+    rivals = []
+    for entry in cohort or ():
+        if not (isinstance(entry, (tuple, list)) and len(entry) == 3 and all(isinstance(part, str) for part in entry)):
+            return None, 'An earlier acceptance on this session has an incomplete record'
+        other, other_text, other_since = entry
+        if other == message_id or other in ids or other_text.strip() != needle:
+            continue
+        accepted = moment(other_since)
+        if accepted is None or accepted.tzinfo is None:
+            return None, 'An earlier acceptance of the same text has no usable accept time'
+        rivals.append((accepted, other, False))
+    free = sorted(copies)
+    for accepted, _, ours in sorted([*rivals, (start, message_id or '', True)]):
+        taken = next((index for index, when in enumerate(free) if when >= accepted), None)
+        if ours:
+            if taken is not None:
+                return True, None
+            if any(when >= start for when in copies):
+                return None, ("This text was stored fewer times than it was accepted, and the copies went to earlier "
+                              "identical messages: delivery can't be told for this one")
+            return False, None
+        if taken is not None:
+            free.pop(taken)
+    return None, None
 
 
 def prompt_recorded(native_id, prompt, since, environment):
@@ -768,7 +846,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
                                (session.workspace,))[0]
 
-    def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True):
+    def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=()):
         """Whether a message Claude accepted reached this session's conversation, read from its transcript under
         the Claude storage `home`: ok with {'delivered': bool}, or unknown with the reason (LC-30).
 
@@ -779,7 +857,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not isinstance(home, str) or not os.path.isabs(home):
             return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
         answer, why = message_delivered(session.native_id, message_id, text, since, {'CLAUDE_CONFIG_DIR': home},
-                                        (session.workspace,), framed)
+                                        (session.workspace,), framed, cohort)
         if answer is None:
             return NativeResult('unknown', why or "This message's session, text or accept time isn't recorded")
         return NativeResult('ok', value={'delivered': answer})
@@ -907,9 +985,13 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not isinstance(home, str) or not os.path.isabs(home):
             return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
         try:
-            found = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+            found = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,), links=True)
         except Unreadable as error:
             return NativeResult('unknown', f"Claude's storage folder {error.path} can't be read")
+        for path in found:  # presence is the session's own rows in a regular file, never a name
+            problem = transcript_identity(path, session.native_id)
+            if problem:
+                return NativeResult('unknown', problem)
         return NativeResult('ok', value={'present': bool(found)})
 
     def observed_binding(self, session):
