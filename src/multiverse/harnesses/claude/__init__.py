@@ -58,6 +58,7 @@ MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
 BRIDGE = 'claude-mod-v1'
+FUNCTION_HOOKS = 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'  # loads the mod: set for bridge launches only
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
@@ -860,7 +861,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
         settings = {'crossSessionInbound': 'accept'}
-        environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
+        environment = {**command.environment, FUNCTION_HOOKS: '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
         # The adapter's own settings and environment never change; problems and modes join the launch's own.
@@ -882,7 +883,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         hooks) and asks Claude for no version, so each directory is recorded as not fitting."""
         plan = plugins.plan_for(context, 'claude', self.name, version=None, bridge=False,
                                 base_environment=command.environment)
-        return replace(command, environment=plan.environment, plugins=plan.record())
+        unset = command.unset_env
+        if FUNCTION_HOOKS not in plan.environment:
+            # A tmux server first started from a Claude session passes its hooks switch on; only the bridge sets it.
+            unset = tuple(dict.fromkeys((*unset, FUNCTION_HOOKS)))
+        return replace(command, environment=plan.environment, unset_env=unset, plugins=plan.record())
 
     def session_home(self, environment):
         """Claude's storage for a launch: CLAUDE_CONFIG_DIR, else HOME/.claude, of that launch's environment."""

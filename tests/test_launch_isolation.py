@@ -509,7 +509,7 @@ class LaunchIsolationTest(unittest.TestCase):
                    # values: a tmux server first started from a Claude Code session passes them to every pane.
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
-                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_TMPDIR",
+                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_TMPDIR", "CLAUDE_CODE_EXECPATH",
                    "CLAUDE_CODE_INVOKED_SKILLS")
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
                   **{name: "parent" for name in markers}, "CLAUDE_CODE_CHILD_SESSION": "1", "NO_COLOR": "1",
@@ -565,7 +565,8 @@ class LaunchIsolationTest(unittest.TestCase):
         # Claude agent spawned from inside Claude also inherits the parent's IDE port and its inbox path and secret.
         names = ('CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET',
                  'CLAUDE_CODE_MESSAGING_TOKEN')
-        inherited = {'CLAUDE_CODE_CHILD_SESSION': '1', **{name: 'parent' for name in names[1:]}, 'PATH': '/usr/bin'}
+        inherited = {'CLAUDE_CODE_CHILD_SESSION': '1', **{name: 'parent' for name in names[1:]}, 'PATH': '/usr/bin',
+                     'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
         path = self.root / 'harnesses/claude/harness.json'
         original = read(path)
         for settings in ({}, {'inbox_bridge': True}, {'inbox_bridge': False}, {'unset_env': ['NO_COLOR']},
@@ -586,6 +587,9 @@ class LaunchIsolationTest(unittest.TestCase):
                         env = runner.launch_environment({'unset_env': list(command.unset_env),
                                                          'env': {**command.environment, 'MV2_CLI': '/mv2/bin/mv2'}})
                     self.assertEqual({name: env[name] for name in names if name in env}, settings.get('env', {}))
+                    # Function hooks load the mod; a plain launch must not inherit them from a Claude-started server.
+                    self.assertEqual(env.get('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'),
+                                     None if settings.get('inbox_bridge') is False else '1')
 
     def test_old_launch_callbacks_are_refused(self):
         """Every callback from an outdated launch (inbox, report, send, session-bind, runtime-update) is refused
