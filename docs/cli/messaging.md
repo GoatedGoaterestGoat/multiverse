@@ -35,6 +35,8 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 | `follow-up` | The next thing to do | After the current turn ends |
 | `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
 
+Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` when they want a quick reply or return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
+
 Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 If a name or UUID prefix matches several agents, the error lists their names
@@ -156,7 +158,7 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
 
 ## Inside Claude and Pi sessions
 
