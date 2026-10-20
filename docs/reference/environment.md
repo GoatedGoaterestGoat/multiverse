@@ -61,6 +61,7 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | `CODEX_THREAD_ID`, `CLAUDECODE` | Removes the parent's values before a launch. Codex supplies its own `CODEX_THREAD_ID` to its tools. |
 | `CLAUDE_CODE_CHILD_SESSION` | Always removes it when inherited. Claude Code sets it for its own tool subprocesses, and a Claude agent that inherits it saves no transcript. A harness's `env` can still set it. |
 | `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
+| `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_PID`, `CLAUDE_EFFORT` and other parent-session markers | Removes inherited Claude identity, worktree, temporary-directory and invoked-skill markers for every harness, including from a tmux server started inside Claude. A harness's `env` can still set them. |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` | Sets it to `1` for Claude bridge launches, because the multiverse mod needs it. |
 | `TMUX`, `TMUX_PANE` | `mv2 attach` reads them to return to the dashboard pane it was started from. |
 
@@ -73,23 +74,37 @@ inherited daemon environment. A value you explicitly set in Codex's
 mv2 does not replace absence with an empty value. A recorded non-empty launch
 value still wins. In a direct launch, an absent variable is explicitly unset in
 the child. Older snapshots missing another harness's variable use a
-recorded launch request if it has that value; otherwise they leave it unset.
+recorded launch request if it has that value; otherwise they keep that key unknown
+and inherit it as before. Unknown is different from a recorded unset selection.
 Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
 unset; setting it to a default-looking path can change where Claude reads its
 login and global settings. Codex selects canonical storage paths for its
 frontend, service and tools. The native child receives the launching command's
-`HOME`, and storage variables absent from the selected environment are explicitly
+`HOME`, and storage variables recorded as absent are explicitly
 removed, so an older tmux server cannot supply a different home. A resume that
 would change the saved conversation's storage, including a plain launch whose
 saved path now follows a different symlink, is refused before its launch records
 change. The error shows both paths; restore the original storage at the saved
-path, or spawn a new agent for the new storage.
+path, or spawn a new agent for the new storage. A hand-restored spelling of the
+same directory can be normalized against the retained canonical home or launch
+request; this does not permit a saved path to point at a different directory.
+Resume notices also name ignored overrides of another harness's recorded storage
+variables, so a child harness keeps the expected home.
 
-Older Codex agents may lack a storage snapshot. Resume adopts their recorded
-service scope or explicit launch-request environment only when it proves both
-the Codex home and whether a separate database home was set. Main-era plain
-launches usually recorded neither, so resume refuses before changing any records.
-Restore `native_storage_environment` in the named properties file from verified
-original settings (`CODEX_HOME` and `CODEX_SQLITE_HOME`, with `null` for an unset
-database home), or spawn a new agent. Today's shell and tmux server are not
-evidence of what an earlier launch used.
+Older Claude and Codex agents may lack a storage snapshot. Existing proven
+Codex service scopes or explicit launch requests remain usable. Otherwise mv2
+looks for that exact conversation in candidate homes from the saved launch
+request, the calling shell (or its harness default), and the old tmux server's
+global environment. The adapter reads Claude's session transcript or Codex's
+rollout metadata; it starts no native process. Exactly one home must contain the
+conversation, with absence proven in every other candidate. mv2 then records the
+proven values, including the HOME used for a default storage path, and says which
+home it adopted. Unknown foreign-harness keys stay
+unknown; adoption does not force them unset.
+
+If no candidate, multiple candidates or unreadable evidence prevents proof,
+resume refuses before changing the launch records and lists the candidate paths.
+Resume from a shell whose `CLAUDE_CONFIG_DIR` or `CODEX_HOME` names the home
+holding the conversation; restore read access or resolve duplicate copies first
+when the error names those problems. A current environment alone is never proof
+that a legacy conversation used that storage.

@@ -173,7 +173,7 @@ Schema 2 points at a built-in adapter and adjusts it:
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |
 | `env` | Variables (name to string) set for every spawn and resume. It can't set `MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`, or the storage variables mv2 reads (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). |
-| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID`, `CLAUDECODE` and an inherited `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` are always removed. |
+| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID` and a parent Claude session's markers ([environment](environment.md)) are always removed when inherited. |
 | `inbox_bridge` | The live connection (the bridge). For Codex and Claude, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
 | `system_prompt_snapshot` | Claude only. `"off"`, the default, gives a resumed agent the current bootstrap. `"on"` keeps the system prompt Claude recorded at the conversation's first request, so a bootstrap change reaches only new conversations. A `--system-prompt-snapshot` flag in `args` or `resume_args` overrides it. |
 
@@ -240,7 +240,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 
 | Path | Meaning |
 | --- | --- |
-| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains selected storage variable values; `null` means explicitly unset on future launches. |
+| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains proven storage variable values; `null` means explicitly unset on future launches. A missing legacy key remains unknown, not unset. A legacy adoption also keeps its proven `HOME` when a default storage path depends on it. |
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |

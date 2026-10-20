@@ -110,6 +110,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             for key in selected:
                                 os.environ[key] = str(self.work / ('caller-changed-' + key))
                             result = lifecycle.start(self.root, resume=result['id'])
+                            self.assertTrue(any(f'ignored {foreign}=' in line for line in result.get('notices', [])))
                         request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
                         with patch.dict(os.environ, {**{key: str(self.work / ('server-' + key)) for key in selected},
                                                      'HOME': str(self.work / 'server-home')}):
@@ -117,6 +118,17 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({key: environment.get(key) for key in selected}, expected, mode)
                         self.assertEqual(environment['HOME'], caller['HOME'], mode)
                         self.assertEqual(read(directory / 'properties.json')['native_storage_environment'], expected)
+                    own_key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
+                    if family in ('claude', 'codex') and expected.get(own_key):
+                        with self.subTest('a hand-restored alias normalizes against retained canonical proof'):
+                            alias = self.work / ('restored-alias-' + str(uuid4()))
+                            alias.symlink_to(expected[own_key], target_is_directory=True)
+                            restored = read(directory / 'properties.json')
+                            restored['native_storage_environment'][own_key] = str(alias)
+                            write(directory / 'properties.json', restored)
+                            result = lifecycle.start(self.root, resume=result['id'])
+                            self.assertEqual(result['native_storage_environment'][own_key], expected[own_key])
+                            alias.unlink()
                     if family == 'codex' and selected['CODEX_HOME'] is not None:
                         for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
                             with self.subTest(retargeted=key):
@@ -161,7 +173,7 @@ class LaunchIsolationTest(unittest.TestCase):
             request_path = directory / 'launches' / facts['launch_id'] / 'request.json'
             request = read(request_path)
             legacy = {key: value for key, value in properties.items()
-                      if key not in ('native_storage_environment', 'native_environment', 'native_service_identity')}
+                      if key not in ('native_storage_environment', 'native_environment', 'native_service_identity', 'native_session_home')}
             storage = {'CODEX_HOME': str(self.work / 'actual-old-home'),
                        'CODEX_SQLITE_HOME': str(self.work / 'actual-old-database')}
             for proof in ('missing', 'request', 'service', 'partial-request', 'request-unset', 'request-alias'):
@@ -200,7 +212,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                             patch.dict(os.environ, {key: str(self.work / ('wrong-caller-' + key)) for key in storage}):
                         if proof in ('missing', 'partial-request', 'request-alias'):
-                            reason = 'Native session storage differs' if proof == 'request-alias' else 'original Codex storage.*not recorded'
+                            reason = 'Native session storage differs' if proof == 'request-alias' else 'Cannot prove unique conversation storage'
                             with self.assertRaisesRegex(ValueError, reason):
                                 lifecycle.start(self.root, resume=directory.name)
                             self.assertEqual({path: path.read_bytes() for path in paths}, before)
@@ -210,6 +222,91 @@ class LaunchIsolationTest(unittest.TestCase):
                             actual = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
                             self.assertEqual({key: actual['env'].get(key) for key in storage}, expected)
                             self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
+
+    def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
+        """A legacy resume must find its exact conversation before adopting storage; caller and tmux environments can silently split an existing conversation."""
+        from multiverse.harnesses.claude import project_key
+        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server')
+        for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
+            with self.subTest(family=family, found=found):
+                key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
+                executable = self.work / (family + '-version-only')
+                version = '2.1.303 (Claude Code)' if family == 'claude' else 'codex-cli 0.163.0'
+                executable.write_text(f'#!{sys.executable}\nprint({version!r})\n')
+                executable.chmod(0o755)
+                manifest = self.root / 'harnesses' / family / 'harness.json'
+                definition = read(manifest)
+                definition['settings'].update(inbox_bridge=False, executable=str(executable))
+                write(manifest, definition)
+                directory, properties, _, _ = lifecycle._record(self.root, family + '-legacy-' + found, '', family, None, None)
+                properties['workspace'] = str(self.work)
+                properties['native_session_id'] = str(uuid4())
+                write(directory / 'properties.json', properties)
+                launch = str(uuid4())
+                facts = {'launch_id': launch, 'state': 'dormant',
+                         'tmux': {'socket': str(self.work / 'old.sock'), 'session': '$1', 'pane': '%1'}}
+                write(directory / 'runtime.json', facts)
+                homes = {key: self.work / family / found / key for key in ('server', 'caller', 'request')}
+                server_home = self.work / family / found / 'server-user' if found == 'default-server' else self.work
+                if found == 'default-server':
+                    homes['server'] = server_home / ('.claude' if family == 'claude' else '.codex')
+                request = {'env': {key: str(homes['request'])}, 'unset_env': []}
+                request_path = directory / 'launches' / launch / 'request.json'
+                write(request_path, request)
+                for source, home in homes.items():
+                    folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
+                    folder.mkdir(parents=True)
+                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server') and source == 'server'):
+                        identifier = properties['native_session_id']
+                        if family == 'claude':
+                            (folder / (identifier + '.jsonl')).write_text('{}\n')
+                        else:
+                            (folder / ('rollout-2026-10-19T19-00-00-' + identifier + '.jsonl')).write_text(
+                                json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n')
+                if found == 'same-home-alias':
+                    import shutil
+                    shutil.rmtree(homes['caller'])
+                    homes['caller'].symlink_to(homes['server'], target_is_directory=True)
+                backend = Mock()
+                backend.run.return_value = 'HOME=' + str(server_home)
+                if found != 'default-server':
+                    backend.run.return_value += '\n' + key + '=' + str(homes['server'])
+                backend.create.return_value = {'socket': str(self.work / 'new.sock'), 'session': '$2', 'pane': '%2'}
+                paths = (directory / 'properties.json', directory / 'runtime.json', request_path)
+                before = {path: path.read_bytes() for path in paths}
+                original_scandir = os.scandir
+                def scandir(path):
+                    if found == 'unreadable' and Path(path) == homes['server'] / ('projects' if family == 'claude' else 'sessions'):
+                        raise PermissionError('fixture denied candidate storage')
+                    return original_scandir(path)
+                with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                        patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                        patch.object(os, 'scandir', scandir), \
+                        patch.dict(os.environ, {key: str(homes['caller'])}):
+                    if found in ('none', 'multiple', 'unreadable'):
+                        with self.assertRaisesRegex(ValueError, 'conversation.*storage'):
+                            lifecycle.start(self.root, resume=directory.name)
+                        self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                        backend.create.assert_not_called()
+                    else:
+                        chosen = homes['server' if found in ('same-home-alias', 'default-server') else found]
+                        result = lifecycle.start(self.root, resume=directory.name)
+                        self.assertEqual(result['native_session_home'], str(chosen))
+                        expected = {key: str(chosen)}
+                        if found != 'request':
+                            expected['HOME'] = os.environ['HOME'] if found == 'caller' else str(server_home)
+                        if found == 'default-server' and family == 'claude':
+                            expected[key] = None
+                        if family == 'codex' and found != 'request':
+                            expected['CODEX_SQLITE_HOME'] = None
+                        self.assertEqual(result['native_storage_environment'], expected)
+                        actual = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                        self.assertEqual(actual['env'].get(key), expected[key])
+                        foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
+                        self.assertNotIn(foreign, actual['unset_env'])
+                        self.assertTrue(any('Adopted' in notice and str(chosen) in notice for notice in result['notices']))
+                        again = lifecycle.start(self.root, resume=directory.name)
+                        self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
 
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,

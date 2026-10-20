@@ -32,7 +32,9 @@ def snapshot_environment(properties, request, keys):
             (not isinstance(value, str) or '\0' in value) for value in saved.values()):
         raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
     historical = request_environment(request, keys)
-    return {key: saved[key] if key in saved else historical.get(key) for key in keys}
+    selected = (*keys, 'HOME') if 'HOME' in saved and 'HOME' not in keys else keys
+    return {key: saved[key] if key in saved else historical[key] for key in selected
+            if key in saved or key in historical}
 
 
 def legacy_codex_environment(properties, request):
@@ -72,6 +74,8 @@ def recorded_environment(directory, properties, family, keys, runtime=None):
                      else request_environment(request, keys))
             if saved is None or any(key not in saved for key in keys):
                 return None
+        if any(key not in saved for key in keys):
+            return None  # Missing evidence is not a recorded absence.
         home = request_environment(request, ('HOME',)).get('HOME')
         return {**saved, **({'HOME': home} if isinstance(home, str) and Path(home).is_absolute() else {})}
     except (OSError, ValueError, TypeError, AttributeError):

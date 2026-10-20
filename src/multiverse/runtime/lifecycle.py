@@ -19,7 +19,7 @@ from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native, attachments, agent_identity, registration, missing_runtime
+from . import native, attachments, agent_identity, registration, missing_runtime, storage_adoption
 
 TEARDOWN_TIMEOUT = 10
 
@@ -300,11 +300,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
         environment = {**ambient, **saved, **target}
-        storage = _storage_environment(adapter, properties, environment, ambient, resume, agent_dir, previous)
+        storage_notices = []
+        storage = _storage_environment(adapter, properties, environment, ambient, resume, agent_dir, previous,
+                                       storage_notices)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
-                                agent_environment=agent_environment)
+                                agent_environment=agent_environment, storage_keys=tuple(storage))
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
@@ -319,8 +321,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
-        notices = display.notice_lines(missing_notices,
-                    _resume_notices(adapter, session, ambient, context.environment) if resume else [])
+        notices = display.notice_lines(missing_notices, storage_notices,
+                    _resume_notices(adapter, session, ambient, context.environment, storage) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         # An adapter may resolve a saved path through a changed symlink. Compare
         # its effective selection with recorded strings, never re-resolve history.
@@ -551,17 +553,24 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     return {**result, 'notices': notices} if notices else result
 
 
-def _resume_notices(adapter, session, caller_environment, effective_environment):
+def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None):
     """Optional presentation only; never changes the storage or launch decision."""
     hook = native.adapter_hook(adapter, 'resume_notice')
-    if hook is None:
-        return []
+    notices = []
     try:
-        notice = hook(session, dict(caller_environment), dict(effective_environment))
+        notice = hook(session, dict(caller_environment), dict(effective_environment)) if hook else None
     except Exception:
-        return []
+        notice = None
     notice = display.clean(notice).strip() if isinstance(notice, str) else ''
-    return [notice] if notice else []
+    if notice:
+        notices.append(notice)
+    for key, value in (storage or {}).items():
+        requested = caller_environment.get(key)
+        if key in getattr(adapter, 'storage_env', ()) or requested is None or requested == value:
+            continue
+        kept = 'unset' if value is None else json.dumps(value)
+        notices.append(f'Kept its recorded {key} {kept}; ignored {key}={json.dumps(requested)}.')
+    return notices
 
 
 
@@ -700,7 +709,7 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous):
+def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices):
     """Replay storage values and explicit absence before the adapter computes home."""
     own_keys = getattr(adapter, 'storage_env', ())
     keys = tuple(dict.fromkeys([*own_keys, *(key for cls in harnesses.BUILTINS.values()
@@ -709,24 +718,45 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
     if saved is not None and (not isinstance(saved, dict) or any(
             value is not None and (not isinstance(value, str) or '\0' in value) for value in saved.values())):
         raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
-    request = storage_records.launch_request(directory, previous) if resume and (saved is None or any(key not in saved for key in keys)) else {}
+    request = storage_records.launch_request(directory, previous) if resume else {}
     historical = storage_records.request_environment(request, keys)
     scope = (properties.get('native_service_identity') or {}).get('scope', {}) if resume else {}
     for key in own_keys:
         if scope and key not in scope and ambient.get(key):
             raise ValueError(f'Cannot add {key}={ambient[key]!r} to this saved native storage scope; '
                              f'unset {key} to resume, or spawn a new agent for that storage')
-    if saved is None:
-        if resume and getattr(adapter, 'family', None) == 'codex' and properties.get('native_session_id'):
-            adopted = storage_records.legacy_codex_environment(properties, request)
-            if adopted is None:
-                raise ValueError(f'The original Codex storage was not recorded reliably for {directory / "properties.json"}. '
-                    'Restore native_storage_environment from verified original launch settings '
-                    '(CODEX_HOME and CODEX_SQLITE_HOME, null for an unset database home), or spawn a new agent. '
-                    'The current shell and tmux server cannot prove which storage the old launch used')
-            return {key: adopted[key] if key in adopted else historical.get(key) for key in keys}
-        return {key: environment.get(key) if not resume or key in own_keys else historical.get(key) for key in keys}
-    return storage_records.snapshot_environment(properties, request, keys)
+    if not resume:
+        return {key: environment.get(key) for key in keys}
+    if saved is not None:
+        # A hand-restored alternate spelling may be normalized only against an
+        # independent saved canonical path, never by resolving history anew.
+        normalized = dict(saved)
+        proof = {**historical, **properties.get('native_environment', {}), **scope}
+        if own_keys and properties.get('native_session_home'):
+            proof[own_keys[0]] = properties['native_session_home']
+        for key in own_keys:
+            value, canonical = saved.get(key), proof.get(key)
+            if isinstance(value, str) and value and isinstance(canonical, str) and canonical and value != canonical:
+                if os.path.realpath(value) == canonical:
+                    normalized[key] = canonical
+        properties['native_storage_environment'] = normalized
+        return storage_records.snapshot_environment(properties, request, keys)
+    family = getattr(adapter, 'family', None)
+    if family == 'codex' and properties.get('native_session_id'):
+        adopted = storage_records.legacy_codex_environment(properties, request)
+        if adopted is not None:
+            return {**historical, **adopted}
+    if family in ('claude', 'codex') and properties.get('native_session_id'):
+        terminal = previous.get('tmux') or {}
+        adopted, notice = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
+                                                    Tmux(terminal.get('socket')))
+        if adopted.get('HOME'):
+            environment['HOME'] = adopted['HOME']
+        notices.append(notice)
+        return {**{key: value for key, value in historical.items() if key not in own_keys},
+                **{key: adopted[key] for key in own_keys if key in adopted},
+                **({'HOME': adopted['HOME']} if adopted.get('HOME') else {})}
+    return {**historical, **{key: environment.get(key) for key in own_keys}}
 
 
 def _storage_command(command, storage):
