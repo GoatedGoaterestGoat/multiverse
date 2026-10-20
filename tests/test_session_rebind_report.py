@@ -64,7 +64,10 @@ class SessionRebindReportTest(BaseTest):
             with self.subTest(seen=seen), patch(observer, return_value=seen), patch(rebind, return_value={}) as rebound:
                 self.report()
                 rebound.assert_called_once()
-        write(self.agent / 'properties.json', {'id': self.agent.name, 'name': 'worker', 'harness': 'codex',
+        # A custom (schema 1) harness has no storage, unlike Codex, whose adapter names its home.
+        write(self.root / 'harnesses/custom/harness.json', {'schema': 1, 'spawn': ['custom'],
+                                                            'resume': ['custom', '{session_id}']})
+        write(self.agent / 'properties.json', {'id': self.agent.name, 'name': 'worker', 'harness': 'custom',
                                                'native_session_id': self.previous})
         with patch(rebind, return_value={}) as rebound:
             self.report(session_reason='new')
