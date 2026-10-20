@@ -35,6 +35,9 @@ class CodexAdapter(ConfiguredAdapter):
         from .identity import POLICY
         return POLICY
 
+    def allow_recorded_launch(self, session):
+        return isinstance(session.native_mode, Mapping) and session.native_mode.get('mode') == 'bridge'
+
     def resume_notice(self, session, caller_environment, effective_environment):
         from .identity import resume_notice
         return resume_notice(caller_environment, effective_environment)
@@ -43,8 +46,9 @@ class CodexAdapter(ConfiguredAdapter):
         if (environment.get('MV2_IDENTITY_MODE') is None and environment.get('MV2_LAUNCH_ID')
                 and environment.get('CODEX_THREAD_ID') and environment.get('MV2_AGENT_ID') == session.agent_id
                 and (session.native_mode or {}).get('mode') == 'bridge'):
-            return ('This Codex conversation still has values from before the update: restart the agent '
-                    '(mv2 kill, then mv2 resume) with no other client attached.')
+            return ('This Codex conversation has an unverified cached tool identity. Use the current mv2 '
+                    "installation and inspect this agent's saved launch records. Codex can retain an idle "
+                    'conversation for up to 30 minutes after its last client leaves.')
         return None
 
     def supports_launch_refusal(self, cli_version):

@@ -9,17 +9,13 @@ message-safety checks.
 
 ## Upgrade running Codex bridge agents
 
-Restart each running Codex bridge agent once after updating:
+Run callbacks through the current mv2 installation. A connected Codex conversation can retain an earlier launch's tool environment, without `MV2_IDENTITY_MODE` and with its old `MV2_LAUNCH_ID`. The Codex bridge explicitly opts into compatibility for this case; other adapters default to refusing it.
 
-1. Run `mv2 kill NAME` to stop the old mv2 launch.
-2. Close any other clients attached to that conversation so Codex can release
-   its cached configuration.
-3. Run `mv2 resume NAME` to load the clean agent-stable environment.
+Core requires a canonical historical launch ID and a readable `launches/LID/request.json` under this same agent. Its recorded universe, full agent ID, agent directory and launch ID must match the caller. The request must have `shared_service=true`, bridge mode and a relay with `binds_session=true`. Core then applies the current saved-policy, exact bound native thread, canonical storage, workspace, universe and agent-directory checks.
 
-There is no adoption step, update hook or legacy authority exception. An old
-conversation's `report` or `inbox` call explains that its values predate the update
-and gives these restart instructions. Resuming while another client retains the
-old configuration cannot make those cached values current.
+This route permits only the agent's own `report`, `inbox`, sending as the agent and verification of its existing session binding. Missing or damaged proof, a foreign thread or scope, and an incorrect explicit identity mode remain refused. Runner and control updates and `calling_socket` retain strict launch checks. No caller environment is rewritten or given the current launch ID.
+
+By default, Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves. Restarting the frontend does not guarantee that its cached tool settings change. The compatibility route lets verified old tools work without changing those settings. A separate older mv2 checkout still runs its old callback code and is not covered; use the current installation.
 
 ## Agent identity and terminal identity
 

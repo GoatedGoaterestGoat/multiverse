@@ -205,6 +205,14 @@ class SharedIdentityTest(unittest.TestCase):
     def test_tool_shell_identity_is_stable_and_never_per_launch(self):
         """Codex tools keep stable identity and storage, including another harness's values or absence; drift can silently authorize the wrong launch or open another home."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+        for selection, permitted in ((None, False), ({}, False), ({'mode': 'plain'}, False),
+                                     ({'mode': 'unknown'}, False), (['bridge'], False),
+                                     ({'policy': 'auto', 'mode': 'bridge'}, True),
+                                     ({'policy': 'required', 'mode': 'bridge'}, True)):
+            with self.subTest(source='recorded launch opt-in', selection=selection):
+                session = SessionHandle('agent', 'codex', '/workspace', native_mode=selection)
+                hook = getattr(adapter, 'allow_recorded_launch', lambda session: False)
+                self.assertIs(hook(session), permitted)
         with self.subTest(source='two launches'):
             a, b = (adapter.spawn(self.context(launch)) for launch in ('old', 'new'))
             self.assertNotEqual(a.rpc_proxy.socket_path, b.rpc_proxy.socket_path)
@@ -255,11 +263,13 @@ class SharedIdentityTest(unittest.TestCase):
                         session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
                         command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
                         if command.shared_service:
+                            self.assertEqual(command.agent_identity, adapter.agent_identity_policy())
                             self.assertEqual(command.shared_service.environment, expected)
                             stable = command.rpc_proxy.settings['agent_environment']
                             self.assertEqual({key: stable[key] for key in adapter.storage_env if key in stable}, expected)
                         plain = command.fallback if command.shared_service else command
                         if plain is not None:
+                            self.assertIsNone(plain.agent_identity)
                             self.assertEqual({key: plain.environment[key] for key in adapter.storage_env
                                               if key in plain.environment}, expected)
                             self.assertEqual(plain.environment['DEBUG'], 'keep')
