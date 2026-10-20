@@ -227,11 +227,14 @@ def _blocked(label, path, pid, started, observations):
     snapshot = observations.get(pid, (False, None))[1] if valid_pid else None
     current = snapshot[0] if snapshot else 'unknown (process inspection unavailable)'
     command = _command(pid, current) if snapshot else process_command(pid) or 'unknown'
+    timestamp = _start_time(current)
+    started_text = (datetime.fromtimestamp(timestamp, timezone.utc).strftime('started %a %b %d %H:%M:%S %Y UTC')
+                    if timestamp is not None else 'start time unavailable')
     why = ('its recorded process identity is still live' if started and started == current else
            'mv2 cannot prove that this process is unrelated to the old launch')
     if not snapshot:
         why = 'process inspection unavailable; ' + why
-    return (f'The previous terminal is still closing its {label}: PID {pid}, command {command}; '
+    return (f'The previous terminal is still closing its {label}: PID {pid}, command {command}, {started_text}; '
             f'{why}. Record: {path}. '
             'Inspect that PID and the record; wait for the verified old process to exit, then retry. '
             'If the identity is unavailable or the record is damaged, restore process inspection or repair '

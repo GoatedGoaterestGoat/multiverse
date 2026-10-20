@@ -4,6 +4,7 @@ from ..store import existing_lock, lock, now, read, write
 from . import sessions, records
 import fcntl
 import re
+import stat
 
 
 def record_paths(root):
@@ -28,7 +29,10 @@ def orphaned(directory):
             continue
         return False
     try:
-        launches = list((directory / 'launches').iterdir())
+        folder = directory / 'launches'
+        if stat.S_ISREG(folder.stat().st_mode):
+            return True  # A regular file cannot contain launch or session evidence.
+        launches = list(folder.iterdir())
     except FileNotFoundError:
         return True
     for launch in launches:

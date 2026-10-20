@@ -61,7 +61,7 @@ mv2 resume worker --model opus --wait
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
-Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
+Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 
 Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.
 
@@ -109,6 +109,8 @@ An old agent folder containing only plugin leftovers, with no `properties.json`,
 conversation. It does not block spawns, session claims or resumes elsewhere.
 This includes abandoned launch folders containing only bootstrap or task files,
 with no request, ready marker, registration, cleanup or connection records.
+A regular file named `launches` cannot hold launch records either; it stays with
+the leftovers instead of blocking unrelated names or conversations.
 List and doctor identify the leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
 checks that no terminal is tagged for that agent on the current servers before
 moving the folder and its plugin leftovers to trash; unreadable servers or new
@@ -162,6 +164,10 @@ check tags and retained process records before treating readable malformed bytes
 as lost authority; they preserve those bytes in the moved record. A file that
 cannot be read because of permissions must be made readable first. Recovery
 rechecks the record before acting, so a concurrent repair is never overwritten.
+If `properties.json` is missing, kill can still close the exact tagged terminal
+using the folder's agent and universe IDs. It preserves recorded process evidence
+for cleanup and reports native cancellation as unconfirmed; it does not guess a
+harness or conversation to cancel.
 Discovery skips an earlier launch whose request was never written; a malformed
 or unreadable request still refuses recovery with its path and repair advice.
 Repair that request or restore it from a verified backup before retrying; editing

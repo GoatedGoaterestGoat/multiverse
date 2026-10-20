@@ -144,7 +144,8 @@ def damaged_mentions(directory, value):
     """Missing files cannot claim an ID; surviving unreadable evidence still can."""
     paths = [directory / name for name in ('properties.json', 'runtime.json', 'sessions.jsonl')]
     try:
-        launches = list((directory / 'launches').iterdir())
+        folder = directory / 'launches'
+        launches = [] if stat.S_ISREG(folder.stat().st_mode) else list(folder.iterdir())
     except FileNotFoundError:
         launches = []
     for launch in launches:

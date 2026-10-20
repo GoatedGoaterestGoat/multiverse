@@ -211,3 +211,13 @@ class DamagedPeerClaimsTest(BaseTest):
         with self.subTest('a non-directory launch entry cannot hold a launch request'):
             (orphan / 'launches' / str(uuid4())).write_text('leftover')
             claim()
+        with self.subTest('a regular launches file cannot hold a name or session claim'):
+            import shutil
+            shutil.rmtree(orphan / 'launches')
+            (orphan / 'launches').write_text('leftover')
+            claim()  # The unrelated runtime above must not make this file unreadable authority.
+            agents.check_available_name(self.root, 'unreserved')
+            (orphan / 'runtime.json').unlink()
+            self.assertTrue(agents.orphaned(orphan))
+            claim()
+            agents.check_available_name(self.root, 'unreserved')

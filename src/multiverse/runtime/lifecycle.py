@@ -932,6 +932,8 @@ def terminal_action(root, reference, action):
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference, allow_damaged=True)
+    if agents.properties_missing(agent_dir):
+        return missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
     records.properties(agent_dir / 'properties.json')
     initial, malformed = missing_runtime.recovery_snapshot(agent_dir)
     initial_observation = None

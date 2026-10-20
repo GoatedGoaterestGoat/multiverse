@@ -64,7 +64,8 @@ class DiscoveryTest(BaseTest):
                 missing_runtime.discover(self.directory, self.properties)
             self.assertEqual(caught.exception.file, path)
             self.assertIn(str(path), caught.exception.reason)
-            self.assertIn('restore', caught.exception.reason.lower())
+            self.assertIn('repair', caught.exception.reason.lower())
+            self.assertNotIn('restore read access', caught.exception.reason.lower())
             self.assertNotIn('mv2 kill', caught.exception.reason)
         path.unlink()
         with self.subTest(request='missing before native startup'), \
@@ -164,6 +165,42 @@ class DiscoveryTest(BaseTest):
                 facts = missing_runtime._qualified_facts(self.root, self.directory, self.properties, terminal,
                                                         self.launch.name, request, adapter)
                 self.assertNotIn('control_endpoint', facts)
+
+    def test_runtime_only_kill_uses_exact_tags_without_inventing_native_authority(self):
+        """A lost properties record must not strand its pane, but recovery must not cancel a guessed conversation or close another generation."""
+        (self.directory / 'properties.json').unlink()
+        (self.launch / 'request.json').unlink()
+        facts = {'launch_id': self.launch.name, 'state': 'running',
+                 'tmux': {'socket': '/recorded.sock', 'session': '$1', 'pane': '%2'}}
+        write(self.directory / 'runtime.json', facts)
+        for label in ('different launch', 'unreadable server', 'replaced record', 'exact pane'):
+            pane = {**self.pane}
+            if label == 'different launch':
+                pane['@mv2_launch_id'] = uid()
+            error = 'Permission denied' if label == 'unreadable server' else None
+            def close(*args):
+                self.assertEqual(args, ('kill-pane', '-t', '%2'))
+                panes.clear()
+            def snapshot(backend):
+                if label == 'replaced record':
+                    write(self.directory / 'properties.json', self.properties)
+                return dict(panes), error
+            panes = {'%2': pane}
+            with self.subTest(label=label), patch.object(missing_runtime.Tmux, 'snapshot', snapshot), \
+                    patch.object(missing_runtime.Tmux, 'run', side_effect=close) as control, \
+                    patch.object(missing_runtime.harnesses, 'load', side_effect=AssertionError('no native identity')), \
+                    patch.object(attachments, 'wait'), patch.object(attachments, 'problem', return_value=None):
+                if label == 'exact pane':
+                    result = lifecycle.kill(self.root, self.directory.name)
+                    self.assertEqual(result['state'], 'dormant')
+                    self.assertEqual(result['native_cancellation']['state'], 'unknown')
+                    control.assert_called_once()
+                else:
+                    with self.assertRaises(records.RecordError):
+                        lifecycle.kill(self.root, self.directory.name)
+                    control.assert_not_called()
+                    self.assertEqual(read(self.directory / 'runtime.json'), facts)
+            (self.directory / 'properties.json').unlink(missing_ok=True)
 
     def test_stop_aborts_if_the_launch_changes_during_the_native_stop(self):
         """A pane, generation or request that changes during a slow native stop aborts the close, while an

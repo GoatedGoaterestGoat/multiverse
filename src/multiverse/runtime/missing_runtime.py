@@ -42,8 +42,9 @@ def _problem(directory, reason, *, recommend_kill=True):
         'runtime.json and retry')
 
 
-def _request_problem(path, reason):
-    return records.RecordError(path, f'{reason}; restore read access or repair {path} from a verified backup '
+def _request_problem(path, reason, *, unreadable=False):
+    remedy = 'restore read access or repair' if unreadable else 'repair'
+    return records.RecordError(path, f'{reason}; {remedy} {path} from a verified backup '
         'before retrying. Its recorded terminal server must be readable to check for a surviving launch')
 
 
@@ -153,7 +154,7 @@ def mismatch(directory, facts, observation):
     return None
 
 
-def discover(directory, properties, socket_path=None, *, facts=None, orphan=False):
+def discover(directory, properties, socket_path=None, *, facts=None, orphan=False, requestless=False):
     """One snapshot per recorded/current server. No name or PID based adoption."""
     root = directory.parents[2]
     if (properties.get('id') != directory.name
@@ -175,11 +176,11 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
         except FileNotFoundError:
             continue  # Preparation can fail before publishing a native request.
         except OSError as error:
-            raise _request_problem(path, f'cannot inspect request: {error}') from error
+            raise _request_problem(path, f'cannot inspect request: {error}', unreadable=True) from error
         try:
             request = records.properties(path)
         except records.RecordError as error:
-            raise _request_problem(path, error.reason) from error
+            raise _request_problem(path, error.reason, unreadable=error.reason.startswith('cannot be read:')) from error
         requests[launch.name] = request
         env = request.get('env', {})
         if not isinstance(env, dict):
@@ -209,7 +210,7 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
                     f'tagged pane {pane.get("pane_id")} on terminal server {address or "multiverse-v2"} '
                     'still belongs to this folder; verify and close that terminal before removing the folder')
             identifier = pane.get('@mv2_launch_id')
-            if not _uuid(identifier) or identifier not in requests:
+            if not _uuid(identifier) or identifier not in requests and not requestless:
                 raise _problem(directory, 'a tagged terminal has no valid saved launch request')
             # Explicit and default clients can address the same server.
             key = (pane.get('pane_pid'), pane.get('pane_id'), identifier)
@@ -217,7 +218,7 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
                 continue
             seen.add(key)
             found.append((backend, {'socket': address, 'pane': pane['pane_id'], 'session': pane['session_id']},
-                          identifier, requests[identifier]))
+                          identifier, requests.get(identifier, {})))
     return found
 
 
@@ -270,13 +271,16 @@ def kill(root, directory, *, attachment_only=False):
     """Close one verified pane; unavailable native cancellation is reported honestly."""
     with lock(directory / '.launch.lock', create_parent=False):
         previous, malformed = recovery_snapshot(directory)
-        properties = records.properties(directory / 'properties.json')
-        if (malformed is None and (directory / 'runtime.json').exists() and damage(directory, previous) is None
+        missing_properties = agents.properties_missing(directory)
+        properties = ({'id': directory.name, 'name': directory.name,
+                       'universe_id': read(root / 'universe.json')['id']} if missing_properties
+                      else records.properties(directory / 'properties.json'))
+        if (not missing_properties and malformed is None and (directory / 'runtime.json').exists() and damage(directory, previous) is None
                 and mismatch(directory, previous, observe(properties, previous)) is None):
             return None  # Caller retries its normal path; never replace fresh facts.
         condition = ('was missing' if not (directory / 'runtime.json').exists()
                      else 'had damaged launch authority')
-        found = discover(directory, properties, facts=previous)
+        found = discover(directory, properties, facts=previous, requestless=missing_properties)
         saved_launch = previous.get('launch_id')
         if _uuid(saved_launch) and any(row[2] != saved_launch for row in found):
             raise _problem(directory, 'tagged terminal belongs to a different saved launch; refusing to adopt it')
@@ -288,11 +292,18 @@ def kill(root, directory, *, attachment_only=False):
             return {'id': directory.name, 'state': 'dormant', 'native_cancellation': {
                 'state': 'unknown', 'reason': f'runtime.json {condition}; no running terminal was found. Native cancellation is unconfirmed'}}
         backend, terminal, launch_id, request = found[0]
-        adapter = harnesses.load(root, properties['harness'])
+        adapter = None if missing_properties else harnesses.load(root, properties['harness'])
         facts = _qualified_facts(root, directory, properties, terminal, launch_id, request, adapter)
+        if missing_properties:
+            # Tags authorize closing this pane, never native cancellation. Keep
+            # surviving PID/start evidence for the cleanup barrier after close.
+            facts = {**previous, **facts}
+            facts.pop('control_endpoint', None)
         # State ending blocks workers/new input. This is recovered tag/request
         # metadata only: no child PID, native grant or shared-service proof.
         _unchanged(directory, previous, malformed)
+        if missing_properties and not agents.properties_missing(directory):
+            raise _problem(directory, 'properties record changed during terminal discovery; retry')
         write(directory / 'runtime.json', facts)
         cancellation = NativeResult('unknown', f'runtime.json {condition}; native cancellation could not be verified')
         if attachment_only:
@@ -327,6 +338,7 @@ def kill(root, directory, *, attachment_only=False):
         latest = agents.runtime(directory)
         panes, error = backend.snapshot()
         if (error or latest.get('launch_id') != launch_id
+                or missing_properties and not agents.properties_missing(directory)
                 or not matches(panes.get(terminal['pane']), properties, facts)):
             raise _problem(directory, 'terminal ownership changed before close; no replacement was closed')
         backend.run('kill-pane', '-t', terminal['pane'])
