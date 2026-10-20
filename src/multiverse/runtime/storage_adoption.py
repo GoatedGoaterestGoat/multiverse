@@ -105,7 +105,7 @@ def _never_started(adapter, properties, previous, directory):
         return False
 
 
-def discover(adapter, properties, previous, directory, request, ambient, backend):
+def discover(adapter, properties, previous, directory, request, ambient, backend, *, recorded=None):
     """Adopt exactly one proven candidate, with absence proved in every other home."""
     keys = tuple(getattr(adapter, 'storage_env', ()))
     identifier = previous.get('launch_id')
@@ -125,6 +125,8 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
             raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
     historical = records.request_environment(request, (*keys, 'HOME'))
     candidates = []
+    if recorded is not None:
+        candidates.append(('saved storage', dict(recorded), properties['workspace']))
     if historical:
         candidates.append(('launch request', historical, properties['workspace']))
     # A complete global environment distinguishes unset from unknown. An absent

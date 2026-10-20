@@ -76,8 +76,8 @@ value still wins. In a direct launch, an absent variable is explicitly unset in
 the child. Older snapshots missing another harness's variable use a
 recorded launch request if it has that value; otherwise they keep that key unknown
 and inherit it as before. Unknown is different from a recorded unset selection.
-Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
-unset; setting it to a default-looking path can change where Claude reads its
+Claude preserves both the exact `CLAUDE_CONFIG_DIR` value, including its alias
+spelling on resume, and whether it was unset; setting it to a default-looking path can change where Claude reads its
 login and global settings. Codex selects canonical storage paths for its
 frontend, service and tools. The native child receives the launching command's
 `HOME`, and storage variables recorded as absent are explicitly
@@ -88,6 +88,11 @@ change. The error shows both paths; restore the original storage at the saved
 path, or spawn a new agent for the new storage. A hand-restored spelling of the
 same directory can be normalized against the retained canonical home or launch
 request; this does not permit a saved path to point at a different directory.
+If a legacy Codex spelling, including a hand-restored snapshot, has no retained
+canonical home, mv2 first proves the conversation in that candidate home. It
+canonicalizes the adopted storage once, then refuses later alias retargets.
+Claude keeps its literal variable while comparing the canonical conversation
+home for the same refusal.
 Resume notices also name ignored overrides of another harness's recorded storage
 variables, so a child harness keeps the expected home.
 

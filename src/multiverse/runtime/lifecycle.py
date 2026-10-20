@@ -727,33 +727,54 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
                              f'unset {key} to resume, or spawn a new agent for that storage')
     if not resume:
         return {key: environment.get(key) for key in keys}
-    if saved is not None:
+    family = getattr(adapter, 'family', None)
+    proof = {**historical, **properties.get('native_environment', {}), **scope}
+    unproven_alias = (family == 'codex' and saved is not None and not properties.get('native_session_home')
+        and any(isinstance(saved.get(key), str) and saved[key] and os.path.isabs(saved[key])
+                and proof.get(key) in (None, saved[key])
+                and os.path.realpath(saved[key]) != saved[key] for key in own_keys))
+    if saved is not None and not unproven_alias:
         # A hand-restored alternate spelling may be normalized only against an
         # independent saved canonical path, never by resolving history anew.
         normalized = dict(saved)
-        proof = {**historical, **properties.get('native_environment', {}), **scope}
         if own_keys and properties.get('native_session_home'):
             proof[own_keys[0]] = properties['native_session_home']
-        for key in own_keys:
+        # Claude's literal variable selects login/settings as well as history;
+        # its separately recorded canonical session home guards later alias changes.
+        for key in own_keys if family != 'claude' else ():
             value, canonical = saved.get(key), proof.get(key)
             if isinstance(value, str) and value and isinstance(canonical, str) and canonical and value != canonical:
                 if os.path.realpath(value) == canonical:
                     normalized[key] = canonical
         properties['native_storage_environment'] = normalized
         return storage_records.snapshot_environment(properties, request, keys)
-    family = getattr(adapter, 'family', None)
-    if family == 'codex' and properties.get('native_session_id'):
+    candidate_recorded = saved
+    if family == 'codex' and saved is None and properties.get('native_session_id'):
         adopted = storage_records.legacy_codex_environment(properties, request)
-        if adopted is not None:
+        if adopted is not None and all(not value or os.path.realpath(value) == value for value in adopted.values()):
             return {**historical, **adopted}
+        candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
         terminal = previous.get('tmux') or {}
         adopted, notice = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
-                                                    Tmux(terminal.get('socket')))
+                                                    Tmux(terminal.get('socket')), recorded=candidate_recorded)
+        if family == 'codex':
+            # The finder proved this first home's conversation. Save its canonical
+            # scope now; later resumes compare these strings without re-resolving history.
+            adopted = {key: os.path.realpath(value) if key in own_keys and value else value
+                       for key, value in adopted.items()}
+            properties['native_storage_environment'] = {**historical, **(saved or {}), **adopted}
+            if isinstance(properties.get('native_environment'), dict):
+                properties['native_environment'] = {**properties['native_environment'],
+                    **{key: adopted[key] for key in own_keys if key in properties['native_environment'] and key in adopted}}
+            if isinstance(properties.get('native_service_identity'), dict):
+                identity = properties['native_service_identity']
+                properties['native_service_identity'] = {**identity, 'scope': {
+                    key: adopted.get(key, value) for key, value in identity.get('scope', {}).items()}}
         if adopted.get('HOME'):
             environment['HOME'] = adopted['HOME']
         notices.append(notice)
-        return {**{key: value for key, value in historical.items() if key not in own_keys},
+        return {**{key: value for key, value in {**historical, **(saved or {})}.items() if key not in own_keys},
                 **{key: adopted[key] for key in own_keys if key in adopted},
                 **({'HOME': adopted['HOME']} if adopted.get('HOME') else {})}
     return {**historical, **{key: environment.get(key) for key in own_keys}}

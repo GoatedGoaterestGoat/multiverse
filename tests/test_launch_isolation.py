@@ -67,7 +67,10 @@ class LaunchIsolationTest(unittest.TestCase):
 
     def test_launch_storage_presence_survives_tmux_and_resume(self):
         """Storage values, absence, legacy evidence and aliases must survive tmux and resume; inherited or guessed homes silently select another account, including for children using a different harness."""
+        alias_parent = self.work / 'alias-parent'
+        alias_parent.symlink_to(self.work, target_is_directory=True)
         for family, selected in (
+                ('claude', {'CLAUDE_CONFIG_DIR': str(alias_parent / 'claude-alias-home')}),
                 ('claude', {'CLAUDE_CONFIG_DIR': None}),
                 ('claude', {'CLAUDE_CONFIG_DIR': ''}),
                 ('claude', {'CLAUDE_CONFIG_DIR': str(self.work / 'claude-storage')}),
@@ -128,7 +131,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             restored['native_storage_environment'][own_key] = str(alias)
                             write(directory / 'properties.json', restored)
                             result = lifecycle.start(self.root, resume=result['id'])
-                            self.assertEqual(result['native_storage_environment'][own_key], expected[own_key])
+                            self.assertEqual(result['native_storage_environment'][own_key], str(alias) if family == 'claude' else expected[own_key])
                             alias.unlink()
                     if family == 'codex' and selected['CODEX_HOME'] is not None:
                         for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
@@ -213,7 +216,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                             patch.dict(os.environ, {key: str(self.work / ('wrong-caller-' + key)) for key in storage}):
                         if proof in ('missing', 'partial-request', 'request-alias'):
-                            reason = 'Native session storage differs' if proof == 'request-alias' else 'Cannot prove unique conversation storage'
+                            reason = 'Cannot prove unique conversation storage'
                             with self.assertRaisesRegex(ValueError, reason):
                                 lifecycle.start(self.root, resume=directory.name)
                             self.assertEqual({path: path.read_bytes() for path in paths}, before)
@@ -227,8 +230,10 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
         """Legacy adoption must find the exact conversation, or prove no child ever started; otherwise inherited storage and missing history can silently strand a conversation, while service re-preparation can erase unknown keys."""
         from multiverse.harnesses.claude import project_key
-        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
+        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
+            if family == 'claude' and found in ('restored-spelling', 'scope-spelling'):
+                continue
             with self.subTest(family=family, found=found):
                 key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
                 executable = self.work / (family + '-version-only')
@@ -251,7 +256,19 @@ class LaunchIsolationTest(unittest.TestCase):
                 server_home = self.work / family / found / 'server-user' if found == 'default-server' else self.work
                 if found == 'default-server':
                     homes['server'] = server_home / ('.claude' if family == 'claude' else '.codex')
-                request = {'env': {key: str(homes['request'])}, 'unset_env': []}
+                if found in ('server-spelling', 'restored-spelling', 'scope-spelling'):
+                    actual_server = homes['server'].with_name('actual-server')
+                    actual_server.mkdir(parents=True)
+                    homes['server'].symlink_to(actual_server, target_is_directory=True)
+                if found in ('restored-spelling', 'scope-spelling'):
+                    record = {'CODEX_HOME': str(homes['server']), 'CODEX_SQLITE_HOME': None}
+                    if found == 'restored-spelling':
+                        properties['native_storage_environment'] = record
+                    else:
+                        properties['native_environment'] = {'CODEX_HOME': str(homes['server'])}
+                        properties['native_service_identity'] = {'provider': 'codex', 'scope': {'CODEX_HOME': str(homes['server'])}}
+                    write(directory / 'properties.json', properties)
+                request = {'env': {} if found == 'restored-spelling' else {key: str(homes['request'])}, 'unset_env': []}
                 request_path = directory / 'launches' / launch / 'request.json'
                 if found.startswith('empty-'):
                     facts = {'launch_id': launch, 'state': 'failed', 'error': 'terminal creation failed'}
@@ -266,7 +283,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 for source, home in homes.items():
                     folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
                     folder.mkdir(parents=True)
-                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server') and source == 'server'):
+                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
                         identifier = properties['native_session_id']
                         if family == 'claude':
                             (folder / (identifier + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': identifier}) + '\n')
@@ -301,11 +318,11 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
-                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server') else found]
+                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
                         result = lifecycle.start(self.root, resume=directory.name)
-                        self.assertEqual(result['native_session_home'], str(chosen))
-                        expected = {key: str(chosen)}
-                        if found != 'request':
+                        self.assertEqual(result['native_session_home'], str(chosen.resolve()))
+                        expected = {key: str(chosen.resolve() if family == 'codex' else chosen)}
+                        if found not in ('request', 'restored-spelling', 'scope-spelling'):
                             expected['HOME'] = os.environ['HOME'] if found == 'caller' or fresh else str(server_home)
                         if found == 'default-server' and family == 'claude':
                             expected[key] = None
@@ -316,9 +333,28 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual(actual['env'].get(key), expected[key])
                         foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
                         self.assertNotIn(foreign, actual['unset_env'])
-                        self.assertTrue(any(('starting fresh' if fresh else 'Adopted') in notice and str(chosen) in notice for notice in result['notices']))
+                        self.assertTrue(any(('starting fresh' if fresh else 'Adopted') in notice and str(chosen.resolve()) in notice for notice in result['notices']))
                         again = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
+                        if family == 'codex' and found in ('server-spelling', 'restored-spelling', 'scope-spelling'):
+                            canonical = chosen.resolve()
+                            moved = canonical.with_name(canonical.name + '-original')
+                            replacement = canonical.with_name(canonical.name + '-different')
+                            replacement.mkdir()
+                            paths = [directory / 'properties.json', directory / 'runtime.json',
+                                     *directory.glob('launches/*/request.json')]
+                            before = {path: path.read_bytes() for path in paths}
+                            calls = backend.create.call_count
+                            canonical.rename(moved)
+                            canonical.symlink_to(replacement, target_is_directory=True)
+                            try:
+                                with self.assertRaisesRegex(ValueError, 'Native session storage differs'):
+                                    lifecycle.start(self.root, resume=directory.name)
+                                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                                self.assertEqual(backend.create.call_count, calls)
+                            finally:
+                                canonical.unlink()
+                                moved.rename(canonical)
                         if family == 'codex' and found == 'server':
                             # The real lifecycle prepares a shared adapter twice. The second
                             # call must keep the partial storage mask from the first.
