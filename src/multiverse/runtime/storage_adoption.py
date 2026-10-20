@@ -40,6 +40,71 @@ def _candidate_home(adapter, environment, base):
     return os.path.realpath(result), selected
 
 
+def _present(path):
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _never_started(adapter, properties, previous, directory):
+    """Only an assigned, unpublished native conversation can safely start fresh.
+
+    A reported ID already came from a native conversation. Missing history or
+    an idle process cannot prove that it never ran a turn.
+    """
+    if (getattr(adapter, 'session_mode', None) != 'assigned'
+            or properties.get('native_session_id') != properties.get('id')
+            or properties.get('phase', 'starting') != 'starting'):
+        return False
+    try:
+        # Resume may have discarded damaged runtime authority after proving exit.
+        # Exit is not proof that this conversation never ran: inspect the saved facts.
+        previous = agent_records.runtime(directory / 'runtime.json')
+        if previous and (previous.get('state') not in ('starting', 'failed') or any(
+                key in previous for key in ('pid', 'exit_code', 'usage', 'last_usage', 'native_bridge', 'native_service'))):
+            return False
+        for name in ('sessions.jsonl', 'session.jsonl', 'native-delivery.json'):
+            path = directory / name
+            try:
+                if path.read_bytes().strip():
+                    return False
+            except FileNotFoundError:
+                pass
+        try:
+            (directory / 'inbox-state.json').stat()
+        except FileNotFoundError:
+            states = {}
+        else:
+            states = agent_records.properties(directory / 'inbox-state.json')
+        for state in states.values():
+            if (not isinstance(state, dict) or state.get('submission_state') not in ('pending', 'failed')
+                    or state.get('native_receipt') or not isinstance(state.get('attempts', []), list)
+                    or any(not isinstance(attempt, dict) or attempt.get('state') not in ('error', 'unavailable')
+                           for attempt in state.get('attempts', []))):
+                return False
+        receipts = directory / 'claude-receipts'
+        if _present(receipts) and any(receipts.iterdir()):
+            return False
+        launches = directory / 'launches'
+        if not _present(launches):
+            return not previous
+        entries = list(launches.iterdir())
+        if previous and not any(path.name == previous.get('launch_id') for path in entries):
+            return False
+        for launch in entries:
+            if not launch.is_dir():
+                return False
+            # A ready/request publication could have released a child even if
+            # the subsequent runtime write was lost. Never infer exit from it.
+            if any(_present(launch / name) for name in ('request.json', 'ready', 'cleanup.json', 'roles')):
+                return False
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def discover(adapter, properties, previous, directory, request, ambient, backend):
     """Adopt exactly one proven candidate, with absence proved in every other home."""
     keys = tuple(getattr(adapter, 'storage_env', ()))
@@ -81,6 +146,7 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
     session = SessionHandle.from_records(properties, previous, directory)
     hook = adapter_hook(adapter, 'session_storage_evidence')
     homes = {}
+    caller = None
     for label, environment, base in candidates:
         try:
             home, selected = _candidate_home(adapter, environment, base)
@@ -90,6 +156,8 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
                 if label != 'launch request':
                     problems.append(f'{label} does not identify a storage home')
                 continue
+            if label == 'calling shell':
+                caller = (home, selected)
             if home in homes:
                 continue
             result = hook(session, home) if hook else None
@@ -101,6 +169,10 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
         except Exception as error:
             problems.append(f'{label}: {type(error).__name__}: {error}')
     found = [home for home, (present, _) in homes.items() if present is True]
+    if (not problems and not found and homes and caller and all(value[0] is False for value in homes.values())
+            and _never_started(adapter, properties, previous, directory)):
+        return caller[1], (f'No conversation exists in any candidate storage and no native child was started; '
+                           f'starting fresh in {caller[0]!r} with the same assigned session ID')
     if problems or len(found) != 1:
         choices = ', '.join(f'{home!r} ({"present" if present is True else "absent" if present is False else "unknown"})'
                             for home, (present, _) in homes.items()) or 'no identifiable home'
@@ -108,7 +180,9 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
         raise ValueError(f'Cannot prove unique conversation storage for {directory / "properties.json"}. '
             f'Candidates: {choices}. ' + ('; '.join(problems) + '. ' if problems else '') +
             f'Resume from a shell whose {variable} points at the home holding this conversation. '
-            'Restore access to unreadable candidates and resolve duplicate copies before retrying; no storage was adopted')
+            'Restore access to unreadable candidates and resolve duplicate copies before retrying; no storage was adopted. '
+            'If the conversation is gone and this agent might have run a turn, remove this agent with '
+            f'mv2 remove {properties["id"]}, then spawn a new agent')
     home = found[0]
     selected = homes[home][1]
     return selected, f'Adopted the existing conversation storage {home!r} after finding this session there'

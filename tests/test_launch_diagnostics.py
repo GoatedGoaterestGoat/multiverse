@@ -8,6 +8,7 @@ import threading
 from unittest.mock import patch
 from uuid import uuid4
 
+from multiverse import harnesses
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse.runtime import native, runner
@@ -175,7 +176,11 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                 write(directory / 'properties.json', {'id': agent_id,
                       'universe_id': read(self.root / 'universe.json')['id'], 'name': 'failed-' + executable.name,
                       'task': 'original task', 'harness': 'claude', 'workspace': str(self.work),
-                      'native_session_id': str(uuid4())})
+                      'native_session_id': str(uuid4()),
+                      # This current synthetic recipient has a known launch scope;
+                      # legacy storage discovery is a separate upgrade boundary.
+                      'native_storage_environment': {key: os.environ.get(key) for adapter in harnesses.BUILTINS.values()
+                                                     for key in adapter.storage_env}})
                 with patch.dict(os.environ, {'MV2_TMUX_SOCKET': self.socket}):
                     result = send.run(self.root, agent=agent_id, text='Preserve this prompt', sender={'name': 'user'})
                 self.assertTrue(result['saved'])

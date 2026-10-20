@@ -225,9 +225,9 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
 
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
-        """A legacy resume must find its exact conversation before adopting storage; caller and tmux environments can silently split an existing conversation, and second-stage service preparation can silently erase unknown storage keys."""
+        """Legacy adoption must find the exact conversation, or prove no child ever started; otherwise inherited storage and missing history can silently strand a conversation, while service re-preparation can erase unknown keys."""
         from multiverse.harnesses.claude import project_key
-        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server')
+        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
             with self.subTest(family=family, found=found):
                 key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
@@ -241,7 +241,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 write(manifest, definition)
                 directory, properties, _, _ = lifecycle._record(self.root, family + '-legacy-' + found, '', family, None, None)
                 properties['workspace'] = str(self.work)
-                properties['native_session_id'] = str(uuid4())
+                properties['native_session_id'] = properties['id'] if found.startswith('empty-') else str(uuid4())
                 write(directory / 'properties.json', properties)
                 launch = str(uuid4())
                 facts = {'launch_id': launch, 'state': 'dormant',
@@ -253,14 +253,23 @@ class LaunchIsolationTest(unittest.TestCase):
                     homes['server'] = server_home / ('.claude' if family == 'claude' else '.codex')
                 request = {'env': {key: str(homes['request'])}, 'unset_env': []}
                 request_path = directory / 'launches' / launch / 'request.json'
-                write(request_path, request)
+                if found.startswith('empty-'):
+                    facts = {'launch_id': launch, 'state': 'failed', 'error': 'terminal creation failed'}
+                    if found == 'empty-may-have-child':
+                        facts['pid'] = 1234
+                    write(directory / 'runtime.json', facts)
+                    request_path.parent.mkdir(parents=True, exist_ok=True)
+                    if found == 'empty-accepted':
+                        write(directory / 'inbox-state.json', {str(uuid4()): {'submission_state': 'accepted'}})
+                else:
+                    write(request_path, request)
                 for source, home in homes.items():
                     folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
                     folder.mkdir(parents=True)
                     if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server') and source == 'server'):
                         identifier = properties['native_session_id']
                         if family == 'claude':
-                            (folder / (identifier + '.jsonl')).write_text('{}\n')
+                            (folder / (identifier + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': identifier}) + '\n')
                         else:
                             (folder / ('rollout-2026-10-19T19-00-00-' + identifier + '.jsonl')).write_text(
                                 json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n')
@@ -273,7 +282,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 if found != 'default-server':
                     backend.run.return_value += '\n' + key + '=' + str(homes['server'])
                 backend.create.return_value = {'socket': str(self.work / 'new.sock'), 'session': '$2', 'pane': '%2'}
-                paths = (directory / 'properties.json', directory / 'runtime.json', request_path)
+                paths = tuple(path for path in (directory / 'properties.json', directory / 'runtime.json', request_path) if path.exists())
                 before = {path: path.read_bytes() for path in paths}
                 original_scandir = os.scandir
                 def scandir(path):
@@ -284,18 +293,19 @@ class LaunchIsolationTest(unittest.TestCase):
                         patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                         patch.object(os, 'scandir', scandir), \
                         patch.dict(os.environ, {key: str(homes['caller'])}):
-                    if found in ('none', 'multiple', 'unreadable'):
+                    fresh = found == 'empty-before-child' and family == 'claude'
+                    if found in ('none', 'multiple', 'unreadable') or found.startswith('empty-') and not fresh:
                         with self.assertRaisesRegex(ValueError, 'conversation.*storage'):
                             lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
-                        chosen = homes['server' if found in ('same-home-alias', 'default-server') else found]
+                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server') else found]
                         result = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(result['native_session_home'], str(chosen))
                         expected = {key: str(chosen)}
                         if found != 'request':
-                            expected['HOME'] = os.environ['HOME'] if found == 'caller' else str(server_home)
+                            expected['HOME'] = os.environ['HOME'] if found == 'caller' or fresh else str(server_home)
                         if found == 'default-server' and family == 'claude':
                             expected[key] = None
                         if family == 'codex' and found != 'request':
@@ -305,7 +315,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual(actual['env'].get(key), expected[key])
                         foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
                         self.assertNotIn(foreign, actual['unset_env'])
-                        self.assertTrue(any('Adopted' in notice and str(chosen) in notice for notice in result['notices']))
+                        self.assertTrue(any(('starting fresh' if fresh else 'Adopted') in notice and str(chosen) in notice for notice in result['notices']))
                         again = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
                         if family == 'codex' and found == 'server':

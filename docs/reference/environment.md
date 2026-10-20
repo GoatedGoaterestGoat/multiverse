@@ -108,3 +108,13 @@ Resume from a shell whose `CLAUDE_CONFIG_DIR` or `CODEX_HOME` names the home
 holding the conversation; restore read access or resolve duplicate copies first
 when the error names those problems. A current environment alone is never proof
 that a legacy conversation used that storage.
+
+If every candidate is readable and none holds the conversation, mv2 can start
+fresh in the calling shell's storage only when its retained records prove no
+native child ever started, or no launch was published, and show no acceptance
+or turn evidence. This applies to an assigned session ID, such as Claude's; a
+reported native ID already proves a native conversation existed. The resume
+result says it is starting fresh. If the agent might have run a turn, mv2
+refuses: restore the missing conversation, or remove the agent with
+`mv2 remove NAME` and spawn a new one. Missing history alone is not proof that
+the conversation was unused.
