@@ -86,7 +86,8 @@ class CodexAdapter(ConfiguredAdapter):
                 retry_argv = additions.apply(replace(command, argv=tuple(argv))).argv
                 retry = StartupRetrySpec(retry_argv, (*plain_command.notices,
                     f"Codex runs this folder read-only, so {name}'s agent folder ({directory}) is not writable; "
-                    "session-bind, report and inbox need approval. To allow it, give the harness --sandbox workspace-write."))
+                    "session-bind, report and inbox need approval to write there; with approval policy never, they fail. "
+                    "To allow it, give the harness --sandbox workspace-write."))
             plain = replace(plain_command, startup_retry=retry,
                             environment={**plain_command.environment, **storage_environment(context)},
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
