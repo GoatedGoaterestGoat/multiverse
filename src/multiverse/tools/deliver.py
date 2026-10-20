@@ -54,7 +54,10 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 finalized += 1
                 continue
             if state == 'cancelled':
-                receipt = {**(tracking.get('last_receipt') or {}),
+                claimed = mailbox.claim_cancelled_report(directory, message['id'])
+                if claimed is None:
+                    continue
+                receipt = {**(claimed.get('last_receipt') or {}),
                            'state': 'cancelled', 'ok': False, 'reused': True}
             elif final is not None:
                 receipt = final
@@ -87,8 +90,6 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             present = _present_error if summary.get('ok') is False and _present_error else _present
             present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
-        if state == 'cancelled':
-            mailbox.update_message(directory, message['id'], cancelled_reported_at=store.now())
     if _present and finalized:
         _present(f'{name}: {finalized} earlier {"refusal is" if finalized == 1 else "refusals are"} final' +
                  ('; nothing to retry.' if not results else '.'))

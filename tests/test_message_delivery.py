@@ -1,6 +1,7 @@
 """Durable delivery evidence and automatic inbox read positions."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -117,8 +118,8 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_check_and_retry_select_eligible_messages_across_the_whole_history(self):
         """deliver --check selects accepted, unknown and pending messages and --retry only definite failures, across
-        the whole history, and cancellation is final after one report; fragile because selection can silently
-        miss pages or repeatedly fail on work that kill deliberately cancelled."""
+        the whole history, and concurrent checks claim one final cancellation report; fragile because stale
+        snapshots can double-report work that kill deliberately cancelled."""
         accepted = self.send()
         self.behavior = NativeResult('error', 'definite failure')
         failed = self.send()
@@ -170,10 +171,20 @@ class InboxDeliveryTest(DeliveryFixture):
                 lines = []
                 # Final cancellation remains reportable even if the harness can no longer load.
                 with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
-                    checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                    snapshot, barrier = deliver.mailbox.inbox, threading.Barrier(2)
+                    def simultaneous_snapshot(*args, **kwargs):
+                        result = snapshot(*args, **kwargs)
+                        barrier.wait(timeout=5)
+                        return result
+                    with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous_snapshot), \
+                            ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                                check=True, _present=lines.append), range(2)))
+                    self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
+                    checked = next(result for result in results if result['messages'])
                     self.assertFalse(checked['ok'], checked)
                     self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
-                    self.assertIn('Send a new message', lines[0])
+                    self.assertEqual(sum('Send a new message' in line for line in lines), 1)
                     self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
                     self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
                 after = message_record(self.directory, message['id'])[1]

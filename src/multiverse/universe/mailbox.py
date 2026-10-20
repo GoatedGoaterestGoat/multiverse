@@ -300,6 +300,19 @@ def update_message(agent_dir, message_id, **changes):
     return after
 
 
+def claim_cancelled_report(agent_dir, message_id):
+    """Claim one final cancellation report even when checkers read the same snapshot."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if current.get('submission_state') != 'cancelled' or current.get('cancelled_reported_at'):
+            return None
+        states[message_id] = claimed = {**current, 'cancelled_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return claimed
+
+
 def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False, prompt_context=None):
     """A CLI prompt has no native receipt ID; record process-start evidence only."""
     if not message_id:

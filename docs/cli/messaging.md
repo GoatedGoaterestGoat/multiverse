@@ -75,7 +75,8 @@ mv2 deliver worker --retry    # resend messages that definitely failed
 
 `--check` reports a cancellation once as not delivered and exits nonzero, with
 advice to send a new message if you still want it delivered. Later checks omit
-that cancellation. It stays in history; neither `--check` nor `--retry` resends it.
+that cancellation, including concurrent checks. It stays in history; neither
+`--check` nor `--retry` resends it.
 
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. It does not resend them. List, inspect and doctor show how many
