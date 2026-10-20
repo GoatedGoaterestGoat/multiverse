@@ -61,7 +61,9 @@ transcript, and once however many paths reach a file), and among the session's a
 the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt
 receipt the copy stored just before it, a mid-turn receipt none. The remaining copies go to the
 others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
-a copy left to another identical message makes the answer unknown. Missing reason hooks default to no additional
+a copy left to another identical message makes the answer unknown. So does an identical message the
+current live launch accepted that has no receipt yet, since it may still write one for a copy, and
+copies of one row uuid that disagree on its type, text or time, whatever order they're read in. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
 Core retains the failed launch's exact prompt, start time, conversation identity

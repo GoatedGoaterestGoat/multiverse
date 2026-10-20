@@ -527,11 +527,12 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         return {'type': 'user', 'uuid': str(uuid4()), 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
                 'origin': {'kind': 'plugin', 'name': 'multiverse', 'asUser': True}}
 
-    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=(), ledger=None):
+    def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=(), ledger=None, active=()):
         result = self.adapter.accepted_message_evidence(session or self.session(), self.message, text, since,
                                                         home or str(self.storage), framed=framed,
                                                         **({'cohort': cohort} if cohort else {}),
-                                                        **({'receipts': ledger} if ledger else {}))
+                                                        **({'receipts': ledger} if ledger else {}),
+                                                        **({'active_acceptances': active} if active else {}))
         return result.state, (result.value or {}).get('delivered')
 
     def test_accepted_message_delivered_lost_or_unknown(self):
@@ -577,6 +578,16 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
              {'cohort': [earlier], 'duplicate': 'copy'}, ('unknown', None)),
             ('a project folder reached through a link counts once', [self.prompt()], '',
              {'cohort': [earlier], 'duplicate': 'link'}, ('unknown', None)),
+            ('a newer identical acceptance of the live launch, its receipt not yet written', [self.prompt()], '',
+             {'cohort': [later], 'active': [later[0]]}, ('unknown', None)),
+            ('an active acceptance of another text changes nothing', [self.prompt()], '',
+             {'cohort': [(later[0], 'Message from lead:\nSomething else.', later[2])], 'active': [later[0]]}, ('ok', True)),
+            ('copies of one row disagree on its time, the old one read first', [self.prompt()], '',
+             {'duplicate': 'copy', 'conflict': {'timestamp': '2026-10-19T09:59:00.000Z'}, 'first': 'copy'}, ('unknown', None)),
+            ('copies of one row disagree on its time, the new one read first', [self.prompt()], '',
+             {'duplicate': 'copy', 'conflict': {'timestamp': '2026-10-19T09:59:00.000Z'}, 'first': 'original'}, ('unknown', None)),
+            ('copies of one row disagree on its text', [self.prompt()], '',
+             {'duplicate': 'copy', 'conflict': {'content': 'Message from lead:\nSomething else.'}}, ('unknown', None)),
             ('a matching copy without a row id', [{key: value for key, value in self.prompt().items() if key != 'uuid'}], '',
              {}, ('unknown', None)),
             ('a non-object row', [self.prompt('something else')], '[1, 2]\n', {}, ('unknown', None)),
@@ -607,10 +618,20 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
                 options = dict(options)
                 self.receipts(options.pop('receipts', {}))
                 duplicate = options.pop('duplicate', None)
+                changed, first = options.pop('conflict', None), options.pop('first', 'original')
                 path = self.transcript(*written, raw=raw)
                 if duplicate == 'copy':  # a session resumed from another workspace leaves a copy there
                     other.mkdir(exist_ok=True)
-                    (other / path.name).write_bytes(path.read_bytes())
+                    rows = [json.loads(line) for line in path.read_text().splitlines()]
+                    if changed:  # the copy's first row: the same uuid, a different proof field
+                        rows[0] = {**rows[0], **{key: value for key, value in changed.items() if key != 'content'}}
+                        if 'content' in changed:
+                            rows[0]['message'] = {**rows[0]['message'], 'content': changed['content']}
+                    (other / path.name).write_text(''.join(json.dumps(row) + '\n' for row in rows))
+                    # The order the copies are read in (their mtimes) must never decide the answer.
+                    older, newer = (path, other / path.name) if first == 'original' else (other / path.name, path)
+                    os.utime(older, (1_700_000_000, 1_700_000_000))
+                    os.utime(newer, (1_700_000_100, 1_700_000_100))
                 elif duplicate == 'link':  # one project folder reached through two names
                     other.symlink_to(self.project, target_is_directory=True)
                 try:

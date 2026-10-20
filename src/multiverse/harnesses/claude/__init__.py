@@ -663,7 +663,7 @@ def _receipt(directory, receipts, message_id):
 
 
 def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=(),
-                      directory=None, receipts=None):
+                      directory=None, receipts=None, active=()):
     """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
 
     Never confirms falsely: when in doubt the answer is None (can't tell). True for our receipt, or the
@@ -676,7 +676,10 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     queued_command row. The remaining copies go to the others from their accept
     times on, oldest first. False only when every transcript that could hold it was read whole and no copy is
     left from our accept time on. With `framed` False, `text` is only the body (older records): a match is not
-    proof, since another message can share it; its absence still is.
+    proof, since another message can share it; its absence still is. An identical acceptance in `active` (accepted by
+    the current live launch) with no receipt yet may still write one for a stored copy, so it leaves us unknown;
+    copies of one row uuid that disagree on its type, text or time make that row unknown, whatever order they're
+    read in.
     """
     start, needle = moment(since), (text or '').strip()
     if not native_id or not needle or start is None or start.tzinfo is None or not environment:
@@ -690,7 +693,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         paths = session_transcripts(native_id, environment, workspaces)
     except Unreadable as error:
         return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
-    damaged, ids, copies, rows = None, set(), [], set()
+    damaged, ids, versions, prints, conflicting = None, set(), {}, {}, set()
     for path in paths:
         try:
             lines = path.read_bytes().split(b'\n')
@@ -703,18 +706,36 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
                 row = json.loads(raw)
                 seen = _delivery_row(row)
             except ValueError:  # damaged, or the last row cut short while it was being written
-                seen = False
+                row, seen = None, False
             if seen is False:
                 damaged = damaged or path
-            elif seen and seen[0] == 'id':
-                ids.add(seen[1])
+                continue
+            uuid = row.get('uuid') if isinstance(row.get('uuid'), str) and row.get('uuid') else None
+            if uuid is not None:  # every copy of a row must agree on what it proves
+                proof = (row.get('type'), seen[0] if seen else None, seen[1].strip() if seen else None,
+                         row.get('timestamp'))
+                if prints.setdefault(uuid, proof) != proof:
+                    conflicting.add(uuid)
+            if seen and seen[0] == 'id':
+                versions.setdefault(uuid or object(), []).append(('id', seen[1], None, path))
             elif seen and (seen[1].strip() == needle if framed else needle in seen[1]):
-                when, uuid = moment(seen[2]), row.get('uuid')
-                if when is None or when.tzinfo is None or not isinstance(uuid, str) or not uuid:
-                    damaged = damaged or path  # a copy that can't be placed in time, or told from another copy
-                elif uuid not in rows:  # the same row in another copy of the transcript counts once
-                    rows.add(uuid)
-                    copies.append(when)
+                versions.setdefault(uuid or object(), []).append(('text', None, seen[2], path))
+    copies = []
+    for key, found in versions.items():
+        uuid = key if isinstance(key, str) else None
+        if uuid in conflicting:
+            if any(kind == 'text' or value == message_id for kind, value, _, _ in found):
+                damaged = damaged or found[0][3]  # copies that disagree prove nothing about this message
+            continue  # another message's ID row in doubt: it isn't counted as confirmed either
+        kind, value, stamp, path = found[0]
+        if kind == 'id':
+            ids.add(value)
+            continue
+        when = moment(stamp)
+        if when is None or when.tzinfo is None or uuid is None:
+            damaged = damaged or path  # a copy that can't be placed in time, or told from another copy
+        else:
+            copies.append(when)  # once per uuid, however many copies of the transcript hold it
     if message_id and message_id in ids:
         return True, None
     if damaged:
@@ -741,6 +762,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
             return None, "Another acceptance of the same text has a receipt that can't be placed in time"
         if receipt and receipt[0] == 'prompt':
             holders.append((receipt[1], accepted))
+        elif not receipt and other in (active or ()):
+            return None, ("An identical message the live launch accepted may still be stored and confirmed: check again "
+                          "once it is confirmed or its launch has ended")
         elif not receipt:  # a mid-turn receipt is a queued_command row: it takes no prompt copy
             rivals.append((accepted, other, False))
     free = sorted(copies)
@@ -907,7 +931,7 @@ class ClaudeAdapter(ConfiguredAdapter):
                                (session.workspace,))[0]
 
     def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=(),
-                                  receipts=None):
+                                  receipts=None, active_acceptances=()):
         """Whether a message Claude accepted reached this session's conversation, read from its transcript under
         the Claude storage `home`: ok with {'delivered': bool}, or unknown with the reason (LC-30).
 
@@ -919,7 +943,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
         directory = Path(session.session_file).parent if session.session_file else None
         answer, why = message_delivered(session.native_id, message_id, text, since, {'CLAUDE_CONFIG_DIR': home},
-                                        (session.workspace,), framed, cohort, directory, receipts)
+                                        (session.workspace,), framed, cohort, directory, receipts,
+                                        tuple(active_acceptances or ()))
         if answer is None:
             return NativeResult('unknown', why or "This message's session, text or accept time isn't recorded")
         return NativeResult('ok', value={'delivered': answer})
