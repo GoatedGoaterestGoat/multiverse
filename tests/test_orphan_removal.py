@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from multiverse.runtime import lifecycle
+from multiverse.runtime import attachments
 from multiverse.store import read, uid, write
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import list_agents
@@ -43,7 +44,8 @@ class OrphanRemovalTest(BaseTest):
                 try:
                     row = lifecycle.listing(self.root)[0]
                     self.assertNotEqual(row['damaged'].get('recover'), 'remove')
-                    with self.assertRaises(records.RecordError):
+                    with patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)), \
+                            self.assertRaises(records.RecordError):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
                     path.unlink()
@@ -63,6 +65,24 @@ class OrphanRemovalTest(BaseTest):
             self.assertFalse(self.directory.exists())
             self.assertEqual(removed['id'], self.directory.name)
             self.assertEqual(read(Path(removed['trash']) / 'compaction/note.json'), {'leftover': True})
+        with self.subTest('runtime-only leftovers retain process proof before removal'):
+            write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'failed', 'pid': 12345})
+            original = (self.directory / 'runtime.json').read_bytes()
+            for snapshot, process in ((({'%1': pane}, None), None),
+                                      (({}, 'Permission denied'), None),
+                                      (({}, None), 'recorded child remains live')):
+                with self.subTest(snapshot=snapshot, process=process), \
+                        patch.object(Tmux, 'snapshot', return_value=snapshot), \
+                        patch.object(attachments, 'recorded_process_problem', return_value=process), \
+                        self.assertRaises(records.RecordError):
+                    relocate.remove_agent(self.root, self.directory.name)
+                self.assertEqual((self.directory / 'runtime.json').read_bytes(), original)
+            with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
+                    patch.object(attachments, 'recorded_process_problem', return_value=None), \
+                    patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
+                removed = relocate.remove_agent(self.root, self.directory.name)
+            self.assertEqual((Path(removed['trash']) / 'runtime.json').read_bytes(), original)
+            self.assertFalse(self.directory.exists())
 
     def test_new_core_evidence_during_discovery_is_not_moved(self):
         """Core evidence that appears while orphan discovery runs stops the move; fragile because it is a race with a

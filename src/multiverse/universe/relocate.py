@@ -10,7 +10,7 @@ from contextlib import ExitStack
 import os
 
 from . import exact, parent, trash, tree, workspace
-from .agents import directory, runtime, update_runtime, name_matches, record_paths, orphaned
+from .agents import directory, runtime, update_runtime, name_matches, record_paths, orphaned, properties_missing
 from . import records, sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
@@ -21,9 +21,12 @@ def _stopped(agent_dir):
     """Require native exit and remove any retained, owned terminal wrapper."""
     from ..runtime import missing_runtime
     from .agents import interrupted_preparation
-    if orphaned(agent_dir):
-        missing_runtime.require_stopped(agent_dir, _orphan_identity(agent_dir), operation='move or remove', orphan=True)
-        if not orphaned(agent_dir):
+    if properties_missing(agent_dir):
+        previous, malformed = missing_runtime.recovery_snapshot(agent_dir)
+        missing_runtime.require_stopped(agent_dir, _orphan_identity(agent_dir), facts=previous,
+                                        operation='move or remove', orphan=True)
+        missing_runtime._unchanged(agent_dir, previous, malformed)
+        if not properties_missing(agent_dir):
             raise records.RecordError(agent_dir / 'properties.json',
                                       'core records changed during orphan discovery; retry with the current record')
         return  # No authority was invented, and no terminal was controlled.
@@ -180,12 +183,12 @@ def move_subverse(path, destination):
 def remove_agent(root, reference):
     root = exact(root)
     agent_dir = directory(root, reference, allow_damaged=True)
-    orphan = orphaned(agent_dir)
+    orphan = properties_missing(agent_dir)
     properties = _orphan_identity(agent_dir) if orphan else records.properties(agent_dir / "properties.json")
     with ExitStack() as stack:
         _hold(stack, [agent_dir])
         _session_namespaces(stack, root)
-        if orphan and not orphaned(agent_dir):
+        if orphan and not properties_missing(agent_dir):
             raise records.RecordError(agent_dir / 'properties.json',
                                       'core records changed before orphan removal; retry with the current record')
         entry = trash.entry(root, f'{properties["name"]}-{agent_dir.name[:8]}')

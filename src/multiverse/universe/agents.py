@@ -40,6 +40,15 @@ def orphaned(directory):
     return True
 
 
+def properties_missing(directory):
+    """Only proven absence permits removal using the folder's recovery identity."""
+    try:
+        (directory / 'properties.json').stat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 class AgentNotFound(ValueError):
     """No saved agent matches a reference; no launch was attempted."""
 
@@ -96,7 +105,7 @@ def name_matches(path, name):
         try:
             if orphaned(path.parent):
                 return False  # No current or historical record can reserve a name.
-            mentioned = (error.data or {}).get('name') == name or records.mentions(path, name)
+            mentioned = (error.data or {}).get('name') == name or sessions.damaged_mentions(path.parent, name)
         except (OSError, ValueError) as unreadable:
             remedy = ('restore or remove the record' if isinstance(unreadable, FileNotFoundError)
                       else 'fix its permissions or repair the record')

@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import stat
 
 from ..harnesses.types import normalize_session_id
 from ..store import lock, now, read, uid, write
@@ -139,7 +140,7 @@ def _journal_mentions(path, native_id):
     return records.mentions(path, native_id)
 
 
-def _damaged_mentions(directory, native_id):
+def damaged_mentions(directory, value):
     """Missing files cannot claim an ID; surviving unreadable evidence still can."""
     paths = [directory / name for name in ('properties.json', 'runtime.json', 'sessions.jsonl')]
     try:
@@ -147,11 +148,17 @@ def _damaged_mentions(directory, native_id):
     except FileNotFoundError:
         launches = []
     for launch in launches:
+        try:
+            mode = launch.stat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(mode):
+            continue  # A regular file cannot contain a launch request.
         paths.append(launch / 'request.json')
     mentioned = False
     for path in paths:
         try:
-            mentioned = records.mentions(path, native_id) or mentioned
+            mentioned = records.mentions(path, value) or mentioned
         except FileNotFoundError:
             continue
     return mentioned
@@ -176,7 +183,7 @@ def claim(root, directory, data, native_id, home=None, *, operation=None):
                     if orphaned(path.parent):
                         continue  # Only plugin leftovers; no current or historical claim.
                     known = (error.data or {}).get('native_session_id')
-                    mentioned = _damaged_mentions(path.parent, native_id) or known == native_id
+                    mentioned = damaged_mentions(path.parent, native_id) or known == native_id
                 except (OSError, ValueError) as unreadable:
                     raise SessionConflict(f'Cannot check {owner}: {path} or {journal} cannot be read safely '
                                           f'({unreadable}); fix permissions or repair the record before retrying') from error

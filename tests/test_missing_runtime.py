@@ -60,8 +60,12 @@ class DiscoveryTest(BaseTest):
         path = self.launch / 'request.json'
         for content in ('[]', '{"env":[]}', '{"env":{"MV2_TMUX_SOCKET":5}}'):
             path.write_text(content)
-            with self.subTest(request=content), self.assertRaises(records.RecordError):
+            with self.subTest(request=content), self.assertRaises(records.RecordError) as caught:
                 missing_runtime.discover(self.directory, self.properties)
+            self.assertEqual(caught.exception.file, path)
+            self.assertIn(str(path), caught.exception.reason)
+            self.assertIn('restore', caught.exception.reason.lower())
+            self.assertNotIn('mv2 kill', caught.exception.reason)
         path.unlink()
         with self.subTest(request='missing before native startup'), \
                 patch.object(missing_runtime.Tmux, 'snapshot', return_value=({}, None)):
@@ -91,6 +95,11 @@ class DiscoveryTest(BaseTest):
             self.assertFalse((self.root / 'trash').exists())
         for content in (b'{torn', b'[]', b'', b'\xff'):
             runtime.write_bytes(content)
+            with self.subTest(resume_torn=content), self.assertRaises(records.RecordError) as caught:
+                lifecycle.start(self.root, resume='lost')
+            self.assertIn(str(runtime), caught.exception.reason)
+            self.assertIn('restore', caught.exception.reason.lower())
+            self.assertIn('restore', lifecycle.listing(self.root, only=self.directory.name)[0]['damaged']['reason'].lower())
             with self.subTest(remove_torn=content), \
                     patch.object(missing_runtime.Tmux, 'snapshot', return_value=({'%2': self.pane}, None)), \
                     self.assertRaisesRegex(records.RecordError, 'running terminal.*mv2 kill'):

@@ -42,6 +42,11 @@ def _problem(directory, reason, *, recommend_kill=True):
         'runtime.json and retry')
 
 
+def _request_problem(path, reason):
+    return records.RecordError(path, f'{reason}; restore read access or repair {path} from a verified backup '
+        'before retrying. Its recorded terminal server must be readable to check for a surviving launch')
+
+
 
 def recovery_snapshot(directory):
     """Readable malformed bytes are lost authority; unreadable bytes still refuse recovery."""
@@ -170,19 +175,19 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
         except FileNotFoundError:
             continue  # Preparation can fail before publishing a native request.
         except OSError as error:
-            raise _problem(directory, f'cannot inspect {path}: {error}') from error
+            raise _request_problem(path, f'cannot inspect request: {error}') from error
         try:
             request = records.properties(path)
         except records.RecordError as error:
-            raise _problem(directory, f'{path}: {error.reason}') from error
+            raise _request_problem(path, error.reason) from error
         requests[launch.name] = request
         env = request.get('env', {})
         if not isinstance(env, dict):
-            raise _problem(directory, f'invalid environment in {path}')
+            raise _request_problem(path, 'invalid environment')
         saved = env.get('MV2_TMUX_SOCKET')
         if saved is not None:
             if not isinstance(saved, str) or not saved or not Path(saved).is_absolute():
-                raise _problem(directory, f'invalid recorded terminal socket in {path}')
+                raise _request_problem(path, 'invalid recorded terminal socket')
             sockets.add(saved)
     for value in (socket_path, os.environ.get('MV2_TMUX_SOCKET')):
         if value is not None:
@@ -223,7 +228,7 @@ def require_stopped(directory, properties, socket_path=None, *, facts=None, oper
                        recommend_kill=operation != 'kill')
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
         raise _problem(directory, reason, recommend_kill=False)
-    for launch in ([] if orphan else launches(directory)):
+    for launch in launches(directory):
         if reason := attachments.problem(directory, {'launch_id': launch.name}):
             raise _problem(directory, reason, recommend_kill=False)
     if facts or (directory / 'runtime.json').exists():

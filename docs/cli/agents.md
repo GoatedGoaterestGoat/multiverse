@@ -128,6 +128,10 @@ reports the damage as a problem and exits nonzero. Use the damaged row's UUID
 when its name cannot be recovered. A folder with surviving core records still reserves its
 UUID when properties.json is missing. Commands that would act on damaged
 identity refuse until it is repaired; listing does not rewrite or reset it.
+A missing properties file reserves only names still mentioned by surviving
+records. A runtime-only folder does not block unrelated spawns. You can remove
+such a folder by its full UUID: mv2 checks tagged terminals, saved process
+identities and launch cleanup records first, then preserves its files in trash.
 
 A missing runtime.json, or damaged launch authority inside it (such as an invalid
 launch UUID or terminal socket, pane or session identity), is reported even though
@@ -160,6 +164,8 @@ cannot be read because of permissions must be made readable first. Recovery
 rechecks the record before acting, so a concurrent repair is never overwritten.
 Discovery skips an earlier launch whose request was never written; a malformed
 or unreadable request still refuses recovery with its path and repair advice.
+Repair that request or restore it from a verified backup before retrying; editing
+runtime.json cannot replace the request's missing terminal-server evidence.
 It never guesses a child PID or contacts a shared server from the conversation
 UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other

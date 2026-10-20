@@ -76,7 +76,15 @@ def runtime(path):
     """An agent's `runtime.json` as a dict, {} when the agent never launched; RecordError when it cannot be used."""
     if not Path(path).exists():
         return {}
-    return _object(path)
+    try:
+        return _object(path)
+    except RecordError as error:
+        path = Path(path)
+        if path.name != 'runtime.json':
+            raise
+        raise RecordError(path, f'{error.reason}; restore read access or restore {path} from a verified backup. '
+            f'To close a surviving tagged terminal, use mv2 kill {path.parent.name}; only after verifying '
+            'its terminal, runner and child have exited, remove this runtime.json and resume', error.data) from None
 
 
 def mentions(path, value):

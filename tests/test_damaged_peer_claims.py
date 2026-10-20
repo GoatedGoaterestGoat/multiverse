@@ -178,8 +178,7 @@ class DamagedPeerClaimsTest(BaseTest):
                 try:
                     with self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
                         claim()
-                    with self.assertRaisesRegex(records.RecordError, orphan.name):
-                        agents.check_available_name(self.root, 'unreserved')
+                    agents.check_available_name(self.root, 'unreserved')
                 finally:
                     evidence.unlink()
         stat, runtime = Path.stat, orphan / 'runtime.json'
@@ -207,4 +206,8 @@ class DamagedPeerClaimsTest(BaseTest):
             agents.check_available_name(self.root, 'unreserved')
         with self.subTest('a missing properties file cannot claim an unrelated runtime-only session'):
             write(orphan / 'runtime.json', {'state': 'failed', 'native_session_id': str(uuid4())})
+            claim()
+            agents.check_available_name(self.root, 'unreserved')
+        with self.subTest('a non-directory launch entry cannot hold a launch request'):
+            (orphan / 'launches' / str(uuid4())).write_text('leftover')
             claim()
