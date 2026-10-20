@@ -73,6 +73,10 @@ mv2 deliver worker --check    # settle uncertain deliveries, record confirmation
 mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
+`--check` reports a cancellation once as a final result, with advice to send a
+new message if you still want it delivered. It keeps the cancellation in history;
+neither `--check` nor `--retry` resends it.
+
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.

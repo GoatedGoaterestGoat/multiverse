@@ -31,6 +31,8 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             continue
         tracking = message['tracking']
         state = tracking['submission_state']
+        if state == 'cancelled' and tracking.get('cancelled_reported_at'):
+            continue
         # An accepted submission can gain receipt evidence while the launch that
         # took it runs; check it until consumption is confirmed. A queue acceptance
         # receipt is not transcript evidence. Accepted resume prompts have no
@@ -51,7 +53,10 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             if final is not None and retry:
                 finalized += 1
                 continue
-            if final is not None:
+            if state == 'cancelled':
+                receipt = {**(tracking.get('last_receipt') or {}),
+                           'state': 'cancelled', 'ok': True, 'reused': True}
+            elif final is not None:
                 receipt = final
             elif retry:
                 with store.lock(directory / '.send.lock'):
@@ -82,6 +87,8 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             present = _present_error if summary.get('ok') is False and _present_error else _present
             present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
+        if state == 'cancelled':
+            mailbox.update_message(directory, message['id'], cancelled_reported_at=store.now())
     if _present and finalized:
         _present(f'{name}: {finalized} earlier {"refusal is" if finalized == 1 else "refusals are"} final' +
                  ('; nothing to retry.' if not results else '.'))

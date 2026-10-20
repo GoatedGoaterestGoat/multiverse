@@ -117,8 +117,8 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_check_and_retry_select_eligible_messages_across_the_whole_history(self):
         """deliver --check selects accepted, unknown and pending messages and --retry only definite failures, across
-        the whole history, not the first page of 50; fragile because selection reads paged history, and the
-        first-page bug was silent."""
+        the whole history, and cancellation is final after one report; fragile because selection can silently
+        miss pages or repeatedly fail on work that kill deliberately cancelled."""
         accepted = self.send()
         self.behavior = NativeResult('error', 'definite failure')
         failed = self.send()
@@ -155,6 +155,31 @@ class InboxDeliveryTest(DeliveryFixture):
         self.assertTrue(result['ok'])
         self.assertEqual(len(result['messages']), 55)
         self.assertEqual(len(self.calls), before + 1 + 55)
+        for staged in (False, True):
+            with self.subTest(cancelled_startup=staged):
+                self.recipient()
+                message = append_message(self.directory, 'cancel me', {}, delivery='follow-up')
+                if staged:
+                    update_message(self.directory, message['id'], submission_state='pending',
+                                   deferred_launch_id=self.launch)
+                adapter = harnesses.load(self.root, 'claude')
+                with patch.object(adapter, 'stop', create=True, return_value=NativeResult('ok', value={
+                        'cancelled_message_ids': [] if staged else [message['id']]})):
+                    native.stop(self.root, self.agent)
+                before = message_record(self.directory, message['id'])[1]
+                lines = []
+                # Final cancellation remains reportable even if the harness can no longer load.
+                with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
+                    checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                    self.assertTrue(checked['ok'], checked)
+                    self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
+                    self.assertIn('Send a new message', lines[0])
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                after = message_record(self.directory, message['id'])[1]
+                self.assertEqual(after['submission_state'], 'cancelled')
+                self.assertEqual(after.get('attempts'), before.get('attempts'))
+                self.assertEqual(self.calls, [])
 
     def test_check_confirms_without_resending(self):
         """deliver --check records confirmation only for the current launch, treats a still-queued native entry as
