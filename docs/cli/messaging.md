@@ -37,6 +37,8 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 
 Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
+If a wake is refused, `send` and `deliver --check` show the complete reason, including the exact record paths and recovery instructions. Reflected message text remains hidden.
+
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
 

@@ -4,7 +4,7 @@ import json
 from ..display import clean
 
 
-def failure_reason(reason, text=''):
+def failure_reason(reason, text='', *, preserve_details=False):
     reason = str(reason or 'the session could not accept the message')
     if text:
         # Replace whole reflected values once. Short conversational tokens are
@@ -14,6 +14,10 @@ def failure_reason(reason, text=''):
         if pieces:
             pattern = r'(?<!\w)(?:' + '|'.join(re.escape(piece) for piece in sorted(pieces, key=len, reverse=True)) + r')(?!\w)'
             reason = re.sub(pattern, 'the message', reason)
+    if preserve_details:
+        # Wake refusals carry actionable record paths and recovery instructions.
+        # Keep them whole, while still removing reflected message bodies above.
+        return clean(reason)
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'
@@ -53,7 +57,8 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
         return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
         # A file path is actionable evidence, not an opaque native identifier.
-        why = clean(reason) if value.get('pre_submission_failure') is True else failure_reason(reason, text)
+        why = (clean(reason) if value.get('pre_submission_failure') is True else
+               failure_reason(reason, text, preserve_details=value.get('wake_refused') is True))
         if value.get('launch_only') is True and value.get('final') is False:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason and resume with a working bridge, "
                     f"then mv2 deliver {name} --retry.")
