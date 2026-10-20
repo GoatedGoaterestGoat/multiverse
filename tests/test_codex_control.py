@@ -85,8 +85,10 @@ class CodexControlTest(unittest.TestCase):
                     state['restart'] = restart
                 self.ctx = replace(self.ctx, queue_state=state)
                 self.requests.clear()
-                self.assertEqual(self.run_plan('follow-up', state='idle', overrides={
-                    'thread/queue/list': {'result': {'data': [other]}}}).state, 'native_queued')
+                result = self.run_plan('follow-up', state='idle', overrides={
+                    'thread/queue/list': {'result': {'data': [other]}}})
+                self.assertEqual(result.state, 'native_queued')
+                self.assertEqual(result.value.get('paused', False), not starts)
                 methods = [r.method for r in self.requests]
                 self.assertEqual(methods.count('thread/queue/add'), 1)
                 self.assertEqual(methods.count('thread/queue/start'), starts)
