@@ -268,13 +268,14 @@ def message_record(agent_dir, message_id):
 
 
 def acceptance_contexts(agent_dir, native_id, home, body):
-    """Snapshot all acceptances, including final ones, before matching shared transcript rows."""
+    """Snapshot acceptances and their exact receipts together before matching transcript rows."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
         cohort = []
         _, _, messages = _messages(agent_dir)
         bodies = {message['id']: message.get('text') for _, message in messages}
-        for identifier, state in _states(agent_dir).items():
+        states = _states(agent_dir)
+        for identifier, state in states.items():
             attempts = state.get('attempts') or []
             if (state.get('submission_state') != 'accepted'
                     and not any(attempt.get('state') in ('ok', 'native_queued') for attempt in attempts)):
@@ -294,7 +295,10 @@ def acceptance_contexts(agent_dir, native_id, home, body):
                 continue
             if saved['home'] == home:
                 cohort.append((identifier, saved['text'], saved['since']))
-        return tuple(cohort)
+        receipts = {identifier: receipt for identifier, _, _ in cohort
+                    if isinstance(receipt := states[identifier].get('native_receipt'), dict)
+                    and receipt.get('transcript_confirmed') is True}
+        return tuple(cohort), receipts
 
 
 def update_message(agent_dir, message_id, **changes):

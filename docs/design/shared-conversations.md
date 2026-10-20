@@ -13,7 +13,7 @@ Run callbacks through the current mv2 installation. A connected Codex conversati
 
 Core requires a canonical historical launch ID and a readable `launches/LID/request.json` under this same agent. Its recorded universe, full agent ID, agent directory and launch ID must match the caller. The request must have `shared_service=true`, bridge mode and a relay with `binds_session=true`. Core then applies the current saved-policy, exact bound native thread, canonical storage, workspace, universe and agent-directory checks.
 
-This route permits only the agent's own `report`, `inbox`, sending as the agent and verification of its existing session binding. Missing or damaged proof, a foreign thread or scope, and an incorrect explicit identity mode remain refused. Runner and control updates and `calling_socket` retain strict launch checks. No caller environment is rewritten or given the current launch ID.
+This route permits only the agent's own `report`, `inbox`, sending as the agent and verification of its existing session binding. Missing or damaged proof, a foreign thread or scope, and an incorrect explicit identity mode remain refused. Runner and control updates retain strict launch checks. For this retained-launch compatibility caller, `calling_socket` also requires the current launch. No caller environment is rewritten or given the current launch ID.
 
 By default, Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves. Restarting the frontend does not guarantee that its cached tool settings change. The compatibility route lets verified old tools work without changing those settings. A separate older mv2 checkout still runs its old callback code and is not covered; use the current installation.
 
@@ -40,7 +40,8 @@ given the latest launch ID as a substitute for its own identity.
 | Own `report` and `inbox`, including `inbox --wait` | Explicit agent proof or opted-in retained bridge proof; valid across terminal replacement and while its wrapper is stopped or failed. It cannot clear a launch error or make a terminal ready. |
 | `send`, `deliver`, `ask`, usage and management commands | A validated agent may act normally. Recipient native session, message receipts, target launch and pane checks remain unchanged. |
 | `session-bind` with agent proof, including a retained bridge launch | Only verifies the exact already-bound ID, without writing. Establishing or changing a binding still requires the strict runner callback. |
-| `runtime-update`, runner binding, control RPC, attachment relay and child-spawn socket selection | Exact launch identity remains required. Old terminals cannot control replacement attachments. |
+| `runtime-update`, runner binding, control RPC and attachment relay | Exact launch identity remains required. Old terminals cannot control replacement attachments. |
+| Child-spawn socket selection | Explicit stable agent proof selects the verified current runtime's socket without a launch ID. The retained-launch compatibility route does not apply here; that caller must prove the current launch. |
 
 Plugin MCP environment references alone do not acquire native-shell authority:
 the shell's native conversation proof is required. Explicit plugin/API

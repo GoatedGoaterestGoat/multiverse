@@ -33,7 +33,7 @@ Connected Codex tools keep the same agent identity when another Codex client dri
 
 Each launch requests `MV2_CLI`, `MV2_PYTHON` and `PATH` from the mv2 installation starting it. These paths are tool settings, not identity proof. The saved maps describe requests, not measured values in a loaded conversation. Codex can retain an idle conversation for up to 30 minutes after its last client leaves by default, so restarting the frontend does not guarantee new tool settings.
 
-Use the current mv2 installation for callbacks from an older Codex bridge conversation. Its retained launch request and the current thread, storage, workspace and agent records must all match. This permits `report`, `inbox`, sending as the agent and verification of the existing binding; child spawning and runner/control callbacks keep their launch checks. A separate old mv2 checkout still runs its old code and is not covered. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
+Use the current mv2 installation for callbacks from an older Codex bridge conversation. Its retained launch request and the current thread, storage, workspace and agent records must all match. This permits `report`, `inbox`, sending as the agent and verification of the existing binding; child spawning through this compatibility route and all runner/control callbacks keep their launch checks. A separate old mv2 checkout still runs its old code and is not covered. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 Outside an agent session, leave `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID` and `MV2_IDENTITY_MODE` unset. In an agent context, `send` signs as that agent and `inbox` reads its inbox. Copying only part of the identity fails validation.
 
@@ -123,7 +123,7 @@ fresh in the calling shell's storage only when its retained records prove no
 native child ever started, or no launch was published, and show no acceptance
 or turn evidence. This applies to an assigned session ID, such as Claude's; a
 reported native ID already proves a native conversation existed. The resume
-result says it is starting fresh. If the agent might have run a turn, mv2
+result says once that it is starting fresh, including the selected storage. If the agent might have run a turn, mv2
 refuses: restore the missing conversation, or remove the agent with
 `mv2 remove NAME` and spawn a new one. Missing history alone is not proof that
 the conversation was unused.

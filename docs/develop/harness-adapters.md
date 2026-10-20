@@ -33,6 +33,7 @@ Core also looks for these optional methods and attributes:
 | `family` | Which status line defaults apply: `claude`, `codex`, `pi` or `''` |
 | `session_home(environment)` | Resolve an explicit candidate storage home; return `None` when its supplied environment cannot identify one. |
 | `session_storage_evidence(session, home)` | Read-only proof that this exact conversation exists under an absolute candidate home: `ok` with `value.present` true or false, or `unknown` with a reason for incomplete evidence. |
+| `resume_notice(session, caller_environment, effective_environment)` | A notice about the selected storage or conversation. If it accepts the optional keyword `fresh_start`, core passes false after announcing its own proven fresh start; other notices still apply. |
 | `allow_recorded_launch(session)` | Explicitly allow core to verify retained bridge-launch identity for data callbacks; exactly `True` opts in, absent/default is false. The current adapter policy must equal the saved policy; this never grants control authority. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
@@ -158,15 +159,13 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
 
 An optional `accepted_message_evidence(session, message_id, text, since, home,
-framed=True, cohort=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a
+framed=True, cohort=(), receipts=None)` hook returns `ok` with `delivered: true|false`, or `unknown` with a
 named reason. Core calls it only after proving the accepting runner and child
 have exited and a newer ready, idle launch uses the same session and storage.
 The hook reads the accepting workspace and exact saved framing. `cohort` is a
 snapshot of `(message_id, framed_text, accepted_at)` for the conversation's
 acceptances, including already confirmed or final entries, read under the inbox
-lock before calling the adapter. Identical text consumes stored rows oldest
-acceptance first; one row cannot confirm two messages. Exact message-ID rows
-belong only to that ID, and excess acceptances stay unknown. An older same-body
+lock before calling the adapter. `receipts` maps those IDs to their saved, transcript-confirmed native receipt values from the same snapshot. The adapter also checks its own receipt files, which may not have reached the ledger. Exact prompt receipts reserve their stored occurrences before identical text consumes remaining rows oldest acceptance first. One row cannot confirm two messages, including copies of that row in another file. Exact attachment-ID rows belong only to that ID and consume no anonymous prompt occurrence. Missing row identity or ambiguous reservations keep text evidence unknown. An older same-body
 acceptance with unrecorded framing has a `None` text in the cohort: text evidence
 stays unknown, while exact-ID evidence may still confirm. Different bodies cannot
 share a framed text row. For older records,

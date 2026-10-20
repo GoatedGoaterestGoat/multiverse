@@ -671,8 +671,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once, by its row
     uuid across transcript copies. `cohort` holds the session's other acceptances as (message_id, framed text,
     since). Among those with our text, an exact receipt (the mod's file in `directory`, else the ledger's in
-    `receipts`) first takes its own copy: a prompt receipt the latest copy at or before it, within a minute; a
-    mid-turn receipt none, being a queued_command row. The remaining copies go to the others from their accept
+    `receipts`) first takes its own copy: a prompt receipt the one unused copy stored between its accept time
+    and it, within a minute (none, or more than one, leaves this unknown); a mid-turn receipt none, being a
+    queued_command row. The remaining copies go to the others from their accept
     times on, oldest first. False only when every transcript that could hold it was read whole and no copy is
     left from our accept time on. With `framed` False, `text` is only the body (older records): a match is not
     proof, since another message can share it; its absence still is.

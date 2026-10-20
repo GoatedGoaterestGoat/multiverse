@@ -1,6 +1,7 @@
 """An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
 from contextlib import contextmanager
+import inspect
 import json
 import math
 import os
@@ -321,8 +322,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
-        notices = display.notice_lines(missing_notices, storage_notices,
-                    _resume_notices(adapter, session, ambient, context.environment, storage) if resume else [])
+        notices = display.notice_lines(missing_notices, [item.notice for item in storage_notices],
+                    _resume_notices(adapter, session, ambient, context.environment, storage,
+                                    fresh_start=not any(item.fresh_start for item in storage_notices)) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         # An adapter may resolve a saved path through a changed symlink. Compare
         # its effective selection with recorded strings, never re-resolve history.
@@ -553,12 +555,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     return {**result, 'notices': notices} if notices else result
 
 
-def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None):
+def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None, *, fresh_start=True):
     """Optional presentation only; never changes the storage or launch decision."""
     hook = native.adapter_hook(adapter, 'resume_notice')
     notices = []
     try:
-        notice = hook(session, dict(caller_environment), dict(effective_environment)) if hook else None
+        options = ({'fresh_start': False}
+                   if not fresh_start and hook and 'fresh_start' in inspect.signature(hook).parameters else {})
+        notice = hook(session, dict(caller_environment), dict(effective_environment), **options) if hook else None
     except Exception:
         notice = None
     notice = display.clean(notice).strip() if isinstance(notice, str) else ''
@@ -756,8 +760,9 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
         candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
         terminal = previous.get('tmux') or {}
-        adopted, notice = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
-                                                    Tmux(terminal.get('socket')), recorded=candidate_recorded)
+        adoption = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
+                                            Tmux(terminal.get('socket')), recorded=candidate_recorded)
+        adopted = adoption.environment
         if family == 'codex':
             # The finder proved this first home's conversation. Save its canonical
             # scope now; later resumes compare these strings without re-resolving history.
@@ -773,7 +778,7 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
                     key: adopted.get(key, value) for key, value in identity.get('scope', {}).items()}}
         if adopted.get('HOME'):
             environment['HOME'] = adopted['HOME']
-        notices.append(notice)
+        notices.append(adoption)
         return {**{key: value for key, value in {**historical, **(saved or {})}.items() if key not in own_keys},
                 **{key: adopted[key] for key in own_keys if key in adopted},
                 **({'HOME': adopted['HOME']} if adopted.get('HOME') else {})}

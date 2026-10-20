@@ -196,10 +196,12 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
         """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can
-        invite a duplicate resend, while hiding an old acceptance or confirming two identical acceptances from one stored row silently loses a message (LC-30)."""
+        invite a duplicate resend; receipt reservations, copied histories and final acceptances must share row counts or silently confirm a lost identical message (LC-30)."""
         cases = ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'current-launch',
                  'working', 'unready', 'other-session', 'other-home', 'no-cleanup', 'live-child',
-                 'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks', 'identical-acceptances')
+                 'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks', 'identical-acceptances',
+                 'identical-receipt', 'identical-ledger-receipt', 'identical-final-receipt',
+                 'identical-damaged-receipt', 'identical-copy', 'identical-alias', 'identical-no-row-id')
         for case in cases:
             with self.subTest(case=case):
                 self.recipient(native_session_home=str(self.work / 'claude-home'))
@@ -209,7 +211,8 @@ class InboxDeliveryTest(DeliveryFixture):
                 context = tracking.get('delivery_context')
                 if case in ('lost', 'confirmed'):
                     self.assertEqual(context['text'], self.calls[0][1].framed)
-                if case == 'identical-acceptances':
+                identical = case.startswith('identical-')
+                if identical:
                     self.send(message['text'], sender={'name': 'old-name'})
                     second = {'id': self.calls[-1][1].id}
                     self.assertNotEqual(second['id'], message['id'])
@@ -218,8 +221,32 @@ class InboxDeliveryTest(DeliveryFixture):
                     from multiverse.harnesses.claude import project_key
                     transcript = Path(context['home']) / 'projects' / project_key(str(self.work)) / (self.native_id + '.jsonl')
                     transcript.parent.mkdir(parents=True, exist_ok=True)
-                    transcript.write_text(json.dumps({'type': 'user', 'sessionId': self.native_id,
-                        'timestamp': now(), 'message': {'content': context['text']}}) + '\n')
+                    timestamp = now()
+                    row = {'type': 'user', 'uuid': str(uuid4()), 'sessionId': self.native_id,
+                           'timestamp': timestamp, 'message': {'content': context['text']}}
+                    if case == 'identical-no-row-id':
+                        row.pop('uuid')
+                    transcript.write_text(json.dumps(row) + '\n')
+                    if case == 'identical-copy':
+                        copy = transcript.parent.with_name('copied-history') / transcript.name
+                        copy.parent.mkdir(exist_ok=True)
+                        copy.write_bytes(transcript.read_bytes())
+                    if case == 'identical-alias':
+                        transcript.parent.with_name('same-project-alias').symlink_to(transcript.parent, target_is_directory=True)
+                    if 'receipt' in case:
+                        from datetime import datetime
+                        at = int(datetime.fromisoformat(timestamp).timestamp() * 1000) + 1
+                        receipt = {'transcript_confirmed': True, 'route': 'prompt', 'delivered_at_ms': at}
+                        if case == 'identical-receipt':
+                            write(self.directory / 'claude-receipts' / (second['id'] + '.json'),
+                                  {'id': second['id'], 'route': 'prompt', 'at': at})
+                        else:
+                            if case == 'identical-damaged-receipt':
+                                receipt.pop('route')
+                            update_message(self.directory, second['id'], native_receipt=receipt, transcript_confirmed_at=timestamp)
+                            if case == 'identical-final-receipt':
+                                update_message(self.directory, second['id'], submission_state='cancelled',
+                                               final_reason='cancelled', cancelled_reported_at=timestamp)
                 legacy = case.startswith('legacy-')
                 if legacy:
                     update_message(self.directory, message['id'], delivery_context=None)
@@ -256,7 +283,7 @@ class InboxDeliveryTest(DeliveryFixture):
                                 else (False, None) if case == 'unknown-process' else (True, None))
                 lines = []
                 actual = (ClaudeAdapter.configured('claude', {}).accepted_message_evidence
-                          if case in ('lost', 'legacy-lost', 'legacy-unreadable', 'identical-acceptances') else None)
+                          if case in ('lost', 'legacy-lost', 'legacy-unreadable') or identical else None)
                 blocked = Path(home) / 'projects' / 'unrelated-project' / (self.native_id + '.jsonl')
                 if case == 'legacy-unreadable':
                     blocked.parent.mkdir(parents=True, exist_ok=True)
@@ -283,9 +310,20 @@ class InboxDeliveryTest(DeliveryFixture):
                         checked = next(item for item in results if item['messages'])
                     else:
                         checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
-                    if case == 'identical-acceptances':
+                    if identical:
                         first_state = message_record(self.directory, message['id'])[1]
                         second_state = message_record(self.directory, second['id'])[1]
+                        if 'receipt' in case or case == 'identical-no-row-id':
+                            self.assertEqual(first_state['submission_state'], 'accepted')
+                            self.assertIsNot(first_state['native_receipt'].get('transcript_confirmed'), True)
+                            if 'receipt' in case:
+                                self.assertTrue(second_state['native_receipt']['transcript_confirmed'])
+                            else:
+                                self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                            deliver.run(self.root, agent=self.agent, check=True)
+                            self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                            self.assertEqual(len(self.calls), 3, 'A check cannot resend an unconfirmed acceptance')
+                            continue
                         self.assertTrue(first_state['native_receipt']['transcript_confirmed'])
                         self.assertEqual(second_state['submission_state'], 'accepted')
                         self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)

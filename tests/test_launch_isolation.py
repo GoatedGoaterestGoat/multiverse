@@ -228,7 +228,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
 
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
-        """Legacy adoption must find the exact conversation, or prove no child ever started; otherwise inherited storage and missing history can silently strand a conversation, while service re-preparation can erase unknown keys."""
+        """Legacy adoption must find the exact conversation or prove no child ever started; otherwise storage can strand history, service preparation can erase unknown keys, and two independent fresh-start decisions can repeat their notice."""
         from multiverse.harnesses.claude import project_key
         cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
@@ -334,6 +334,8 @@ class LaunchIsolationTest(unittest.TestCase):
                         foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
                         self.assertNotIn(foreign, actual['unset_env'])
                         self.assertTrue(any(('starting fresh' if fresh else 'Adopted') in notice and str(chosen.resolve()) in notice for notice in result['notices']))
+                        if fresh:
+                            self.assertEqual(sum('fresh' in notice for notice in result['notices']), 1)
                         again = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
                         if family == 'codex' and found in ('server-spelling', 'restored-spelling', 'scope-spelling'):

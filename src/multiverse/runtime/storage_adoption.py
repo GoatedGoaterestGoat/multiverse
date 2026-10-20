@@ -1,11 +1,19 @@
 """Read-only discovery of an unrecorded legacy conversation home."""
 from pathlib import Path
+from dataclasses import dataclass
 import os
 
 from ..harnesses.types import SessionHandle
 from ..universe import storage as records
 from ..universe import records as agent_records
 from .native import adapter_hook
+
+
+@dataclass(frozen=True)
+class Adoption:
+    environment: dict
+    notice: str
+    fresh_start: bool = False
 
 
 def _environment(source, keys):
@@ -170,8 +178,9 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
     found = [home for home, (present, _) in homes.items() if present is True]
     if (not problems and not found and homes and caller and all(value[0] is False for value in homes.values())
             and _never_started(adapter, properties, previous, directory)):
-        return caller[1], (f'No conversation exists in any candidate storage and no native child was started; '
-                           f'starting fresh in {caller[0]!r} with the same assigned session ID')
+        return Adoption(caller[1],
+                        f'No conversation exists in any candidate storage and no native child was started; '
+                        f'starting fresh in {caller[0]!r} with the same assigned session ID', fresh_start=True)
     if problems or len(found) != 1:
         choices = ', '.join(f'{home!r} ({"present" if present is True else "absent" if present is False else "unknown"})'
                             for home, (present, _) in homes.items()) or 'no identifiable home'
@@ -184,4 +193,4 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
             f'mv2 remove {properties["id"]}, then spawn a new agent')
     home = found[0]
     selected = homes[home][1]
-    return selected, f'Adopted the existing conversation storage {home!r} after finding this session there'
+    return Adoption(selected, f'Adopted the existing conversation storage {home!r} after finding this session there')
