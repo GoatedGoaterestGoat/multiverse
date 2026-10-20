@@ -196,10 +196,10 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
         """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can
-        invite a duplicate resend, while hiding the old acceptance silently loses a message (LC-30)."""
+        invite a duplicate resend, while hiding an old acceptance or confirming two identical acceptances from one stored row silently loses a message (LC-30)."""
         cases = ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'current-launch',
                  'working', 'unready', 'other-session', 'other-home', 'no-cleanup', 'live-child',
-                 'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks')
+                 'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks', 'identical-acceptances')
         for case in cases:
             with self.subTest(case=case):
                 self.recipient(native_session_home=str(self.work / 'claude-home'))
@@ -209,6 +209,17 @@ class InboxDeliveryTest(DeliveryFixture):
                 context = tracking.get('delivery_context')
                 if case in ('lost', 'confirmed'):
                     self.assertEqual(context['text'], self.calls[0][1].framed)
+                if case == 'identical-acceptances':
+                    self.send(message['text'], sender={'name': 'old-name'})
+                    second = {'id': self.calls[-1][1].id}
+                    self.assertNotEqual(second['id'], message['id'])
+                    older_peer = self.send('a different legacy body', sender={'name': 'old-name'})
+                    update_message(self.directory, older_peer['id'], delivery_context=None)
+                    from multiverse.harnesses.claude import project_key
+                    transcript = Path(context['home']) / 'projects' / project_key(str(self.work)) / (self.native_id + '.jsonl')
+                    transcript.parent.mkdir(parents=True, exist_ok=True)
+                    transcript.write_text(json.dumps({'type': 'user', 'sessionId': self.native_id,
+                        'timestamp': now(), 'message': {'content': context['text']}}) + '\n')
                 legacy = case.startswith('legacy-')
                 if legacy:
                     update_message(self.directory, message['id'], delivery_context=None)
@@ -245,7 +256,7 @@ class InboxDeliveryTest(DeliveryFixture):
                                 else (False, None) if case == 'unknown-process' else (True, None))
                 lines = []
                 actual = (ClaudeAdapter.configured('claude', {}).accepted_message_evidence
-                          if case in ('lost', 'legacy-lost', 'legacy-unreadable') else None)
+                          if case in ('lost', 'legacy-lost', 'legacy-unreadable', 'identical-acceptances') else None)
                 blocked = Path(home) / 'projects' / 'unrelated-project' / (self.native_id + '.jsonl')
                 if case == 'legacy-unreadable':
                     blocked.parent.mkdir(parents=True, exist_ok=True)
@@ -272,6 +283,28 @@ class InboxDeliveryTest(DeliveryFixture):
                         checked = next(item for item in results if item['messages'])
                     else:
                         checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                    if case == 'identical-acceptances':
+                        first_state = message_record(self.directory, message['id'])[1]
+                        second_state = message_record(self.directory, second['id'])[1]
+                        self.assertTrue(first_state['native_receipt']['transcript_confirmed'])
+                        self.assertEqual(second_state['submission_state'], 'accepted')
+                        self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                        self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
+                        self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                        # A legacy same-body acceptance cannot consume an exact-ID receipt.
+                        update_message(self.directory, message['id'], delivery_context=None, target_session=None,
+                            attempts=[{key: value for key, value in attempt.items() if key != 'native_session_id'}
+                                      for attempt in first_state['attempts']])
+                        deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertIsNot(message_record(self.directory, second['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                        with transcript.open('a') as out:
+                            out.write(json.dumps({'type': 'attachment', 'attachment': {'type': 'queued_command',
+                                'origin': {'msg_id': second['id']}, 'prompt': context['text']}}) + '\n')
+                        deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertTrue(message_record(self.directory, second['id'])[1]['native_receipt']['transcript_confirmed'])
+                        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                        self.assertEqual(len(self.calls), 3, 'Checks never submit or reuse a consumed transcript row')
+                        continue
                     queried = case in ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'legacy-unreadable', 'concurrent-checks')
                     self.assertEqual(evidence.call_count, int(queried))
                     if queried:

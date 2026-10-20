@@ -64,3 +64,49 @@ class HostOwnershipTest(unittest.TestCase):
             self.assertEqual(observe(self.properties, exited)['live'], 'stopped')
         with self.subTest('ending without its pane'), self.snapshot(({}, None)):
             self.assertEqual(observe(self.properties, ending)['live'], 'dormant')
+
+
+from test_multiverse import TerminalBase
+
+
+class StorageEnvironmentTest(TerminalBase):
+    def test_storage_paths_are_read_whole_before_proving_unique_home(self):
+        """A literal newline or trailing whitespace in tmux's storage value must not hide a second conversation and falsely prove a unique home."""
+        import json
+        import sys
+        from uuid import uuid4
+        from multiverse.harnesses.codex import CodexAdapter
+        from multiverse.runtime import lifecycle, storage_adoption
+        directory, props, _, _ = lifecycle._record(self.root, 'home-proof', '', 'codex', None, None)
+        native = str(uuid4())
+        props.update(native_session_id=native, workspace=str(self.work))
+        previous = {'launch_id': str(uuid4()), 'state': 'dormant'}
+        caller = self.work / 'caller'
+        self.backend.run('new-session', '-d', '-s', 'env-proof', sys.executable, '-c', 'import time; time.sleep(60)')
+        self.backend.run('set-environment', '-g', 'HOME', str(self.work))
+        for spelling in ('server\nhome', 'server\rhome', 'server-home\n', 'server-home \n'):
+            with self.subTest(spelling=spelling):
+                server = self.work / spelling
+                for home in (server, caller):
+                    folder = home / 'sessions'
+                    folder.mkdir(parents=True, exist_ok=True)
+                    (folder / ('rollout-2026-10-19T19-00-00-' + native + '.jsonl')).write_text(
+                        json.dumps({'type': 'session_meta', 'payload': {'id': native}}) + '\n')
+                self.backend.run('set-environment', '-g', 'CODEX_HOME', str(server))
+                try:
+                    actual = self.backend.environment('CODEX_HOME')
+                except ValueError as error:
+                    self.assertEqual(spelling, 'server\rhome')
+                    self.assertIn('ambiguous escaped output', str(error))
+                else:
+                    self.assertEqual(actual, str(server))
+                with self.assertRaisesRegex(ValueError, 'Cannot prove unique conversation storage'):
+                    storage_adoption.discover(CodexAdapter.configured('codex', {}), props, previous, directory, {},
+                                              {'HOME': str(self.work), 'CODEX_HOME': str(caller)}, self.backend)
+        # Empty and unset are distinct controls for the same raw-value reader.
+        self.backend.run('set-environment', '-g', 'CODEX_HOME', '')
+        self.assertEqual(self.backend.environment('CODEX_HOME'), '')
+        self.backend.run('set-environment', '-gu', 'CODEX_HOME')
+        self.assertIsNone(self.backend.environment('CODEX_HOME'))
+        self.backend.run('set-environment', '-gr', 'CODEX_HOME')
+        self.assertIsNone(self.backend.environment('CODEX_HOME'))

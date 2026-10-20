@@ -117,6 +117,9 @@ agent stopped. Unreadable or incomplete evidence stays uncertain. A proved loss
 is reported once as not delivered, with advice to send a new message deliberately;
 `--retry` does not resend it. The text may still be drafted in the terminal.
 The final result remains in inbox history.
+Identical accepted messages need separate stored copies: each text row confirms
+at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
+an exact message-ID receipt confirms only that message.
 
 ## Read an inbox
 

@@ -137,7 +137,7 @@ class RuntimeWriterUpgradeTest(BaseTest):
                             path = self.work / 'codex/sessions' / ('rollout-2026-10-18T00-00-00-' + identifier + '.jsonl')
                             path.parent.mkdir(parents=True, exist_ok=True)
                             path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n')
-                    backend.run.return_value = '\n'.join(key + '=' + value for key, value in environment.items())
+                    backend.environment.side_effect = environment.get
                     with patch.dict(os.environ, environment), \
                          patch.object(lifecycle, 'Tmux', return_value=backend), \
                          patch.object(lifecycle, 'observe', return_value={'live': live}), \

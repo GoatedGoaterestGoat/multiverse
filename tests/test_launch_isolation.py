@@ -278,9 +278,10 @@ class LaunchIsolationTest(unittest.TestCase):
                     shutil.rmtree(homes['caller'])
                     homes['caller'].symlink_to(homes['server'], target_is_directory=True)
                 backend = Mock()
-                backend.run.return_value = 'HOME=' + str(server_home)
+                server_environment = {'HOME': str(server_home)}
                 if found != 'default-server':
-                    backend.run.return_value += '\n' + key + '=' + str(homes['server'])
+                    server_environment[key] = str(homes['server'])
+                backend.environment.side_effect = server_environment.get
                 backend.create.return_value = {'socket': str(self.work / 'new.sock'), 'session': '$2', 'pane': '%2'}
                 paths = tuple(path for path in (directory / 'properties.json', directory / 'runtime.json', request_path) if path.exists())
                 before = {path: path.read_bytes() for path in paths}

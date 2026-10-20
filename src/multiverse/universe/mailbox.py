@@ -267,6 +267,36 @@ def message_record(agent_dir, message_id):
         return message, _states(agent_dir).get(message_id, {})
 
 
+def acceptance_contexts(agent_dir, native_id, home, body):
+    """Snapshot all acceptances, including final ones, before matching shared transcript rows."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        cohort = []
+        _, _, messages = _messages(agent_dir)
+        bodies = {message['id']: message.get('text') for _, message in messages}
+        for identifier, state in _states(agent_dir).items():
+            attempts = state.get('attempts') or []
+            if (state.get('submission_state') != 'accepted'
+                    and not any(attempt.get('state') in ('ok', 'native_queued') for attempt in attempts)):
+                continue
+            saved = state.get('delivery_context')
+            target = (saved.get('native_id') if isinstance(saved, dict) else state.get('target_session')
+                      or next((attempt.get('native_session_id') for attempt in reversed(attempts)
+                               if attempt.get('state') in ('ok', 'native_queued')), None))
+            if target is not None and target != native_id:
+                continue
+            if target is None or not isinstance(saved, dict) or not all(isinstance(saved.get(key), str)
+                                                      for key in ('home', 'text', 'since')):
+                other_body = bodies.get(identifier)
+                if isinstance(other_body, str) and other_body.strip() != body.strip():
+                    continue  # Equal framed text requires equal bodies even before snapshots existed.
+                cohort.append((identifier, None, ''))  # Unknown framing blocks text proof, never exact-ID proof.
+                continue
+            if saved['home'] == home:
+                cohort.append((identifier, saved['text'], saved['since']))
+        return tuple(cohort)
+
+
 def update_message(agent_dir, message_id, **changes):
     """Merge delivery evidence under the recipient inbox lock."""
     agent_dir = Path(agent_dir)

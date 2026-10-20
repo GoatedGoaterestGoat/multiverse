@@ -5,7 +5,7 @@ from uuid import UUID
 
 from ..harnesses.types import NativeResult
 from ..store import read
-from ..universe import storage
+from ..universe import mailbox, storage
 from . import attachments
 
 
@@ -68,7 +68,10 @@ def check(directory, adapter, session, executor, message, tracking):
             return None
         # Keep the accepting launch's workspace/framing even after later renames.
         evidence_session = replace(session, workspace=workspace, launch_id=old)
-        result = hook(evidence_session, message['id'], text, since, home, framed=framed)
+        # Final/confirmed acceptances still consume their stored text row. Read
+        # one ledger snapshot, then release its lock before provider evidence.
+        cohort = mailbox.acceptance_contexts(directory, native_id, home, message['text']) if framed else ()
+        result = hook(evidence_session, message['id'], text, since, home, framed=framed, cohort=cohort)
         delivered = result.value.get('delivered') if isinstance(result.value, dict) else None
         if result.state != 'ok' or type(delivered) is not bool:
             return NativeResult('unknown', result.reason or 'Accepted-message transcript evidence is incomplete')

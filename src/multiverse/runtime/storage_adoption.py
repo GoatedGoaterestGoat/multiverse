@@ -131,13 +131,10 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
     # server supplies no candidate, while an unreadable server prevents proof.
     problems = []
     try:
-        output = backend.run('show-environment', '-g')
-        if not isinstance(output, str):
+        values = {key: backend.environment(key) for key in (*keys, 'HOME')}
+        if any(value is not None and not isinstance(value, str) for value in values.values()):
             raise ValueError('terminal server did not return its environment')
-        values = dict(line.split('=', 1) for line in output.splitlines()
-                      if '=' in line and line.split('=', 1)[0] in (*keys, 'HOME'))
-        if values:
-            candidates.append(('terminal server', _environment(values, keys), properties['workspace']))
+        candidates.append(('terminal server', values, properties['workspace']))
     except Exception as error:
         reason = str(error)
         if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):

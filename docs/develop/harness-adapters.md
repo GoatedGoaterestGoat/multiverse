@@ -157,10 +157,18 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
 
 An optional `accepted_message_evidence(session, message_id, text, since, home,
-framed=True)` hook returns `ok` with `delivered: true|false`, or `unknown` with a
+framed=True, cohort=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a
 named reason. Core calls it only after proving the accepting runner and child
 have exited and a newer ready, idle launch uses the same session and storage.
-The hook reads the accepting workspace and exact saved framing. For older records,
+The hook reads the accepting workspace and exact saved framing. `cohort` is a
+snapshot of `(message_id, framed_text, accepted_at)` for the conversation's
+acceptances, including already confirmed or final entries, read under the inbox
+lock before calling the adapter. Identical text consumes stored rows oldest
+acceptance first; one row cannot confirm two messages. Exact message-ID rows
+belong only to that ID, and excess acceptances stay unknown. An older same-body
+acceptance with unrecorded framing has a `None` text in the cohort: text evidence
+stays unknown, while exact-ID evidence may still confirm. Different bodies cannot
+share a framed text row. For older records,
 `framed=False` supplies only the body, and an unknown workspace is an empty string
 so every storage folder remains a candidate. Absence can prove loss, but a body match
 cannot confirm delivery without an exact message ID. Unreadable or unfinished

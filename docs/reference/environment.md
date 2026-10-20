@@ -95,7 +95,9 @@ Older Claude and Codex agents may lack a storage snapshot. Existing proven
 Codex service scopes or explicit launch requests remain usable. Otherwise mv2
 looks for that exact conversation in candidate homes from the saved launch
 request, the calling shell (or its harness default), and the old tmux server's
-global environment. The adapter reads Claude's session transcript or Codex's
+global environment. Each terminal variable is read whole, including embedded
+newlines and trailing whitespace; unreadable or ambiguous escaped output blocks adoption. The adapter
+reads Claude's session transcript or Codex's
 rollout metadata; it starts no native process. Exactly one home must contain the
 conversation, with absence proven in every other candidate. mv2 then records the
 proven values, including the HOME used for a default storage path, and says which
