@@ -145,7 +145,7 @@ These need no permission:
 - `api.files` (`read_json`, atomic `write_json`, `lock`, `ensure_dir` (1.10), `now`) and `api.text` (`clean`, `tokens`).
 - `mv.name`, `mv.version`, `mv.directory` and `mv.can(permission)`.
 
-A call that can't be done raises `api.Error` with a readable message.
+A call that can't be done raises `api.Error` with a readable message. A filesystem or system failure (such as `EACCES` or `ENOSPC`) raises an `api.Error` that is also the `OSError` it was, with its `errno`, so `except OSError` catches it too.
 
 ### Permissions
 

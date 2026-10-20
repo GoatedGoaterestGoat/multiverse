@@ -1,5 +1,6 @@
 """The plugin core: manifests, discovery, trust, plugins.json, settings, loading and the API."""
 import contextlib
+import errno
 import io
 import json
 import threading
@@ -438,6 +439,29 @@ class ApiTest(PluginTestCase):
             self.assertEqual([agent.name for agent in plugins.panel_context(found["boards"], self.root, {}, rows,
                                                                             set()).agents], ["worker"])
             self.assertEqual(plugins.panel_context(found["blind"], self.root, {}, rows, set()).agents, ())
+
+    def test_a_filesystem_failure_is_an_oserror_too(self):
+        """A filesystem failure in an API call (EACCES, ENOSPC) is an api.Error and also the OSError it was, errno
+        kept, as state_dir and agent_state_dir raised in 1.9; a break goes unnoticed because tests rarely fill a
+        disk, and a 1.9 plugin's except OSError then crashes on the first full one."""
+        self.write_plugin("keeper", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("keeper")
+        mv = api.Plugin(loader.load(self.entry("keeper")))
+        self.agent("worker")
+        worker = mv.universe(self.root).agent("worker")
+        for failure, kind in ((PermissionError(errno.EACCES, "Permission denied"), PermissionError),
+                              (OSError(errno.ENOSPC, "No space left on device"), OSError)):
+            for name, call in (("state_dir", lambda: mv.state_dir(self.root)),
+                               ("agent_state_dir", lambda: mv.agent_state_dir(worker)),
+                               ("files.ensure_dir", lambda: api.files.ensure_dir(self.work / "elsewhere" / "a"))):
+                with self.subTest(name, errno=errno.errorcode[failure.errno]), \
+                        mock.patch.object(Path, "mkdir", side_effect=failure):
+                    with self.assertRaises(api.Error) as caught:
+                        call()
+                    self.assertIsInstance(caught.exception, kind)
+                    self.assertEqual(caught.exception.errno, failure.errno)
+                    self.assertIn(failure.strerror, str(caught.exception))
 
 
 HELPERS = """

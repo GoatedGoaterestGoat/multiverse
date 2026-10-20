@@ -59,8 +59,34 @@ def _call(function, *args, **kwargs):
         raise
     except agent_files.Gone as error:
         raise _gone(error) from error
-    except (OSError, ValueError, KeyError, RuntimeError) as error:
+    except OSError as error:
+        raise _os_error(error) from error
+    except (ValueError, KeyError, RuntimeError) as error:
         raise Error(str(error)) from error
+
+
+_OS_ERRORS = {}  # an OSError class -> the api.Error that is also it
+
+
+def _os_error(error):
+    """The api.Error for a filesystem or system failure, which is also the OSError it was (its class, errno and
+    file names): what state_dir and agent_state_dir raised in 1.9, so a plugin's except OSError still catches it."""
+    kind = type(error)
+    twin = _OS_ERRORS.get(kind)
+    if twin is None:
+        try:
+            twin = type(kind.__name__, (kind, Error), {"__module__": __name__})  # OSError first: it parses errno
+        except TypeError:  # an OSError class that cannot be combined: the plain one
+            twin = _OS_ERRORS.get(OSError) or type("OSError", (OSError, Error), {"__module__": __name__})
+            _OS_ERRORS[OSError] = twin
+        twin = _OS_ERRORS.setdefault(kind, twin)
+    try:
+        if error.errno is not None:
+            return twin(error.errno, error.strerror, error.filename, None, error.filename2)
+        return twin(*error.args)
+    except Exception:  # a class with a constructor of its own
+        plain = _os_error(OSError(error.errno, error.strerror)) if error.errno is not None else None
+        return plain if plain is not None else Error(str(error))
 
 
 def _gone(error):
