@@ -469,6 +469,8 @@ class ApiTest(PluginTestCase):
             self.agent("coder", harness="codex")
             with self.assertRaisesRegex(api.Error, "coder runs harness 'codex', not 'claude'"):
                 mv.harness_info(self.root, "claude", agent=mv.universe(self.root).agent("coder"))
+            with self.assertRaisesRegex(api.Error, r"pass mv\.universe\(universe\)\.agent\('storage'\)"):
+                mv.harness_info(self.root, "claude", agent="storage")  # a name is refused, saying what to pass
 
     def test_a_filesystem_failure_is_an_oserror_too(self):
         """A filesystem failure in an API call (EACCES, ENOSPC) is an api.Error and also the OSError it was, errno

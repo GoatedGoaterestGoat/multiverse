@@ -550,7 +550,8 @@ def _agent_home(agent, harness, family):
     variables (None: the default), else, for an agent no launch recorded either for, this process's environment.
     None for a record that can't be read."""
     if not isinstance(agent, Agent):
-        raise Error("agent must be an Agent, as mv.universe(...).agent gives")
+        hint = f"mv.universe(universe).agent({agent!r})" if isinstance(agent, str) else "mv.universe(universe).agent(NAME)"
+        raise Error(f"agent must be an Agent, not {type(agent).__name__}: pass {hint}")
     if agent.harness != harness:
         raise Error(f"{agent.name} runs harness {agent.harness!r}, not {harness!r}")
     from ..store import read
