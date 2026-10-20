@@ -267,7 +267,7 @@ def message_record(agent_dir, message_id):
         return message, _states(agent_dir).get(message_id, {})
 
 
-def acceptance_contexts(agent_dir, native_id, home, body):
+def acceptance_contexts(agent_dir, native_id, home, body, *, current_launch):
     """Snapshot acceptances and their exact receipts together before matching transcript rows."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
@@ -298,7 +298,15 @@ def acceptance_contexts(agent_dir, native_id, home, body):
         receipts = {identifier: receipt for identifier, _, _ in cohort
                     if isinstance(receipt := states[identifier].get('native_receipt'), dict)
                     and receipt.get('transcript_confirmed') is True}
-        return tuple(cohort), receipts
+        active = []
+        for identifier, _, _ in cohort:
+            state = states[identifier]
+            saved = state.get('delivery_context')
+            if (isinstance(saved, dict) and saved.get('launch_id') == current_launch
+                    or any(attempt.get('launch_id') == current_launch and attempt.get('state') in ('ok', 'native_queued')
+                           for attempt in state.get('attempts') or [])):
+                active.append(identifier)
+        return tuple(cohort), receipts, tuple(active)
 
 
 def update_message(agent_dir, message_id, **changes):

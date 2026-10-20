@@ -72,10 +72,13 @@ def check(directory, adapter, session, executor, message, tracking):
         # exact receipts reserve occurrences before anonymous text allocation,
         # even when the adapter's original receipt file has disappeared.
         # Release the ledger lock before any provider evidence reads.
-        cohort, receipts = (mailbox.acceptance_contexts(directory, native_id, home, message['text'])
-                            if framed else ((), {}))
+        # A live producer can publish its receipt after a negative read. Keep
+        # its acceptance reserved until exact evidence resolves that ambiguity.
+        cohort, receipts, active = (mailbox.acceptance_contexts(directory, native_id, home, message['text'],
+                                                               current_launch=session.launch_id)
+                                    if framed else ((), {}, ()))
         result = hook(evidence_session, message['id'], text, since, home,
-                      framed=framed, cohort=cohort, receipts=receipts)
+                      framed=framed, cohort=cohort, receipts=receipts, active_acceptances=active)
         delivered = result.value.get('delivered') if isinstance(result.value, dict) else None
         if result.state != 'ok' or type(delivered) is not bool:
             return NativeResult('unknown', result.reason or 'Accepted-message transcript evidence is incomplete')

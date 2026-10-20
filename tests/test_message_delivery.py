@@ -1,5 +1,6 @@
 """Durable delivery evidence and automatic inbox read positions."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import threading
@@ -196,12 +197,13 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
         """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can
-        invite a duplicate resend; receipt reservations, copied histories and final acceptances must share row counts or silently confirm a lost identical message (LC-30)."""
+        invite a duplicate resend; receipts that publish late, copied histories and final acceptances must share row counts or silently confirm a lost identical message (LC-30)."""
         cases = ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'current-launch',
                  'working', 'unready', 'other-session', 'other-home', 'no-cleanup', 'live-child',
                  'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks', 'identical-acceptances',
                  'identical-receipt', 'identical-ledger-receipt', 'identical-final-receipt',
-                 'identical-damaged-receipt', 'identical-copy', 'identical-alias', 'identical-no-row-id')
+                 'identical-damaged-receipt', 'identical-copy', 'identical-alias', 'identical-no-row-id',
+                 'identical-late-publication', 'identical-active-ended')
         for case in cases:
             with self.subTest(case=case):
                 self.recipient(native_session_home=str(self.work / 'claude-home'))
@@ -212,7 +214,12 @@ class InboxDeliveryTest(DeliveryFixture):
                 if case in ('lost', 'confirmed'):
                     self.assertEqual(context['text'], self.calls[0][1].framed)
                 identical = case.startswith('identical-')
+                active_peer = case in ('identical-late-publication', 'identical-active-ended')
+                current = old if case == 'current-launch' else str(uuid4())
                 if identical:
+                    if active_peer:
+                        facts = read(self.directory / 'runtime.json')
+                        write(self.directory / 'runtime.json', {**facts, 'launch_id': current})
                     self.send(message['text'], sender={'name': 'old-name'})
                     second = {'id': self.calls[-1][1].id}
                     self.assertNotEqual(second['id'], message['id'])
@@ -234,7 +241,6 @@ class InboxDeliveryTest(DeliveryFixture):
                     if case == 'identical-alias':
                         transcript.parent.with_name('same-project-alias').symlink_to(transcript.parent, target_is_directory=True)
                     if 'receipt' in case:
-                        from datetime import datetime
                         at = int(datetime.fromisoformat(timestamp).timestamp() * 1000) + 1
                         receipt = {'transcript_confirmed': True, 'route': 'prompt', 'delivered_at_ms': at}
                         if case == 'identical-receipt':
@@ -262,7 +268,6 @@ class InboxDeliveryTest(DeliveryFixture):
                 if case == 'legacy-no-home':
                     write(self.directory / 'launches' / old / 'request.json',
                           {'env': {}, 'unset_env': ['CLAUDE_CONFIG_DIR']})
-                current = old if case == 'current-launch' else str(uuid4())
                 write(self.directory / 'runtime.json', {'launch_id': current, 'state': 'running',
                     'status': 'working' if case == 'working' else 'idle', 'pid': 990003,
                     'startup_checked': case != 'unready', 'tmux': self.terminal})
@@ -292,10 +297,24 @@ class InboxDeliveryTest(DeliveryFixture):
                     if case == 'legacy-unreadable' and path == blocked:
                         raise PermissionError('legacy workspace unknown; this folder may hold the transcript')
                     return original_stat(path, *args, **kwargs)
+                from multiverse.harnesses import claude
+                original_receipt = claude._receipt
+                publications = []
+                def receipt_after_negative(directory, receipts, identifier):
+                    value = original_receipt(directory, receipts, identifier)
+                    if case == 'identical-late-publication' and identifier == second['id'] and value is None:
+                        at = int(datetime.fromisoformat(now()).timestamp() * 1000) + 1
+                        write(self.directory / 'claude-receipts' / (identifier + '.json'),
+                              {'id': identifier, 'route': 'prompt', 'at': at})
+                        publications.append(identifier)
+                    return value
                 with patch.object(adapter, 'accepted_message_evidence', return_value=answer,
                                   side_effect=actual, create=True) as evidence, \
                         patch.object(adapter, 'session_home', side_effect=lambda env: env.get('CLAUDE_CONFIG_DIR'), create=True), \
-                        patch.object(attachments, '_observation', return_value=observations), patch.object(Path, 'stat', stat):
+                        patch.object(attachments, '_observation', return_value=observations), patch.object(Path, 'stat', stat), \
+                        patch.object(claude, '_receipt', side_effect=receipt_after_negative), \
+                        patch.object(adapter, 'get_delivery', side_effect=(ClaudeAdapter.configured('claude', {}).get_delivery
+                            if case == 'identical-late-publication' else lambda *args: self.behavior)):
                     if case == 'concurrent-checks':
                         snapshot = deliver.mailbox.inbox
                         barrier = threading.Barrier(2)
@@ -313,6 +332,33 @@ class InboxDeliveryTest(DeliveryFixture):
                     if identical:
                         first_state = message_record(self.directory, message['id'])[1]
                         second_state = message_record(self.directory, second['id'])[1]
+                        if active_peer:
+                            self.assertEqual(first_state['submission_state'], 'accepted')
+                            self.assertIsNot(first_state['native_receipt'].get('transcript_confirmed'), True)
+                            if case == 'identical-late-publication':
+                                self.assertEqual(publications, [second['id']])
+                                self.assertTrue(second_state['native_receipt']['transcript_confirmed'])
+                                deliver.run(self.root, agent=self.agent, check=True)
+                                self.assertIsNot(message_record(self.directory, message['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                                # Receipt now known: a separate, later stored occurrence can confirm A.
+                                receipt = read(self.directory / 'claude-receipts' / (second['id'] + '.json'))
+                                later = datetime.fromtimestamp((receipt['at'] + 1) / 1000, timezone.utc).isoformat()
+                                with transcript.open('a') as out:
+                                    out.write(json.dumps({**row, 'uuid': str(uuid4()),
+                                        'timestamp': later}) + '\n')
+                            else:
+                                self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                                write(self.directory / 'launches' / current / 'cleanup.json', {
+                                    'schema': 1, 'launch_id': current, 'state': 'complete', 'pid': 990004, 'child_pid': 990005})
+                                facts = read(self.directory / 'runtime.json')
+                                write(self.directory / 'runtime.json', {**facts, 'launch_id': str(uuid4())})
+                            deliver.run(self.root, agent=self.agent, check=True)
+                            self.assertIs(message_record(self.directory, message['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                            if case == 'identical-active-ended':
+                                self.assertIsNot(message_record(self.directory, second['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                            self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                            self.assertEqual(len(self.calls), 3, 'Checking a receipt race never resends')
+                            continue
                         if 'receipt' in case or case == 'identical-no-row-id':
                             self.assertEqual(first_state['submission_state'], 'accepted')
                             self.assertIsNot(first_state['native_receipt'].get('transcript_confirmed'), True)
@@ -324,7 +370,7 @@ class InboxDeliveryTest(DeliveryFixture):
                             self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
                             self.assertEqual(len(self.calls), 3, 'A check cannot resend an unconfirmed acceptance')
                             continue
-                        self.assertTrue(first_state['native_receipt']['transcript_confirmed'])
+                        self.assertIs(first_state['native_receipt'].get('transcript_confirmed'), True)
                         self.assertEqual(second_state['submission_state'], 'accepted')
                         self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
                         self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)

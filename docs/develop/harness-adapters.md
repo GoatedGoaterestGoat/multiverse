@@ -159,7 +159,7 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
 
 An optional `accepted_message_evidence(session, message_id, text, since, home,
-framed=True, cohort=(), receipts=None)` hook returns `ok` with `delivered: true|false`, or `unknown` with a
+framed=True, cohort=(), receipts=None, active_acceptances=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a
 named reason. Core calls it only after proving the accepting runner and child
 have exited and a newer ready, idle launch uses the same session and storage.
 The hook reads the accepting workspace and exact saved framing. `cohort` is a
@@ -168,7 +168,7 @@ acceptances, including already confirmed or final entries, read under the inbox
 lock before calling the adapter. `receipts` maps those IDs to their saved, transcript-confirmed native receipt values from the same snapshot. The adapter also checks its own receipt files, which may not have reached the ledger. Exact prompt receipts reserve their stored occurrences before identical text consumes remaining rows oldest acceptance first. One row cannot confirm two messages, including copies of that row in another file. Exact attachment-ID rows belong only to that ID and consume no anonymous prompt occurrence. Missing row identity or ambiguous reservations keep text evidence unknown. An older same-body
 acceptance with unrecorded framing has a `None` text in the cohort: text evidence
 stays unknown, while exact-ID evidence may still confirm. Different bodies cannot
-share a framed text row. For older records,
+share a framed text row. `active_acceptances` lists cohort IDs accepted by the current live launch, from the same locked snapshot. An identical active acceptance without an exact receipt or attachment-ID row blocks anonymous text allocation: an idle status and a negative receipt read cannot exclude later publication. A later check can allocate again after that launch ends or its exact receipt is available. For older records,
 `framed=False` supplies only the body, and an unknown workspace is an empty string
 so every storage folder remains a candidate. Absence can prove loss, but a body match
 cannot confirm delivery without an exact message ID. Unreadable or unfinished
