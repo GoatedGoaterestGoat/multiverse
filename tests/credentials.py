@@ -2,8 +2,8 @@
 needs one, and a failing assertion that prints an environment would put it in logs and transcripts. tests/run.py
 drops them before it imports or starts anything; isolate() drops them again for each test, for a module run directly
 with unittest."""
-WORDS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "_KEY", "_AUTH", "CREDENTIAL", "ASKPASS")
-PREFIXES = ("GH_", "GITHUB_", "AWS_", "ANTHROPIC_", "OPENAI_")
+WORDS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "_KEY", "_AUTH", "AUTHORIZATION", "CREDENTIAL", "ASKPASS")
+PREFIXES = ("GH_", "GITHUB_", "AWS_", "ANTHROPIC_", "OPENAI_", "VSCODE_GIT_")  # VS Code's git credential helper
 NOT_CREDENTIALS = ("GIT_AUTHOR_",)  # git's identity: GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL, which tests need
 
 
