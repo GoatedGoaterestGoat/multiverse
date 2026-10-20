@@ -16,7 +16,7 @@ from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
-from ..universe import agents, catalog, mailbox, records
+from ..universe import agents, catalog, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import native, attachments, agent_identity, registration, missing_runtime
@@ -700,43 +700,6 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_request(directory, previous):
-    identifier = (previous or {}).get('launch_id')
-    if missing_runtime._uuid(identifier):
-        try:
-            return records.properties(directory / 'launches' / identifier / 'request.json')
-        except records.RecordError:
-            pass
-    return {}
-
-
-def _legacy_codex_storage(properties, directory, request):
-    """Adopt historical launch evidence, never today's caller or tmux environment."""
-    keys = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
-    identity = properties.get('native_service_identity') or {}
-    scope = identity.get('scope') if isinstance(identity, dict) and identity.get('provider') == 'codex' else None
-    if isinstance(scope, dict) and scope.get('CODEX_HOME'):
-        saved = {key: scope.get(key) for key in keys}
-    else:
-        env, unset = request.get('env'), request.get('unset_env', [])
-        saved = {key: None if key in unset else env[key] for key in keys
-                 if isinstance(env, dict) and isinstance(unset, list) and (key in unset or key in env)}
-        # Codex's default follows the launch HOME, which old tmux inherited.
-        # An absent request key is not proof that the server had it unset.
-        if 'CODEX_HOME' in saved and not saved['CODEX_HOME']:
-            home = env.get('HOME')
-            if isinstance(home, str) and Path(home).is_absolute():
-                saved['CODEX_HOME'] = str(Path(home) / '.codex')
-    if (set(saved) != set(keys) or not saved.get('CODEX_HOME')
-            or any(value is not None and (not isinstance(value, str) or not value or '\0' in value
-                   or not Path(value).is_absolute() or os.path.normpath(value) != value) for value in saved.values())):
-        raise ValueError(f'The original Codex storage was not recorded reliably for {directory / "properties.json"}. '
-            'Restore native_storage_environment from verified original launch settings '
-            '(CODEX_HOME and CODEX_SQLITE_HOME, null for an unset database home), or spawn a new agent. '
-            'The current shell and tmux server cannot prove which storage the old launch used')
-    return saved
-
-
 def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous):
     """Replay storage values and explicit absence before the adapter computes home."""
     own_keys = getattr(adapter, 'storage_env', ())
@@ -746,12 +709,8 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
     if saved is not None and (not isinstance(saved, dict) or any(
             value is not None and (not isinstance(value, str) or '\0' in value) for value in saved.values())):
         raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
-    historical = {}
-    request = _storage_request(directory, previous) if resume and (saved is None or any(key not in saved for key in keys)) else {}
-    request_env, request_unset = request.get('env', {}), request.get('unset_env', [])
-    if isinstance(request_env, dict) and isinstance(request_unset, list):
-        historical = {key: None if key in request_unset else request_env[key] for key in keys
-                      if key in request_unset or isinstance(request_env.get(key), str)}
+    request = storage_records.launch_request(directory, previous) if resume and (saved is None or any(key not in saved for key in keys)) else {}
+    historical = storage_records.request_environment(request, keys)
     scope = (properties.get('native_service_identity') or {}).get('scope', {}) if resume else {}
     for key in own_keys:
         if scope and key not in scope and ambient.get(key):
@@ -759,10 +718,15 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
                              f'unset {key} to resume, or spawn a new agent for that storage')
     if saved is None:
         if resume and getattr(adapter, 'family', None) == 'codex' and properties.get('native_session_id'):
-            adopted = _legacy_codex_storage(properties, directory, request)
+            adopted = storage_records.legacy_codex_environment(properties, request)
+            if adopted is None:
+                raise ValueError(f'The original Codex storage was not recorded reliably for {directory / "properties.json"}. '
+                    'Restore native_storage_environment from verified original launch settings '
+                    '(CODEX_HOME and CODEX_SQLITE_HOME, null for an unset database home), or spawn a new agent. '
+                    'The current shell and tmux server cannot prove which storage the old launch used')
             return {key: adopted[key] if key in adopted else historical.get(key) for key in keys}
         return {key: environment.get(key) if not resume or key in own_keys else historical.get(key) for key in keys}
-    return {key: saved[key] if key in saved else historical.get(key) for key in keys}
+    return storage_records.snapshot_environment(properties, request, keys)
 
 
 def _storage_command(command, storage):

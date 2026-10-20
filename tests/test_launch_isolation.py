@@ -16,7 +16,7 @@ from native_safety import install as install_native_safety
 install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse.universe import agents
+from multiverse.universe import agents, storage as storage_records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import runner
 from multiverse import harnesses
@@ -70,7 +70,9 @@ class LaunchIsolationTest(unittest.TestCase):
                 ('claude', {'CLAUDE_CONFIG_DIR': None}),
                 ('claude', {'CLAUDE_CONFIG_DIR': ''}),
                 ('claude', {'CLAUDE_CONFIG_DIR': str(self.work / 'claude-storage')}),
-                ('pi', {'CODEX_HOME': str(self.work / 'codex-from-pi')}),
+                ('pi', {'PI_CODING_AGENT_DIR': None, 'CODEX_HOME': str(self.work / 'codex-from-pi')}),
+                ('pi', {'PI_CODING_AGENT_DIR': ''}),
+                ('pi', {'PI_CODING_AGENT_DIR': str(self.work / 'pi-storage')}),
                 ('codex', {'CODEX_HOME': None, 'CODEX_SQLITE_HOME': None}),
                 ('codex', {'CODEX_HOME': str(self.work / 'codex-storage'),
                            'CODEX_SQLITE_HOME': str(self.work / 'database')})):
@@ -85,7 +87,8 @@ class LaunchIsolationTest(unittest.TestCase):
                 write(manifest, definition)
                 backend = Mock()
                 backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
-                selected = {**{key: None for key in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME')}, **selected}
+                selected = {**{key: None for key in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME',
+                                                    'PI_CODING_AGENT_DIR')}, **selected}
                 foreign = 'CODEX_HOME' if family == 'claude' else 'CLAUDE_CONFIG_DIR'
                 selected[foreign] = str(self.work / ('other-harness-' + family))
                 caller = {key: value for key, value in os.environ.items() if key not in selected}
@@ -186,6 +189,12 @@ class LaunchIsolationTest(unittest.TestCase):
                     write(request_path, old_request)
                     paths = [directory / 'properties.json', directory / 'runtime.json', request_path]
                     before = {path: path.read_bytes() for path in paths}
+                    recorded = storage_records.recorded_environment(directory, old_properties, 'codex', tuple(storage), facts)
+                    if proof in ('missing', 'partial-request'):
+                        self.assertIsNone(recorded)
+                    else:
+                        self.assertEqual({key: recorded[key] for key in storage}, expected)
+                    self.assertEqual({path: path.read_bytes() for path in paths}, before)
                     backend.reset_mock()
                     with patch.object(lifecycle, 'Tmux', return_value=backend), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \

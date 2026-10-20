@@ -57,6 +57,7 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | --- | --- |
 | `CODEX_HOME`, `CODEX_SQLITE_HOME` | Reads them from its own environment to find Codex sessions and the shared Codex app-server. Set them where mv2 runs, because a harness's `env` can't set them. |
 | `CLAUDE_CONFIG_DIR` | Reads it from the spawning environment to choose Claude's storage. Set it where mv2 runs, because a harness's `env` can't set it. A resume keeps the recorded value or absence; if it ignores a different value, its result names the kept storage and the ignored override. |
+| `PI_CODING_AGENT_DIR` | Records its value or absence at spawn and replays it on resume, including in other harnesses that may spawn Pi. Set it where mv2 runs; Pi's harness `env` cannot set it. |
 | `CODEX_THREAD_ID`, `CLAUDECODE` | Removes the parent's values before a launch. Codex supplies its own `CODEX_THREAD_ID` to its tools. |
 | `CLAUDE_CODE_CHILD_SESSION` | Always removes it when inherited. Claude Code sets it for its own tool subprocesses, and a Claude agent that inherits it saves no transcript. A harness's `env` can still set it. |
 | `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
