@@ -443,9 +443,10 @@ class ApiTest(PluginTestCase):
     def test_an_agents_harness_home_is_its_recorded_storage(self):
         """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
         storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown
-        (None) for a launched agent with no proof, and this process's environment only for one never launched; a
-        break goes unnoticed because tests run every process with one environment, while the dashboard or the host
-        may run with another and then read another store."""
+        (None) for a launched agent with no proof, and this process's environment only for one never launched; and
+        its recorded storage values, an explicit value kept apart from a recorded absence even where both name one
+        directory; a break goes unnoticed because tests run every process with one environment, while the dashboard
+        or the host may run with another and then read another store, or run Claude under another config."""
         self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read"]},
                           {"plugin.py": "def register(mv): pass\n"})
         self.enable("reader")
@@ -465,7 +466,9 @@ class ApiTest(PluginTestCase):
             "damaged-runtime-is-a-launch": ({}, "runtime without its launch id", None),
             "a-session-journal-is-a-launch": ({}, "a session journal only", None),
             "native-session-without-proof": ({"native_session_id": "c1"}, None, None),
-            "damaged": ({"native_storage_environment": ["not", "a", "record"]}, None, None)}
+            "damaged": ({"native_storage_environment": ["not", "a", "record"]}, None, None),
+            "explicit-default-directory": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": str(
+                Path(os.environ["HOME"]) / ".claude")}}, None, Path(os.environ["HOME"]) / ".claude")}
         old_codex = str(self.work / "proven-old-home")
         codex_rows = {  # agents from before storage was recorded: what a resume adopts, never the reader's
             "legacy-codex": ({"native_session_id": "x1", "native_service_identity": {
@@ -476,6 +479,14 @@ class ApiTest(PluginTestCase):
                 "provider": "codex", "scope": {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}}},
                 "no launch at all", Path(old_codex)),
             "codex-without-proof": ({"native_session_id": "x2"}, None, None)}
+        old_codex_storage = {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}
+        storage_rows = {  # the recorded values, where proven (every other row: None)
+            "storage": {"CLAUDE_CONFIG_DIR": str(recorded)},
+            "storage-unset-without-launch-home": {"CLAUDE_CONFIG_DIR": None},  # home unknown, absence proven
+            "storage-unset-with-launch-home": {"CLAUDE_CONFIG_DIR": None},
+            "explicit-default-directory": {"CLAUDE_CONFIG_DIR": str(Path(os.environ["HOME"]) / ".claude")},
+            "legacy-codex": old_codex_storage, "unbound-but-launched-codex": old_codex_storage,
+            "legacy-scope-without-a-runtime": old_codex_storage}
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.work / "reader-home")}):
             for harness_name, table in (("claude", rows), ("codex", codex_rows)):
                 for name, (properties, request, expected) in table.items():
@@ -494,9 +505,11 @@ class ApiTest(PluginTestCase):
                             (directory / "launches" / launch / "request.json").write_text(json.dumps(
                                 {"argv": ["x"], "env": request[0], "unset_env": request[1]}))
                         agent = mv.universe(self.root).agent(name)
-                        self.assertEqual(mv.harness_info(self.root, harness_name, agent=agent).home, expected)
+                        info = mv.harness_info(self.root, harness_name, agent=agent)
+                        self.assertEqual((info.home, info.storage), (expected, storage_rows.get(name)))
         with self.subTest("without an agent: this process's environment, as before"):
-            self.assertEqual(mv.harness_info(self.root, "claude").home, mine)
+            self.assertEqual((mv.harness_info(self.root, "claude").home, mv.harness_info(self.root, "claude").storage),
+                             (mine, None))
         with self.subTest("an agent of another harness is refused"):
             self.agent("coder", harness="codex")
             with self.assertRaisesRegex(api.Error, "coder runs harness 'codex', not 'claude'"):

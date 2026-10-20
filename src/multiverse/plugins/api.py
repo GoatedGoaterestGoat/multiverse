@@ -543,10 +543,20 @@ class HarnessInfo:
                               # Claude's CLAUDE_CONFIG_DIR or ~/.claude, Codex's CODEX_HOME or ~/.codex,
                               # Pi's PI_CODING_AGENT_DIR when set; None otherwise. As this process's
                               # environment names it, or, asked for an agent (1.12), as its launches do
+    storage: dict | None = None  # asked for an agent (1.12): its recorded storage variables for this harness,
+                                 # each name to its value, or to None where the launch had it unset; None when
+                                 # not asked for an agent, never launched, or not proven
 
 
-def _agent_home(agent, harness, family, keys):
-    """An agent's harness home as its launches use it, from its records only: the session home core recorded, else
+def _agent_storage(agent, harness, family, keys):
+    """(home, storage) of an agent's harness as its launches use them, from its records only.
+
+    storage: the agent's storage variables (`keys`) as the shared evidence records them (universe.storage: the
+    storage map, or the legacy launch evidence a resume adopts), each to its value or to None where the launch had
+    it unset; None when that isn't proven. A value and an absence stay apart even where they name one directory:
+    an explicit CLAUDE_CONFIG_DIR moves Claude's login and global config.
+
+    home: the session home core recorded, else
     the storage its next resume would replay (universe.storage, which lifecycle shares: the storage map, or the
     legacy launch evidence a resume adopts; a variable recorded as unset is its default under the launch's HOME,
     which must be recorded too). None (unknown) when a launched agent has no such proof, or a record can't be
@@ -561,19 +571,21 @@ def _agent_home(agent, harness, family, keys):
     try:
         properties = read(agent.directory / "properties.json")
     except (OSError, ValueError):
-        return None
-    home = properties.get("native_session_home") if isinstance(properties, dict) else None
-    if isinstance(home, str) and home:
-        return Path(home)
+        return None, None
     if not isinstance(properties, dict):
-        return None
+        return None, None
     from ..universe import storage
     recorded = storage.recorded_environment(agent.directory, properties, family, keys)
+    values = ({key: recorded[key] for key in keys}
+              if recorded is not None and keys and all(key in recorded for key in keys) else None)
+    home = properties.get("native_session_home")
+    if isinstance(home, str) and home:
+        return Path(home), values
     if recorded is not None:
-        return _recorded_home(family, {key: value for key, value in recorded.items() if value})
+        return _recorded_home(family, {key: value for key, value in recorded.items() if value}), values
     if _never_launched(agent.directory, properties):
-        return _harness_home(family)  # nothing of it in any store yet: where this process's would put it
-    return None
+        return _harness_home(family), None  # nothing of it in any store yet: where this process's would put it
+    return None, None
 
 
 _HOME_VARIABLES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex"),
@@ -740,10 +752,10 @@ class Plugin:
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
         family = getattr(adapter, "family", "") or ""
-        home = (_harness_home(family) if agent is None
-                else _agent_home(agent, harness, family, tuple(getattr(adapter, "storage_env", ()))))
+        home, recorded = ((_harness_home(family), None) if agent is None
+                          else _agent_storage(agent, harness, family, tuple(getattr(adapter, "storage_env", ()))))
         return HarnessInfo(harness, family, executable, tuple(spec.get("unset_env", ())),
-                           bool(settings.get("inbox_bridge")), dict(settings), home)
+                           bool(settings.get("inbox_bridge")), dict(settings), home, recorded)
 
     def state_dir(self, universe=None):
         """state/plugins/NAME/ of a universe, made on first use while the universe exists; UniverseGone once it
