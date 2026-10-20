@@ -1,12 +1,14 @@
 """An independent shared-service provider declares the same authority contract."""
 from dataclasses import asdict, replace
 from pathlib import Path
+import os
+import sys
 import shutil
 import unittest
 from unittest.mock import Mock, patch
 
 from multiverse.harnesses.types import AgentIdentitySpec, NativeServiceHandle, NativeEndpoint, ServiceIdentity
-from multiverse.runtime import lifecycle, runner, rpc
+from multiverse.runtime import agent_identity, lifecycle, runner, rpc
 from multiverse.store import read, write
 from multiverse.universe import agents
 from test_native_backends import NativeBackendTest
@@ -27,6 +29,9 @@ class IdentityLifecycleTest(NativeBackendTest):
         return result, agents.directory(self.root, result['id'])
 
     def test_declared_provider_gets_stable_context_but_runner_keeps_private_generation(self):
+        """Resume refreshes MV2_CLI, MV2_PYTHON and PATH from the current install, also from a damaged saved
+        environment, keeps the stable identity and never restores a removed checkout; fragile because it matters
+        only after an upgrade or move, and a break points agents' mv2 at a deleted interpreter (02da069)."""
         result, directory = self.stable_spawn()
         first = read(directory / 'properties.json')
         self.assertEqual(first['agent_identity']['spec']['mode'], 'service-agent-v1')
@@ -35,16 +40,34 @@ class IdentityLifecycleTest(NativeBackendTest):
         self.assertEqual(initial.agent_environment, final.agent_environment)
         self.assertNotIn('MV2_TMUX_SOCKET', final.agent_environment)
         before = dict(first['agent_environment'])
-        with patch.object(lifecycle, '_cli_path', return_value='/another/installation/bin/mv2'):
-            resumed = lifecycle.start(self.root, resume=result['id'])
-        self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + resumed['runtime']['launch_id']), True)
-        after = read(directory / 'properties.json')
-        self.assertEqual(after['agent_environment'], before)
-        request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
-        self.assertEqual(request['env']['MV2_CLI'], '/another/installation/bin/mv2')
-        self.assertNotEqual(request['env']['MV2_LAUNCH_ID'], result['runtime']['launch_id'])
+        refreshed = {**before, 'MV2_CLI': '/another/installation/bin/mv2', 'MV2_PYTHON': sys.executable,
+                     'PATH': '/another/installation/bin' + os.pathsep + os.environ.get('PATH', '')}
+        removed = {'MV2_CLI': '/removed/checkout/bin/mv2', 'MV2_PYTHON': '/removed/venv/bin/python',
+                   'PATH': '/removed/bin'}
+        # A removed checkout/interpreter must not be restored into the new request.
+        for saved in ({**before, **removed}, None, [], {'MV2_CLI': 7, 'MV2_PYTHON': None, 'PATH': []}):
+            with self.subTest(saved=saved):
+                write(directory / 'properties.json', {**first, 'agent_environment': saved})
+                with patch.object(lifecycle, '_cli_path', return_value='/another/installation/bin/mv2'):
+                    resumed = lifecycle.start(self.root, resume=result['id'])
+                self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + resumed['runtime']['launch_id']), True)
+                after = read(directory / 'properties.json')
+                self.assertEqual(after['agent_environment'], refreshed)
+                self.assertEqual(after['agent_identity'], first['agent_identity'])
+                request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
+                self.assertEqual(request['env']['MV2_CLI'], '/another/installation/bin/mv2')
+                self.assertEqual(request['agent_environment'], after['agent_environment'])
+                self.assertNotEqual(request['env']['MV2_LAUNCH_ID'], result['runtime']['launch_id'])
+        # Executable locations are requested tool configuration, never actor proof.
+        proof = {**refreshed, 'SERVICE_THREAD': first['native_session_id'], 'TEST_NATIVE_HOME': str(self.adapter.home)}
+        self.assertIsNotNone(agent_identity.actor(proof))
+        self.assertEqual(agent_identity.actor({**proof, **removed}), agent_identity.actor(proof))
+        self.assertEqual(agent_identity.environment(request['env'], None, refreshed), {})
 
     def test_late_plain_fallback_removes_the_provisional_policy(self):
+        """A runner falling back to plain drops the provisional stable-identity policy; fragile because the late
+        fallback is rarely exercised, and a break makes all of that agent's callbacks fail identity could not be
+        verified."""
         result, directory = self.stable_spawn()
         launch = directory / 'launches' / result['runtime']['launch_id']
         request = read(launch / 'request.json')

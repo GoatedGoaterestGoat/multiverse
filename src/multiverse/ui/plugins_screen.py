@@ -161,10 +161,12 @@ class PluginsScreen(ModalScreen):
     def describe_selected(self):
         item = self.selected()
         text = describe(item) if item else "No plugins are installed here."
-        if self.host and (self.host["needed"] or self.host["running"]):
-            state = "running" if self.host["running"] else "off (h starts it)"
+        if self.host and (self.host["needed"] or self.host["running"] or self.host.get("problem")):
+            state = "running" if self.host["running"] else "off (h starts it)" if self.host["needed"] else "off"
+            if self.host.get("problem"):
+                state += " · status unknown"
             text = f"Plugin host: {state}" + "".join(f"\n  {clean(name)}: {clean(why)}" for name, why in self.host["stopped"].items()) \
-                + "\n\n" + text
+                + (f"\n  {clean(self.host['problem'])}" if self.host.get("problem") else "") + "\n\n" + text
         if self.problems:
             text += "\n\n" + "\n".join("• " + clean(problem) for problem in self.problems)
         self.query_one("#plugin-details", Static).update(text)

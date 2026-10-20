@@ -8,8 +8,9 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean
+from ..display import clean, live_label
 from . import theme
+from .plugin_service import in_daemon
 from .tree import within
 
 
@@ -114,7 +115,7 @@ class Inspector(Vertical):
     async def read_plugin_facts(self, row, generation):
         try:
             lines = await asyncio.wait_for(
-                asyncio.to_thread(self.app.plugin_service.facts, Path(row["universe"]), row), PLUGIN_FACTS_TIMEOUT)
+                in_daemon(self.app.plugin_service.facts, Path(row["universe"]), row), PLUGIN_FACTS_TIMEOUT)
         except Exception:  # a hung or failing plugin never reaches the inspector
             lines = [("plugins", "unavailable")]
         finally:
@@ -177,8 +178,28 @@ def identity(state, row):
     state.append(clean(row.get("harness", "unknown")))
     if row.get("model"):
         state.append(" / " + clean(row["model"]))
-    live = row.get("live", "unknown")
-    state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
+    live = live_label(row) if "live" in row else "unknown"
+    state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.BLUE if live == "starting" else theme.YELLOW)
+
+
+def damage(state, row):
+    """A row whose record cannot be read says which file and why; its other facts are unknown."""
+    found = row.get("damaged")
+    if not isinstance(found, dict):
+        return
+    if found.get("recover") == "remove":  # nothing here is an agent: there is nothing to repair, only a folder to remove
+        folder = Path(found.get("file", ""))
+        folder = folder.parent if folder.name == "properties.json" else folder  # older listings name the missing file
+        state.append("\nLeftover folder: " + clean(str(folder)), style=f"bold {theme.YELLOW}")
+        state.append("\nNo agent records, only leftover files. Press d to move it to the trash; mv2 first checks that "
+                     "no terminal is running for it. The other agents are not affected.", style=theme.SUBTEXT0)
+        return
+    state.append("\nDamaged: " + clean(found.get("file", "")), style=f"bold {theme.RED}")
+    state.append("\n" + clean(found.get("reason", "")), style=theme.YELLOW)
+    if found.get("recover") == "kill":  # a terminal may still be running behind the lost record
+        state.append("\nPress K to find and stop its terminal. Then fix or restore the file and refresh (F5).", style=theme.SUBTEXT0)
+    else:
+        state.append("\nFix or restore the file and refresh (F5). The other agents are not affected.", style=theme.SUBTEXT0)
 
 
 def progress(state, row):
@@ -199,8 +220,28 @@ def native_mode(state, row):
     selection = row.get('runtime', {}).get('native_mode')
     if selection:
         state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style=theme.SUBTEXT0)
-        if selection.get('fallback_reason'):
-            state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
+
+
+def fallback(state, row):
+    """Why the launch is not what was asked for (a Claude Code too old for the mod, a relay that was unavailable)."""
+    selection = row.get('runtime', {}).get('native_mode')
+    if selection and selection.get('fallback_reason'):
+        state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
+
+
+def plugin_problems(state, row):
+    """Plugins the launch left out, and why, from the launch's plugin record (any harness); what the fallback line
+    already says is not repeated."""
+    record = row.get("runtime", {}).get("plugins")
+    if not isinstance(record, dict):
+        return
+    said = str((row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason") or "")
+    found = record.get("plugins") if isinstance(record.get("plugins"), dict) else {}
+    for name, detail in sorted(found.items()):
+        if isinstance(detail, dict) and detail.get("state") == "skipped" and str(detail.get("reason") or "") not in said:
+            state.append(f"\nPlugin {clean(name)} left out: {clean(str(detail.get('reason') or 'no reason given'))}", style=theme.YELLOW)
+    if record.get("error") and str(record["error"]) not in said:
+        state.append("\n" + clean(str(record["error"])), style=theme.YELLOW)
 
 
 def launch_error(state, row):
@@ -223,7 +264,9 @@ def versions(state, row):
                      + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
 
 
-AGENT_FACTS = (identity, progress, focused, context, native_mode, launch_error, relay_loss, versions)
+# What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugin_problems, progress, focused, context,
+               native_mode, versions)
 
 
 def agent_state(row):

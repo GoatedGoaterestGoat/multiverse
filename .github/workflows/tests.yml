@@ -1,0 +1,82 @@
+# mv2's unittest suite on Linux, without the Codex, Claude and Pi CLIs: their live tests skip.
+# The plugin submodules (plugins/compaction, plugins/remote) are private and not fetched, so their own tests, which
+# test_plugin_checkouts adds when they are there, don't run.
+name: tests
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  schedule:
+    - cron: "0 9 * * *"  # nightly, 09:00 UTC: the module-by-module job
+  workflow_dispatch:
+
+# Actions are pinned by commit SHA, with the release in a comment: a tag can be moved to other code, a commit
+# cannot. To update one, take the commit of its new release tag (gh api repos/OWNER/REPO/commits/TAG --jq .sha).
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: suite (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15  # about 3.5 minutes; a hang fails the run instead of holding it
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]  # the oldest requires-python allows, and the one mv2 is developed on
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22  # test_pi_bridge
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      - name: Install mv2
+        run: uv sync --frozen --python ${{ matrix.python }}
+      - name: Run the tests
+        run: .venv/bin/python tests/run.py -v  # -v: each test by name, skipped ones with their reason
+
+  alone:
+    # Each module in a process of its own, one at a time, with plain unittest: a module can pass beside others in
+    # the suite and fail alone, when nothing else loads the machine or reaps for it. tests/run.py already runs each
+    # module in its own process, so this repeats the suite in another way: nightly and on demand, not on every push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: each module alone (Python 3.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20  # about 6 minutes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+      - name: Install mv2
+        run: uv sync --frozen --python 3.13
+      - name: Run each module alone
+        working-directory: tests
+        run: |
+          failed=()
+          modules=$(../.venv/bin/python run.py --list)  # the suite job's modules, as unittest discover finds them
+          for module in $modules; do
+            echo "::group::$module"
+            code=0
+            timeout 300 ../.venv/bin/python -m unittest "$module" || code=$?  # the step runs under bash -e
+            # 5 is "no tests ran": a module that only holds fixtures for others, which the suite job runs as 0 tests
+            if [ $code -ne 0 ] && [ $code -ne 5 ]; then
+              failed+=("$module")
+              echo "::error::$module failed when run alone"
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "Failed alone: ${failed[*]}"
+            exit 1
+          fi

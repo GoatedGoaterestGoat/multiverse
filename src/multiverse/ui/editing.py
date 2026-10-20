@@ -106,6 +106,12 @@ class TreeEditing:
         if row["kind"] == "group" and Path(row["path"]) == self.root:
             return (f"Go back to the parent universe to {verb} {clean(row['name'])}." if self.history
                     else f"The top-level universe cannot be {verb}d here.")
+        if row["kind"] == "agent" and isinstance(row.get("damaged"), dict):
+            found = row["damaged"]
+            if verb == "delete" and found.get("recover") == "remove":
+                return None  # a folder with no agent record in it: core proves nothing runs there when it removes it
+            return (f"{clean(row['name'])} cannot be {verb}d while its record is damaged: "
+                    f"{clean(found.get('file', ''))}: {clean(found.get('reason', ''))}")
         running = row["alive"] if row["kind"] == "group" else int(row["live"] in ('alive', 'ending'))
         if running:
             what = f"{running} running agent{'s' if running != 1 else ''} inside" if row["kind"] == "group" else "it"
@@ -156,7 +162,11 @@ class TreeEditing:
             self.set_status(problem, error=True)
             return
         name = clean(row["name"])
-        if row["kind"] == "agent":
+        if row["kind"] == "agent" and (row.get("damaged") or {}).get("recover") == "remove":
+            detail = (f"{name} is a folder with no agent record, only leftover files. mv2 checks that no terminal is "
+                      "running for it, then moves the folder to this universe's trash.")
+            callback, args, label = self.backend.remove_agent, (Path(row["universe"]), row["id"]), "Delete agent"
+        elif row["kind"] == "agent":
             detail = f"{name} moves to this universe's trash with its inbox and launch history."
             callback, args, label = self.backend.remove_agent, (Path(row["universe"]), row["id"]), "Delete agent"
         else:

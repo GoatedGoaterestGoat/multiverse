@@ -102,14 +102,23 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
 
 
 def rebind(root, directory, launch_id, previous, session_id, reason):
-    """Move this exact launch's agent to the session its process is on now; refused unless core can prove it.
+    """Move this exact launch's agent to the session its process is on now.
 
+    Core refuses an outdated launch, a previous session that is no longer the agent's and a session bound to
+    another agent. Where the harness can observe its process's session (Claude's process file), the move must be
+    to the session it shows. Where it cannot, any process holding this launch's identity can move the pointer.
     `home` is the harness's storage as this launch sees it: an integration runs in the launch's environment.
     """
     from .. import harnesses
+    from ..harnesses.types import SessionHandle
     properties = read(directory / "properties.json")
     adapter = harnesses.load(root, properties.get("harness", ""))
     home = getattr(adapter, "session_home", lambda environment: None)(dict(os.environ))
+    observer = getattr(adapter, "observed_binding", None)
+    if callable(observer) and properties.get("workspace"):
+        observed = observer(SessionHandle.from_records(properties, read(directory / "runtime.json"), directory))
+        if observed is not None and observed.native_id != session_id:
+            raise ValueError("Not moved: this launch's process is on another session")
     return agents.rebind_session(root, directory.name, previous, session_id, reason, launch_id, home=home)
 
 

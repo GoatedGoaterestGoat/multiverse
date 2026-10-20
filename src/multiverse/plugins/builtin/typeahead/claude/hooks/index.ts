@@ -54,15 +54,16 @@ export function catalogRows(entries: readonly CatalogEntry[]): Suggestion[] {
   }))
 }
 
-type Listed = { id?: unknown; name?: unknown; universe?: unknown; live?: unknown; status?: unknown; phase?: unknown }
+type Listed = { id?: unknown; name?: unknown; universe?: unknown; live?: unknown; status?: unknown; phase?: unknown; damaged?: unknown }
 
 // The agents `mv2 send` can reach from here: `mv2 list --json` also shows other universes' agents,
-// which it cannot. This agent is left out, and so is a name `send` could not take as one word.
+// which it cannot. This agent is left out, and so is a name `send` could not take as one word, and a row
+// built from a damaged record (an orphan's name is its ID): send can't reach it.
 export function agentRows(listed: unknown, self?: string, universe?: string): Suggestion[] {
   if (!Array.isArray(listed)) return []
   return (listed as Listed[]).flatMap((agent) => {
     const name = agent?.name
-    if (typeof name !== "string" || !/^[^\s,]+$/.test(name) || agent.id === self) return []
+    if (typeof name !== "string" || !/^[^\s,]+$/.test(name) || agent.id === self || agent.damaged != null) return []
     if (universe && agent.universe !== universe) return []
     const status = typeof agent.status === "string" && agent.status !== "-" && agent.status !== "unknown" ? agent.status : undefined
     const parts = [agent.live, status, agent.phase].filter((part): part is string => typeof part === "string" && part !== "")

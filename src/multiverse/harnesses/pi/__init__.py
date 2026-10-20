@@ -9,6 +9,11 @@ from ..types import SessionHandle, Message, Executor, Capability, NativeResult, 
 from ..types import normalize_session_id
 
 
+# The bridge is opt-in for Pi and never falls back, so a plain Pi stays launch-only until its harness changes:
+# a final refusal, so core advises no restart and may close its messages, as for a plain Claude or Codex.
+LAUNCH_ONLY = "This agent is launch-only: its harness doesn't turn inbox_bridge on"
+
+
 class PiAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
@@ -53,10 +58,14 @@ class PiAdapter(ConfiguredAdapter):
         result['session_name'] = Capability('supported', mechanism='--name')
         connected = (session.state == 'running' and session.bridge == 'pi-socket-v1'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-json')
-        support = Capability('supported', mechanism='pi-socket-v1', required=True) if connected else Capability(
-            'unavailable', 'Pi extension socket has not registered for this launch', required=True)
+        if connected:
+            support = Capability('supported', mechanism='pi-socket-v1', required=True)
+        elif not self.settings.get('inbox_bridge'):
+            support = Capability('unavailable', LAUNCH_ONLY, mechanism='launch-only', required=True)
+        else:
+            support = Capability('unavailable', 'Pi extension socket has not registered for this launch', required=True)
         result['send_steer'] = result['send_follow_up'] = support
-        result['get_delivery'] = replace(support, required=False)
+        result['get_delivery'] = replace(support, required=False, mechanism=None if not connected else support.mechanism)
         return result
 
     def get_delivery(self, session, message_id, executor):
@@ -66,7 +75,10 @@ class PiAdapter(ConfiguredAdapter):
         mode = message.delivery
         if mode not in ('steer', 'follow-up'):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
-        if self.capabilities(session)['send_steer'].state != 'supported':
+        support = self.capabilities(session)['send_steer']
+        if support.state != 'supported':
+            if support.mechanism == 'launch-only':
+                return NativeResult('unavailable', support.reason, {'launch_only': True, 'final': True})
             return NativeResult('unavailable', 'Pi extension socket is not registered')
         return executor.request(session, {'operation': 'send', 'message_id': message.id,
                                          'text': message.framed or message.text, 'mode': mode})

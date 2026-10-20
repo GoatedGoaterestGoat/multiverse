@@ -32,6 +32,36 @@ def tui_arguments(argv):
     return argv
 
 
+def plain_arguments(argv, recipe, values):
+    """Prepare a retry removing only mv2's root, with no native-policy guess."""
+    argv = list(argv)
+    own_root = next((index for index in range(len(recipe) - 1)
+                     if recipe[index:index + 2] == ['--add-dir', '{agent_dir}']), None)
+    if own_root is None or argv[own_root:own_root + 2] != ['--add-dir', values['agent_dir']]:
+        return argv, False
+    del argv[own_root:own_root + 2]
+    return argv, True
+
+
+def startup_retryable(snapshot):
+    """The native TUI rejected add-dir before startup; a live warning is not a retry."""
+    if type(snapshot.get('exit_code')) is not int or snapshot['exit_code'] == 0:
+        return False
+    text = snapshot.get('text')
+    if not isinstance(text, str) or len(text) > 32768 or '\x1b' in text or '\0' in text:
+        return False
+    directory = snapshot.get('agent_dir')
+    if not isinstance(directory, str) or not directory or '\x1b' in directory or '\0' in directory:
+        return False
+    # The native error may sit inside an inline screen or wrap inside words and
+    # paths. Its complete diagnostic must name the exact core-owned agent root;
+    # banners, abbreviated working directories and composer markers are irrelevant.
+    compact = ''.join(text.split())
+    diagnostic = ('Erroraddingdirectories:Ignoring--add-dir(' + ''.join(directory.split()) + ')because'
+                  'theeffectivepermissionsdonotallowadditionalwritableroots.')
+    return diagnostic in compact
+
+
 def remote_arguments(argv, context):
     """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)
@@ -146,6 +176,10 @@ class LaunchProtocol:
         self.prompt_request = None
         self.prompt_submitted = False
         self.prompt_error = None
+
+    def for_connection(self, connection_id, owns_primary):
+        from .side import LaunchConnection
+        return LaunchConnection(self, connection_id, owns_primary)
 
     def outgoing(self, value):
         method = value.get('method')

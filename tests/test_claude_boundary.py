@@ -70,21 +70,14 @@ class BoundaryBase:
         write(path, config)
         return harnesses.load(self.root, 'claude')
 
-
-class ClaudeBoundaryTest(BoundaryBase, BaseTest):
-    def setUp(self):
-        super().setUp()
-        self.prepare()
-        self.socket = str(self.work / 'inbox.sock')
-
     def values(self):
         return dict(name='worker', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello',
                     bootstrap_json='"Hello"', task='', agent_dir=str(self.work / 'agent'), harness_dir='/h',
                     session_file='', bootstrap_file='', task_file='', workspace=str(self.work), model='',
-                    control_socket=self.socket)
+                    control_socket=self.inbox)
 
     def session(self, **fields):
-        base = dict(state='running', native_id=str(uuid4()), endpoint=NativeEndpoint('unix-lines', self.socket),
+        base = dict(state='running', native_id=str(uuid4()), endpoint=NativeEndpoint('unix-lines', self.inbox),
                     bridge=BRIDGE, native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
                     session_file=str(self.work / 'agent' / 'session.jsonl'))
         return SessionHandle('agent', 'claude', str(self.work), **{**base, **fields})
@@ -96,130 +89,151 @@ class ClaudeBoundaryTest(BoundaryBase, BaseTest):
         properties = {'id': agent, 'name': 'worker', 'harness': 'claude', 'workspace': str(self.work),
                       'native_session_id': native_id}
         facts = {'launch_id': 'current', 'state': 'running', 'status': 'idle',
-                 'control_endpoint': {'transport': 'unix-lines', 'address': self.socket},
+                 'control_endpoint': {'transport': 'unix-lines', 'address': self.inbox},
                  'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}}
         write(directory / 'properties.json', properties)
         write(directory / 'runtime.json', facts)
         return agent, directory, properties
 
-    def test_every_launch_shape_is_terminal_hosted_with_no_service_attachment_or_proxy(self):
-        values = self.values()
-        auto, plain = self.adapter(None), self.adapter(False)
-        saved = SessionHandle(values['agent_id'], 'claude', str(self.work), native_id=values['session_id'])
-        launches = {'auto spawn': auto.spawn(LaunchContext('spawn', values)),
-                    'auto resume': auto.resume(saved, LaunchContext('resume', values)),
-                    'plain spawn': plain.spawn(LaunchContext('spawn', values)),
-                    'plain resume': plain.resume(saved, LaunchContext('resume', values))}
-        with patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 270)):
-            launches['auto fallback'] = auto.spawn(LaunchContext('spawn', values))
-        for name, command in launches.items():
-            with self.subTest(name):
-                for absent in ('shared_service', 'rpc_proxy', 'attachment', 'fallback'):
-                    self.assertIsNone(getattr(command, absent), absent)
-                self.assertIsNone(native.launch_attachment(command))
-                bridged = name.startswith('auto') and name != 'auto fallback'
-                self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket) if bridged else None)
-                self.assertEqual(command.native_mode['mode'], 'bridge' if bridged else 'plain')
 
-    def test_core_offers_no_recovery_or_retained_usage_for_a_bridged_session(self):
-        adapter = self.adapter(None)
-        _, directory, properties = self.records()
-        facts = read(directory / 'runtime.json')
-        session = SessionHandle.from_records(properties, facts, directory)
-        self.assertEqual((session.service, session.attachment), (None, None))
-        reason = native.recovery_unavailable(session)
-        self.assertIn('has not declared', reason)
-        self.assertEqual(recovery.eligibility(properties, facts), reason)
-        self.assertEqual(recovery.check(properties, facts, directory).state, 'unavailable')
-        command = adapter.spawn(LaunchContext('spawn', self.values()))
-        with self.assertRaises(ValueError):
-            native.validate_recovery_command(command, session)
-        self.assertIsNone(adapter.attachment_recovery(session))
-        self.assertIsNone(adapter.retained_usage(session, facts))
+class ClaudeBoundaryTest(BoundaryBase, BaseTest):
+    def setUp(self):
+        super().setUp()
+        self.prepare()
+        self.inbox = str(self.work / 'inbox.sock')
 
-    def test_readiness_is_the_mods_registration_and_matches_the_rule_it_replaced(self):
-        adapters = {None: self.adapter(None), False: self.adapter(False)}
-        launches = {'bridge': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
-                    'plain': {'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'Claude Code 2.1.270 is too old'},
-                    None: None}
-        wrong, ready = [], 0
-        for setting, mode, transport, bridge, state, bound in itertools.product(
-                (None, False), launches, (None, 'unix-lines', 'unix-json'), (None, BRIDGE, *FOREIGN),
-                ('running', 'starting', 'stopped'), (True, False)):
-            session = SessionHandle(
-                'agent', 'claude', str(self.work), native_id=str(uuid4()) if bound else None, state=state,
-                endpoint=NativeEndpoint(transport, self.socket) if transport else None, bridge=bridge,
-                native_mode=launches[mode], session_file=str(self.work / 'agent' / 'session.jsonl'))
-            adapter = adapters[setting]
-            expected = transport is None or (setting is None and mode != 'plain' and transport == 'unix-lines'
-                                             and bridge == BRIDGE and state == 'running' and bound)
-            # The old rule asked the whole capability set; the hook must give the same answer without it.
-            old = ConfiguredAdapter.attachment_ready(adapter, session)
-            new = adapter.attachment_ready(session)
-            ready += bool(new)
-            if not (bool(old) == bool(new) == bool(expected)):
-                wrong.append((setting, mode, transport, bridge, state, bound, bool(old), bool(new), bool(expected)))
-        self.assertEqual(wrong[:5], [])
-        self.assertGreater(ready, 0)
-
-    def test_readiness_does_not_build_the_capability_set(self):
-        adapter = self.adapter(None)
-        with patch.object(type(adapter), 'capabilities', side_effect=AssertionError('readiness built capabilities')):
-            self.assertTrue(adapter.attachment_ready(self.session()))
-            self.assertFalse(adapter.attachment_ready(self.session(bridge=None)))
-            self.assertTrue(adapter.attachment_ready(self.session(endpoint=None, bridge=None)))
-
-    def test_a_foreign_bridge_id_never_makes_a_launch_ready_or_deliverable(self):
-        adapter, executor = self.adapter(None), Mock()
-        for bridge in (None, *FOREIGN):
-            with self.subTest(bridge=bridge):
-                session = self.session(bridge=bridge)
-                self.assertFalse(adapter.attachment_ready(session))
-                capabilities = adapter.capabilities(session)
+    def test_bridged_claude_is_ready_only_when_the_exact_mod_registered(self):
+        """A bridged Claude is ready only when running, bound, on a unix-lines endpoint and registered as exactly
+        claude-mod-v1, a plain fallback is ready at once, and no launch shape declares a service, proxy or recovery;
+        fragile because five fields come from three writers, and a false ready sends steers to a socket nobody reads."""
+        with self.subTest('the rule readiness replaced'):
+            adapters = {None: self.adapter(None), False: self.adapter(False)}
+            launches = {'bridge': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+                        'plain': {'policy': 'auto', 'mode': 'plain',
+                                  'fallback_reason': 'Claude Code 2.1.270 is too old'},
+                        None: None}
+            wrong, ready = [], 0
+            for setting, mode, transport, bridge, state, bound in itertools.product(
+                    (None, False), launches, (None, 'unix-lines', 'unix-json'), (None, BRIDGE, *FOREIGN),
+                    ('running', 'starting', 'stopped'), (True, False)):
+                session = SessionHandle(
+                    'agent', 'claude', str(self.work), native_id=str(uuid4()) if bound else None, state=state,
+                    endpoint=NativeEndpoint(transport, self.inbox) if transport else None, bridge=bridge,
+                    native_mode=launches[mode], session_file=str(self.work / 'agent' / 'session.jsonl'))
+                adapter = adapters[setting]
+                expected = transport is None or (setting is None and mode != 'plain' and transport == 'unix-lines'
+                                                 and bridge == BRIDGE and state == 'running' and bound)
+                # The old rule asked the whole capability set; the hook must give the same answer without it.
+                old = ConfiguredAdapter.attachment_ready(adapter, session)
+                new = adapter.attachment_ready(session)
+                ready += bool(new)
+                if not (bool(old) == bool(new) == bool(expected)):
+                    wrong.append((setting, mode, transport, bridge, state, bound, bool(old), bool(new), bool(expected)))
+            self.assertEqual(wrong[:5], [])
+            self.assertGreater(ready, 0)
+        with self.subTest('without building the capability set'):
+            adapter = self.adapter(None)
+            with patch.object(type(adapter), 'capabilities',
+                              side_effect=AssertionError('readiness built capabilities')):
+                self.assertTrue(adapter.attachment_ready(self.session()))
+                self.assertFalse(adapter.attachment_ready(self.session(bridge=None)))
+                self.assertTrue(adapter.attachment_ready(self.session(endpoint=None, bridge=None)))
+        with self.subTest('a foreign bridge id'):
+            adapter, executor = self.adapter(None), Mock()
+            for bridge in (None, *FOREIGN):
+                with self.subTest(bridge=bridge):
+                    session = self.session(bridge=bridge)
+                    self.assertFalse(adapter.attachment_ready(session))
+                    capabilities = adapter.capabilities(session)
+                    # Not launch-only: the mod should still register, so core keeps its restart advice and its
+                    # messages open.
+                    for name in ('send_steer', 'send_follow_up'):
+                        self.assertEqual((capabilities[name].state, capabilities[name].reason), ('unavailable', NOT_REGISTERED))
+                        self.assertIsNone(capabilities[name].mechanism)
+                    self.assertNotEqual(capabilities['ask'].state, 'supported')
+                    for delivery in ('steer', 'follow-up'):
+                        message = Message('id', 'body', delivery=delivery, framed='Message from a:\nbody')
+                        result = adapter.send(session, message, executor)
+                        self.assertEqual(result.state, 'unavailable')
+                        self.assertNotIn('launch_only', result.value or {})
+                    result = adapter.ask(session, 'What?', executor)
+                    self.assertEqual(result.state, 'unavailable')
+                    self.assertNotIn('launch_only', result.value or {})
+            executor.write_lines.assert_not_called()
+            exact = self.session(bridge=BRIDGE)
+            self.assertTrue(adapter.attachment_ready(exact))
+            self.assertEqual(adapter.capabilities(exact)['send_follow_up'].state, 'supported')
+        with self.subTest('a session that is not ready'):
+            adapter = self.adapter(True)
+            executor = Mock()
+            steer = Message(str(uuid4()), 'body', framed='Message from user:\nbody')
+            # A stopped launch, one without an inbox, and one whose mod never registered.
+            for session in (self.session(state='stopped'), self.session(endpoint=None), self.session(bridge=None)):
                 for name in ('send_steer', 'send_follow_up'):
-                    self.assertEqual((capabilities[name].state, capabilities[name].reason), ('unavailable', NOT_REGISTERED))
-                self.assertNotEqual(capabilities['ask'].state, 'supported')
-                for delivery in ('steer', 'follow-up'):
-                    message = Message('id', 'body', delivery=delivery, framed='Message from a:\nbody')
-                    self.assertEqual(adapter.send(session, message, executor).state, 'unavailable')
-                self.assertEqual(adapter.ask(session, 'What?', executor).state, 'unavailable')
-        executor.write_lines.assert_not_called()
-        exact = self.session(bridge=BRIDGE)
-        self.assertTrue(adapter.attachment_ready(exact))
-        self.assertEqual(adapter.capabilities(exact)['send_follow_up'].state, 'supported')
+                    self.assertEqual(adapter.capabilities(session)[name].state, 'unavailable')
+                self.assertEqual(adapter.send(session, steer, executor).state, 'unavailable')
+            # Claude has not bound the inbox and published its key yet.
+            self.assertEqual(adapter.send(self.session(), steer, executor).state, 'unavailable')
+            self.assertEqual(self.adapter(False).capabilities(self.session())['send_steer'].state, 'unavailable')
+            executor.write_lines.assert_not_called()
+        with self.subTest('every launch shape is terminal-hosted'):
+            values = self.values()
+            auto, plain = self.adapter(None), self.adapter(False)
+            saved = SessionHandle(values['agent_id'], 'claude', str(self.work), native_id=values['session_id'])
+            launches = {'auto spawn': auto.spawn(LaunchContext('spawn', values)),
+                        'auto resume': auto.resume(saved, LaunchContext('resume', values)),
+                        'plain spawn': plain.spawn(LaunchContext('spawn', values)),
+                        'plain resume': plain.resume(saved, LaunchContext('resume', values))}
+            with patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 270)):
+                launches['auto fallback'] = auto.spawn(LaunchContext('spawn', values))
+            for name, command in launches.items():
+                with self.subTest(name):
+                    for absent in ('shared_service', 'rpc_proxy', 'attachment', 'fallback'):
+                        self.assertIsNone(getattr(command, absent), absent)
+                    self.assertIsNone(native.launch_attachment(command))
+                    bridged = name.startswith('auto') and name != 'auto fallback'
+                    self.assertEqual(command.control_endpoint,
+                                     NativeEndpoint('unix-lines', self.inbox) if bridged else None)
+                    self.assertEqual(command.native_mode['mode'], 'bridge' if bridged else 'plain')
+        with self.subTest('no recovery or retained usage'):
+            adapter = self.adapter(None)
+            _, directory, properties = self.records()
+            facts = read(directory / 'runtime.json')
+            session = SessionHandle.from_records(properties, facts, directory)
+            self.assertEqual((session.service, session.attachment), (None, None))
+            reason = native.recovery_unavailable(session)
+            self.assertIn('has not declared', reason)
+            self.assertEqual(recovery.eligibility(properties, facts), reason)
+            self.assertEqual(recovery.check(properties, facts, directory).state, 'unavailable')
+            command = adapter.spawn(LaunchContext('spawn', self.values()))
+            with self.assertRaises(ValueError):
+                native.validate_recovery_command(command, session)
+            self.assertIsNone(adapter.attachment_recovery(session))
+            self.assertIsNone(adapter.retained_usage(session, facts))
+        with self.subTest('only the exact recorded bridge id registers'):
+            adapter = self.adapter(None)
+            agent, directory, properties = self.records()
 
-    def test_the_recorded_bridge_id_reaches_the_session_and_only_the_exact_one_registers(self):
-        adapter = self.adapter(None)
-        agent, directory, properties = self.records()
+            def reported(**changes):
+                with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
+                    runtime_update.run(self.root, agent=agent, **changes)
+                session = SessionHandle.from_records(properties, read(directory / 'runtime.json'), directory)
+                return session, adapter.attachment_ready(session)
 
-        def reported(**changes):
-            with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
-                runtime_update.run(self.root, agent=agent, **changes)
-            session = SessionHandle.from_records(properties, read(directory / 'runtime.json'), directory)
-            return session, adapter.attachment_ready(session)
-
-        session, ready = reported(status='idle', bridge='other-bridge-v1')
-        self.assertEqual((session.bridge, ready), ('other-bridge-v1', False))
-        session, ready = reported(status='idle', bridge=BRIDGE)
-        self.assertEqual((session.bridge, ready), (BRIDGE, True))
-        session, ready = reported(status='idle', bridge='none')
-        self.assertEqual((session.bridge, ready), (None, False))
+            session, ready = reported(status='idle', bridge='other-bridge-v1')
+            self.assertEqual((session.bridge, ready), ('other-bridge-v1', False))
+            session, ready = reported(status='idle', bridge=BRIDGE)
+            self.assertEqual((session.bridge, ready), (BRIDGE, True))
+            session, ready = reported(status='idle', bridge='none')
+            self.assertEqual((session.bridge, ready), (None, False))
 
     def test_the_mod_reports_the_bridge_id_the_adapter_waits_for(self):
+        """The TypeScript mod sends exactly the bridge id Python waits for; fragile because the constant is duplicated
+        across Python and TS with no other test running both, and a mismatch leaves every bridged Claude starting
+        forever."""
         source = (MOD / 'hooks/index.ts').read_text()
         self.assertEqual(source.count('"--bridge"'), 1)
         self.assertIn(f'"--bridge", "{BRIDGE}"', source)
-
-    def test_a_plain_fallback_explains_itself_in_every_operation(self):
-        adapter, executor = self.adapter(None), Mock()
-        reason = 'Claude Code 2.1.270 is older than 2.1.280, which the multiverse mod needs'
-        fell_back = self.session(endpoint=None, bridge=None,
-                                 native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason})
-        self.assertTrue(adapter.attachment_ready(fell_back))  # nothing to wait for: the process is the work
-        message = Message('id', 'body', framed='Message from a:\nbody')
-        for result in (adapter.send(fell_back, message, executor), adapter.ask(fell_back, 'What?', executor)):
-            self.assertEqual((result.state, result.reason), ('unavailable', 'Launched without the bridge: ' + reason))
-        executor.write_lines.assert_not_called()
 
 
 FAKE_CLAUDE = '''#!{python}
@@ -251,6 +265,9 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
         self.adapter_ = self.adapter(None)
 
     def test_a_launched_claude_has_an_inbox_but_no_service_and_waits_for_the_mod(self):
+        """One launch with a stand-in claude declares only a unix-lines inbox, stays not ready for a foreign id, becomes
+        ready for the exact one, and delivers an authenticated tagged frame; fragile because it crosses the runner,
+        runtime-update, wait_ready and the inbox auth handshake, which are mocked everywhere else."""
         agent = lifecycle.start(self.root, 'bridged', '', 'claude', socket_path=self.socket)
         self.addCleanup(lambda: lifecycle.terminal_action(self.root, agent['id'], 'stop'))
         directory = agents.directory(self.root, agent['id'])
@@ -277,9 +294,9 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
 
         # Readiness: the process running is not enough; a foreign id does not count; the exact id does.
         until(lambda: read(directory / 'runtime.json').get('startup_checked') is True)
-        self.assertFalse(waited(1)['ready'])
+        self.assertFalse(waited(.3)['ready'])
         reported(status='idle', bridge='other-bridge-v1')
-        self.assertFalse(waited(1)['ready'])
+        self.assertFalse(waited(.3)['ready'])
         reported(status='idle', bridge=BRIDGE)
         self.assertTrue(waited(10)['ready'])
 
@@ -303,10 +320,15 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
                               sender={'agent_id': sender, 'universe': str(self.root), 'name': 'agent'})
         inbox.close()
         self.assertEqual(result['state'], 'native_queued')
+        self.assertTrue(result['ok'])
         auth, frame = inbox.lines
-        self.assertEqual(auth['type'], 'auth')
+        self.assertEqual(auth, {'type': 'auth', 'token': '0' * 32})
         self.assertEqual(frame['session_id'], agent['native_session_id'])
-        self.assertEqual(frame['message']['content'].split('>>', 1)[1], 'Message from reviewer:\nPlease rebase<</MV2>>')
+        self.assertNotIn('id', result)
+        message_id = frame['msg_id']
+        self.assertNotIn(message_id, json.dumps(result))
+        self.assertEqual(frame['message']['content'],
+                         f'<<MV2 steer id={message_id}>>Message from reviewer:\nPlease rebase<</MV2>>')
 
 
 if __name__ == '__main__':

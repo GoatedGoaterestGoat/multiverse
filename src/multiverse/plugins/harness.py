@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 
-from . import loader
+from . import agent_files, loader
 
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
@@ -83,8 +83,11 @@ class LaunchPlan:
     error: str | None = None  # why no plugin could be considered at all
 
     def record(self):
-        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing."""
-        return {"plugins": self.plugins, "status_items": self.status_items, **({"error": self.error} if self.error else {})}
+        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing, and the
+        launch's plugin problems (a plugin left out because it broke), which mv2 inspect shows."""
+        return {"plugins": self.plugins, "status_items": self.status_items,
+                **({"problems": list(self.problems)} if self.problems else {}),
+                **({"error": self.error} if self.error else {})}
 
     def skip(self, name, reason):
         entry = self.plugins.setdefault(name, {})
@@ -377,6 +380,9 @@ class SessionInfo:
     state: str = "unknown"
     native_mode: dict | None = None
     plugins: dict | None = None  # this launch's runtime.json `plugins` record
+    # The agent's current workspace as properties.json records it (saved on every launch; the core
+    # SessionHandle's), or None when none is recorded (1.11).
+    workspace: str | None = None
 
     @property
     def directory(self):
@@ -389,7 +395,7 @@ def session_info(session, family, runtime=None):
     return SessionInfo(directory.parent.parent.parent, session.agent_id, session.harness, family or "",
                        session.native_id, session.launch_id, session.state,
                        dict(session.native_mode) if session.native_mode else None,
-                       (runtime or {}).get("plugins"))
+                       (runtime or {}).get("plugins"), session.workspace or None)
 
 
 def capabilities(info, taken):
@@ -490,10 +496,13 @@ def write_item(agent_dir, name, text):
     if not text:
         path.unlink(missing_ok=True)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text + "\n")
-    temporary.replace(path)
+    try:
+        agent_files.ensure_dir(path.parent)  # never the agent's folder: a removed agent gets nothing written
+        temporary.write_text(text + "\n")
+        temporary.replace(path)
+    except FileNotFoundError:
+        return
 
 
 def as_json(plan):

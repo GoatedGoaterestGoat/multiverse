@@ -6,7 +6,9 @@ never on the event loop. A plugin's failure is recorded against it by
 text, never as an exception the dashboard has to survive. Tests replace this
 object with a fake.
 """
+import asyncio
 from pathlib import Path
+import threading
 import time
 from types import SimpleNamespace
 
@@ -14,6 +16,34 @@ from textual.worker import WorkerFailed
 
 from .. import plugins, universe
 from ..plugins import host, loader
+
+async def in_daemon(function, *args):
+    """Run function(*args) in a daemon thread and await its result.
+
+    For calls into plugin code that can take as long as the plugin likes. asyncio.to_thread runs in the loop's
+    executor, whose threads asyncio waits for when the dashboard exits (up to five minutes), so a plugin call
+    that never returns would keep the process alive after q. This thread is left behind instead.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+
+    def finish(setter, value):
+        if not future.done():  # the waiter was cancelled (the dashboard is closing)
+            setter(value)
+
+    def run():
+        try:
+            outcome = (future.set_result, function(*args))
+        except BaseException as error:
+            outcome = (future.set_exception, error)
+        try:
+            loop.call_soon_threadsafe(finish, *outcome)
+        except RuntimeError:  # the loop is closed: the dashboard has gone and nobody is waiting
+            pass
+
+    threading.Thread(target=run, daemon=True, name=f"dashboard call: {getattr(function, '__name__', 'plugin')}").start()
+    return await future
+
 
 def universe_name(root):
     """The universe's own name from universe.json, else its directory's (a top universe's directory is `.multiverse`)."""
@@ -130,14 +160,16 @@ class PluginService:
         return top
 
     def host_state(self, root):
-        """{needed, running, stopped: {plugin: reason}, pid, workers} for this tree's host, or None when unreadable."""
+        """{needed, running, stopped: {plugin: reason}, pid, workers, problem} for this tree's host, or None when unreadable.
+
+        `problem` is why the host's recorded status cannot be used (a damaged status file), or None."""
         try:
             info = host.status(self.host_top(root))
         except Exception:
             return None
         return {"needed": bool(info.get("needed")), "running": bool(info.get("running")),
                 "stopped": dict(info.get("stopped") or {}), "pid": info.get("pid"),
-                "workers": sorted(info.get("workers") or ())}
+                "workers": sorted(info.get("workers") or ()), "problem": info.get("problem")}
 
     def start_host(self, root):
         """Start the host unless one runs; raises with the reason when it does not come up."""

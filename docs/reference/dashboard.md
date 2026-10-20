@@ -13,8 +13,8 @@ mv2 -u .multiverse/subverses/review tui
 ## Layout
 
 - **The list** is one tree. The universe and each subverse are folders, with their agents underneath. Folders fold and unfold.
-- **The header** counts live agents, agents waiting for you (an orange `●` marks them) and focused agents (a `◉` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`.
-- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones.
+- **The header** counts live agents, agents waiting for you (an orange `●` marks them) and focused agents (a `◉` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
+- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a plugin the launch left out. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode and fallback reason.
 - **The bottom line** shows key hints and the result of your last action. The hints are clickable.
 
 In a narrow terminal, the optional columns are hidden first. The whole tree fits in 60×20. The dashboard respects `NO_COLOR`.
@@ -24,7 +24,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | Column | Shows |
 | --- | --- |
 | `name` | The agent's name (always shown) |
-| `live` | `alive`, `ending`, `stopped`, `dormant` or `unknown` |
+| `live` | `alive`, `ending`, `stopped`, `dormant`, `starting` (a new agent still being prepared) or `unknown` |
 | `status` | `working`, `waiting`, `idle` or `disconnected`, from the harness over a live connection |
 | `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90% |
 | `cost` | The session's cost so far (off by default) |
@@ -70,7 +70,9 @@ In forms, `Tab` and `Shift-Tab` move between fields, `Ctrl+Enter` submits and `E
 
 Press `n` to add a draft row in the selected folder. Type the name, then press `Tab` to choose a harness with `↑`/`↓`. Press `Tab` again to set an optional model.
 
-`Enter` creates the agent, and `Esc` discards the draft. A new agent starts idle, so send it a message with `m`.
+`Enter` creates the agent, and `Esc` discards the draft. The draft has no field for a first prompt, so the new agent goes `idle` once it has started. Send it a message with `m`. An agent created with a prompt (`mv2 spawn --task`) is `working` until it finishes that prompt, then `idle`.
+
+`status` and `phase` are separate. `status` is the harness's own state (`working`, `waiting` or `idle`). `phase` is what the agent last reported with `mv2 report`, and reads `starting` until it reports.
 
 Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and the `base` template. For anything else, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
 
@@ -82,6 +84,8 @@ Press `g` for a new subverse, type a name and press `Enter`. The subverse uses i
 - **`r`** resumes it.
 
 The bottom line shows each result, such as `worker has your message for its next turn.` [Messaging](../cli/messaging.md#read-the-result) explains each one.
+
+**A damaged record.** An agent whose record file cannot be read shows as a row marked `⚠`, with `live` and `status` `unknown`. Its summary and the inspector name the file and the reason. The other agents are not affected, and the row recovers on the next refresh once the file is repaired or restored. Message, resume, move, delete and attach refuse such a row and say why. `K` does the same, except for an agent whose `runtime.json` is missing: `K` then asks for confirmation and finds the agent's tagged terminal to stop it. A folder with no agent record at all, only leftover files, shows as a leftover folder, and the inspector says what to do: `d` checks that no terminal is running for it, then moves the folder to the trash. For an agent whose `runtime.json` is missing, the inspector points to `K`. The [agents guide](../cli/agents.md#damaged-records) covers the same records from the CLI.
 
 ## Move and delete
 

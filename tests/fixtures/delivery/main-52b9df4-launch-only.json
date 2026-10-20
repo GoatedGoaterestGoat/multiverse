@@ -1,0 +1,44 @@
+{
+  "source_commit": "52b9df4",
+  "message": {
+    "schema": 2,
+    "target_session": "93a2efd6-a537-4d8d-acfd-772610bf931e",
+    "delivery": "steer",
+    "id": "fb0b82f0-9fa8-4461-a6d2-0c0243266604",
+    "at": "2026-10-18T03:16:26.596880+00:00",
+    "from": {},
+    "text": "upgrade proof"
+  },
+  "tracking": {
+    "submission_state": "failed",
+    "target_session": "93a2efd6-a537-4d8d-acfd-772610bf931e",
+    "delivery_method": "native",
+    "attempts": [
+      {
+        "state": "unavailable",
+        "reason": "The multiverse mod has not registered for this launch",
+        "message_id": "fb0b82f0-9fa8-4461-a6d2-0c0243266604",
+        "native_session_id": "93a2efd6-a537-4d8d-acfd-772610bf931e",
+        "mode": "steer",
+        "agent_id": "97772d1e-4c6b-44ee-bf14-1240eb7111fe",
+        "launch_id": "6acf1832-2a49-4b27-90af-f5176394502d",
+        "at": "2026-10-18T03:16:26.599218+00:00",
+        "value": null,
+        "ok": false
+      }
+    ],
+    "native_receipt": null
+  },
+  "result": {
+    "state": "unavailable",
+    "reason": "The multiverse mod has not registered for this launch",
+    "message_id": "fb0b82f0-9fa8-4461-a6d2-0c0243266604",
+    "native_session_id": "93a2efd6-a537-4d8d-acfd-772610bf931e",
+    "mode": "steer",
+    "agent_id": "97772d1e-4c6b-44ee-bf14-1240eb7111fe",
+    "launch_id": "6acf1832-2a49-4b27-90af-f5176394502d",
+    "at": "2026-10-18T03:16:26.599218+00:00",
+    "value": null,
+    "ok": false
+  }
+}

@@ -54,13 +54,17 @@ def command(root, name, reserved=(), guarded=False):
     owner = commands(root, reserved).get(name)
     if owner is None:
         raise PluginError(f"No plugin here provides mv2 {name}")
-    loaded = loader.load(entry(root, owner[0]))
+    try:
+        loaded = loader.load(entry(root, owner[0]))
+    except PluginError as error:
+        raise PluginError(_about(owner[0], error)) from error
     now = entry(root, owner[0])
-    if now.state == "unusable":
-        print(f"mv2: {now.problem}", file=sys.stderr)  # it still runs: its command may show or fix the settings
+    if now.state == "unusable" and (root, owner[0]) not in _warned:
+        _warned.add((root, owner[0]))  # once a process: one mv2 command looks its command up more than once
+        print(f"mv2: {_about(owner[0], now.problem)}", file=sys.stderr)  # it still runs: it may show or fix them
     found = loaded.registrations.commands.get(name)
     if found is None:
-        raise PluginError(f"{loaded.name} declares mv2 {name} but did not register it")
+        raise PluginError(f"plugin {loaded.name}: it declares mv2 {name} but did not register it")
     if not guarded:
         return found
 
@@ -77,6 +81,20 @@ def command(root, name, reserved=(), guarded=False):
     expected = (OSError, ValueError, KeyError, RuntimeError)
     return loader.Command(name, guard(found.configure, "options", ()), guard(found.run, "failed", expected),
                           guard(found.cli_run, "failed", expected) if found.cli_run else None)
+
+
+_warned = set()  # (universe, plugin) whose unusable settings this process has already said
+
+
+def _about(name, problem):
+    """`plugin NAME: …` for a problem of plugin NAME, as its command reports it ("NAME failed to load: X" becomes
+    "plugin NAME: failed to load: X")."""
+    text = str(problem)
+    for prefix in (f"{name}: ", f"{name} "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return f"plugin {name}: {text}"
 
 
 def catalog_entries(root):
@@ -203,7 +221,10 @@ def notes(root):
     unknown = config.load(root).unknown
     newer = ([f"plugins.json has fields this mv2 does not know: {', '.join(unknown)}; update mv2 to use them"]
              if unknown else [])
-    return newer + [f"{found.name} is on here but not installed (an optional plugin: mv2 plugins install "
+    ignored = [f"{name}: {legacy} is here but ignored: its settings were converted to "
+               f"{settings_files.path(root, name).relative_to(root).as_posix()} already; remove {legacy}"
+               for name, legacy in reappeared(root)]
+    return newer + ignored + [f"{found.name} is on here but not installed (an optional plugin: mv2 plugins install "
                     f"{found.name}, which needs access to its repository)"
                     for found in entries(root)
                     if found.on and found.state == "missing" and found.name in KNOWN and found.name not in waiting]
@@ -236,27 +257,44 @@ def doctor(root, universe_for):
     return found_problems
 
 
-def listing(root):
+def listing(root, wait=loader.REFRESH_WAIT):
     """Every plugin this universe sees, for `mv2 plugins` and the dashboard's Plugins screen.
 
     [{name, on, state, source, version, description, problem, errors, permissions,
       commands, settings: {path, source, problem, schema} or None, shadowed}]
 
     It never waits out a slow register(): a plugin whose load is still running is `loading`, and its own
-    settings screen is offered once it has loaded (loader.generation() rises then)."""
+    settings screen is offered once it has loaded (loader.generation() rises then). A plugin with settings is
+    loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings check refuses
+    reads `unusable` here as it does in doctor."""
     from . import host
+    current = entries(root)
+    checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
+              and found.on and found.state in ("on", "unusable") and found.loaded is None]
+    for found in checks:
+        try:
+            loader.load(found, wait=wait)
+        except PluginError:
+            pass  # its entry says why
+    if checks:
+        current = entries(root)
     recent = loader.errors()
     stopped = host.left_stopped(root)
     result = []
-    for found in entries(root):
+    for found in current:
         manifest = found.manifest
         state = "loading" if found.usable and found.loaded is None and loader.loading(found) else found.state
+        problem, waiting = found.problem, _waiting_old_file(root, found)
+        if waiting and found.on and state in ("on", "loaded", "loading"):
+            # The plugin's real settings wait in its old file: it is off here until that is converted (compaction
+            # fails closed), and its defaults are never shown as its settings.
+            state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
                 "description": manifest.description if manifest else "",
                 "default": manifest.default if manifest and found.source == "bundled" else "off",
-                "problem": found.problem, "errors": recent.get(found.name, []) + (
+                "problem": problem, "errors": recent.get(found.name, []) + (
                     host.gave_up(root, found.name) if manifest is not None and manifest.events else []) + (
                     [_left_stopped(found.name, stopped[found.name])] if found.name in stopped else []),
                 "permissions": manifest.permission_texts() if manifest else [],
@@ -275,8 +313,9 @@ def listing(root):
             except ValueError as error:
                 schema, schema_problem = None, str(error)
             item["settings"] = {"path": str(current.path), "source": current.source,
-                                "problem": current.problem or schema_problem, "schema": schema,
-                                "values": current.values,
+                                "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
+                                or schema_problem, "schema": schema,
+                                "values": {} if waiting else current.values,
                                 "screen": _settings_screen(found),
                                 "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
                                            if found.loaded and found.loaded.registrations.settings_fields else None)}
@@ -851,13 +890,69 @@ def _settings_screen(found):
     return loaded.registrations.settings_screen if loaded is not None else None
 
 
+def settings_checked(root, name, wait=None):
+    """Load plugin `name` so its own settings check runs here, also where it is off; None, or why it cannot run.
+
+    The check is the plugin's code: a process that has not loaded the plugin (a fresh `mv2 plugins`) would
+    otherwise judge its settings by their schema alone, write what the plugin refuses and call it usable. A
+    plugin whose code cannot run here (untrusted, failed, safe mode) has only its schema checked, and is said so."""
+    return _own_check(root, name, wait)[1]
+
+
+def _own_check(root, name, wait=None):
+    """(plugin `name`'s settings check or None, why it could not run or None), loading it, also where it is off."""
+    found = entry(root, name)
+    if found.manifest is None or found.manifest.settings is None:
+        return None, None
+    loaded = found.loaded if isinstance(found.loaded, loader.Loaded) else None
+    if loaded is None:
+        try:
+            loaded = loader.load(found, off=not found.on, wait=wait)
+        except PluginError as error:
+            return None, str(error)
+    return loaded.registrations.settings_check, None
+
+
+def reappeared(root):
+    """[(name, old file)] of pre-plugin settings files found here although the plugin's settings were converted
+    already (plugin-settings/NAME.json is here too): nothing reads them; an old branch may have brought one back."""
+    root, found = Path(root), []
+    for entry_ in entries(root):
+        legacy = (entry_.manifest.settings.legacy if entry_.manifest is not None and entry_.manifest.settings
+                  else KNOWN.get(entry_.name, {}).get("legacy"))
+        if legacy and (root / legacy).is_file() and settings_files.path(root, entry_.name).is_file():
+            found.append((entry_.name, legacy))
+    named = {name for name, _ in found} | {entry_.name for entry_ in entries(root)}
+    found.extend((name, known["legacy"]) for name, known in KNOWN.items() if name not in named
+                 and (root / known["legacy"]).is_file() and settings_files.path(root, name).is_file())
+    return found
+
+
 def settings_of(root, name):
-    """(values, problem, path) of a plugin's settings in this universe."""
+    """(values, problem, path) of a plugin's settings in this universe, judged by its own check too."""
+    check, _ = _own_check(root, name)
     found = entry(root, name)
     if found.manifest is None:
         raise PluginError(found.problem or f"{name} cannot be read")
-    current = loader.settings(root, found)
+    current = settings_files.read(root, found.manifest, check)
+    waiting = _waiting_old_file(root, found)
+    if waiting:  # its real settings are in the old file: the defaults never stand in for them
+        return {}, _waiting_problem(waiting), current.path
     return current.values, current.problem, current.path
+
+
+def _waiting_old_file(root, found):
+    """The pre-plugin settings file of `found` that waits here to be converted, or None."""
+    legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
+              else None)
+    if root is not None and legacy and (Path(root) / legacy).is_file() \
+            and not settings_files.path(root, found.name).exists():
+        return legacy
+    return None
+
+
+def _waiting_problem(legacy):
+    return f"{legacy} is not converted yet: run mv2 plugins migrate --apply"
 
 
 def edit_settings(root, name, changes):
@@ -866,10 +961,10 @@ def edit_settings(root, name, changes):
     Keys are dotted paths or tuples; settings.DELETE removes one. Nothing is
     written unless the whole result passes the plugin's schema and own check.
     """
+    check, _ = _own_check(root, name)
     found = entry(root, name)
     if found.manifest is None:
         raise PluginError(found.problem or f"{name} cannot be read")
-    check = found.loaded.registrations.settings_check if found.loaded else None
     return settings_files.edit(root, found.manifest, changes, check).values
 
 

@@ -39,7 +39,13 @@ print('read completed', flush=True)
 
 
 class StdinOwnershipTest(unittest.TestCase):
+    def setUp(self):
+        isolate(self)
+
     def test_core_subprocesses_explicitly_choose_whether_they_own_the_terminal(self):
+        """Every helper subprocess in src/ sets stdin explicitly, only the runner and attach inherit it, and tmux
+        commands, failing or not, leave a native terminal probe nonblocking; fragile because any new
+        subprocess.run silently inherits the TUI's terminal and strands Codex's terminal probe (0b7aaef)."""
         source = Path(__file__).resolve().parents[1] / 'src' / 'multiverse'
         interactive = {('runtime/runner.py', 'Popen'), ('tools/attach.py', 'run')}
         inherited = set()
@@ -58,20 +64,15 @@ class StdinOwnershipTest(unittest.TestCase):
                         inherited.add(location)
         self.assertEqual(inherited, interactive)
 
-
-@unittest.skipUnless(shutil.which('tmux'), 'tmux is required')
-class HelperTerminalTest(unittest.TestCase):
-    def setUp(self):
-        isolate(self)
+        if not shutil.which('tmux'):
+            self.skipTest('tmux is required for the terminal probe')
         temporary = self.enterContext(tempfile.TemporaryDirectory(prefix='mv2-stdin-', dir='/tmp'))
-        self.socket = str(Path(temporary) / 'tmux.sock')
-        self.tmux = ['tmux', '-f', '/dev/null', '-S', self.socket]
-        subprocess.run([*self.tmux, 'new-session', '-d', '-s', 'probe', 'sleep', '60'],
+        socket = str(Path(temporary) / 'tmux.sock')
+        tmux = ['tmux', '-f', '/dev/null', '-S', socket]
+        subprocess.run([*tmux, 'new-session', '-d', '-s', 'probe', 'sleep', '60'],
                        stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=5)
-        self.addCleanup(lambda: subprocess.run([*self.tmux, 'kill-server'], stdin=subprocess.DEVNULL,
+        self.addCleanup(lambda: subprocess.run([*tmux, 'kill-server'], stdin=subprocess.DEVNULL,
                                                capture_output=True, timeout=5))
-
-    def test_tmux_success_and_error_cannot_strand_a_native_terminal_probe(self):
         commands = [
             ['capture-pane', '-p', '-t', 'probe'],
             ['display-message', '-p', '-t', 'probe', '#{cursor_flag}'],
@@ -86,7 +87,7 @@ class HelperTerminalTest(unittest.TestCase):
                 master, slave = pty.openpty()
                 process = None
                 try:
-                    process = subprocess.Popen([sys.executable, '-c', PROBE, self.socket, json.dumps(command)],
+                    process = subprocess.Popen([sys.executable, '-c', PROBE, socket, json.dumps(command)],
                                                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                                bufsize=0, env=environment)
                     self.assertTrue(select.select([process.stdout], [], [], 5)[0], 'probe did not start')

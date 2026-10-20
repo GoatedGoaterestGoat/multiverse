@@ -17,7 +17,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Harness | Version | What was checked |
 | --- | --- | --- |
 | Codex CLI | 0.163.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
-| Claude Code | 2.1.302 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Claude Code | 2.1.303 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 Other releases may behave differently. The Claude Code mod API is early access and can change between releases.
@@ -27,8 +27,8 @@ Other releases may behave differently. The Claude Code mod API is early access a
 | Feature | Needs | With an older version |
 | --- | --- | --- |
 | Claude bridge (the multiverse mod: message delivery, status, receipts, `ask`, status line, compaction) | Claude Code 2.1.280 | With `inbox_bridge` unset, the agent launches plain and `mv2 inspect` shows why. With `inbox_bridge: true`, the launch fails. A version mv2 can't read counts as new enough. |
-| `/multiverse` typeahead in Claude's prompt box | Claude Code 2.1.292 | The typeahead isn't loaded, but the `/multiverse` command works without it. |
-| Codex bridge | No version check | At each launch, mv2 checks that the CLI, the shared app-server and its relay work. It falls back to plain when `inbox_bridge` is unset. The CLI and app-server versions are recorded at launch and may differ. |
+| `/multiverse` typeahead in Claude's prompt box | Claude Code 2.1.292 | The typeahead isn't loaded, but the `/multiverse` command works without it. A version mv2 can't read also skips it, unlike the bridge: Claude refuses a plugin that uses an event it doesn't know, and suggestions aren't worth that risk. |
+| Codex bridge | No version check | Older CLIs receive a launch notice that mv2 startup screen checks are disabled. Native side conversations separately require the checked daemon release and a client that supports them. At each launch, mv2 checks that the CLI, the shared app-server and its relay work. It falls back to plain when `inbox_bridge` is unset. The CLI and app-server versions are recorded at launch and may differ. |
 | Pi bridge | No version check | The bridge is off unless `inbox_bridge` is `true`. |
 
 See [harnesses](../use/harnesses.md) for `inbox_bridge` and launch-only agents.

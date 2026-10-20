@@ -29,7 +29,9 @@ The [dashboard reference](../reference/dashboard.md) lists every key and column,
 
 ## Start an agent
 
-Select a folder and press `n`. Type a name, press `Tab` to choose a harness, and press `Enter`. The agent shows as `starting`, then `working`.
+Select a folder and press `n`. Type a name, press `Tab` to choose a harness, and press `Enter`. This gives the agent no first prompt, so it is `idle` once it has started. Send it a message with `m`, and its status changes to `working` while it works. Its `phase` reads `starting` until the agent reports something with `mv2 report`.
+
+To start an agent on a task, use `mv2 spawn --task`. It shows `working` until it finishes the prompt, then `idle`.
 
 ![Creating an agent with n: name, harness, Enter](../media/create-agent.gif)
 

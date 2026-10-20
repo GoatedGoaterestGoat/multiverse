@@ -24,5 +24,11 @@ The transcript protocols (reading rows by cursor, labels, turns, model metadata,
 
 ## Harnesses
 
-- **Codex `/new` and `/resume` inside a running agent.** Like Claude's `/clear`, these move the TUI to a different conversation while mv2 still addresses the old one, so messages may be lost on the bridge. Check this during the Codex version check, and fix it with the session lineage record.
+- **`mv2 ask` for Codex.** `ask` answers from the agent's conversation, and the side that answers must not be able to act: no commands, no inbox, no messages as the agent. Codex 0.163.0 can fork a conversation, but nothing makes the fork tool-free:
+  - Turning the shell tool off leaves `apply_patch`.
+  - An empty `mcp_servers` merges with the configured servers instead of clearing them.
+  - MCP servers and hooks start with the fork, before any per-turn setting applies.
+
+  Until then, Codex's own `/btw` side chat works in the agent's terminal, without isolation ([harnesses](../use/harnesses.md)). Build `ask` once Codex can lock a fork's tools. The same proof is needed for Codex's one-shot run.
+- **Codex `/new` and `/resume` inside a running agent.** On Codex 0.163.0 the bridge relay refuses both, so the agent keeps its conversation and nothing is lost. If a later Codex lets the terminal switch conversations, record the change in the session lineage as Claude's `/clear` does.
 - **Plugin worker liveness outside tmux.** Covered in PR #20 by workers checking their parent. Revisit if the host ever runs without tmux by design.

@@ -3,7 +3,7 @@ import os
 import time
 
 from ..store import now, read, write
-from .process import process_started, process_snapshot
+from .process import process_started, process_snapshot, valid_start, LINUX_START
 
 TOTAL_TIMEOUT = 180
 STALL_TIMEOUT = 60
@@ -53,7 +53,8 @@ def _parent_gone(owner):
         if state[0] in ('Z', 'X'):
             return True
         if started is not None:
-            return started != current  # A reused PID is not this launch's parent.
+            if valid_start(started) and valid_start(current) and bool(LINUX_START.fullmatch(started)) == bool(LINUX_START.fullmatch(current)):
+                return started != current  # Compare identities only in the same clock domain.
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -97,6 +98,10 @@ def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL
                 raise RuntimeError(f'Launch preparation failed while {stage}')
             if observed >= next_check:
                 if _parent_gone(owner):
+                    # The parent can publish ready and exit after our stage
+                    # snapshot. Its normal exit is not failed registration.
+                    if (launch / 'ready').exists():
+                        return
                     raise RuntimeError(f'Launch registration parent exited while {stage}')
                 next_check = observed + 1
             if observed - started >= total_timeout:

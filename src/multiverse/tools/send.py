@@ -2,10 +2,10 @@
 import os
 from pathlib import Path
 import sys
-from .. import universe
-from ..runtime import native
+from .. import universe, display
+from ..runtime import native, missing_runtime
 from ..store import lock, now, read
-from ..universe import agents, focus
+from ..universe import agents, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
 from ._messaging import delivery_line, failure_reason
@@ -36,8 +36,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     if not text.strip():
         raise ValueError("Message text must not be empty")
     if sender is None:
-        from ..runtime.agent_identity import actor
-        caller = actor()
+        from ..runtime.agent_identity import sender_actor
+        caller = sender_actor()
         sender = caller.sender() if caller else {"agent_id": os.environ.get("MV2_AGENT_ID"), "universe": os.environ.get("MV2_UNIVERSE"),
                   "name": "agent" if os.environ.get("MV2_AGENT_ID") else "user"}
     references = [reference.strip() for reference in agent.split(',')]
@@ -47,12 +47,17 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     for reference in references:
         try:
             directory = agents.directory(root, reference)
-        except ValueError:
+        except ValueError as error:
+            damaged = isinstance(error, (records.RecordError, agents.AmbiguousAgent))
             if len(references) == 1:
+                if damaged:
+                    raise  # The target is known; preserve its named record error.
                 raise ValueError('Could not find one matching agent. Run mv2 list and use its name.') from None
-            name = failure_reason(reference)
-            result = {'ok': False, 'saved': False, 'reason': 'Could not find one matching agent'}
-            line = f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.'
+            name = display.clean(reference) if damaged else failure_reason(reference)
+            reason = display.clean(str(error)) if damaged else 'Could not find one matching agent'
+            result = {'ok': False, 'saved': False, 'reason': reason}
+            line = (f'Not sent to {name}: {reason}.' if damaged else
+                    f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.')
         else:
             if directory in seen:
                 continue  # An alias of the same recipient must not duplicate a prompt.
@@ -66,7 +71,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             elif result['delivery'] == 'inbox-only':
                 line = f"Saved to {name}'s inbox; it sees it at its next check."
             else:
-                line = delivery_line(name, receipt, delivery=delivery, text=text, running=running)
+                line = display.with_notices(delivery_line(name, receipt, delivery=delivery, text=text, running=running), receipt)
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
@@ -100,12 +105,23 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             return ({'at': now(), 'from': sender, 'text': text, 'delivery': delivery, 'state': 'focused',
                      'saved': False, 'ok': False, 'focus': held}, {})
         binding_error = None
+        preflight_error = None
+        if delivery != 'inbox-only':
+            try:
+                mailbox.preflight_delivery(directory)
+            except (OSError, ValueError, TypeError) as error:
+                preflight_error = str(error)
         with lock(directory / '.launch.lock'):
             properties = read(directory / 'properties.json')
             if delivery != 'inbox-only':
                 try:
-                    properties, _ = native.session_snapshot(root, directory, properties, agents.runtime(directory),
-                                                            launch_locked=True)
+                    facts = agents.runtime(directory)
+                    # Preserve the saved target while send_or_wake independently
+                    # discovers terminal ownership; damaged facts cannot reconcile.
+                    if (missing_runtime.damage(directory, facts) is None
+                            and missing_runtime.mismatch(directory, facts, native.observe(properties, facts)) is None):
+                        properties, _ = native.session_snapshot(root, directory, properties, facts,
+                                                                launch_locked=True)
                 except Exception as error:
                     binding_error = str(error)
             target = properties.get('native_session_id')
@@ -114,21 +130,36 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
         if delivery == 'inbox-only':
             return ({**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}, {})
+        if preflight_error:
+            reason = (preflight_error if str(directory) in preflight_error else
+                      f"{directory / 'inbox-state.json'}: {preflight_error}")
+            mailbox.record_unsubmitted(directory, message['id'], reason)
+            receipt = {'state': 'error', 'ok': False, 'reason': reason,
+                       'value': {'pre_submission_failure': True}}
+            return ({**result, 'state': 'error', 'saved': True, 'ok': False,
+                     'native_delivery': delivery_summary(receipt)}, receipt)
         if binding_error:
             receipt = {'state': 'error', 'reason': binding_error}
             update_message(directory, message['id'], submission_state='failed', attempts=[receipt])
             return ({**result, 'state': 'error', 'saved': True, 'ok': False,
                      'native_delivery': delivery_summary(receipt)}, receipt)
         try:
-            receipt = native.send_or_wake(root, directory.name, message['id'])
+            receipt = native.send_or_wake(root, directory.name, message['id'], new_message=True)
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
-            _, tracking = message_record(directory, message['id'])
-            if tracking.get('submission_state', 'pending') == 'pending':
-                update_message(directory, message['id'], submission_state='failed',
-                               attempts=[*tracking.get('attempts', []), receipt])
+            try:
+                _, tracking = message_record(directory, message['id'])
+                if tracking.get('submission_state', 'pending') == 'pending':
+                    update_message(directory, message['id'], submission_state='failed',
+                                   attempts=[*tracking.get('attempts', []), receipt])
+            except (OSError, ValueError, TypeError) as damaged:
+                # A later ledger failure cannot establish whether the native
+                # operation ran. Save the named error, never fabricate retry proof.
+                receipt = {'state': 'unknown', 'ok': False,
+                           'reason': f'{directory / "inbox-state.json"}: {damaged}; submission is unconfirmed'}
         return ({**result, "state": receipt['state'], "saved": True, "native_delivery": delivery_summary(receipt),
-                "ok": receipt['state'] not in ('error', 'unavailable', 'unknown')}, receipt)
+                "ok": receipt['state'] not in ('error', 'unavailable', 'unknown'),
+                **({"notices": receipt["notices"]} if receipt.get("notices") else {})}, receipt)
 
 
 def cli_run(root=None, *, json=False, **options):

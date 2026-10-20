@@ -48,7 +48,9 @@ class ConfiguredAdapter:
         if unknown:
             raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
         bridge = settings.get('inbox_bridge', False)
-        if not isinstance(bridge, bool) or (bridge and not cls.supports_bridge):
+        if not isinstance(bridge, bool):
+            raise ValueError('inbox_bridge must be true or false')
+        if bridge and not cls.supports_bridge:
             raise ValueError('inbox_bridge is not supported by this adapter')
         spec = json.loads((cls.package / 'defaults.json').read_text())
         for key in ('model', 'unset_env', 'env'):
@@ -132,8 +134,12 @@ class ConfiguredAdapter:
             if '--' in argv and prompt_args and prompt_args[0] == '--':
                 prompt_args = prompt_args[1:]
             argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
-        # Scrubbing parent identity is a core invariant, including legacy definitions.
-        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', *self.spec.get('unset_env', [])]))
+        # Scrubbing parent identity is a core invariant, including legacy definitions, and so is Claude's
+        # child-session marker, which turns transcript saving off, and a parent Claude's IDE port and inbox path
+        # and secret (an agent spawned from inside Claude inherits them): a harness replacing unset_env keeps them.
+        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION',
+                                     'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
+                                     *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 
     def spawn(self, context: LaunchContext) -> CommandSpec:
@@ -173,6 +179,9 @@ class ConfiguredAdapter:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
         result['session_name'] = Capability('unavailable', 'Native session naming is not verified for this manifest')
+        for operation in ('send_steer', 'send_follow_up'):
+            result[operation] = replace(result[operation], mechanism='launch-only',
+                reason='This agent is launch-only: its harness has no way to deliver into a running session')
         result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
@@ -183,7 +192,7 @@ class ConfiguredAdapter:
         return result
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
-        return NativeResult('unavailable', 'No verified native message delivery for this session')
+        return NativeResult('unavailable', 'No verified native message delivery for this session', {'launch_only': True})
 
     def get_delivery(self, session, message_id, executor):
         return NativeResult('unavailable', 'Native receipt reconciliation is not implemented')

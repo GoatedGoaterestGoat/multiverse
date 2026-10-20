@@ -9,6 +9,7 @@ from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inspe
 from .. import plugins
 from . import columns, plugin_panels, theme
 from .columns import COLUMNS
+from .panels import error_widget
 from .tree import counts, within
 from .views import view
 
@@ -32,21 +33,35 @@ class LocalBackend:
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
         members = list_agents.run(root, recursive=True, json=True)
+        for member in members:  # a leftover folder is not a damaged agent: say what to do with it, not what failed to read
+            if isinstance(member.get("damaged"), dict) and member["damaged"].get("recover") == "remove":
+                member["summary"] = "damaged: a leftover folder with no agent records · d moves it to the trash"
         plugin_columns = any(key not in COLUMNS for key in config["columns"])
+        trouble, on = [], {}
         if plugin_columns:
             # Plugin columns: resolved and computed here, off the event loop. Each agent row says which
             # plugins its universe has on and carries its plugin cells; rendering only reads them.
-            scopes = list(universe.tree(root))
-            columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"])
-            on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
-            for member in members:
-                member["plugins"] = on.get(str(member.get("universe")), [])
-            columns.fill_cells(members)
+            try:
+                scopes = list(universe.tree(root))
+                columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"])
+                on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
+                for member in members:
+                    member["plugins"] = on.get(str(member.get("universe")), [])
+                columns.fill_cells(members)
+            except Exception as error:  # reading plugins failed: their columns show dashes, the agents still list
+                columns.PLUGIN_COLUMNS = {}
+                columns.forget_cells()
+                trouble.append(f"plugin columns: {type(error).__name__}: {error}")
         else:
             columns.PLUGIN_COLUMNS = {}
             columns.forget_cells()
         # Plugin panels render here, off the event loop, from this scope's agents; the dashboard only draws the result.
-        widgets = plugin_panels.expand(root, config["widgets"], members, config.get("plugin_panels", "auto"))
+        try:
+            widgets = plugin_panels.expand(root, config["widgets"], members, config.get("plugin_panels", "auto"))
+        except Exception as error:  # the view's own widgets stay; the plugins' say they could not be read
+            trouble.append(f"plugin panels: {type(error).__name__}: {error}")
+            widgets = [error_widget(widget["title"], "plugin widgets could not be read; see the header")
+                       if widget.get("type") == "plugin" else widget for widget in config["widgets"]]
         groups = []
         for scope in universe.tree(root):
             group = {"path": str(scope), "parent": str(scope.parent.parent) if scope != root else None,
@@ -56,17 +71,21 @@ class LocalBackend:
                 data, style = read(scope / "universe.json"), view(scope)
                 groups.append({**group, "name": style["title"] or data["name"],
                                "description": data.get("description", ""), "accent": style["accent"]})
-                if plugin_columns:
-                    groups[-1]["plugins"] = on[str(scope)]
+                if on:
+                    groups[-1]["plugins"] = on.get(str(scope), [])
             except (OSError, ValueError, KeyError) as error:
                 groups.append({**group, "name": scope.name, "description": str(error),
                                "accent": theme.RED, "error": True})
-        if plugin_columns:
-            columns.fill_cells([g for g in groups if "plugins" in g], group=True)
+        if on:
+            try:
+                columns.fill_cells([g for g in groups if "plugins" in g], group=True)
+            except Exception as error:
+                trouble.append(f"plugin columns: {type(error).__name__}: {error}")
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),
-                "columns": config["columns"], "widgets": widgets, "agents": members}
+                "columns": config["columns"], "widgets": widgets, "agents": members,
+                "plugin_trouble": trouble[0] if trouble else None}
 
     def spawn(self, root, values):
         return spawn.run(root, name=values["name"], task=values.get("task", ""),

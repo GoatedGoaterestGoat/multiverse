@@ -30,7 +30,9 @@ Promised from API 1.9, by adding only:
   for `check()` to be true, failing the test with `what` after `timeout` seconds;
   prefer it to fixed pauses. `await d.press(*keys)` presses keys as a person
   would, `await d.settle()` waits for pending background work and `await
-  d.refresh()` reads the universe again.
+  d.refresh()` reads the universe again. Leaving the `async with` first waits (at
+  most 10 s) until the dashboard has nothing running, scans an action started included,
+  so no thread of it outlives the test and writes under the home the test restores.
 - `d.screen` is the screen in front; `d.status` the dashboard's status line;
   `d.header` its header counts (agents, plugin errors, `host off`).
 - `await d.open_plugins()` presses P and returns the Plugins screen once its list
@@ -78,6 +80,24 @@ class _Service(PluginService):
         return None
 
 
+async def quiet(app, timeout=10.0):
+    """Wait until `app` has nothing running: no scan, no action, no other worker. Leave a dashboard only then.
+
+    Waiting for the workers that exist is not enough: an action ends by starting a scan, and the scan's thread, still
+    running when a test's cleanups restore the real HOME, writes mv2's state there. Bounded, so a test that leaves
+    a plugin action hanging on purpose is not held up for ever; the wait just ends."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            await asyncio.wait_for(app.workers.wait_for_complete(), max(0.01, deadline - loop.time()))
+        except Exception:  # timed out, or a worker was cancelled: either way there is nothing more to wait for
+            return
+        await asyncio.sleep(0)  # a worker that has just ended may have started another
+        if not app.scanning and all(worker.is_finished for worker in app.workers):
+            return
+
+
 class Dashboard:
     def __init__(self, case, size=(120, 40), root=None):
         self.case, self.size = case, size
@@ -92,6 +112,7 @@ class Dashboard:
         return self
 
     async def __aexit__(self, *exception):
+        await quiet(self.app)
         return await self._context.__aexit__(*exception)
 
     # Waiting -------------------------------------------------------------

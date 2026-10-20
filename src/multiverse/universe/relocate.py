@@ -10,8 +10,8 @@ from contextlib import ExitStack
 import os
 
 from . import exact, parent, trash, tree, workspace
-from .agents import directory, runtime, update_runtime
-from . import sessions
+from .agents import directory, runtime, update_runtime, name_matches, record_paths, orphaned
+from . import records, sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
 
@@ -19,10 +19,31 @@ from ..terminal.tmux import observe, owned
 
 def _stopped(agent_dir):
     """Require native exit and remove any retained, owned terminal wrapper."""
-    properties, facts = read(agent_dir / "properties.json"), runtime(agent_dir)
+    from ..runtime import missing_runtime
+    from .agents import interrupted_preparation
+    if orphaned(agent_dir):
+        missing_runtime.require_stopped(agent_dir, _orphan_identity(agent_dir), operation='move or remove', orphan=True)
+        if not orphaned(agent_dir):
+            raise records.RecordError(agent_dir / 'properties.json',
+                                      'core records changed during orphan discovery; retry with the current record')
+        return  # No authority was invented, and no terminal was controlled.
+    properties = records.properties(agent_dir / "properties.json")
+    previous, malformed = missing_runtime.recovery_snapshot(agent_dir)
+    # _hold owns the launch lock. Broken terminal/generation identity cannot
+    # turn an unmatched pane into permission to rename its live records.
+    if malformed is not None or missing_runtime.damage(agent_dir, previous) or not (agent_dir / 'runtime.json').exists():
+        missing_runtime.require_stopped(agent_dir, properties, facts=previous, operation='move or remove')
+        missing_runtime._unchanged(agent_dir, previous, malformed)
+        return  # Absence was independently proved; never rewrite damaged facts.
+    facts = interrupted_preparation(previous, agent_dir)
+    if facts is not previous and facts.get('state') != 'failed':
+        raise records.RecordError(agent_dir / 'runtime.json',
+            'preparation record has native startup evidence; repair the runtime record before acting on this agent')
     if not facts.get("launch_id"):
-        return
+        return  # A genuinely never-launched record has nothing to stop.
     state = observe(properties, facts)
+    if error := missing_runtime.mismatch(agent_dir, facts, state):
+        raise error
     if state["live"] not in ('stopped', 'dormant'):
         raise ValueError(f'Agent {properties["name"]} is {state["live"]}; stop it first'
                          + (f' ({state["reason"]})' if state["reason"] else ""))
@@ -38,13 +59,18 @@ def _stopped(agent_dir):
 
 def _agents(scope):
     return sorted(p.parent for root in tree(scope)
-                  for p in (root / "state" / "agents").glob("*/properties.json"))
+                  for p in record_paths(root))
+
+
+def _orphan_identity(agent_dir):
+    return {'id': agent_dir.name, 'name': agent_dir.name,
+            'universe_id': read(agent_dir.parents[2] / 'universe.json')['id']}
 
 
 def _hold(stack, agent_dirs):
     # Resume and stop take the launch lock, so none can start mid-move.
     for agent_dir in agent_dirs:
-        stack.enter_context(lock(agent_dir / ".launch.lock"))
+        stack.enter_context(lock(agent_dir / ".launch.lock", create_parent=False))
         _stopped(agent_dir)
 
 
@@ -88,14 +114,14 @@ def _subverse(path):
 
 def move_agent(root, reference, destination):
     root, destination = exact(root), exact(destination)
-    agent_dir = directory(root, reference)
-    properties = read(agent_dir / "properties.json")
+    agent_dir = directory(root, reference, allow_damaged=True)
+    properties = records.properties(agent_dir / "properties.json")
     if destination == root:
         raise ValueError(f'{properties["name"]} is already in that universe')
     if not (destination / "harnesses" / properties["harness"] / "harness.json").is_file():
         raise ValueError(f'The destination has no {properties["harness"]} harness configured')
-    for path in (destination / "state" / "agents").glob("*/properties.json"):
-        if read(path)["name"] == properties["name"]:
+    for path in record_paths(destination):
+        if name_matches(path, properties["name"]):
             raise ValueError(f'The destination already has an agent named {properties["name"]}')
     target = destination / "state" / "agents" / agent_dir.name
     with ExitStack() as stack:
@@ -104,8 +130,8 @@ def move_agent(root, reference, destination):
         moved = _session_claims(destination, agent_dir)
         # Spawn publishes names under the same namespace before agents.lock.
         stack.enter_context(lock(destination / 'state' / '.agents.lock'))
-        for path in (destination / 'state' / 'agents').glob('*/properties.json'):
-            if read(path)['name'] == properties['name']:
+        for path in record_paths(destination):
+            if name_matches(path, properties['name']):
                 raise ValueError(f'The destination already has an agent named {properties["name"]}')
         target.parent.mkdir(parents=True, exist_ok=True)
         agent_dir.rename(target)
@@ -153,11 +179,15 @@ def move_subverse(path, destination):
 
 def remove_agent(root, reference):
     root = exact(root)
-    agent_dir = directory(root, reference)
-    properties = read(agent_dir / "properties.json")
+    agent_dir = directory(root, reference, allow_damaged=True)
+    orphan = orphaned(agent_dir)
+    properties = _orphan_identity(agent_dir) if orphan else records.properties(agent_dir / "properties.json")
     with ExitStack() as stack:
         _hold(stack, [agent_dir])
         _session_namespaces(stack, root)
+        if orphan and not orphaned(agent_dir):
+            raise records.RecordError(agent_dir / 'properties.json',
+                                      'core records changed before orphan removal; retry with the current record')
         entry = trash.entry(root, f'{properties["name"]}-{agent_dir.name[:8]}')
         agent_dir.rename(entry)
     record = {"kind": "agent", "name": properties["name"], "id": agent_dir.name,

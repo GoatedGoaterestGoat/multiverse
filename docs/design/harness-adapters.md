@@ -23,9 +23,58 @@ asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID, and resumes it
 with `--resume` only once Claude has saved a transcript for it (it writes none before
-the first message); a session stopped before then restarts fresh under the same
-UUID with `--session-id`, without replaying its task, and says so in the agent's
-details. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+the first message); a session Claude has no transcript for restarts fresh under
+the same UUID with `--session-id`, without replaying its task, and says so in the
+resume result (the `resume_notice` hook) and the agent's details, where core keeps
+it with the launch's notices (never in `fallback_reason`, which is for a plain
+launch's cause). The same hook names a caller's `CLAUDE_CONFIG_DIR` that the resume
+ignored for the storage recorded at spawn, as Codex names an ignored `CODEX_HOME`. The note tells
+"stopped before its first message" from "the saved conversation is missing"
+(Claude deletes transcripts after `cleanupPeriodDays`) by what outlives the
+transcript: a message to this session whose receipt the mod wrote, context the
+mod reported after the agent last moved to this session, or the session in
+Claude's prompt history (`history.jsonl`, which Claude prunes too, so its absence
+proves nothing). When a launch carrying a wake prompt exits during startup, core
+asks `startup_prompt_evidence(session, prompt, since, environment)`: Claude says
+True when the session's transcript has a user row with that prompt from the
+launch's start on, False when the transcript is missing or complete without one
+(the message is then a definite failure that `--retry` resends), and None when it
+can't tell (unreadable or damaged rows, a storage folder it can't read, or no aware
+start time), which keeps the message uncertain. It reads the launch's own storage:
+`session.home`, pinned before the launch started, else the launch environment's
+absolute `CLAUDE_CONFIG_DIR` or `HOME`, and never the checking process's, which
+could find nothing and wrongly prove the prompt absent. Usage and the context
+reading use `session.home` the same way, so a dashboard or CLI running with
+another `CLAUDE_CONFIG_DIR` still reads the launch's own transcripts. After a None, core asks the
+optional `startup_prompt_evidence_reason` with the same arguments: one line naming
+the folder or transcript that can't be read, or the damaged row, and what to fix,
+without the command, which core adds. Missing reason hooks default to no additional
+diagnostic; they cannot change the evidence result.
+
+Core retains the failed launch's exact prompt, start time, conversation identity
+and storage context after observing its process exit. `deliver --check` re-asks
+the evidence hook with that snapshot, even after another launch or conversation
+replaces the current one. True confirms consumption; False makes the message
+retryable; None remains uncertain. This path never reconciles the current native
+binding or resends input. Older receipts can be qualified from the matching
+exited runtime, request and task while those original facts remain available;
+missing facts never authorize retry. A new wake clears the preceding snapshot.
+
+Every transcript lookup lists
+Claude's folders itself rather than with a glob, which skips unreadable folders
+silently. Only a folder that could hold the session counts: Claude names a project
+folder after the real path it was launched in, NFC-normalized, with every UTF-16
+code unit that isn't an ASCII letter or digit replaced by `-` (past 200 units, the
+first 200 plus `-` and a hash). So an unreadable folder blocks when its name,
+ignoring case, is the key of the handle's workspace (as recorded or as its real
+path) or starts with that key plus `-`, which covers Claude's own worktrees under
+the workspace and the hashed long form. Another workspace's unreadable folder is
+skipped; with no absolute workspace, every unreadable folder blocks. The handle's
+workspace is the launch's own, so a recheck of a failed wake reads that launch's
+folder even after the agent moved on. GOAT applies the same rule to its search.
+When part of the storage that could hold the session can't be read, resume tries the saved
+conversation and usage names the folder, instead of either reading the scan as
+proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
 every resume. Claude Code keeps a conversation's system prompt as recorded at its
 first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
 would leave a resumed agent with the bootstrap it started with: a plugin's
@@ -183,7 +232,11 @@ authentication, session binding or the first model turn has finished.
 `spawn --wait` and `resume AGENT --wait` opt into a readiness wait after
 registration (`--wait-timeout SECONDS`, default 60). Core waits outside the launch
 lock so native binding can finish. Every child must first survive a two-second
-startup check (`runtime.startup_checked`); plain/legacy launches then require a running child;
+startup check (`runtime.startup_checked`); plain/legacy launches then require a running child.
+A supported plain refusal observer must also settle before readiness: a started screen
+proceeds, refusal fails with the native reason, and the bounded window ending without
+either proceeds with an explicit unconfirmed-screen notice. Unsupported versions keep
+process readiness;
 bridge launches also require the exact native ID and delivery readiness. For
 Codex, `running` means the relay validated the native reply and effective grants.
 Claude/Pi wait for their bridge registration capability. A changed generation is
@@ -418,10 +471,15 @@ or retry database.
 | submitting | Attempt persisted before native API submission or prompt-bearing process startup; a crash makes acceptance unknown. |
 | accepted | Native API accepted, or the resumed interactive process started with its prompt; consumption may remain unconfirmed. |
 | failed | Definite rejection or pre-submission failure; explicit retry permitted. |
+| launch-only | Final refusal: this launch has no native delivery path. History only; not retried or counted as an open failure. |
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
 The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
-map to failed. Transcript confirmation and an answer are independent evidence,
+map to failed, except a typed `launch_only: true` refusal, which maps to the final
+launch-only state. Only old failed receipts with that exact typed flag are
+normalized to it; accepted and uncertain input is never reclassified. Supported
+stopped-agent wake and failed wake retry stay separate from live delivery.
+Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh
@@ -623,7 +681,7 @@ through `/resume` requests `thread/resume` on the existing transport. This follo
 the 0.163.0 [slash-command dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/chatwidget/slash_dispatch.rs),
 [event dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/event_dispatch.rs)
 and [session lifecycle](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/session_lifecycle.rs).
-The bridge refuses a second start, a fork or a resume with a different native ID;
+The bridge refuses a second start, a persistent fork or a resume with a different native ID;
 it never adopts that conversation. An offline relay regression checks that these
 requests cannot reach the daemon, cannot replace the stored binding, and leave
 the original connection usable. An isolated 0.163.0 TUI probe also exercised
@@ -712,7 +770,13 @@ removes the original workspace and verifies that configuration reads still work.
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
 `unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`, and Claude also supports `system_prompt_snapshot` (see the Claude section). Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
-`CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
+`CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution,
+and so is an inherited `CLAUDE_CODE_CHILD_SESSION` (Claude Code sets it for its own
+tool subprocesses, and a Claude that inherits it saves no transcript), and a
+parent Claude's `CLAUDE_CODE_SSE_PORT` (its IDE connection) and
+`CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` (its inbox and
+its secret), which an agent spawned from inside Claude inherits; a harness that
+sets one in `env` keeps its value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
@@ -789,17 +853,28 @@ Different process-level environments require separately configured native homes.
 Exact thread ID/workspace are checked before queueing or steering. Urgent busy
 input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. A racing busy steer is never converted to a fresh turn.
-Codex 0.159.3 and 0.160.0 can leave automatic queue draining paused after an
-interrupt: a later `queue/add` accepts a message while the thread remains idle.
-This reproduces through direct native RPC, independently of mv2. For a thread
-observed idle before submission, mv2 checks the queue after acceptance. If the
-new message is its only entry, mv2 asks `thread/queue/start` to start that exact
-entry. It never resubmits the text, skips older work or restarts a thread. Native
-queue start rejects active/pending turns. If auto-draining already took the
-entry, no start is needed. A rejected explicit start preserves acceptance and
-reports a diagnostic for `deliver AGENT --check`, rather than making it retryable.
-If other queued work exists, mv2 preserves it and reports that an interrupted
-queue may need native continuation. Receipt checks never start or replay work.
+Codex can leave automatic queue draining paused after an interrupt. The owning
+terminal relay publishes interrupt intent before forwarding it, and records
+exact-primary turn starts and completions. An interrupted completion labels the
+queue paused; a newer start clears it. The public API flattens several abort
+reasons, so this label never blocks Codex's own native draining. Old-turn and
+side-thread events cannot change the primary's state.
+
+Only a new steer or follow-up submitted by mv2 authorizes an explicit restart.
+Core durably claims that message ID under delivery locks and exposes the claim
+to that send invocation only. Ordinary handles strip it; receipt checks,
+retries, inbox-only messages and idle polling cannot reuse it. After accepting
+new idle input, the adapter uses queue/start without an item ID, so the native
+FIFO head runs even if an older item came from another client. A busy race or
+lost acceptance never retries that start or resubmits text. The returned head's
+turn is separate from the new tail's receipt.
+
+Pause state survives an attachment-only resume of the exact conversation. A new
+message waking a paused bridge resumes without an interactive prompt, waits for
+binding, then queues through normal startup delivery. Thus it cannot jump ahead
+of older accepted input. Failed startup leaves it saved for an explicit retry.
+Default kill still cancels native queued work, and delivery checks report those
+messages as cancelled. There is no background idle queue starter.
 Approvals remain unanswered by the delivery client. Core bounds transport
 requests, frames and deadlines. Explicit sandbox/approval flags in `args` or
 `resume_args` are applied and verified on bridge resume as described above;
@@ -808,7 +883,15 @@ profile/directory resume overrides are diagnosed, never silently removed. Whole-
 CLI overrides are rejected in bridge mode; individual keys remain supported.
 Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
 `developer_instructions` CLI override from remote thread requests. The adapter
-therefore returns an optional `RpcProxySpec` in its `CommandSpec`. Core serializes
+therefore returns an optional `RpcProxySpec` in its `CommandSpec`.
+A command candidate may also carry `notices`, a tuple of presentation strings.
+A plain fallback carries its own notices, independently of the bridge candidate;
+these strings never change permissions or launch selection. Core sanitizes and
+records only the selected candidate's notices in the launch request and runtime.
+Spawn, resume, readiness waits and message wakes return them in text and JSON.
+A runner-selected fallback replaces the discarded candidate's notices before
+starting the child, preserving independent saved-storage notices; inspect also
+shows these notes when an asynchronous fallback happened after the CLI returned. Core serializes
 it in the launch request, creates a private 0700 socket directory, and starts the
 relay in the runner before starting the TUI. The provider supplies pure request
 and reply interpretation; core owns WebSocket connections, backpressure, size
@@ -818,7 +901,24 @@ queue: native resume replies include conversation history and can exceed the
 1 MiB budget used for small control RPCs. Oversized messages still close the
 connection with a runtime diagnostic.
 
-The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
+An adapter may supply `for_connection(connection_id, owns_primary)` to give each
+relay connection a protocol view. The owner callback reads current ownership;
+request correlation belongs to the view, while the adapter may share validated
+primary binding state. Core uses that view for request/reply transforms, binding,
+refusal and usage observations, and post-bind naming. Its optional `closed()`
+hook discards only local memory and runs once even if the upstream connection
+fails. Cleanup errors do not change the primary launch's health. Adapters without
+this hook retain their existing shared protocol behavior.
+
+A view can raise `LocalProtocolError` to reject one frame without invoking
+binding, naming, refusal, usage or launch-error callbacks. It supplies a correlated
+string or integer request ID and an explicit reply destination: client for client
+requests or native responses, upstream for native server requests. Core checks
+the frame's ID and direction before replying; a missing ID means drop, and an
+uncorrelated frame or notification gets no fabricated response. Ordinary primary
+validation and transport failures keep their existing diagnostics and loss rules.
+
+The relay adds the bootstrap to the TUI's initial `thread/start` or exact `thread/resume`
 requests, preserving existing developer instructions. Initial writable roots from
 mv2, user arguments and native configuration are combined in the thread request,
 so external state directories remain supported without the rejected CLI flag.
@@ -834,10 +934,22 @@ two requests and three seconds). This also reapplies the name on resume. Naming
 errors or timeouts are recorded in `runtime.json` without failing the terminal
 launch; unrelated TUI requests, native notifications and approvals retain their
 own connection. Existing saved launch requests without a name remain usable.
-Switching or forking into a different thread requires a separate
+Switching or persistently forking into a different thread requires a separate
 Multiverse launch. The relay closes with the launch and never restarts the shared
 daemon. Relay loss stays sticky for that launch; the qualified idle-recovery worker described below can create a fresh launch. Plain launches have no relay. The development
 template, like base and testing, uses auto; existing unset profiles also try the bridge on their next launch.
+
+Codex 0.163.0's native `/btw` is a narrow exception. Only the bound terminal's
+connection may fork its exact primary into one ephemeral side conversation.
+The view keeps the pending fork, side ID and bounded request correlation in
+memory until unsubscribe or connection close. It never publishes a side binding,
+name, usage, refusal, status, inbox or delivery record. Returning to the exact
+primary does not repeat the startup grants, bootstrap or naming. Side input and
+host requests retain Codex's normal tools and permissions; there is no execution
+isolation, and the side can run mv2 commands as the user. Primary send, receipt and
+queue-continuation RPCs still address only the saved primary ID. A native side
+error is forwarded locally without failing the primary. Unknown native versions,
+side resume and persistent forks remain unavailable. This does not add Codex ask.
 
 The runner records `native_relay.state=ready` after binding. Loss of the bound
 TUI's relay connection (or an upstream connection failure before binding) records
@@ -864,13 +976,26 @@ universe, full agent UUID, directory, CLI/Python paths and pinned native storage
 `CODEX_THREAD_ID` must match the saved native binding. Missing or mismatched
 proof is an error, never an operator fallback. `MV2_LAUNCH_ID` and launch-private
 control/tmux addresses are absent. The attachment's `--remote` relay remains
-private to that launch; there is no stable raw-native relay.
+private to that launch; there is no stable raw-native relay. Each new launch requests
+`MV2_CLI`, `MV2_PYTHON` and `PATH` from the launching mv2 installation. The
+requested map is kept in that launch's `request.json.agent_environment` and the
+agent's latest `properties.json.agent_environment`; it is not an attestation of
+the environment in an already-loaded shared conversation. Executable paths are
+not part of actor authority. A shared native conversation can retain its old
+tools while another client remains attached; close those clients, then use a
+normal mv2 kill/resume to reload it after moving an installation.
 
 Before a manual resume or completed stop, mv2 waits for the previous launch's
 owned relay, status, recovery and startup roles to close. A bounded cleanup
 failure remains visible and blocks handover. Per-launch cleanup and connection
 records contain role, endpoint and timing metadata, never conversation content;
-outside clients and the native daemon are left running.
+outside clients and the native daemon are left running. Each role and connection
+records its owner's PID and UTC process start once, so PID reuse and unreaped
+zombies do not block a handover. Older records use their post-creation timestamp
+(or a recorded terminal exit) to rule out later processes; launch start time is
+not such proof. Unclaimed recovery roles expire after 60 seconds. Unknown process
+identities still block with the PID, command, start time and record path so the
+operator can inspect the cause; no cleanup check signals an unrelated process.
 
 `report` (including `status`) and every `inbox` form address that one agent;
 `send` records its stable sender identity, including cross-universe sends. These
@@ -900,6 +1025,43 @@ cause as the launch error in list, inspect, wait and send. Plain recognition is
 limited to the actual active native refusal widget in an owned visible pane,
 with its controls and hidden cursor, at the tested version; quoted history is
 not a refusal. Same-server successful rejoin is never labelled in use.
+
+The plain startup observer runs only for a supported native layout, with a
+55-second observation window from the launch's start. The default 60-second
+readiness wait leaves a five-second margin beyond observation; explicit wait
+timeouts are unchanged. At the observation bound, an unrecognized screen
+(including an unanswered trust prompt) falls back to process readiness with a
+notice instead of blocking the launch. The readiness waiter can settle this
+bound while a pane query is still in flight. The observer discards frames
+completed after the bound; expiry and refusal publication serialize on the
+runtime lock, so a late frame cannot reclassify an unverified startup. It stops sooner after validated
+bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
+perform no pane polling; later TUI navigation is outside this startup observer.
+
+Agent data callbacks (`report` and `inbox`) validate the selected properties and
+actor or current-launch proof independently of harness configuration. A damaged
+harness name or configuration cannot block those callbacks; all other identity
+fields still require valid records. Reporting itself does not need runtime data
+for its optional event metadata. Launch, terminal and delivery operations retain
+their full record validation.
+
+### Successful plain startup observation
+
+An adapter may provide `launch_started(evidence) -> bool` beside its refusal
+classifier. Both receive the same current owned-pane snapshot: actual CLI
+version, visible text, cursor visibility and integer cursor coordinates. Core
+checks refusal first. Only an exact `True` from the startup hook confirms the
+additional plain startup condition and ends observation. All process and liveness
+readiness checks still apply; screen evidence never establishes a binding,
+changes permissions or clears a refusal. If neither classifier settles the screen
+within the startup window, process readiness applies with a notice. For tested Codex 0.163.0, the active empty ordinary composer with its
+configured status content or legacy context-percentage footer is startup evidence;
+the status content need not contain a separator. The exact placeholder may be
+clipped using the owned pane's measured width (at least 24 columns). Startup's
+hint-only footer and deferred-submission hint are not success evidence. No Codex
+config file is read for this classification. The real loading composer is not. Later
+navigation after that success is no longer classified as a launch failure.
+Unknown layouts retain the bounded startup window and existing relay-loss exit.
 
 The native refusal remains latched for that launch, even if pressing R later
 succeeds in Codex. Use `mv2 kill NAME --attachment-only` to end mv2's refused
@@ -1025,6 +1187,11 @@ message to a stopped agent, is an ordinary resume. This differs from Codex, whos
 shared app-server outlives its terminal. Neither is a general model: a bridge says
 what an integration can do, a service says where work lives.
 
+A listing reconciles each row once and passes those same properties and runtime
+records to usage measurement. Direct usage calls still reconcile independently.
+Connection diagnostics retain their own process identity check; there is no
+process-wide identity cache between reads.
+
 Claude's own `/restart` (offered once a newer Claude Code is installed) runs the
 new version in the same process, with a command line Claude rebuilds from the
 session. Seen on 2.1.302, it keeps `--resume`, `--settings`, every
@@ -1037,8 +1204,14 @@ publishes the key for that path, while the mod and its status and usage reports
 keep working. mv2's own socket then has no key, so the adapter follows Claude to
 that socket: it reads `~/.claude/sessions/<pid>.json` for the agent's process and
 uses its `messagingSocketPath` and key only when the file belongs to that exact
-process (the pid, the start time the runner recorded when it started Claude and
-the file's `procStart` all agree, and its `sessionId` is the agent's session).
+process: the start the runner recorded when it started Claude is the pid's start
+now (so a reused pid fails), the file's `procStart` is that start in Claude's own
+format (field 22 of `/proc/<pid>/stat`, in clock ticks since boot, on Linux;
+`ps -o lstart=` in UTC on macOS), the process isn't a zombie, and the file's
+`sessionId` is the agent's session. Only a running launch with a sessions file is
+checked, so a listing runs no process query for stopped agents. For a running
+one, each check costs one `ps` on macOS, and on Linux a `/proc` read plus one
+`ps` once the file matches.
 When it cannot follow (the file is another process's, or the launch was recorded
 before mv2 kept the start time), `mv2 list`, `inspect` and `send` say "Claude
 relaunched itself (/restart) without mv2's inbox; restart the agent". Restarting
@@ -1053,8 +1226,9 @@ runs without waiting for it, so the mod waits up to 5 s and reports nothing if
 the file never changes. Core also reads that file for the exact process
 (`observed_binding`, evidence `claude-process-file`) before it lists, measures,
 sends to or resumes an agent, so a launch without the bridge follows a `/clear`
-too. Core then rebinds the agent and records the move in its session history
-(`docs/session-lineage.md`). Messages, usage and resume go to the new session;
+too. A report that names another session than the process file shows is
+refused. Core then rebinds the agent and records the move in its session history
+([session lineage](session-lineage.md)). Messages, usage and resume go to the new session;
 the old conversation stays on disk as an earlier generation.
 
 The pieces keep to their own side of the boundary:
@@ -1083,6 +1257,14 @@ reads only the session record, never the other capabilities (building them reads
 Status is whatever the mod reports and is never overwritten: core runs no
 observer for Claude and produces no `NativeActivity` for it. A launch that fell
 back to plain says so in its `native_mode`, its capabilities and `mv2 inspect`.
+A plain launch (`inbox_bridge` false, or an auto launch Claude Code is too old
+for) is launch-only by design: `send` and `ask` return `unavailable` with
+`{"launch_only": true}` and `This agent is launch-only: REASON`, so core advises
+no restart, which could not connect it. A bridged launch whose mod has not
+registered carries no flag. With no agent (`mv2 capabilities --harness`), the
+adapter answers for the harness's launches: launch-only for `false`, and for auto
+or `true` the bridge, checked against the installed version only with `--probe`,
+since reading it runs `claude`.
 
 Claude bridge mode steers through the session's own peer inbox. `inbox_bridge` unset is auto: the bridge is used unless the installed
 Claude Code is older than 2.1.280 (the oldest the mod was built on; a version that cannot be read does not count), in which case the
@@ -1146,13 +1328,15 @@ typeahead with an argument hint, and runnable while a turn is running):
 shadowed. Everything but `list` acts with the person's authority at this terminal
 (it sends as this agent, submits a prompt as the person's, or changes what the
 agent has read), so it runs only for a prompt the person typed (the composer, or
-Remote Control); a plugin, the SDK or a peer can only list.
+Remote Control); a plugin, the SDK or a peer can only list. The model can't run
+it at all: Claude's Skill tool refuses plugin commands, so agents use `mv2`.
 
 On Claude Code 2.1.292 or newer the launch also loads `claude/typeahead/`, a
 second small plugin that fills the prompt box's typeahead while `/multiverse` is
 typed: the first word offers `list`, `send`, `inbox` and the catalog's commands,
 workflows and skills (`kind/name` when a bare name is shared or reserved); after
-`send` it offers this universe's agents other than this one (a comma list
+`send` it offers this universe's agents, except this one and any row built from a
+damaged record, which `send` can't reach (a comma list
 completes its last name); a catalog entry's arguments get nothing. It reads `mv2
 catalog` and `mv2 list --json` in the background and keeps them five seconds, so
 typing never waits on mv2, and a failed read offers no rows. It is separate
@@ -1235,7 +1419,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.302; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.303; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

@@ -9,9 +9,15 @@ from .. import universe
 def configure(parser):
     add_agent(parser)
     parser.add_argument("--session-id", required=True, help="Native harness session UUID for exact resume")
+    parser.add_argument("--json", action="store_true", help="Print the agent's record as JSON")
 
 
-def run(root=None, *, agent=None, session_id):
+def cli_run(root=None, *, agent=None, session_id, json=False):
+    record = run(root, agent=agent, session_id=session_id)
+    return record if json else f"Recorded {record.get('name') or 'the agent'}'s session."
+
+
+def run(root=None, *, agent=None, session_id, json=False):  # `json`: presentation only
     caller = actor()
     if caller:
         root = universe.resolve(root)
@@ -23,7 +29,13 @@ def run(root=None, *, agent=None, session_id):
                 raise ValueError('Agent identity can only verify its existing session binding; the runner owns binding changes')
             return data  # Cached bridge bootstrap: exact-existing verification, no writes.
     root, directory, launch_id = callback(root, agent)
-    return agents.bind_session(root, agent, session_id, launch_id)
+    try:
+        return agents.bind_session(root, agent, session_id, launch_id)
+    except OSError as error:
+        from ..runtime.binding_requests import namespace_denied, request_binding
+        if not launch_id or not namespace_denied(root, error):
+            raise
+        return request_binding(root, directory, launch_id, session_id)
 
 
 if __name__ == "__main__":

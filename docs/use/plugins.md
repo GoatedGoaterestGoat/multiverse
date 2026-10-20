@@ -71,7 +71,7 @@ The switch lives in the universe's `plugins.json`, which you can also edit by ha
 
 - A plugin that `plugins.json` doesn't name stays at its default. Every plugin is off by default, except typeahead.
 - Nothing is inherited. A subverse has its own `plugins.json`, so a plugin that is on in the root stays off in a subverse until you turn it on there.
-- Running agents keep the plugins they launched with. Restart an agent (`mv2 kill`, then `mv2 resume`) to give it a plugin you just turned on or off.
+- Running agents keep the plugins they launched with, so a plugin you turn on reaches an agent at its next launch (`mv2 kill`, then `mv2 resume`). A plugin can react sooner to being turned off: with compaction off, a running agent's next `/compact` is Claude's own.
 
 ## Change a plugin's settings
 
@@ -81,11 +81,11 @@ mv2 plugins settings notifier --set quiet_seconds=60   # VALUE is JSON, or else 
 mv2 plugins settings notifier --set notify.done=false --unset max_age_seconds
 ```
 
-Each plugin keeps its settings for a universe in `plugin-settings/NAME.json`. If the plugin's schema refuses an edit, nothing is written. In the dashboard, press `P`, select the plugin and press `Enter` (Configure). This opens the plugin's own settings screen, or fields built from its schema.
+Each plugin keeps its settings for a universe in `plugin-settings/NAME.json`. If the plugin's schema or its own settings check refuses an edit, nothing is written and the command exits 1 with the reason. A plugin whose code can't run here (untrusted, failed to load, safe mode) has only its schema checked, and `mv2 plugins settings` says so. In the dashboard, press `P`, select the plugin and press `Enter` (Configure). This opens the plugin's own settings screen, or fields built from its schema.
 
-Settings that can't be used never stop a launch. Instead, the plugin acts as off in that universe until they're fixed, and `mv2 doctor` says why.
+Settings that can't be used never stop a launch. Instead, the plugin acts as off in that universe until they're fixed: `mv2 plugins` lists it as `unusable`, and `mv2 plugins settings NAME` and `mv2 doctor` say why.
 
-Some plugins used a settings file before they became plugins, such as `compaction.json`. The next `mv2` command that runs in the universe converts that file to `plugin-settings/`. `mv2 plugins migrate` shows what it would convert, and `--apply` converts it now.
+Some plugins used a settings file before they became plugins, such as `compaction.json`. The next `mv2` command that runs in the universe converts that file to `plugin-settings/`. `mv2 plugins migrate` shows what it would convert, and `--apply` converts it now. Once converted, an old file found again (brought back by an old branch, say) is ignored, and `mv2 doctor` says so: remove it.
 
 ## Trust a universe's own plugins
 
@@ -121,8 +121,9 @@ There is one host per top-level universe, in a tmux session on mv2's server. It 
 - If a plugin needs the host and it isn't running, the dashboard starts it. It does this when it opens, and again after you change plugins on `P`. The header shows `host off` while the host is needed but not running. On `P`, press `h` to start or stop it.
 - Quitting the dashboard doesn't stop the host. The host stops by itself once no plugin needs it.
 - A worker that exits is restarted at most 3 times in 5 minutes. After that it stays stopped, and `mv2 plugins host` and `P` show the reason. Turn the plugin off and on again to give it a fresh start.
-- A plugin whose event handlers keep hanging is also left stopped, after 3 restarts however far apart.
+- A plugin whose event handlers keep hanging is also left stopped, after 3 such restarts within a day, however long each run takes. `mv2 plugins` and `mv2 doctor` say so too.
 - The host's log is `state/plugins/host/host.log` in the top-level universe.
+- If the host's `state/plugins/host/status.json` is damaged, `mv2 plugins host` says its status is unknown and why. The host rewrites the file when it starts.
 
 ## Safe mode
 
@@ -141,9 +142,9 @@ A broken plugin loses only its own part of mv2:
 - Its column shows `—`.
 - Its panel shows one line saying why.
 - Its inspector line shows `unavailable`.
-- Its command fails with `mv2: plugin NAME: …`.
+- Its command fails with `mv2: plugin NAME: …`. An error the command gives on purpose (a `ValueError`, `OSError`, `KeyError` or `RuntimeError`) prints `mv2: MESSAGE`, as a built-in command's does.
 
-A launch goes on without the plugin and records why in the agent's `runtime.json`. For Claude Code, `mv2 inspect` shows the reason on its `Note:` line. No plugin can stop a launch, a send, `mv2 list` or the dashboard.
+A launch goes on without the plugin and records why in the agent's `runtime.json`. `mv2 inspect` shows the reason on a `Note:` line, for a plain launch as well as a bridged one. No plugin can stop a launch, a send, `mv2 list` or the dashboard.
 
 | Where | What you see |
 | --- | --- |

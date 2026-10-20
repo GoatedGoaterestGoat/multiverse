@@ -527,7 +527,11 @@ So the host is a general **supervisor** for plugins' long-running work:
   stop`, and stops its workers first. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
   second that its parent process changed, stops its services and exits, so
-  nothing keeps holding a socket or running a handler.
+  nothing keeps holding a socket or running a handler. The supervisor gives each
+  worker its own pid, so this holds even when it died while the worker was
+  still starting. It tells a worker has exited without reaping it (`waitid`,
+  or a kqueue on macOS before Python 3.13), so it can still end what the worker
+  left in its process group.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own
@@ -551,7 +555,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 9)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 11)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -617,7 +621,15 @@ Plugin utilities:
 
 - `mv.state_dir(universe)`: `state/plugins/NAME/` of a universe.
 - `mv.agent_state_dir(agent)`: `state/agents/<id>/NAME/`. Compaction's existing
-  `state/agents/<id>/compaction/` already fits.
+  `state/agents/<id>/compaction/` already fits. The API never makes an agent's
+  own folder: below it, directories are made one level at a time without their
+  parents, and files are written without making their directory, so an agent
+  removed or moved at any moment (its folder renamed away or deleted) makes a
+  late write fail with `api.AgentGone` instead of bringing it back as an orphan.
+  No lock against removal is needed (1.10). A universe's root is kept the same
+  way: `mv.state_dir`, files in a plugin's state (`state/plugins/...`), `mv.log`
+  and mv2's own plugin logs never make it again (`api.UniverseGone`; logs write
+  nothing).
 - `mv.agent_at(directory)` and `mv.current_agent()` (from `MV2_AGENT_DIR`, else
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage
@@ -628,7 +640,7 @@ Plugin utilities:
   directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
   Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
-  processes) and `now`.
+  processes), `ensure_dir` (1.10) and `now`.
 - `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
   the way the rest of mv2 does.
 - `mv.helper.command(name, *args, universe=)` is the argv that runs one of the
@@ -1533,7 +1545,13 @@ multiverse-v2/
   moved `HOME`), by the test or by a thread it started, is refused with
   `PermissionError` and fails that test, never a later one. Writes no test can
   be charged with (a test class that never names itself, or a thread that
-  outlived its test) are printed at the end and fail the run. Its helpers:
+  outlived its test) are printed at the end and fail the run. A path given
+  relative to a directory file descriptor (as `shutil.rmtree` removes files)
+  is resolved through that descriptor, so the working directory never decides
+  it, and every path is checked as written and as resolved, so a write through
+  a link elsewhere that points into the home is refused too. The plugin under test's own directory, and Python's bytecode in a
+  personal plugin (`~/.multiverse/plugins/NAME`), are not guarded: a personal
+  plugin runs its tests from its own directory. Its helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it
     would load it. Its `registrations` hold what `register` added, such as
     columns, handlers, launch contributions and helpers, to call directly.

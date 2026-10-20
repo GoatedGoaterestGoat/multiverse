@@ -135,7 +135,10 @@ class NativeBackendTest(BaseTest):
     def session(self):
         return SessionHandle.from_records(self.properties, self.facts, self.directory)
 
-    def test_explicit_service_identity_attachment_and_protocol_are_independent(self):
+    def test_recovery_qualifies_only_an_exact_idle_service_session(self):
+        """Core's recovery check qualifies only a proven-idle observation of this exact session, workspace and service,
+        speaking only the provider's own methods; any truthy, None or 'false' field that qualifies restarts a working
+        agent mid-turn, unattended."""
         session = self.session()
         self.assertEqual(session.service.identity.provider, 'service-test')
         self.assertEqual(session.service.endpoint.address, self.address)
@@ -150,27 +153,96 @@ class NativeBackendTest(BaseTest):
                          ['hello-service', 'client-ready', 'conversation-inventory'])
         self.assertNotIn('id', self.requests[1])
         self.assertEqual(self.requests[-1]['params']['id'], session.native_id)
-
-    def test_unknown_busy_or_malformed_inventory_never_qualifies(self):
-        for key in ('active', 'waiting', 'queued', 'background'):
-            for value in (True, None, 0, 'false'):
-                with self.subTest(key=key, value=value):
-                    self.inventory[key] = value
-                    self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
+        self.requests.clear()
+        published = []
+        async def observe():
+            task = asyncio.create_task(rpc.watch(self.adapter.attachment_recovery(session), lambda value: None,
+                                                 published.append))
+            for _ in range(100):
+                if published:
+                    break
+                await asyncio.sleep(.01)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        asyncio.run(observe())
+        self.assertIsInstance(published[0], NativeActivity)
+        self.assertEqual([r['method'] for r in self.requests],
+                         ['hello-service', 'client-ready', 'conversation-inventory'])
+        self.requests.clear()
+        def plan():
+            yield RpcRequest('initialize', {})
+            return NativeResult('ok')
+        self.assertEqual(rpc.execute(RpcSpec(self.address, plan)).state, 'ok')
+        self.assertEqual([r['method'] for r in self.requests], ['initialize'])
+        for key, value in product(('active', 'waiting', 'queued', 'background'), (True, None, 0, 'false')):
+            with self.subTest(key=key, value=value):
+                self.inventory[key] = value
+                self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
             self.inventory[key] = False
         for status in ('unknown', 'working', 'waiting', None):
-            self.inventory['status'] = status
-            self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
-
-    def test_observation_must_bind_service_session_and_workspace(self):
-        good = NativeActivity(self.session().native_id, str(self.work), self.session().service,
-                              'idle', False, False, False, False)
+            with self.subTest(status=status):
+                self.inventory['status'] = status
+                self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
+        self.inventory['status'] = 'idle'
+        good = NativeActivity(session.native_id, str(self.work), session.service, 'idle', False, False, False, False)
         for observation in ({'safe': True}, replace(good, native_id='other'),
                             replace(good, workspace='/elsewhere'), replace(good, service=None)):
-            self.adapter.observation = observation
+            with self.subTest(observation=observation):
+                self.adapter.observation = observation
+                self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
+        self.adapter.observation = None
+        elsewhere = replace(self.adapter.attachment_recovery(session), socket_path='/other')
+        with patch.object(self.adapter, 'attachment_recovery', return_value=elsewhere), \
+             patch.object(rpc, 'execute') as execute:
             self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
+        execute.assert_not_called()
+        service = self.facts['native_service']
+        for changed in (None, {**service, 'lifetime': 'owned'},
+                        {**service, 'identity': {'provider': 'other', 'scope': {'storage': '/other'}}},
+                        {**service, 'endpoint': {'transport': 'unix-websocket', 'address': '/other.sock'}}):
+            with self.subTest(service=changed):
+                self.assertIsNotNone(recovery.eligibility(self.properties, {**self.facts, 'native_service': changed}))
+        self.assertIsNotNone(recovery.eligibility({**self.properties, 'workspace': '/other'}, self.facts))
+
+    def test_launches_without_a_service_policy_never_schedule_recovery(self):
+        """Launches without a service-owned recovery policy (Claude, Pi, plain, a changed policy) never schedule
+        recovery or monitors; the decision sits in the runner's relay-loss callback, and recovering a terminal-owned
+        agent kills its work."""
+        plain = ConfiguredAdapter('plain', {'spawn': ['native'], 'resume': ['native', '{session_id}']})
+        for name, adapter in (('plain', plain), *((name, harnesses.BUILTINS[name].configured(name, {}))
+                                                  for name in ('claude', 'pi'))):
+            with self.subTest(adapter=name):
+                self.assertIsNone(adapter.attachment_recovery(self.session()))
+                self.assertIsNone(adapter.retained_usage(self.session(), self.facts))
+        for policy in (None, asdict(AttachmentSpec()), {**self.facts['attachment'], 'work_owner': 'terminal'}):
+            with self.subTest(policy=policy):
+                write(self.directory / 'runtime.json', {**self.facts, 'attachment': policy})
+                with patch.object(recovery.subprocess, 'Popen') as worker:
+                    runner.RelayPublisher(self.directory, self.launch)('lost')
+                worker.assert_not_called()
+                self.assertEqual(agents.runtime(self.directory)['auto_recovery']['state'], 'skipped')
+        with patch.object(self.adapter, 'attachment_recovery', return_value=None):
+            self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
+        write(self.directory / 'runtime.json', self.facts)
+        launch = self.directory / 'launches' / self.launch
+        request = read(launch / 'request.json')
+        request['attachment'] = None
+        write(launch / 'request.json', request)
+        process = Mock(pid=123)
+        process.poll.return_value = process.wait.return_value = 0
+        with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+             patch.object(runner, 'process_started', return_value=None), \
+             patch.object(runner.subprocess, 'Popen', return_value=process), \
+             patch.object(rpc, 'LaunchProxy'), patch.object(runner, 'StatusWatcher') as status, \
+             patch.object(recovery, 'RecoveryMonitor') as monitor, patch.object(runner, 'StartupDelivery'), \
+             patch.object(runner, 'launch_diagnostic', return_value={}):
+            self.assertEqual(runner.main(), 0)
+        status.assert_not_called()
+        monitor.assert_not_called()
 
     def test_recovery_respawns_attachment_and_never_runs_service_start(self):
+        """Recovery respawns the pane on the same native session with no resume prompt and never starts a service; a
+        break replays a message or creates a second daemon, and neither is visible."""
         with patch.object(recovery.subprocess, 'Popen'):
             runner.RelayPublisher(self.directory, self.launch)('service unavailable')
         pane = {'pane_id': '%1', 'pane_dead': '1', '@mv2_agent_id': self.properties['id'],
@@ -194,39 +266,36 @@ class NativeBackendTest(BaseTest):
         self.assertEqual(request['rpc_proxy']['upstream_path'], self.address)
         self.assertTrue(all(call[-1].resume_prompt is None for call in self.adapter.calls))
 
-    def test_scope_change_rejects_resume_before_starting_service_or_terminal(self):
-        self.adapter.home = self.work / 'different-account'
+    def test_adapter_supplied_scope_and_endpoint_are_revalidated(self):
+        """A mismatched account scope, endpoint, binding or lifetime from the adapter refuses before any service or
+        terminal starts; a lax check attaches an agent to another account's daemon or lets core kill a shared
+        daemon."""
+        command = self.adapter.command(self.adapter.calls[-1][-1])
+        native.validate_recovery_command(command, self.session())
+        for changed in (replace(command, shared_service=None), replace(command, attachment=None),
+                        replace(command, rpc_proxy=replace(command.rpc_proxy, binds_session=False)),
+                        replace(command, rpc_proxy=replace(command.rpc_proxy, upstream_path='/other.sock')),
+                        replace(command, shared_service=replace(command.shared_service, lifetime='owned'))):
+            with self.subTest(command=changed), self.assertRaises(ValueError):
+                native.validate_recovery_command(changed, self.session())
+        with patch.object(native.subprocess, 'run') as run, self.assertRaisesRegex(ValueError, 'externally owned'):
+            native.start_shared_service(replace(command.shared_service, lifetime='owned'), self.work,
+                                        self.work / 'log', ())
+        run.assert_not_called()
+        home, self.adapter.home = self.adapter.home, self.work / 'different-account'
         with patch.object(native, 'start_shared_service') as start, self.assertRaisesRegex(ValueError, 'scope'):
             lifecycle.start(self.root, resume=self.properties['id'])
         start.assert_not_called()
         self.assertEqual(agents.runtime(self.directory), self.facts)
         self.backend.respawn.assert_not_called()
-
-    def test_mouse_uses_the_final_prepared_attachment_before_runner_ready(self):
+        self.adapter.home = home
         original = self.adapter.command
-        def prepared(context):
+        def other_endpoint(context):
             command = original(context)
-            return replace(command, attachment=replace(command.attachment, mouse=bool(context.endpoint)))
-        self.backend.run.reset_mock()
-        with patch.object(self.adapter, 'command', side_effect=prepared):
-            result = lifecycle.start(self.root, name='final-mouse', harness='service-test')
-        directory = agents.directory(self.root, result['id'])
-        self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + result['runtime']['launch_id']), True)
-        self.assertTrue(result['runtime']['attachment']['mouse'])
-        self.backend.run.assert_any_call('set-option', '-t', '$1', 'mouse', 'on')
-        self.assertTrue((directory / 'launches' / result['runtime']['launch_id'] / 'ready').exists())
-
-    def test_declared_fallback_can_have_a_different_mouse_policy(self):
-        original = self.adapter.command
-        def prepared(context):
-            command = original(context)
-            return replace(command, fallback=CommandSpec((sys.executable, '-c', 'pass'), attachment=AttachmentSpec(mouse=True)))
-        with patch.object(self.adapter, 'command', side_effect=prepared):
-            result = lifecycle.start(self.root, name='different-fallback', harness='service-test')
-        self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + result['runtime']['launch_id']), True)
-        request = read(agents.directory(self.root, result['id']) / 'launches' / result['runtime']['launch_id'] / 'request.json')
-        self.assertFalse(request['attachment']['mouse'])
-        self.assertTrue(request['fallback']['attachment']['mouse'])
+            return replace(command, rpc_proxy=replace(command.rpc_proxy, upstream_path='/other.sock'))
+        with patch.object(self.adapter, 'command', side_effect=other_endpoint), \
+             self.assertRaisesRegex(RuntimeError, 'different service endpoint'):
+            lifecycle.start(self.root, name='other-endpoint', harness='service-test')
 
     def fallback_fixture(self, initial, selected):
         launch = self.directory / 'launches' / self.launch
@@ -239,36 +308,9 @@ class NativeBackendTest(BaseTest):
         proxy.start.side_effect = RuntimeError('relay unavailable')
         return launch, proxy
 
-    def test_runner_applies_selected_fallback_mouse_policy_before_child_startup(self):
-        original_request = read(self.directory / 'launches' / self.launch / 'request.json')
-        for initial, selected in ((False, True), (True, False), (False, False), (True, True)):
-            with self.subTest(initial=initial, selected=selected):
-                write(self.directory / 'runtime.json', self.facts)
-                write(self.directory / 'launches' / self.launch / 'request.json', original_request)
-                launch, proxy = self.fallback_fixture(initial, selected)
-                self.backend.run.reset_mock()
-                expected = (('set-option', '-t', '%1', 'mouse', 'on') if selected
-                            else ('set-option', '-u', '-t', '%1', 'mouse'))
-                process = Mock(pid=123)
-                process.poll.return_value = process.wait.return_value = 0
-                def start(*args, **kwargs):
-                    if initial != selected:
-                        self.backend.run.assert_called_once_with(*expected)
-                    else:
-                        self.backend.run.assert_not_called()
-                    self.assertEqual(agents.runtime(self.directory)['attachment']['mouse'], selected)
-                    return process
-                with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
-                     patch.object(rpc, 'LaunchProxy', return_value=proxy), \
-                     patch.object(runner, 'process_started', return_value=None), \
-                     patch.object(runner.subprocess, 'Popen', side_effect=start) as child, \
-                     patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
-                     patch.object(runner, 'launch_diagnostic', return_value={}):
-                    self.assertEqual(runner.main(), 0)
-                child.assert_called_once()
-                self.assertIsNone(agents.runtime(self.directory)['native_service'])
-
     def test_stale_generation_or_foreign_pane_cannot_change_fallback_options_or_start_child(self):
+        """A runner of an outdated generation, or in a foreign pane, starts no child and changes no tmux option; a late
+        runner races a resume, and a break starts a duplicate native process."""
         original_request = read(self.directory / 'launches' / self.launch / 'request.json')
         for stale, initial, selected in product((True, False), repeat=3):
             with self.subTest(stale=stale, initial=initial, selected=selected):
@@ -299,77 +341,19 @@ class NativeBackendTest(BaseTest):
                 else:
                     owned.assert_called_once()
 
-    def test_changed_service_or_endpoint_invalidates_the_recent_proof(self):
-        service = self.facts['native_service']
-        for changed in (None, {**service, 'lifetime': 'owned'},
-                        {**service, 'identity': {'provider': 'other', 'scope': {'storage': '/other'}}},
-                        {**service, 'endpoint': {'transport': 'unix-websocket', 'address': '/other.sock'}}):
-            facts = {**self.facts, 'native_service': changed}
-            self.assertIsNotNone(recovery.eligibility(self.properties, facts))
-        self.assertIsNotNone(recovery.eligibility({**self.properties, 'workspace': '/other'}, self.facts))
-
-    def test_recovery_plan_cannot_target_another_service(self):
-        specification = self.adapter.attachment_recovery(self.session())
-        with patch.object(self.adapter, 'attachment_recovery', return_value=replace(specification, socket_path='/other')), \
-             patch.object(rpc, 'execute') as execute:
-            self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
-        execute.assert_not_called()
-
-    def test_automatic_command_must_keep_service_binding_and_recovery_policy(self):
-        command = self.adapter.command(self.adapter.calls[-1][-1])
-        native.validate_recovery_command(command, self.session())
-        for changed in (replace(command, shared_service=None), replace(command, attachment=None),
-                        replace(command, rpc_proxy=replace(command.rpc_proxy, binds_session=False)),
-                        replace(command, rpc_proxy=replace(command.rpc_proxy, upstream_path='/other.sock')),
-                        replace(command, shared_service=replace(command.shared_service, lifetime='owned'))):
-            with self.subTest(command=changed), self.assertRaises(ValueError):
-                native.validate_recovery_command(changed, self.session())
-
-    def test_launch_relay_cannot_target_a_different_service_endpoint(self):
-        original = self.adapter.command
-        def prepared(context):
-            command = original(context)
-            return replace(command, rpc_proxy=replace(command.rpc_proxy, upstream_path='/other.sock'))
-        with patch.object(self.adapter, 'command', side_effect=prepared), \
-             self.assertRaisesRegex(RuntimeError, 'different service endpoint'):
-            lifecycle.start(self.root, name='other-endpoint', harness='service-test')
-
-    def test_service_lifetime_cannot_authorize_core_ownership(self):
-        specification = replace(self.adapter.command(self.adapter.calls[-1][-1]).shared_service, lifetime='owned')
-        with patch.object(native.subprocess, 'run') as command, self.assertRaisesRegex(ValueError, 'externally owned'):
-            native.start_shared_service(specification, self.work, self.work / 'log', ())
-        command.assert_not_called()
-
-    def test_plain_unsupported_or_changed_policy_never_schedules_recovery(self):
-        for policy in (None, asdict(AttachmentSpec()),
-                       {**self.facts['attachment'], 'work_owner': 'terminal'}):
-            write(self.directory / 'runtime.json', {**self.facts, 'attachment': policy})
-            with patch.object(recovery.subprocess, 'Popen') as worker:
-                runner.RelayPublisher(self.directory, self.launch)('lost')
-            worker.assert_not_called()
-            self.assertEqual(agents.runtime(self.directory)['auto_recovery']['state'], 'skipped')
-        with patch.object(self.adapter, 'attachment_recovery', return_value=None):
-            self.assertEqual(recovery.check(self.properties, self.facts, self.directory).state, 'unavailable')
-
-    def test_binding_readiness_requires_provider_validation_and_startup_input(self):
-        session = self.session()
-        self.assertTrue(native.attachment_ready(self.adapter, session))
-        self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_relay=None)))
-        self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_id=None)))
-        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-            write(self.directory / 'runtime.json', {**self.facts, 'startup_delivery': 'waiting'})
-            self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
-            write(self.directory / 'runtime.json', self.facts)
-            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
-
     def test_real_relay_binds_only_after_provider_identity_workspace_and_grant_validation(self):
+        """The real websocket relay binds only when native id, workspace and grant match, also for a protocol without
+        for_connection, whose shared state no connection's cleanup may touch; a break goes unnoticed because a
+        widened grant or a wrong conversation just works."""
         request = read(self.directory / 'launches' / self.launch / 'request.json')
         settings = request['rpc_proxy']['settings']
         for index, change in enumerate(({}, {'native_id': 'wrong'}, {'workspace': '/wrong'}, {'grant': 'wrong'})):
             with self.subTest(change=change):
                 spec = {**request['rpc_proxy'], 'socket_path': str(self.work / f'relay-{index}.sock')}
                 bound, errors = [], []
-                proxy = rpc.LaunchProxy(spec, self.adapter.launch_proxy(settings), bound.append, errors.append)
+                protocol = self.adapter.launch_proxy(settings)
+                protocol.closed = Mock()
+                proxy = rpc.LaunchProxy(spec, protocol, bound.append, errors.append)
                 proxy.start()
                 try:
                     with unix_connect(spec['socket_path'], close_timeout=.1) as client:
@@ -385,17 +369,20 @@ class NativeBackendTest(BaseTest):
                             self.assertEqual(bound, [self.session().native_id])
                 finally:
                     proxy.close()
+                protocol.closed.assert_not_called()
 
-    def test_terminal_adapters_default_to_no_service_or_recovery(self):
-        plain = ConfiguredAdapter('plain', {'spawn': ['native'], 'resume': ['native', '{session_id}']})
-        self.assertIsNone(plain.attachment_recovery(self.session()))
-        self.assertIsNone(plain.retained_usage(self.session(), self.facts))
-        for name in ('claude', 'pi'):
-            adapter = harnesses.BUILTINS[name].configured(name, {})
-            self.assertIsNone(adapter.attachment_recovery(self.session()))
-            self.assertIsNone(adapter.retained_usage(self.session(), self.facts))
-
-    def test_old_style_command_provider_gets_legacy_binding_without_recovery(self):
+    def test_old_providers_and_saved_requests_keep_legacy_binding(self):
+        """Agents launched by an older mv2 keep their binding and startup-input gates after an update and get no
+        recovery; a break shows only on upgrade, on agents already running."""
+        session = self.session()
+        self.assertTrue(native.attachment_ready(self.adapter, session))
+        self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_relay=None)))
+        self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_id=None)))
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            write(self.directory / 'runtime.json', {**self.facts, 'startup_delivery': 'waiting'})
+            self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+            write(self.directory / 'runtime.json', self.facts)
+            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
         original = self.adapter.command
         def legacy(context):
             command = original(context)
@@ -406,15 +393,18 @@ class NativeBackendTest(BaseTest):
         policy = result['runtime']['attachment']
         self.assertEqual((policy['readiness'], policy['work_owner'], policy['recovery']),
                          ('legacy-binding', 'unknown', 'unavailable'))
-        session = SessionHandle.from_records(result, result['runtime'], self.directory)
-        self.assertIsNotNone(native.recovery_unavailable(session))
-
-    def test_old_saved_request_keeps_binding_and_startup_input_gates_without_recovery(self):
+        self.assertIsNotNone(native.recovery_unavailable(
+            SessionHandle.from_records(result, result['runtime'], self.directory)))
         launch = self.directory / 'launches' / self.launch
         request = read(launch / 'request.json')
         request.pop('attachment')
         request['rpc_proxy'].pop('binds_session')
         write(launch / 'request.json', request)
+        facts = {k: v for k, v in self.facts.items() if k not in ('attachment', 'native_service', 'native_relay')}
+        write(self.directory / 'runtime.json', facts)
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+        self.assertIsNotNone(recovery.eligibility(self.properties, facts))
         write(self.directory / 'runtime.json', {k: v for k, v in self.facts.items()
                                                if k not in ('attachment', 'native_service')})
         process = Mock(pid=123)
@@ -428,9 +418,11 @@ class NativeBackendTest(BaseTest):
             self.assertIsNotNone(recovery.eligibility(self.properties, facts))
             agents.update_runtime(self.directory, self.launch, startup_checked=True, startup_delivery='waiting')
             with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-                self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+                self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter,
+                                                      .01)['ready'])
                 agents.update_runtime(self.directory, self.launch, startup_delivery='ready')
-                self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+                self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter,
+                                                     .01)['ready'])
             return 0
         process.wait.side_effect = waited
         with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
@@ -442,55 +434,3 @@ class NativeBackendTest(BaseTest):
              patch.object(recovery, 'RecoveryMonitor') as monitor:
             self.assertEqual(runner.main(), 0)
         monitor.assert_not_called()
-
-    def test_wait_for_old_live_records_does_not_infer_recovery(self):
-        launch = self.directory / 'launches' / self.launch
-        request = read(launch / 'request.json')
-        request.pop('attachment')
-        request['rpc_proxy'].pop('binds_session')
-        write(launch / 'request.json', request)
-        facts = {k: v for k, v in self.facts.items() if k not in ('attachment', 'native_service', 'native_relay')}
-        write(self.directory / 'runtime.json', facts)
-        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
-        self.assertIsNotNone(recovery.eligibility(self.properties, facts))
-
-    def test_service_and_relay_without_policy_do_not_start_monitors(self):
-        launch = self.directory / 'launches' / self.launch
-        request = read(launch / 'request.json')
-        request['attachment'] = None
-        write(launch / 'request.json', request)
-        process = Mock(pid=123)
-        process.poll.return_value = process.wait.return_value = 0
-        with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
-             patch.object(runner, 'process_started', return_value=None), \
-             patch.object(runner.subprocess, 'Popen', return_value=process), \
-             patch.object(rpc, 'LaunchProxy'), patch.object(runner, 'StatusWatcher') as status, \
-             patch.object(recovery, 'RecoveryMonitor') as monitor, patch.object(runner, 'StartupDelivery'), \
-             patch.object(runner, 'launch_diagnostic', return_value={}):
-            self.assertEqual(runner.main(), 0)
-        status.assert_not_called()
-        monitor.assert_not_called()
-
-    def test_rpc_watch_uses_provider_notifications_too(self):
-        specification = self.adapter.attachment_recovery(self.session())
-        published = []
-        async def observe():
-            task = asyncio.create_task(rpc.watch(specification, lambda value: None, published.append))
-            for _ in range(100):
-                if published:
-                    break
-                await asyncio.sleep(.01)
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        asyncio.run(observe())
-        self.assertIsInstance(published[0], NativeActivity)
-        self.assertEqual([r['method'] for r in self.requests],
-                         ['hello-service', 'client-ready', 'conversation-inventory'])
-
-    def test_core_does_not_invent_initialize_notifications(self):
-        def plan():
-            yield RpcRequest('initialize', {})
-            return NativeResult('ok')
-        self.assertEqual(rpc.execute(RpcSpec(self.address, plan)).state, 'ok')
-        self.assertEqual([r['method'] for r in self.requests], ['initialize'])

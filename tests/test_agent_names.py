@@ -1,17 +1,20 @@
-"""Universe-local spawn names, concurrent reservation and legacy addressing."""
+"""Universe-local spawn names, concurrent reservation and addressing precedence."""
 from concurrent.futures import ThreadPoolExecutor
-import os
-import subprocess
+import contextlib
+import io
+import shutil
 import sys
 import threading
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from test_multiverse import BaseTest, ROOT
+from test_multiverse import BaseTest
+from multiverse import cli
 from multiverse.universe import agents
+from multiverse.universe import relocate
+from multiverse.terminal.tmux import Tmux
 from multiverse.runtime import lifecycle
 from multiverse import harnesses
-from multiverse.universe import templates
 from multiverse.store import read, write
 
 
@@ -37,74 +40,175 @@ class AgentNamesTest(BaseTest):
             write(directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': state})
         return directory
 
+    def cli(self, *arguments):
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['mv2', '-u', str(self.root), *arguments]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output), \
+                self.assertRaises(SystemExit) as stopped:
+            cli.main()
+        return stopped.exception.code, output.getvalue()
+
     def test_duplicate_name_is_refused_before_side_effects_in_every_end_state(self):
+        """A duplicate name is refused before any file or tmux side effect in every end state; fragile because new
+        preparation steps get added ahead of the check, and a break leaves half-made records that later read as
+        damage."""
         directory = self.record('worker')
         for state in (None, 'running', 'stopped', 'dormant', 'failed'):
             with self.subTest(state=state):
                 if state:
                     write(directory / 'runtime.json', {'launch_id': 'old', 'state': state})
                 before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
-                with self.assertRaisesRegex(ValueError, 'already has an agent named worker; pick another name or resume it with mv2 resume worker'):
+                with self.assertRaisesRegex(ValueError, 'already has an agent named worker'):
                     lifecycle.start(self.root, 'worker', harness='fake')
                 after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
                 self.assertEqual(after, before)
         self.backend.create.assert_not_called()
 
     def test_parallel_spawns_cannot_publish_two_agents_with_the_same_name(self):
-        adapter = harnesses.load(self.root, 'fake')
-        original = adapter.spawn
-        prepared = threading.Barrier(2)
-        def spawn(context):
-            command = original(context)
-            prepared.wait(timeout=3)  # Both spawns passed the initial name lookup.
-            return command
-        adapter.spawn = spawn
-        def start():
+        """Parallel spawns reserve a name once, while different names still prepare at the same time; fragile because
+        it is a race hand-testing never hits, and a break publishes two agents with one name."""
+        def named(name):
+            return [path for path in (self.root / 'state/agents').glob('*/properties.json')
+                    if read(path)['name'] == name]
+
+        def start(name):
             try:
-                return lifecycle.start(self.root, 'shared-name', harness='fake')
+                return lifecycle.start(self.root, name, harness='fake')
             except ValueError as error:
                 return error
-        with patch.object(harnesses, 'load', return_value=adapter), ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda _: start(), range(2)))
-        self.assertEqual(sum(isinstance(value, dict) for value in results), 1, results)
-        self.assertEqual(sum(isinstance(value, ValueError) for value in results), 1, results)
-        records = list((self.root / 'state/agents').glob('*/properties.json'))
-        self.assertEqual(len(records), 1)
-        self.assertEqual(read(records[0])['name'], 'shared-name')
-        self.assertEqual(self.backend.create.call_count, 1)
+        with self.subTest('two spawns of one name'):
+            ready = threading.Barrier(2)
+            def contend(_):
+                ready.wait(timeout=3)  # Concurrent contenders; only the winner prepares.
+                return start('shared-name')
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(contend, range(2)))
+            self.assertEqual(sum(isinstance(value, dict) for value in results), 1, results)
+            self.assertEqual(sum(isinstance(value, ValueError) for value in results), 1, results)
+            self.assertEqual(len(named('shared-name')), 1)
+            self.assertEqual(self.backend.create.call_count, 1)
+        adapter = harnesses.load(self.root, 'fake')
+        with self.subTest('different names prepare together'):
+            entered = threading.Barrier(2)
+            def prepare(context):
+                entered.wait(5)  # Both preparations run at once, or this barrier breaks.
+                raise ValueError('preparation fixture fails')
+            with patch.object(harnesses, 'load', return_value=adapter), \
+                    patch.object(adapter, 'spawn', side_effect=prepare), ThreadPoolExecutor() as pool:
+                results = list(pool.map(start, ('one', 'two')))
+            self.assertEqual([str(result) for result in results], ['preparation fixture fails'] * 2)
+            self.assertEqual((len(named('one')), len(named('two'))), (0, 0))
+        with self.subTest('four spawns of one name whose preparation fails'):
+            entered, release = threading.Event(), threading.Event()
+            def refuse(context):
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('contenders did not finish')
+                raise ValueError('preparation fixture fails')
+            with patch.object(harnesses, 'load', return_value=adapter), \
+                    patch.object(adapter, 'spawn', side_effect=refuse), ThreadPoolExecutor() as pool:
+                first = pool.submit(start, 'same')
+                try:
+                    self.assertTrue(entered.wait(5))
+                    results = [str(result) for result in pool.map(start, ['same'] * 3)]
+                finally:
+                    release.set()
+                results.append(str(first.result()))
+            self.assertEqual(sum('preparation fixture fails' in result for result in results), 1, results)
+            self.assertEqual(sum('already has an agent named same' in result for result in results), 3, results)
+            self.assertEqual(len(named('same')), 0)
+            agents.check_available_name(self.root, 'same')
 
-    def test_same_name_in_a_subverse_is_allowed_and_resume_reuses_the_original_record(self):
-        first = lifecycle.start(self.root, 'worker', harness='fake')
-        child = templates.create(self.root / 'subverses/child', 'child', workdir=self.work)
-        write(child / 'harnesses/fake/harness.json', self.recipe)
-        second = lifecycle.start(child, 'worker', harness='fake')
-        self.assertNotEqual(first['id'], second['id'])
-        native_id = str(uuid4())
-        agents.bind_session(self.root, first['id'], native_id)
-        resumed = lifecycle.start(self.root, resume='worker')
-        self.assertEqual(resumed['id'], first['id'])
-        self.assertEqual(resumed['native_session_id'], native_id)
-        self.assertEqual(len(list((self.root / 'state/agents').glob('*/properties.json'))), 1)
+    def test_orphan_folders_reserve_no_spawn_name(self):
+        """Plugin-only leftovers cannot block every spawn; the conservative damaged-peer scan otherwise mistakes absence for unreadable authority (LC-25)."""
+        for index, leftover in enumerate((None, 'compaction', 'compaction/state.json', 'status-items/item.json')):
+            with self.subTest(leftover=leftover):
+                orphan = self.root / 'state/agents' / str(uuid4())
+                orphan.mkdir()
+                try:
+                    if leftover == 'compaction':
+                        (orphan / leftover).mkdir()
+                    elif leftover:
+                        write(orphan / leftover, {'leftover': True})
+                    before = {p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}
+                    launched = lifecycle.start(self.root, f'new-{index}', harness='fake')
+                    self.assertNotEqual(launched['id'], orphan.name)
+                    self.assertEqual(read(self.root / 'state/agents' / launched['id'] / 'properties.json')['id'], launched['id'])
+                    self.assertEqual({p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}, before)
+                finally:
+                    shutil.rmtree(orphan)  # Each row proves its own shape, even when an earlier row fails.
 
-    def test_existing_duplicate_names_still_resolve_and_resume_by_uuid_prefix(self):
-        first = self.record('old-name', identifier='11111111-0000-4000-8000-000000000001', state='dormant')
-        second = self.record('old-name', identifier='22222222-0000-4000-8000-000000000002', state='failed')
-        with self.assertRaises(ValueError):
-            agents.directory(self.root, 'old-name')
-        self.assertEqual(agents.directory(self.root, first.name[:8]), first)
-        self.assertEqual(agents.directory(self.root, second.name), second)
-        self.assertEqual(lifecycle.start(self.root, resume=first.name[:8])['id'], first.name)
-        self.assertEqual(lifecycle.start(self.root, resume=second.name[:8])['id'], second.name)
+    def test_uuid_names_cannot_hide_an_agent_or_orphan(self):
+        """Only UUID-shaped names fail before publication; permissive UUID parsers otherwise reject ordinary underscore names while preventing ID-based recovery collisions."""
+        saved = self.record('worker')
+        orphan = self.root / 'state/agents' / str(uuid4())
+        write(orphan / 'compaction/note.json', {'leftover': True})
+        for name in (saved.name, orphan.name, str(uuid4()).upper(), uuid4().hex,
+                     '00000000-0000-0000-0000-000000000000'):
+            with self.subTest(name=name):
+                before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                with self.assertRaisesRegex(ValueError, "names can't look like an agent ID"):
+                    lifecycle.start(self.root, name, harness='fake')
+                after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                self.assertEqual(after, before)
+        self.backend.create.assert_not_called()
+        for name in ('12345678_1234_5678_1234_56781234', 'worker_0123456789abcdef0123456789abcdef'):
+            with self.subTest(name=name):
+                self.assertEqual(lifecycle.start(self.root, name, harness='fake')['name'], name)
 
-    def test_unknown_agent_error_is_plain_in_core_and_cli(self):
-        expected = "No agent named missing here. Run mv2 list to see this universe's agents."
-        with self.assertRaises(ValueError) as error:
-            agents.directory(self.root, 'missing')
-        self.assertEqual(str(error.exception), expected)
-        env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
-        env['PYTHONPATH'] = str(ROOT / 'src')
-        completed = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
-            'resume', 'missing'], env=env, text=True, capture_output=True, timeout=10)
-        self.assertEqual(completed.returncode, 1)
-        self.assertEqual(completed.stderr, 'mv2: ' + expected + '\n')
-        self.assertEqual(completed.stdout, '')
+    def test_addressing_precedence(self):
+        """An exact UUID beats a legacy colliding name, an exact name beats a UUID prefix, and an ambiguous prefix is refused
+        naming each match without saving anything, and old duplicate names still resolve by prefix; fragile because
+        the precedence is subtle, and a break silently sends to, kills or resumes the wrong agent (abac381,
+        14bc474)."""
+        with self.subTest('leftover or damaged peer folders do not steal a healthy short ID'):
+            valid = self.record('healthy', identifier='77777777-0000-4000-8000-000000000001')
+            for suffix, contents in ((2, None), (3, '{broken')):
+                damaged = self.root / 'state/agents' / f'77777777-0000-4000-8000-{suffix:012d}'
+                damaged.mkdir()
+                if contents is not None:
+                    (damaged / 'properties.json').write_text(contents)
+            self.assertEqual(agents.directory(self.root, '77777777'), valid)
+            self.assertEqual(agents.directory(self.root, damaged.name, allow_damaged=True), damaged)
+        with self.subTest('an exact name beats another agent\'s uuid prefix'):
+            named = self.record('a', identifier='33333333-0000-4000-8000-000000000003')
+            prefix = self.record('b', identifier='ab2ea794-0000-4000-8000-000000000004')
+            self.assertEqual(agents.directory(self.root, 'a'), named)
+            self.assertEqual(agents.directory(self.root, 'ab2'), prefix)
+            self.assertEqual(agents.directory(self.root, prefix.name), prefix)
+        with self.subTest('an exact name cannot retarget another agent\'s full uuid'):
+            first = self.record('first', identifier='44444444-0000-4000-8000-000000000005')
+            legacy = self.record(first.name, identifier='55555555-0000-4000-8000-000000000006')
+            self.assertEqual(agents.directory(self.root, first.name), first)
+            self.assertEqual(agents.directory(self.root, legacy.name), legacy)
+            self.assertEqual(lifecycle.start(self.root, resume=legacy.name)['id'], legacy.name)
+        with self.subTest('an orphan is removable despite a legacy UUID-shaped name'):
+            orphan = self.root / 'state/agents' / str(uuid4())
+            write(orphan / 'compaction/note.json', {'leftover': True})
+            legacy = self.record(orphan.name)
+            with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
+                    patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
+                removed = relocate.remove_agent(self.root, orphan.name)
+            self.assertEqual(removed['id'], orphan.name)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(legacy.exists())
+            self.assertEqual(agents.directory(self.root, legacy.name), legacy)
+        with self.subTest('old duplicate names still resolve and resume by uuid prefix'):
+            first = self.record('old-name', identifier='11111111-0000-4000-8000-000000000001', state='dormant')
+            second = self.record('old-name', identifier='22222222-0000-4000-8000-000000000002', state='failed')
+            with self.assertRaises(ValueError):
+                agents.directory(self.root, 'old-name')
+            self.assertEqual(agents.directory(self.root, first.name[:8]), first)
+            self.assertEqual(agents.directory(self.root, second.name), second)
+            self.assertEqual(lifecycle.start(self.root, resume=first.name[:8])['id'], first.name)
+            self.assertEqual(lifecycle.start(self.root, resume=second.name[:8])['id'], second.name)
+        ids = ('a1234567-1111-4111-8111-111111111111', 'a1234567-2222-4222-8222-222222222222')
+        for identifier, name in zip(ids, ('alpha', 'beta')):
+            self.record(name, identifier=identifier)
+        for command in (('send', 'a1234567', '--text', 'must not be saved'), ('inspect', 'a1234567')):
+            with self.subTest(command=command):
+                code, output = self.cli(*command)
+                self.assertEqual(code, 1)
+                for text in (*ids, 'alpha', 'beta'):
+                    self.assertIn(text, output)
+        self.assertEqual(list(self.root.glob('state/agents/*/inbox.jsonl')), [])

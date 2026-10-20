@@ -1,12 +1,12 @@
-"""Optional provider observations do not change legacy adapter requirements."""
+"""A harness's observation of its native session rebinds an agent only on exact evidence from its current launch."""
 from types import SimpleNamespace
 from unittest.mock import patch
 from unittest.mock import Mock
 from uuid import uuid4
 
 from multiverse import harnesses
-from multiverse.harnesses.types import SessionHandle, NativeResult, CommandSpec
-from multiverse.runtime import lifecycle, native
+from multiverse.harnesses.types import NativeResult, CommandSpec, ObservedBinding
+from multiverse.runtime import attachments, lifecycle, native
 from multiverse.store import read, write, lock
 from multiverse.universe import agents
 from multiverse.tools import send
@@ -23,102 +23,117 @@ class SessionObservationTest(BaseTest):
                            'native_session_id': self.old, 'native_session_home': str(self.work),
                            'native_session_provider': 'fixture', 'universe_id': read(self.root / 'universe.json')['id'],
                            'task': ''}
-        self.facts = {'launch_id': 'launch', 'state': 'running', 'pid': 123}
+        self.launch = str(uuid4())
+        self.facts = {'launch_id': self.launch, 'state': 'running', 'pid': 123,
+                      'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}}
         write(self.directory / 'properties.json', self.properties)
         write(self.directory / 'runtime.json', self.facts)
 
-    def test_handle_keeps_process_and_storage_from_the_same_launch_snapshot(self):
-        session = SessionHandle.from_records(self.properties, self.facts, self.directory)
-        self.assertEqual((session.home, session.pid), (str(self.work), 123))
-        self.assertIsNone(SessionHandle('id', 'pi', '/tmp').pid)
+    def observing(self, target, **hooks):
+        """An adapter whose process evidence shows target, and whose usage names the session it measured."""
+        return SimpleNamespace(**{'observed_binding': lambda session: ObservedBinding(
+            native_id=target, home=str(self.work), evidence='fixture-process-file'),
+            'get_usage': lambda session: NativeResult('ok', value={'native_id': session.native_id}), **hooks})
 
-    def test_connection_problem_is_live_only_guarded_and_relay_error_wins(self):
-        calls = []
-        def problem(session):
-            calls.append(session)
-            return 'Native inbox disconnected; restart this agent'
-        adapter = SimpleNamespace(connection_problem=problem)
-        with patch.object(harnesses, 'load', return_value=adapter), \
-                patch.object(native, 'usage_snapshot', return_value={}), \
-                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-            self.assertIn('inbox disconnected', lifecycle.listing(self.root)[0]['connection_error'])
-            self.facts['native_relay'] = {'state': 'lost', 'reason': 'relay disconnected'}
-            write(self.directory / 'runtime.json', self.facts)
-            self.assertEqual(lifecycle.listing(self.root)[0]['connection_error'], 'relay disconnected')
-            self.assertEqual(len(calls), 1)
-        self.facts.pop('native_relay')
-        write(self.directory / 'runtime.json', self.facts)
-        with patch.object(harnesses, 'load', return_value=adapter), \
-                patch.object(native, 'usage_snapshot', return_value={}), \
-                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
-            self.assertIsNone(lifecycle.listing(self.root)[0]['connection_error'])
-            self.assertEqual(len(calls), 1)
-        for adapter in (SimpleNamespace(), SimpleNamespace(connection_problem=lambda session: 1 / 0)):
-            with patch.object(harnesses, 'load', return_value=adapter), \
-                    patch.object(native, 'usage_snapshot', return_value={}), \
-                    patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-                row = lifecycle.listing(self.root)[0]
-                self.assertEqual(row['name'], 'worker')
-                self.assertIsNone(row['connection_error'])
-
-    def test_native_use_reconciles_an_exact_observation_before_usage(self):
-        from multiverse.harnesses.types import ObservedBinding
+    def test_an_exact_observation_rebinds_before_use(self):
+        """An exact observation of a native /new or /clear rebinds before usage is measured or a message is targeted,
+        and a listing whose observation coincides with the runner writing its exit describes the stopped launch it
+        returns; a break goes unnoticed because the first message after the change goes to the old conversation, or
+        the row shows an exit code yet still says alive (LC-24, 02569a6)."""
         target = str(uuid4())
-        observed = ObservedBinding(native_id=target, home=str(self.work), evidence='fixture-process-file')
-        adapter = SimpleNamespace(observed_binding=lambda session: observed,
-                                  get_usage=lambda session: NativeResult('ok', value={'native_id': session.native_id}))
-        with patch.object(harnesses, 'load', return_value=adapter):
+        with patch.object(harnesses, 'load', return_value=self.observing(target)):
             result = native.usage_snapshot(self.root, self.properties, self.facts)
         self.assertEqual(result['value']['native_id'], target)
         self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], target)
         self.assertIn('"reason": "detected"', (self.directory / 'sessions.jsonl').read_text())
-
-    def test_first_message_after_session_change_targets_the_new_session(self):
-        from multiverse.harnesses.types import ObservedBinding
-        target = str(uuid4())
-        adapter = SimpleNamespace(observed_binding=lambda session: ObservedBinding(
-            native_id=target, home=str(self.work), evidence='fixture-process-file'))
-        with patch.object(harnesses, 'load', return_value=adapter), \
+        after = str(uuid4())
+        with patch.object(harnesses, 'load', return_value=self.observing(after)), \
                 patch.object(native, 'send_or_wake', return_value={'state': 'native_queued'}):
             result = send.run(self.root, agent=self.identity, text='after clear', sender={'name': 'user'})
         self.assertTrue(result['ok'])
         message, = inbox(self.directory, all_messages=True)['messages']
-        self.assertEqual(message['target_session'], target)
+        self.assertEqual(message['target_session'], after)
+        with self.subTest('a listing whose observation coincides with the runner writing its exit'):
+            write(self.directory / 'runtime.json', self.facts)
+            wrote = []
 
-    def test_unknown_evidence_never_changes_the_binding(self):
+            def observer(session):
+                if not wrote:  # the runner's exit writer takes no launch lock, so it can land mid-observation
+                    write(self.directory / 'runtime.json', {**self.facts, 'state': 'stopped', 'exit_code': 0})
+                    wrote.append(True)
+                return ObservedBinding(native_id=str(uuid4()), home=str(self.work), evidence='fixture-process-file')
+
+            def terminal(properties, facts, snapshots=None):
+                return {'live': 'stopped' if 'exit_code' in facts else 'alive', 'reason': ''}
+
+            with patch.object(harnesses, 'load', return_value=self.observing(None, observed_binding=observer)), \
+                    patch.object(lifecycle, 'observe', side_effect=terminal):
+                [row] = lifecycle.listing(self.root)
+            self.assertEqual((row['runtime'].get('exit_code'), row['live']), (0, 'stopped'))
+
+    def test_rebind_needs_exact_current_launch_evidence(self):
+        """No rebind and no measurement happen unless the evidence is exact, from the current launch, with a matching
+        terminal and a free lock; fragile because observers read process files a reused process can supply, and a
+        hijacked binding is invisible (02569a6, 97a84f8)."""
         for observed in (None, {'native_id': str(uuid4())}):
-            adapter = SimpleNamespace(observed_binding=lambda session: observed,
-                                      get_usage=lambda session: NativeResult('ok', value={'native_id': session.native_id}))
-            with patch.object(harnesses, 'load', return_value=adapter):
+            with self.subTest(observed=observed):
+                adapter = self.observing(None, observed_binding=lambda session: observed)
+                with patch.object(harnesses, 'load', return_value=adapter):
+                    result = native.usage_snapshot(self.root, self.properties, self.facts)
+                self.assertEqual(result['state'], 'ok' if observed is None else 'error')
+                self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)
+        with self.subTest('a replaced launch'):
+            write(self.directory / 'runtime.json', {**self.facts, 'launch_id': 'new'})
+            with patch.object(harnesses, 'load', return_value=self.observing(str(uuid4()))):
                 result = native.usage_snapshot(self.root, self.properties, self.facts)
-            self.assertEqual(result['state'], 'ok' if observed is None else 'error')
-            self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)
-
-    def test_an_observer_bug_is_visible_without_erasing_the_listing_row(self):
-        def broken(session):
-            raise TypeError('bad native observation')
-        adapter = SimpleNamespace(observed_binding=broken)
-        with patch.object(harnesses, 'load', return_value=adapter), \
-                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
-            row, = lifecycle.listing(self.root)
-        self.assertEqual(row['name'], 'worker')
-        self.assertEqual(row['connection_error'], 'bad native observation')
-
-    def test_changed_generation_refuses_old_observer_without_writing(self):
-        from multiverse.harnesses.types import ObservedBinding
-        adapter = SimpleNamespace(observed_binding=lambda session: ObservedBinding(
-            native_id=str(uuid4()), home=str(self.work), evidence='fixture-process-file'))
-        write(self.directory / 'runtime.json', {**self.facts, 'launch_id': 'new'})
-        with patch.object(harnesses, 'load', return_value=adapter):
-            result = native.usage_snapshot(self.root, self.properties, self.facts)
-        self.assertEqual(result['state'], 'error')
-        self.assertIn('Launch changed', result['reason'])
+            self.assertEqual(result['state'], 'error')
+            self.assertIn('Launch changed', result['reason'])
+            write(self.directory / 'runtime.json', self.facts)
+        with self.subTest('a launch busy with a change'):
+            measured = Mock()
+            adapter = self.observing(str(uuid4()), get_usage=measured)
+            with lock(self.directory / '.launch.lock'), patch.object(harnesses, 'load', return_value=adapter):
+                result = native.usage_snapshot(self.root, self.properties, self.facts)
+            self.assertEqual(result['state'], 'error')
+            self.assertIn('updating; retry', result['reason'])
+            measured.assert_not_called()
+        for error in (ValueError('damaged native evidence'), ValueError()):
+            with self.subTest('a failed observation while listing', error=error):
+                observed, measured = Mock(side_effect=error), Mock()
+                adapter = SimpleNamespace(observed_binding=observed, get_usage=measured)
+                with patch.object(harnesses, 'load', return_value=adapter), \
+                        patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+                    [row] = lifecycle.listing(self.root)
+                self.assertEqual(row['usage']['state'], 'error')
+                if str(error):
+                    self.assertEqual(row['usage']['reason'], str(error))
+                observed.assert_called_once()
+                measured.assert_not_called()
+        with self.subTest('a send whose terminal does not match the launch'):
+            token = 'Sat Oct 17 12:00:00 2026'
+            self.facts.update(pid_started=token)
+            write(self.directory / 'runtime.json', self.facts)
+            observed = []
+            def observer(session):
+                observed.append(session.native_id)
+                return ObservedBinding(native_id=str(uuid4()), home=str(self.work), evidence='fixture-process-file')
+            absent = {'live': 'dormant', 'reason': 'Recorded pane is absent'}
+            with patch.object(harnesses, 'load', return_value=SimpleNamespace(observed_binding=observer)), \
+                    patch.object(native, 'observe', return_value=absent), \
+                    patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
+                send.run(self.root, agent=self.identity, text='must remain queued on the primary',
+                         sender={'name': 'user'})
+            self.assertEqual(observed, [], 'public send must detect runtime mismatch before native identity '
+                                           'reconciliation')
+        self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)
         self.assertFalse((self.directory / 'sessions.jsonl').exists())
 
     def test_resume_rereads_binding_after_acquiring_launch_lock(self):
+        """Resume uses the binding read under the launch lock; fragile because the read-before-lock window is tiny, and
+        the wrong read resumes an old conversation silently."""
         target = str(uuid4())
         stale = dict(self.properties)
-        agents.rebind_session(self.root, self.identity, self.old, target, 'clear', 'launch', home=str(self.work))
+        agents.rebind_session(self.root, self.identity, self.old, target, 'clear', self.launch, home=str(self.work))
         seen = []
         def resume(session, context):
             seen.append(session.native_id)
@@ -136,16 +151,3 @@ class SessionObservationTest(BaseTest):
         self.assertEqual(seen, [target])
         self.assertEqual(result['native_session_id'], target)
         self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], target)
-
-    def test_usage_does_not_wait_for_a_busy_launch_or_measure_the_old_session(self):
-        from multiverse.harnesses.types import ObservedBinding
-        target = str(uuid4())
-        measured = Mock()
-        adapter = SimpleNamespace(observed_binding=lambda session: ObservedBinding(
-            native_id=target, home=str(self.work), evidence='fixture-process-file'), get_usage=measured)
-        with lock(self.directory / '.launch.lock'), patch.object(harnesses, 'load', return_value=adapter):
-            result = native.usage_snapshot(self.root, self.properties, self.facts)
-        self.assertEqual(result['state'], 'error')
-        self.assertIn('updating; retry', result['reason'])
-        measured.assert_not_called()
-        self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)

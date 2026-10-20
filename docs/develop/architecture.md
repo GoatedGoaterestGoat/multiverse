@@ -82,7 +82,9 @@ runner.py LAUNCH_DIR                                tmux pane
      remove the pane unless the launch failed during startup
 ```
 
-Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core owns processes, tmux, records and locks. A failed launch keeps its record with the error, so `mv2 resume` can retry.
+Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core owns processes, tmux, records and locks. A new spawn refused before native preparation releases its name. Once native preparation begins, a failed launch keeps its record with the error, so `mv2 resume` can retry.
+
+A selected command may describe one argv-only startup retry. The runner considers it only after a nonzero exit before readiness, binding or delivery. A pending screen observation keeps this window open for up to 55 seconds; a recognized composer or a caller's process-readiness fallback closes it. Commands without supported screen observation keep the two-second startup window. The adapter must recognize the exact diagnostic from that owned pane. Core removes only a matching leading prelude that this runner actually printed before the candidate; other output remains part of the diagnostic check. Under the launch lock, the runner records the selected argv and notices before starting the replacement child. It never retries a live warning or an already-started conversation.
 
 ## How a message flows
 
@@ -128,7 +130,11 @@ tmux unreachable                                   -> unknown
 
 Window and session names are only labels, so renaming them changes nothing. Every command that signals or captures a pane checks the tags first (`tmux.owned`).
 
-The native process gets `MV2_UNIVERSE`, `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID`, `MV2_CLI`, `MV2_PYTHON`, `MV2_CONTROL_SOCKET` and `MV2_TMUX_SOCKET`. See [environment](../reference/environment.md) for each one. Callbacks from the agent (`report`, `inbox`, `session-bind`, `runtime_update`) compare `MV2_LAUNCH_ID` with `runtime.json` and refuse an outdated launch. [Session isolation](../design/session-isolation.md) explains the limits of these checks.
+The runner and native frontend receive the agent's IDs and this launch's `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` and `MV2_TMUX_SOCKET`. Connected Codex tools instead receive agent-stable identity, including `MV2_IDENTITY_MODE`, without those three launch-specific values. `report`, `inbox` and the sender of `send` validate that identity against the exact native thread and saved storage scope. `session-bind` can only confirm the existing binding in this mode. Runner updates and control calls retain their launch checks. Child launches find the calling agent's tmux socket in its verified runtime record. See [environment](../reference/environment.md) and [session isolation](../design/session-isolation.md).
+
+A plain terminal's `session-bind` normally claims its conversation directly. If its sandbox denies writing the universe's session-claim lock, including through a read-only filesystem, an exact current-launch caller can leave a bounded request in its own launch folder. Its runner applies the same claim under the universe lock and returns a correlated result; the command confirms the saved native ID before reporting success. A stale, ending or conflicting launch is refused. The handoff creates neither an agent folder nor a launch folder, and needs no broader sandbox grant. Operator binding and bridge identity verification keep their existing paths.
+
+Each launch requests current `MV2_CLI`, `MV2_PYTHON` and `PATH` values from the launching installation. Core records that request in `request.json.agent_environment` and the agent's latest `properties.json.agent_environment`. Those maps do not attest to a shared native conversation's cached environment. Executable paths are not part of agent authority. See [environment](../reference/environment.md) for reloading the conversation after an installation moves.
 
 ## How the dashboard is built
 

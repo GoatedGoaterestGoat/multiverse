@@ -34,7 +34,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 9)
+API_VERSION = (1, 11)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -449,7 +449,13 @@ def _entries_uncached(root):
         # A pre-plugin settings file turns nothing on: its first-use conversion writes the switch into plugins.json.
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
-        result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        try:
+            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        except Exception as error:  # whatever happens with one plugin, every other one is still listed
+            text = str(error).strip().splitlines()
+            result[name] = Entry(name, "failed", on, source, directory, found, problem=(
+                f"{name} could not be read: {type(error).__name__}" + (f": {text[0]}" if text else "")),
+                shadowed=shadowed.get(name, []))
         result[name].set_aside = aside.get(name, [])
     for name, (source, directory, problem) in invalid.items():
         if name not in result:
@@ -494,7 +500,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None)
     if isinstance(known, Failed) and known.files == _files(running):
         entry.state, entry.problem = "failed", known.problem
         return entry
-    if known is not None:
+    if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
         entry.state, entry.loaded = "loaded", known
     if root is not None and found.settings is not None:
         # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
@@ -840,19 +846,26 @@ def log_lock_path(path):
     return path.with_name(f".{path.name}.lock")
 
 
-def append_log(path, line, limit=None):
+def append_log(path, line, limit=None, root=None):
     """Append text to a log, rotating it to NAME.1 (one old file kept) once it is past `limit` (LOG_BYTES).
 
     The size check, the rotation and the append happen under a file lock, so two processes writing one log never
-    both rotate it (which would overwrite NAME.1, or rename a file that is already gone)."""
-    from ..store import lock
+    both rotate it (which would overwrite NAME.1, or rename a file that is already gone). A log in a universe's
+    plugin state (or under `root`) that is gone is not written: a log line never brings a removed universe or
+    agent back (agent_files)."""
+    from . import agent_files
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _log_lock, lock(log_lock_path(path)):
-        if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
-            path.replace(path.with_name(path.name + ".1"))
-        with path.open("a") as handle:
-            handle.write(line.rstrip("\n") + "\n")
+    guarded = agent_files.required_folder(path, root)[0] is not None
+    try:
+        agent_files.ensure_dir(path.parent, root)
+        with _log_lock, agent_files.lock(log_lock_path(path), root):
+            if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
+                path.replace(path.with_name(path.name + ".1"))
+            with path.open("a") as handle:
+                handle.write(line.rstrip("\n") + "\n")
+    except FileNotFoundError:
+        if not guarded:
+            raise  # removed meanwhile, with the folder it must find
 TRACEBACK_EVERY = 60.0  # seconds: at most one traceback per plugin and call site in this long
 _logged = {}  # (id(Loaded), what) -> (when a traceback was last written, failures not written since)
 

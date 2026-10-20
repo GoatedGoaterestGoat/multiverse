@@ -1,5 +1,6 @@
 """The conversation's stable tool identity, separate from its terminal launch."""
 from pathlib import Path
+import json
 
 from ..types import AgentIdentitySpec
 
@@ -7,9 +8,28 @@ from ..types import AgentIdentitySpec
 POLICY = AgentIdentitySpec('codex-agent-v1', 'CODEX_THREAD_ID', ('CODEX_HOME', 'CODEX_SQLITE_HOME'))
 # These are core's generation-specific keys. Do not treat every MV2_ name as
 # launch identity: validated plugins own settings under their MV2_<NAME> prefix.
+# Child launches find their tmux server in the verified agent runtime. Keeping
+# a socket here would freeze one launch's server choice in shared tools.
 VOLATILE = frozenset({'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'})
 STABLE = frozenset({'MV2_IDENTITY_MODE', 'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
                     'MV2_CLI', 'MV2_PYTHON', 'PATH'})
+
+
+def resume_notice(caller_environment, effective_environment):
+    """Explain a caller override discarded by the saved native environment."""
+    notices = []
+    for key, label in (('CODEX_HOME', 'Codex home'), ('CODEX_SQLITE_HOME', 'Codex database home')):
+        requested, saved = caller_environment.get(key), effective_environment.get(key)
+        if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+            continue
+        try:
+            kept = Path(saved).expanduser().resolve()
+            if Path(requested).expanduser().resolve() == kept:
+                continue
+        except (OSError, ValueError, RuntimeError):
+            continue  # A diagnostic cannot claim an unverified storage choice.
+        notices.append(f'Kept its saved {label} {json.dumps(str(kept))}; ignored {key}={json.dumps(requested)}.')
+    return ' '.join(notices) or None
 
 
 def storage_environment(context):

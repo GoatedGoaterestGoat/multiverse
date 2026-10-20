@@ -120,12 +120,13 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/errors.log` | The plugin's recorded errors with tracebacks, rotated to `errors.log.1` at 1 MiB. |
 | `NAME/plugin.log` | Lines the plugin logs. |
 | `NAME/events.cursor` | The last event the plugin's handlers finished in this universe. |
+| `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Written after the cursor: an interrupted write delivers again, never skips. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
 | `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
 
-`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, and `journal-id`. A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
+`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, `journal-id`, and its second copy `journal-id.copy` (so a lost or unreadable `journal-id` is not taken for a new journal). A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
 
 ## statusline.json
 
@@ -172,7 +173,7 @@ Schema 2 points at a built-in adapter and adjusts it:
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |
 | `env` | Variables (name to string) set for every spawn and resume. It can't set `MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`, or the storage variables mv2 reads (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). |
-| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID` and `CLAUDECODE` are always removed. |
+| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID`, `CLAUDECODE` and an inherited `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` are always removed. |
 | `inbox_bridge` | The live connection (the bridge). For Codex and Claude, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
 | `system_prompt_snapshot` | Claude only. `"off"`, the default, gives a resumed agent the current bootstrap. `"on"` keeps the system prompt Claude recorded at the conversation's first request, so a bootstrap change reaches only new conversations. A `--system-prompt-snapshot` flag in `args` or `resume_args` overrides it. |
 
@@ -239,11 +240,12 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 
 | Path | Meaning |
 | --- | --- |
-| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. |
-| `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out), and the last `reason` or `error`. |
+| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains selected storage variable values; `null` means explicitly unset on future launches. |
+| `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
 | `inbox-state.json` | Delivery attempts and receipts per message. |
+| `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
 | `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: one line per verified native session change, such as Claude's `/clear`, with the old and new session IDs. Written only after a change. See [session lineage](../design/session-lineage.md). |
@@ -283,7 +285,7 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted: each one's path, the SHA-256 of its files and when. Written by `mv2 plugins trust` and `untrust`. |
 | `~/.multiverse/plugin-cache/SHA256/` | The copy of a trusted universe plugin that actually runs. A copy nothing trusts and nothing used for 14 days is removed. |
 | `~/.multiverse/plugin-fingerprints.json`, `~/.multiverse/pycache/`, `~/.multiverse/installed-plugins.json` | Caches: universe plugins' hashes by file sizes and times, Python bytecode for plugins imported from a universe's own directory, and the pip-installed plugins of each Python environment. They are safe to delete. |
-| `~/.multiverse/plugin-load-timeouts.json` | Plugins whose load ran past 10 s, by their files. Later processes wait for such a plugin at most 0.5 s, and a launch leaves it out while it still loads. The entry goes when the plugin loads or its files change. It is safe to delete. |
+| `~/.multiverse/plugin-load-timeouts.json` | Plugins whose load ran past 10 s, by their files. Later processes wait for such a plugin at most 0.5 s, and a launch leaves it out while it still loads. The entry goes when the plugin loads, its files change, or 10 minutes pass. It is safe to delete. |
 | tmux server `multiverse-v2` | Agent terminals (`tmux -L multiverse-v2`), unless `MV2_TMUX_SOCKET` names another socket. See [Environment](environment.md). |
 | `/tmp/mv2-native-LAUNCH/` | Private socket directory for a bridge launch. |
 | Codex, Claude and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`); mv2 never moves or deletes them. |

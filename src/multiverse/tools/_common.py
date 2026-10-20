@@ -27,7 +27,10 @@ def callback(root, agent, *, agent_scoped=False):
     root = universe.resolve(root)
     if not agent:
         raise ValueError("Specify --agent outside an agent session")
-    directory = agents.directory(root, agent)
+    directory = agents.directory(root, agent, allow_damaged=agent_scoped)
+    if agent_scoped:
+        from ..universe import records
+        records.properties(directory / 'properties.json', harness_optional=True)
     from ..runtime.agent_identity import actor
     caller = actor()
     if caller is not None:
@@ -46,7 +49,7 @@ def callback(root, agent, *, agent_scoped=False):
             adapter = harnesses.load(root, properties['harness'])
             describe = adapter_hook(adapter, 'agent_identity_problem')
             problem = describe(SessionHandle.from_records(properties, agents.runtime(directory), directory), os.environ) if describe else None
-        except (OSError, KeyError):
+        except (OSError, KeyError, ValueError, TypeError):
             problem = None
         if problem:
             raise ValueError(problem)
@@ -62,6 +65,8 @@ def delivery_summary(receipt):
     value = receipt.get('value')
     if isinstance(value, dict) and 'transcript_confirmed' in value:
         result['transcript_confirmed'] = value['transcript_confirmed']
+    if isinstance(value, dict) and value.get('paused') is True:
+        result['paused'] = True
     return result
 
 

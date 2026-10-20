@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from ..store import lock, now, read, uid, write
+from . import records
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None):
@@ -63,21 +64,125 @@ def _messages(agent_dir):
     return data, cursor, messages
 
 
+def _ledger_damage(path, reason):
+    return ValueError(f'{path}: {reason}; back up and repair or reset the file, '
+                      'then check delivery before retrying')
+
+
+def _ledger(path):
+    try:
+        return records.runtime(path)
+    except records.RecordError as error:
+        raise _ledger_damage(error.file, error.reason) from error
+
+
 def _states(agent_dir):
     path = agent_dir / 'inbox-state.json'
-    states = read(path) if path.exists() else {}
+    states = _ledger(path)
+    for identifier, state in states.items():
+        if (not isinstance(state, dict)
+                or ('submission_state' in state and (not isinstance(state['submission_state'], str)
+                    or state['submission_state'] not in ('pending', 'submitting', 'accepted', 'unknown', 'failed', 'cancelled', 'manual', 'launch-only')))
+                or (state.get('native_receipt') is not None and not isinstance(state['native_receipt'], dict))
+                or ('attempts' in state and (not isinstance(state['attempts'], list)
+                    or any(not isinstance(attempt, dict) for attempt in state['attempts'])))):
+            raise _ledger_damage(path, f'invalid delivery tracking for {identifier!r}')
+
     # Retired per-message read markers have no effect on delivery or read position.
     states = {identifier: {key: value for key, value in state.items() if key != 'acknowledged_at'}
               for identifier, state in states.items()}
     states = {identifier: state for identifier, state in states.items() if state}
     legacy = agent_dir / 'native-delivery.json'
     if legacy.exists():
-        for identifier, attempts in read(legacy).items():
+        for identifier, attempts in _ledger(legacy).items():
+            if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
+                    or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
+                           for attempt in attempts)):
+                raise _ledger_damage(legacy, f'invalid delivery attempts for {identifier!r}')
             if identifier not in states and attempts:
                 last = attempts[-1]
                 states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                     'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
+    for state in states.values():
+        last = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
+        value = last.get('value') if isinstance(last, dict) else None
+        final = isinstance(value, dict) and value.get('launch_only') is True and value.get('final') is True
+        if state.get('submission_state') == 'failed' and final:
+            state.update(submission_state='launch-only', final_reason='launch-only')
+        elif state.get('submission_state') == 'launch-only' and not final:
+            # Earlier writers also finalized temporary fallbacks. Re-evaluate
+            # those definite refusals against current policy, without a write.
+            state['submission_state'] = 'failed'
+            state.pop('final_reason', None)
+    for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
+        failed = _ledger(proof)
+        identifier = failed.get('message_id')
+        if (failed.get('schema') != 1 or identifier != proof.stem
+                or not isinstance(identifier, str) or not isinstance(failed.get('reason'), str)):
+            raise _ledger_damage(proof, 'invalid pre-submission failure record')
+        previous = states.get(identifier, {})
+        if previous.get('submission_state', 'pending') in ('pending', 'failed'):
+            receipt = {'state': 'error', 'ok': False, 'reason': failed['reason'],
+                       'value': {'pre_submission_failure': True}}
+            states[identifier] = {**previous, 'submission_state': 'failed',
+                                  'attempts': previous.get('attempts') or [receipt]}
     return states
+
+
+def delivery_problem(agent_dir, name, *, is_final=None):
+    """Count definite failures in real inbox messages, without native queries.
+
+    Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
+    rather than making the agent's identity or terminal record unusable.
+    """
+    if not any((agent_dir / entry).exists() for entry in ('inbox-state.json', 'native-delivery.json', 'inbox-unsubmitted')):
+        return None
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        failed = {identifier for identifier, state in states.items()
+                  if state.get('submission_state') == 'failed'}
+        if not failed:
+            return None
+        _, _, messages = _messages(agent_dir)
+        count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
+                    and message.get('id') in failed
+                    and not (is_final and is_final(message, states[message['id']]))
+                    for _, message in messages)
+    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry' if count else None
+
+
+def preflight_delivery(agent_dir):
+    """No native request until its delivery ledger is readable."""
+    with lock(agent_dir / '.inbox.lock'):
+        _states(agent_dir)
+
+
+def record_unsubmitted(agent_dir, message_id, reason):
+    """Durable negative proof for a newly saved message whose preflight failed.
+
+    Never inferred for old messages. Removed durably before any later native
+    submission, so deleting inbox-state.json cannot revive this proof afterward.
+    """
+    with lock(agent_dir / '.inbox.lock'):
+        _, _, messages = _messages(agent_dir)
+        if not any(message.get('id') == message_id for _, message in messages):
+            raise ValueError('Message does not belong to this recipient inbox')
+        write(agent_dir / 'inbox-unsubmitted' / (message_id + '.json'),
+              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason})
+
+
+def inbox_problem(agent_dir):
+    """Doctor reports damage without consuming or rewriting the message log."""
+    try:
+        with lock(agent_dir / '.inbox.lock'):
+            data, _, _ = _messages(agent_dir)
+            _states(agent_dir)
+            if data and not data.endswith(b'\n'):
+                return (f"{agent_dir / 'inbox.jsonl'}: incomplete final line; sends cannot append. "
+                        "Back up the file, then repair or remove only the incomplete tail; keep complete messages")
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        return f"{agent_dir}: inbox cannot be read: {error}"
+    return None
 
 
 def _manual(message):
@@ -173,6 +278,16 @@ def update_message(agent_dir, message_id, **changes):
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
         write(agent_dir / 'inbox-state.json', states)
+        if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled', 'launch-only'):
+            proof = agent_dir / 'inbox-unsubmitted' / (message_id + '.json')
+            if proof.exists():
+                proof.unlink()
+                # Do not let a crash resurrect a negative proof after submission.
+                descriptor = os.open(proof.parent, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
     # Transitions only, each once: accepted, then (maybe later) confirmed in the transcript; or a definite failure.
     if after.get('submission_state') == 'accepted' and before.get('submission_state') != 'accepted':
         _event(agent_dir, "message.delivered", {"id": message_id, "stage": "accepted"})
@@ -185,7 +300,7 @@ def update_message(agent_dir, message_id, **changes):
     return after
 
 
-def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False):
+def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False, prompt_context=None):
     """A CLI prompt has no native receipt ID; record process-start evidence only."""
     if not message_id:
         return
@@ -201,7 +316,8 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
                               'consumption is unconfirmed') if started else reason,
                    'launch_id': launch_id, 'value': {'transcript_confirmed': None}}
         update_message(directory, message_id, submission_state='unknown' if uncertain else 'accepted' if started else 'failed',
-                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'])
+                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'],
+                       **({'wake_prompt_context': prompt_context} if prompt_context is not None else {}))
 
 
 def end_startup_messages(directory, launch_id, reason, cancelled=False):

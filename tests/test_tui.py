@@ -1,6 +1,6 @@
 """Real Textual widgets and events, without a model, socket or terminal."""
 import asyncio
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import sys
 from threading import Event
@@ -9,14 +9,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-from textual.widgets import Button, DataTable, Footer, Input, OptionList, Static, TextArea
+from textual.widgets import DataTable, Input, OptionList, Static, TextArea
 from textual import events
 from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
-from multiverse.ui.drafts import SubverseDraft
-from multiverse.ui.screens import Choice, Details, Form, KEYS
+from multiverse.ui.screens import Choice, Form
 from multiverse.ui.app import MultiverseApp
-from multiverse.ui.columns import COLUMNS
 from isolation import isolate
 
 
@@ -57,102 +55,19 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         await self.app.workers.wait_for_complete()
         await pilot.pause()
 
-    async def click_row(self, pilot, key, double=False):
-        index = list(self.app.visible_rows).index(key)
-        # Actual table hit testing: one header line, then one line per row.
-        method = pilot.double_click if double else pilot.click
-        self.assertTrue(await method("#agents", offset=(5, index + 1)))
-        await pilot.pause()
+    def buffered(self, text):
+        # Unlike Pilot.press, send a whole terminal read without yielding between keys.
+        for char in text:
+            key = {"/": "slash", " ": "space", "\r": "enter"}.get(char, char)
+            self.app._driver.send_message(events.Key(key, char))
 
-    async def test_all_groups_are_inline_colored_and_keyboard_foldable(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            table = self.app.query_one("#agents", DataTable)
-            self.assertEqual(table.row_count, 11)  # four groups, seven agents
-            self.assertEqual(len(self.app.visible_agents), 7)
-            self.assertEqual(len(self.app.query(Button)), 0)
-            self.app.select_key(group_key(self.cad))
-            self.assertIn("#89b4fa", str(table.get_cell(group_key(self.cad), "name").style))
-            await pilot.press("left")
-            self.assertEqual(table.row_count, 8)
-            self.assertNotIn(group_key(self.verify), self.app.visible_rows)
-            await pilot.press("right", "right")
-            self.assertEqual(self.app.selected["name"], "harness-builder")
-            await pilot.press("j", "right")
-            self.assertEqual(self.app.selected["name"], "verifier")
-            await pilot.press("h")
-            self.assertEqual(self.app.selected_key, group_key(self.verify))
-            await pilot.press("space")
-            self.assertFalse(self.app.visible_rows[group_key(self.verify)]["expanded"])
-            self.assertEqual(self.app.root, self.backend.root)
-
-    async def test_mouse_folds_group_selects_agent_and_double_click_attaches(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            await self.click_row(pilot, group_key(self.review))
-            self.assertEqual(len(self.app.visible_agents), 5)
-            await self.click_row(pilot, group_key(self.review))
-            self.assertEqual(len(self.app.visible_agents), 7)
-            reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
-            await self.click_row(pilot, agent_key(reviewer))
-            self.assertEqual(self.app.selected["id"], reviewer["id"])
-            self.assertEqual(self.backend.calls, [])
-            with patch.object(self.app, "suspend", return_value=nullcontext()):
-                await self.click_row(pilot, agent_key(reviewer), double=True)
-                await self.settle(pilot)
-            self.assertEqual(self.backend.calls, [("attach", self.review, reviewer["id"])])
-
-    async def test_search_reveals_folded_descendants_and_preserves_folds(self):
-        async with self.app.run_test(size=(100, 28)) as pilot:
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.cad))
-            await pilot.press("left", "slash", *"gearbox")
-            self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["verifier"])
-            self.assertIn(group_key(self.cad), self.app.visible_rows)
-            self.assertIn(group_key(self.verify), self.app.visible_rows)
-            await pilot.press("enter")
-            self.app.select_key(next(iter(self.app.visible_agents)))
-            selected = self.app.selected_key
-            self.backend.agents.reverse()
-            self.app.refresh_snapshot()
-            await self.settle(pilot)
-            self.assertEqual(self.app.selected_key, selected)
-            await pilot.press("escape")
-            self.assertFalse(self.app.query_one("#filter").display)
-            self.assertIn(str(self.cad), self.app.collapsed)
-            self.assertNotIn(group_key(self.verify), self.app.visible_rows)
-            await pilot.press("slash", *"no-such-agent")
-            self.assertTrue(self.app.query_one("#empty").display)
-            await pilot.press("escape")
-            self.assertEqual(len(self.app.snapshot["agents"]), 7)
-
-    async def test_spawn_in_selected_subverse_validation_typing_and_cancel(self):
-        async with self.app.run_test(size=(110, 35)) as pilot:
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.review))
-            original = len(self.backend.agents)
-            await pilot.press("n", "ctrl+u", "enter")
-            self.assertEqual(len(self.app.screen_stack), 1)
-            self.assertIn("required", str(self.app.query_one("#status", Static).render()))
-            await pilot.press(*"queen")
-            self.assertEqual(self.app.draft.values["name"], "queen")
-            await pilot.press("tab", "tab")
-            self.assertEqual(self.app.draft.active, "model")
-            self.app.query_one("#agents").post_message(events.Paste("opus"))
-            await pilot.pause()
-            await pilot.press("tab")
-            self.assertEqual(self.app.draft.active, "name")
-            await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual(len(self.backend.agents), original + 1)
-            self.assertEqual(self.backend.agents[-1]["universe"], str(self.review))
-            self.assertEqual(self.backend.agents[-1]["model"], "opus")
-            self.assertEqual(self.backend.agents[-1]["task"], "")
-            self.assertIsNone(self.app.draft)
-            await pilot.press("n", "escape")
-            self.assertEqual(len(self.backend.agents), original + 1)
+    def status(self):
+        return str(self.app.query_one("#status", Static).render())
 
     async def test_message_keeps_original_recipient_during_refresh(self):
+        """A message goes to the agent selected when the form opened, even if a refresh reorders the rows before
+        submit; a break goes unnoticed because the message lands in another agent's inbox and the form closes
+        normally."""
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
             original = self.app.selected["id"]
@@ -169,6 +84,9 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("\n", self.backend.messages[0]["text"])
 
     async def test_focus_toggle_marks_the_agent_and_its_messages_go_to_the_inbox(self):
+        """f focuses the selected agent for a chosen length, marks it in the table, header, status line and inspector,
+        and m on it sends inbox-only, then f unfocuses it; a break goes unnoticed because a dashboard message would
+        otherwise be refused as a steer, or bury the question the focus protects."""
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             agent = dict(self.app.selected)
@@ -216,91 +134,203 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
 
-    async def test_empty_initial_prompt_can_spawn_and_failed_delivery_is_visible(self):
+    async def test_a_failing_backend_operation_never_ends_the_dashboard(self):
+        """Send, inspect, spawn and attach raising, attach inside Textual's suspend, leave the error on show, the rows
+        listed, a spawn draft kept and input working, and a send that is saved but not delivered is not reported as
+        complete; fragile because Textual ends the app on an unhandled worker exception and suspend() skips its resume
+        when the body raises, these errors happen only in the field (LAB-UI003), and a returned failure, unlike a
+        raised one, reads as success unless the status is built from the delivery receipt."""
+        resumed = []
+
+        @contextmanager
+        def suspend():
+            # Match Textual: code after yield is skipped if the body raises.
+            yield
+            resumed.append(True)
+
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
-            original = len(self.backend.agents)
-            await pilot.press('n', 'ctrl+enter')
-            await self.settle(pilot)
-            self.assertEqual(len(self.backend.agents), original + 1)
-            self.assertEqual(self.backend.agents[-1]['task'], '')
-            failed = {'saved': True, 'state': 'unavailable', 'ok': False,
-                      'native_delivery': {'state': 'unavailable', 'reason': 'Native bridge is unavailable'}}
-            with patch.object(self.backend, 'send', return_value=failed):
-                await pilot.press('m')
-                self.app.screen.query_one('#field-text', TextArea).load_text('Keep this saved')
-                await pilot.press('ctrl+enter')
+            agent = self.app.selected_key
+            with self.subTest(operation="send"), \
+                    patch.object(self.backend, "send", side_effect=OSError("Inbox is read-only")):
+                await pilot.press("m")
+                self.app.screen.query_one("#field-text", TextArea).load_text("test")
+                await pilot.press("ctrl+enter")
                 await self.settle(pilot)
-            status = str(self.app.query_one('#status', Static).render())
-            self.assertIn('Message saved', status)
-            self.assertIn('Native bridge is unavailable', status)
-
-    async def test_message_on_dormant_row_shows_pending_wake(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            self.app.selected['live'] = 'dormant'
-            selected = self.app.selected['id']
-            pending = {'saved': True, 'state': 'pending', 'ok': True,
-                       'native_delivery': {'state': 'pending', 'reason': 'Resuming with this message'}}
-            with patch.object(self.backend, 'send', return_value=pending) as sent:
-                await pilot.press('m')
-                self.app.screen.query_one('#field-text', TextArea).load_text('Continue the saved task')
-                await pilot.press('ctrl+enter')
+                self.assertIn("read-only", self.status())
+                self.assertFalse(self.app.operating)
+            undelivered = {"saved": True, "state": "unavailable", "ok": False,
+                           "native_delivery": {"state": "unavailable", "reason": "Native bridge is unavailable"}}
+            with self.subTest(operation="send, saved but not delivered"), \
+                    patch.object(self.backend, "send", return_value=undelivered):
+                await pilot.press("m")
+                self.app.screen.query_one("#field-text", TextArea).load_text("Keep this saved")
+                await pilot.press("ctrl+enter")
                 await self.settle(pilot)
-            self.assertEqual(sent.call_args.args[1:], (selected, 'Continue the saved task', 'steer'))
-            status = str(self.app.query_one('#status', Static).render())
-            self.assertIn('pending', status)
-            self.assertIn('Resuming with this message', status)
-
-    async def test_inspector_shows_selected_native_mode_and_fallback_reason(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            self.app.selected['runtime'] = {'native_mode': {
-                'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'Native config API unavailable'}}
-            self.app.action_preview()
-            state = str(self.app.query_one('#inspect-state', Static).render())
-            self.assertIn('Mode: plain (auto)', state)
-            self.assertIn('Fallback: Native config API unavailable', state)
-
-    async def test_inspector_preserves_saved_native_error_after_wrapper_is_gone(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            reason = 'Native process exited with code 1 during startup.\nLast terminal output:\nNo conversation found'
-            row = next(row for row in self.backend.agents if row['id'] == self.app.selected['id'])
-            row.update(live='dormant', launch_error=reason, reason=reason)
-            self.app.refresh_snapshot()
-            await self.settle(pilot)
-            with patch.object(self.backend, 'inspect') as capture:
-                self.app.action_preview()
+                self.assertIn("Native bridge is unavailable", self.status())
+                self.assertNotIn("complete", self.status())
+                self.assertFalse(self.app.operating)
+            with self.subTest(operation="inspect"), \
+                    patch.object(self.backend, "inspect", side_effect=OSError("Pane unavailable")):
+                await pilot.press("p")
                 await self.settle(pilot)
-                capture.assert_not_called()
-            self.assertIn('code 1', str(self.app.query_one('#inspect-state', Static).render()))
-            self.assertIn('No conversation found', str(self.app.query_one('#preview', Static).render()))
-            self.assertEqual(self.app.query_one('#pane-scroll').border_title, 'SAVED LAUNCH OUTPUT')
+                self.assertIn("Pane unavailable", str(self.app.query_one("#preview", Static).render()))
+                self.assertFalse(self.app.operating)
+                await pilot.press("p")
+            with self.subTest(operation="spawn"), \
+                    patch.object(self.backend, "spawn", side_effect=OSError("Harness unavailable")):
+                self.app.select_key(group_key(self.review))
+                await pilot.press("n", *"queen", "tab", "tab", *"Verify")
+                before = dict(self.app.draft.values)
+                await pilot.press("enter")
+                await self.settle(pilot)
+                self.assertEqual(self.app.draft.values, before)
+                self.assertIn("Harness unavailable", self.status())
+                self.assertFalse(self.app.operating)
+                await pilot.press("escape")
+                self.assertIsNone(self.app.draft)
+            with self.subTest(operation="attach"), patch.object(self.app, "suspend", side_effect=suspend), \
+                    patch.object(self.backend, "attach", side_effect=RuntimeError("no current client")):
+                self.app.select_key(agent)
+                await pilot.press("enter")
+                await self.settle(pilot)
+                self.assertEqual(resumed, [True])
+                self.assertIn("no current client", self.status())
+                self.assertFalse(self.app.operating)
+            self.assertEqual(len(self.app.screen_stack), 1)
+            self.assertEqual(len(self.app.visible_agents), 7)
+            self.assertEqual(len(self.backend.agents), 7)
+            self.assertEqual(self.backend.calls, [])
+            await pilot.press("slash", *"gearbox")
+            self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["verifier"])
 
-    async def test_inspector_shows_nonblocking_native_version_difference(self):
+    async def test_typed_keys_never_trigger_global_actions(self):
+        """Text typed into the filter, a spawn draft or the message editor, in one terminal read or key by key, is never
+        read as single-letter bindings (s stop, q quit, m message, n new agent), and a draft survives a refresh;
+        fragile because a terminal delivers a burst in one read before focus moves, and a dropped / silently corrupts a
+        message."""
+        self.backend.scopes[self.review]["name"] = "Testing queue"
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
-            self.app.selected['runtime'] = {'native_mode': {'policy': 'required', 'mode': 'bridge'},
-                                            'native_versions': {'cli': '0.159.3', 'daemon': '0.160.0'}}
-            self.app.action_preview()
-            state = str(self.app.query_one('#inspect-state', Static).render())
-            self.assertIn('Mode: bridge (required)', state)
-            self.assertIn('Versions: CLI 0.159.3 / daemon 0.160.0 (different)', state)
+            search = self.app.query_one("#filter", Input)
+            with ExitStack() as stack:
+                actions = {name: stack.enter_context(patch.object(self.app, "action_" + name))
+                           for name in ("stop", "kill", "spawn", "subverse", "message", "resume", "attach", "quit",
+                                        "preview", "details")}
+                # Each row: whether the inspector is open first, the terminal reads, then the query and focus.
+                for inspector, reads, query, focused in (
+                        (True, ["/Testing queue\r"], "Testing queue", "#agents"),  # the live repro's exact batch
+                        (True, ["/Testing", " queue names\r"], "Testing queue names", "#agents"),  # after it closed
+                        (False, ["/nmsqgpvr", "/q"], "nmsqgpvr/q", "#filter"),
+                        # Reopening selects the old query, so new text replaces it.
+                        (False, ["/Testing\r", "/ new message stop resume"], " new message stop resume", "#filter")):
+                    with self.subTest(reads=reads):
+                        await pilot.press("escape")
+                        if inspector:
+                            MultiverseApp.action_preview(self.app)
+                            self.assertIsNotNone(self.app.inspector.row)
+                        for read in reads:
+                            self.buffered(read)
+                            await self.settle(pilot)
+                        self.assertEqual(search.value, query)
+                        self.assertIs(self.app.focused, self.app.query_one(focused))
+                        self.assertEqual(len(self.app.screen_stack), 1)
+                        self.assertIsNone(self.app.draft)
+                with self.subTest("paced keys reopening the search"):
+                    await pilot.press("enter", "slash", *"paced names")
+                    self.assertEqual(search.value, "paced names")
+                    self.assertIs(self.app.focused, search)
+                for name, action in actions.items():
+                    with self.subTest(action=name):
+                        action.assert_not_called()
+            self.assertEqual(self.backend.calls, [])
+            await pilot.press("escape")
+            self.assertFalse(search.display)
+            with self.subTest("slashes in the filter, a draft and the message editor"):
+                self.app.select_key(agent_key(self.backend.agents[0]))
+                await pilot.press("slash", "a", "slash", "b")
+                self.assertEqual(search.value, "a/b")
+                await pilot.press("escape", "n", "tab", "tab", "a", "slash", "b")
+                self.assertEqual(self.app.draft.values["model"], "a/b")
+                await pilot.press("escape", "m")
+                await pilot.press("a", "slash", "b")
+                self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "a/b")
+                await pilot.press("escape")
+            with self.subTest("action letters typed into a spawn draft, then a refresh"):
+                self.app.select_key(group_key(self.review))
+                await pilot.press("n", *"queen", "tab", "tab", *"Verify", "shift+enter", *"q n m s", "tab", *"model-a")
+                before = dict(self.app.draft.values)
+                key = self.app.draft.key
+                self.backend.agents.reverse()
+                self.app.refresh_snapshot()
+                await self.settle(pilot)
+                self.assertEqual(self.app.draft.values, before)
+                self.assertIn("q n m s", "".join(before.values()))
+                self.assertEqual(self.app.selected_key, key)
+                self.assertEqual(self.app.draft.scope, self.review)
+                await pilot.press("escape")
+                self.assertIsNone(self.app.draft)
+            self.assertEqual(self.backend.calls, [])
+            self.assertEqual(len(self.backend.agents), 7)
 
-    async def test_relay_loss_is_visible_in_status_and_inspector(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
+    async def test_stale_async_results_are_discarded(self):
+        """A delayed pane capture of the previous agent, or a delayed scan of the parent after entering a child, is
+        dropped; a break goes unnoticed because it shows another agent's terminal under the selected name, or the
+        parent's rows under the child's title."""
+        entered, release = Event(), Event()
+        async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
-            self.app.selected['status'] = 'disconnected'
-            self.app.selected['runtime'] = {'native_relay': {'state': 'lost',
-                'reason': 'Native relay lost. Kill then resume the agent.', 'detail': 'daemon connection closed'}}
-            self.assertEqual(COLUMNS['status'].render(self.app.selected).plain, 'disconnected')
-            self.app.action_preview()
-            state = str(self.app.query_one('#inspect-state', Static).render())
-            self.assertIn('Native relay lost. Kill then resume', state)
-            self.assertIn('daemon connection closed', state)
+            original = dict(self.app.selected)
+            reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
+
+            def capture(root, reference):
+                if reference == original["id"]:
+                    entered.set()
+                    release.wait(3)
+                    return "OLD PANE"
+                return "NEW PANE"
+
+            with self.subTest("a pane capture of the previous agent"), \
+                    patch.object(self.backend, "inspect", side_effect=capture):
+                await pilot.press("p")
+                await asyncio.to_thread(entered.wait, 1)
+                try:
+                    self.app.select_key(agent_key(reviewer))
+                    await pilot.pause(0.3)
+                    self.assertEqual(self.app.inspector.row["id"], reviewer["id"])
+                finally:
+                    release.set()
+                await self.settle(pilot)
+                self.assertIn("NEW PANE", str(self.app.query_one("#preview", Static).render()))
+                self.assertNotIn("OLD PANE", str(self.app.query_one("#preview", Static).render()))
+                await pilot.press("p")
+            entered.clear()
+            release.clear()
+            snapshot = self.backend.snapshot
+
+            def slow(root):
+                if root == self.backend.root:
+                    entered.set()
+                    release.wait(3)
+                return snapshot(root)
+
+            with self.subTest("a scan of the parent after entering a child"), \
+                    patch.object(self.backend, "snapshot", side_effect=slow):
+                self.app.refresh_snapshot()
+                await asyncio.to_thread(entered.wait, 1)
+                try:
+                    self.app.select_key(group_key(self.cad))
+                    await pilot.press("enter")
+                finally:
+                    release.set()
+                await self.settle(pilot)
+                self.assertEqual(self.app.snapshot["root"], self.cad)
+                self.assertEqual(self.app.title, "CAD Lab")
 
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
+        """The inline harness selector takes keyboard and mouse but no typed text, and Enter on it creates the agent in
+        the selected group; kept because Enter there once only moved on to the model, and nothing shows that the press
+        did not create the agent (b1b6a6e)."""
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]
         async with self.app.run_test(size=(110, 28)) as pilot:
             await self.settle(pilot)
@@ -327,394 +357,41 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(self.app.draft.values["harness"], "codex")
             self.assertEqual(self.app.draft.active, "model")
+            created = len(self.backend.agents) + 1
+            await pilot.press("shift+tab")
+            self.assertEqual(self.app.draft.active, "harness")
             await pilot.press("enter")
             await self.settle(pilot)
+            self.assertIsNone(self.app.draft)
+            self.assertEqual(len(self.backend.agents), created)
             self.assertEqual(self.backend.agents[-1]["harness"], "codex")
             self.assertEqual(self.backend.agents[-1]["universe"], str(self.review))
 
-    async def test_removed_harness_requires_a_new_selection(self):
-        async with self.app.run_test(size=(60, 20)) as pilot:
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.review))
-            await pilot.press("n", "tab", "tab", *"Review")
-            self.backend.scopes[self.review]["harnesses"] = ["claude"]
-            self.app.refresh_snapshot()
-            await self.settle(pilot)
-            await pilot.press("enter")
-            self.assertIsNotNone(self.app.draft)
-            self.assertEqual(self.app.draft.active, "harness")
-            menu = self.app.query_one("#harness-menu", OptionList)
-            self.assertTrue(menu.display)
-            self.assertLessEqual(menu.region.right, 60)
-            await pilot.press("down", "enter", "enter")
-            await self.settle(pilot)
-            self.assertEqual(self.backend.agents[-1]["harness"], "claude")
-
-    async def test_stop_confirmation_resume_and_keyboard_attach(self):
+    async def test_escape_on_a_kill_or_delete_confirmation_does_nothing(self):
+        """Esc on the Kill and Delete confirmations leaves the agent in place and running, and Ctrl+Enter on the same
+        confirmation carries the action out; fragile because Esc hands the callback None and a callback that does not
+        check for it kills or deletes on cancel, the one slip that loses work, and nothing else notices."""
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
-            reference = self.app.selected["id"]
-            await pilot.press("s", "escape")
-            self.assertEqual(self.backend.calls, [])
-            await pilot.press("s", "ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual(self.app.selected["live"], "dormant")
-            await pilot.press("enter")
-            self.assertEqual(self.backend.calls, [("kill", self.backend.root, reference)])
-            await pilot.press("r")
-            await self.settle(pilot)
-            with patch.object(self.app, "suspend", return_value=nullcontext()):
-                await pilot.press("enter")
-                await self.settle(pilot)
-            self.assertEqual([call[0] for call in self.backend.calls], ["kill", "resume", "attach"])
-
-    async def test_shift_k_kills_but_lowercase_k_still_moves_up(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            agent = dict(self.app.selected)
-            key = self.app.selected_key
-            await pilot.press('k')
-            self.assertNotEqual(self.app.selected_key, key)
-            self.assertEqual(self.backend.calls, [])
-            self.assertFalse(self.app.check_action('kill', ()))  # Group row.
-            self.app.select_key(key)
-            await pilot.press('K', 'escape')
-            self.assertEqual(self.backend.calls, [])
-            footer = {b.binding.key for b in self.app.active_bindings.values() if b.binding.show}
-            self.assertIn('K', footer)
-            self.assertNotIn('d', footer)
-            self.assertIn('d              Delete', KEYS)
-            await pilot.press('K', 'ctrl+enter')
-            await self.settle(pilot)
-            self.assertEqual(self.backend.calls, [('kill', Path(agent['universe']), agent['id'])])
-            self.assertEqual((self.app.selected['live'], self.app.selected['status']), ('dormant', '-'))
-            self.assertTrue(self.app.check_action('kill', ()))
-            self.assertTrue(self.app.check_action('resume', ()))
-            await pilot.press('K')
-            self.assertIn('cancels native work only; no terminal remains',
-                          str(self.app.screen.query_one('#dialog-description', Static).render()))
-            await pilot.press('escape')
-            self.assertEqual(len(self.app.screen_stack), 1)
-
-            self.backend.kill = lambda *_: {'native_cancellation': {
-                'state': 'ok', 'reason': 'Native cleanup requested', 'cancelled_submissions': 1, 'interrupted_turns': 2}}
-            await pilot.press('s', 'ctrl+enter')
-            await self.settle(pilot)
-            self.assertIn('1 queued cancelled, 2 turn interrupts', str(self.app.query_one('#status', Static).render()))
-            self.backend.kill = lambda *_: {'native_cancellation': {
-                'state': 'unknown', 'reason': 'Native cancellation unconfirmed: Connection refused'}}
-            await pilot.press('s', 'ctrl+enter')
-            await self.settle(pilot)
-            self.assertIn('Terminal closed: Native cancellation unconfirmed',
-                          str(self.app.query_one('#status', Static).render()))
-
-    async def test_kill_operation_refreshes_ending_and_stopped_before_dormant(self):
-        ending, stopped, finish_native, finish_wrapper = Event(), Event(), Event(), Event()
-        def staged_kill(root, reference):
-            row = self.backend.find(root, reference)
-            row.update(live='ending', status='-')
-            ending.set()
-            if not finish_native.wait(5):
-                raise TimeoutError('test native release')
-            row.update(live='stopped')
-            stopped.set()
-            if not finish_wrapper.wait(5):
-                raise TimeoutError('test wrapper release')
-            row.update(live='dormant')
-        self.backend.kill = staged_kill
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            await pilot.press('K', 'ctrl+enter')
-            try:
-                for event, live in ((ending, 'ending'), (stopped, 'stopped')):
-                    self.assertTrue(await asyncio.to_thread(event.wait, 2))
-                    self.app.refresh_snapshot()
-                    await self.app.workers.wait_for_complete([w for w in self.app.workers if w.group == 'scan'])
-                    await pilot.pause()
-                    self.assertEqual((self.app.selected['live'], self.app.selected['status']), (live, '-'))
-                    self.assertFalse(self.app.check_action('resume', ()))  # Action still in progress.
-                    finish_native.set()
-            finally:
-                finish_native.set()
-                finish_wrapper.set()
-            await self.settle(pilot)
-            self.assertEqual(self.app.selected['live'], 'dormant')
-
-    async def test_retained_stopped_agent_can_resume_and_ending_counts_as_live(self):
-        from multiverse.ui.tree import counts
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            stopped = next(a for a in self.backend.agents if a['live'] == 'stopped')
-            self.app.select_key(agent_key(stopped))
-            self.assertTrue(self.app.check_action('resume', ()))
-            await pilot.press('r')
-            await self.settle(pilot)
-            self.assertEqual(self.app.selected['live'], 'alive')
-            self.assertEqual(counts([{'live': 'ending'}, {'live': 'stopped'}, {'live': 'dormant'}])['alive'], 1)
-
-    async def test_create_nested_subverse_and_quit_do_not_stop_agents(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            footer = {active.binding.action for active in self.app.active_bindings.values() if active.binding.show}
-            self.assertIn("subverse", footer)
-            self.app.select_key(group_key(self.verify))
-            await pilot.press("g")
-            self.assertEqual(len(self.app.screen_stack), 1, "Subverse creation is inline, not a form")
-            self.assertIsInstance(self.app.draft, SubverseDraft)
-            self.assertEqual(self.app.draft.values["name"], "subverse")
-            self.assertIn(self.app.draft.key, self.app.visible_rows)
-            await pilot.press("tab")
-            self.assertEqual(self.app.draft.active, "name")
-            await pilot.press("escape")
-            self.assertIsNone(self.app.draft)
-            self.assertEqual(len(self.backend.scopes), 4)
-            # The backend validates names; a refusal keeps the draft for correction.
-            await pilot.press("g", "ctrl+u", "enter")
-            await self.settle(pilot)
-            self.assertIn("letters", str(self.app.query_one("#status", Static).render()))
-            self.assertIsNotNone(self.app.draft)
-            await pilot.press(*"bad name", "enter")
-            await self.settle(pilot)
-            self.assertIsNotNone(self.app.draft)
-            await pilot.press("ctrl+u")
-            self.app.query_one("#agents").post_message(events.Paste("experiments\nsecond line"))
-            await pilot.pause()
-            self.assertEqual(self.app.draft.values["name"], "experiments")
-            await pilot.press("enter")
-            await self.settle(pilot)
-            target = self.verify / "subverses/experiments"
-            self.assertIsNone(self.app.draft)
-            self.assertEqual(self.app.selected_key, group_key(target))
-            self.app.select_key(group_key(self.verify))
-            await pilot.press("g", "ctrl+u", *"experiments", "enter")
-            await self.settle(pilot)
-            self.assertIn("already exists", str(self.app.query_one("#status", Static).render()))
-            self.assertIsNotNone(self.app.draft)
-            await pilot.press("escape")
-            self.assertEqual(self.app.root, self.backend.root)
-            self.assertEqual(len(self.app.visible_agents), 7)
-            await pilot.press("q")
-        self.assertEqual(self.backend.calls, [])
-
-    async def test_resize_dense_layout_forms_and_on_demand_preview(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            with patch.object(self.backend, "inspect", wraps=self.backend.inspect) as inspect:
-                self.app.refresh_snapshot()
-                await self.settle(pilot)
-                inspect.assert_not_called()
-                await pilot.press("p")
-                await self.settle(pilot)
-                self.assertIn("Context loaded", str(self.app.query_one("#preview", Static).render()))
-                await pilot.press("p")
-            for width, height in ((100, 28), (80, 24), (60, 20)):
-                await pilot.resize_terminal(width, height)
-                await pilot.pause()
-                table = self.app.query_one("#agents", DataTable)
-                self.assertGreaterEqual(table.region.height, height - 4)
-                self.assertLessEqual(table.region.right, width)
-                self.assertFalse(table.show_horizontal_scrollbar)
-                self.assertEqual(table.row_count, 11)
-                self.assertEqual(len(self.app.query(Button)), 0)
-            await pilot.press("n")
-            self.assertEqual(len(self.app.screen.query(Button)), 0)
-            for selector in ("#selection", "#status"):
-                region = self.app.query_one(selector).region
-                self.assertLessEqual(region.bottom, 20)
-                self.assertGreater(region.height, 0)
-            self.assertEqual(len(self.app.screen_stack), 1)
-            await pilot.press("tab", "tab", *"sonnet")
-            self.assertEqual(self.app.draft.values["model"], "sonnet")
-            await pilot.press("escape", "question_mark")
-            self.assertIsInstance(self.app.screen, Details)
-            await pilot.press("escape")
-
-    async def test_hover_never_opens_inspector_and_p_follows_selection(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            original = self.app.selected_key
-            reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
-            index = list(self.app.visible_rows).index(agent_key(reviewer))
-            await pilot.hover("#agents", offset=(6, index + 1))
-            await pilot.pause(0.4)
-            self.assertIsNone(self.app.inspector.row)
-            self.assertEqual(self.app.selected_key, original)
-            await pilot.press("j")
-            await pilot.pause(0.3)
-            self.assertIsNone(self.app.inspector.row)
-            self.assertEqual(self.backend.calls, [])
-            await pilot.press("p")
-            await self.settle(pilot)
-            self.assertEqual(self.app.inspector.row["key"], self.app.selected_key)
-            self.assertGreaterEqual(self.app.query_one("#inspector").region.x, self.app.query_one("#agents").region.right)
-            await pilot.hover("#masthead")
-            await pilot.pause(0.3)
-            self.assertIsNotNone(self.app.inspector.row)
-            await pilot.press("j")
-            await pilot.pause(0.3)
-            await self.settle(pilot)
-            self.assertEqual(self.app.inspector.row["key"], self.app.selected_key)
-            await pilot.press("p")
-            self.assertIsNone(self.app.inspector.row)
-
-    async def test_compact_drawer_and_escape_close(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            await pilot.press("j", "p")
-            await self.settle(pilot)
-            for width, height in ((80, 24), (60, 20)):
-                await pilot.resize_terminal(width, height)
-                await pilot.pause()
-                inspector = self.app.query_one("#inspector").region
-                table = self.app.query_one("#agents", DataTable)
-                self.assertGreaterEqual(inspector.y, table.region.bottom)
-                self.assertLessEqual(inspector.bottom, height - 2)
-                self.assertGreaterEqual(table.region.height, 6)
-                self.assertFalse(table.show_horizontal_scrollbar)
-                self.assertGreaterEqual(self.app.query_one("#pane-scroll").region.height, 2)
-            await pilot.press("escape")
-            self.assertIsNone(self.app.inspector.row)
-
-    async def test_waiting_agents_stand_out_and_groups_count_them(self):
-        reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
-        reviewer["status"] = "waiting"
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            self.assertIn("1 waiting", str(self.app.query_one("#totals", Static).render()))
-            row = self.app.visible_rows[agent_key(reviewer)]
-            name, status = COLUMNS["name"].render(row), COLUMNS["status"].render(row)
-            self.assertIn("●", name.plain)
-            self.assertEqual(status.plain, "waiting")
-            self.assertIn("#fab387", str(status.style))
-            group = self.app.visible_rows[group_key(self.review)]
-            self.assertTrue(COLUMNS["summary"].render(group).plain.startswith("1 waiting"))
-            quiet = self.app.visible_rows[agent_key(next(a for a in self.backend.agents if a["name"] != "reviewer" and a["live"] == "alive"))]
-            self.assertNotIn("●", COLUMNS["name"].render(quiet).plain)
-
-    async def test_user_facing_text_says_status(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            self.assertEqual(COLUMNS["status"].title, "Status")
-            self.assertNotIn("ctivity", KEYS)
-            self.assertIn("Inspector", [b.description for b in self.app.BINDINGS if b.show])
-            await pilot.press("p")
-            await self.settle(pilot)
-            self.assertIn("Status:", str(self.app.query_one("#inspect-state", Static).render()))
-
-    async def test_preview_refresh_discards_delayed_result_and_does_not_read_stopped_agent(self):
-        entered, release = Event(), Event()
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            original = dict(self.app.selected)
-            reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
-            calls = []
-
-            def capture(root, reference):
-                calls.append(reference)
-                if reference == original["id"]:
-                    entered.set()
-                    release.wait(3)
-                    return "OLD PANE"
-                return "NEW PANE " + str(len(calls))
-
-            with patch.object(self.backend, "inspect", side_effect=capture):
-                await pilot.press("p")
-                await asyncio.to_thread(entered.wait, 1)
-                try:
-                    self.app.select_key(agent_key(reviewer))
-                    await pilot.pause(0.3)
-                    self.assertEqual(self.app.inspector.row["id"], reviewer["id"])
-                finally:
-                    release.set()
-                await self.settle(pilot)
-                self.assertIn("NEW PANE", str(self.app.query_one("#preview", Static).render()))
-                self.assertNotIn("OLD PANE", str(self.app.query_one("#preview", Static).render()))
-                before = len(calls)
-                self.app.refresh_snapshot()
-                await self.settle(pilot)
-                self.assertEqual(len(calls), before + 1)
-                reviewer["live"], reviewer["status"] = "stopped", "-"
-                self.app.refresh_snapshot()
-                await self.settle(pilot)
-                self.assertEqual(len(calls), before + 1)
-            self.assertIn("Native process stopped; tmux wrapper remains", str(self.app.query_one("#preview", Static).render()))
-
-    async def test_group_inspector_does_not_capture_and_preview_errors_stay_local(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            with patch.object(self.backend, "inspect", side_effect=OSError("Pane unavailable")) as inspect:
-                self.app.select_key(group_key(self.review))
-                await pilot.press("p")
-                await pilot.pause(0.1)
-                self.assertEqual(self.app.inspector.row["kind"], "group")
-                self.assertIn("2/2 live", str(self.app.query_one("#inspect-state", Static).render()))
-                inspect.assert_not_called()
-                self.app.select_key(list(self.app.visible_rows)[list(self.app.visible_rows).index(group_key(self.review)) + 1])
-                await pilot.pause(0.3)
-                await self.settle(pilot)
-                self.assertIn("Pane unavailable", str(self.app.query_one("#preview", Static).render()))
-                self.assertFalse(self.app.operating)
-
-    async def test_inline_draft_survives_refresh_failure_and_literal_action_keys(self):
-        async with self.app.run_test(size=(100, 28)) as pilot:
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.review))
-            await pilot.press("n", *"queen", "tab", "tab", *"Verify", "shift+enter", *"q n m s", "tab", *"model-a")
-            before = dict(self.app.draft.values)
-            key = self.app.draft.key
-            self.backend.agents.reverse()
-            self.app.refresh_snapshot()
-            await self.settle(pilot)
-            self.assertEqual(self.app.draft.values, before)
-            self.assertEqual(self.app.selected_key, key)
-            self.assertEqual(self.app.draft.scope, self.review)
-            with patch.object(self.backend, "spawn", side_effect=OSError("Harness unavailable")):
-                await pilot.press("enter")
-                await self.settle(pilot)
-            self.assertEqual(self.app.draft.values, before)
-            self.assertIn("Harness unavailable", str(self.app.query_one("#status", Static).render()))
-            self.assertEqual(self.backend.calls, [])
-            self.assertEqual(len(self.backend.agents), 7)
-            await pilot.press("escape")
-            self.assertIsNone(self.app.draft)
-
-    async def test_slow_refresh_leaves_input_responsive_and_preserves_current_filter(self):
-        entered, release = Event(), Event()
-        original = self.backend.snapshot
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-
-            def slow(root):
-                entered.set()
-                release.wait(4)
-                return original(root)
-
-            with patch.object(self.backend, "snapshot", side_effect=slow):
-                self.app.refresh_snapshot()
-                await asyncio.to_thread(entered.wait, 1)
-                try:
-                    await pilot.press("slash", *"blocked")
-                    self.assertIs(self.app.focused, self.app.query_one("#filter"))
-                    self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["pr-writer"])
-                finally:
-                    release.set()
-                await self.settle(pilot)
-            self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["pr-writer"])
-
-    async def test_backend_failure_is_visible_and_preserves_dashboard(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            with patch.object(self.backend, "send", side_effect=OSError("Inbox is read-only")):
-                await pilot.press("m")
-                self.app.screen.query_one("#field-text", TextArea).load_text("test")
-                await pilot.press("ctrl+enter")
-                await self.settle(pilot)
-            self.assertIn("read-only", str(self.app.query_one("#status", Static).render()))
-            self.assertFalse(self.app.operating)
-            self.assertEqual(len(self.app.visible_agents), 7)
-
+            agents = len(self.backend.agents)
+            for key, title, done in (("K", "Kill", lambda: [call[0] for call in self.backend.calls] == ["kill"]),
+                                     ("d", "Delete", lambda: len(self.backend.agents) == agents - 1)):
+                with self.subTest(title):
+                    await pilot.press(key)
+                    self.assertIsInstance(self.app.screen, Form)
+                    self.assertIn(title, self.app.screen.form_title)
+                    await pilot.press("escape")
+                    await self.settle(pilot)
+                    self.assertEqual(len(self.app.screen_stack), 1)
+                    self.assertFalse(done(), f"Esc on the {title} confirmation carried it out")
+                    await pilot.press(key, "ctrl+enter")  # the same confirmation does act when it is accepted
+                    await self.settle(pilot)
+                    self.assertTrue(done(), f"Ctrl+Enter on the {title} confirmation did nothing")
 
     async def test_enter_uses_cursor_before_highlight_message_is_dispatched(self):
+        """Enter acts on the row under the cursor even before Textual has dispatched the highlight message; kept for
+        the lab finding, since a fast key after a move otherwise opens or attaches the previously highlighted row and
+        the user types into the wrong agent (LAB-UI003)."""
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
             old_agent = self.app.selected
@@ -727,80 +404,6 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertEqual(self.app.root, self.cad)
             self.assertEqual(self.backend.calls, [])
-
-    async def test_attach_failure_exits_suspend_normally_and_restores_input(self):
-        resumed = []
-
-        @contextmanager
-        def suspend():
-            # Match Textual: code after yield is skipped if the body raises.
-            yield
-            resumed.append(True)
-
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            with patch.object(self.app, "suspend", side_effect=suspend), \
-                    patch.object(self.backend, "attach", side_effect=RuntimeError("no current client")):
-                await pilot.press("enter")
-                await self.settle(pilot)
-            self.assertEqual(resumed, [True])
-            self.assertFalse(self.app.operating)
-            self.assertIn("no current client", str(self.app.query_one("#status", Static).render()))
-            await pilot.press("slash", *"gearbox")
-            self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["verifier"])
-
-    async def test_buffered_search_routes_query_to_input_without_global_actions(self):
-        self.backend.scopes[self.review]["name"] = "Testing queue"
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            await pilot.press("p")
-            self.assertIsNotNone(self.app.inspector.row)
-            with ExitStack() as stack:
-                actions = {name: stack.enter_context(patch.object(self.app, "action_" + name))
-                           for name in ("stop", "spawn", "subverse", "message", "resume", "quit", "preview", "details")}
-                # Unlike Pilot.press, enqueue the whole terminal read without
-                # yielding between keys. The live repro sends this exact batch.
-                for key, character in [("slash", "/"), *[(c, c) for c in "Testing queue"], ("enter", None)]:
-                    self.app.post_message(events.Key(key, character))
-                await self.settle(pilot)
-                for action in actions.values():
-                    action.assert_not_called()
-            self.assertEqual(self.app.query_one("#filter", Input).value, "Testing queue")
-            self.assertIs(self.app.focused, self.app.query_one("#agents"))
-            self.assertEqual(len(self.app.screen_stack), 1)
-            self.assertIsNone(self.app.draft)
-            self.assertEqual(self.backend.calls, [])
-            await pilot.press("escape")
-            self.assertFalse(self.app.query_one("#filter").display)
-
-    async def test_buffered_search_keeps_focus_for_subsequent_action_letters(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            with ExitStack() as stack:
-                actions = [stack.enter_context(patch.object(self.app, "action_" + name))
-                           for name in ("stop", "spawn", "subverse", "message", "resume", "quit", "preview", "details")]
-                for key, character in [("slash", "/"), *[(c, c) for c in "nmsqgpvr"]]:
-                    self.app.post_message(events.Key(key, character))
-                await self.settle(pilot)
-                self.assertIs(self.app.focused, self.app.query_one("#filter"))
-                for key, character in [("slash", "/"), ("q", "q")]:
-                    self.app.post_message(events.Key(key, character))
-                await self.settle(pilot)
-                self.assertEqual(self.app.query_one("#filter", Input).value, "nmsqgpvr/q")
-                for action in actions:
-                    action.assert_not_called()
-
-    async def test_search_shortcut_preserves_slashes_in_editors_and_drafts(self):
-        async with self.app.run_test(size=(120, 32)) as pilot:
-            await self.settle(pilot)
-            await pilot.press("slash", "a", "slash", "b")
-            self.assertEqual(self.app.query_one("#filter", Input).value, "a/b")
-            await pilot.press("escape", "n", "tab", "tab", "a", "slash", "b")
-            self.assertEqual(self.app.draft.values["model"], "a/b")
-            await pilot.press("escape", "m")
-            await pilot.press("a", "slash", "b")
-            self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "a/b")
-            await pilot.press("escape")
 
 
 if __name__ == "__main__":

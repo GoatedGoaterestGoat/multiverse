@@ -66,7 +66,10 @@ def exact(value, root=None):
     if root is not None and not path.is_absolute():
         nested = Path(root)
         for part in path.parts:
-            nested = nested / "subverses" / slug(part)
+            try:
+                nested = nested / "subverses" / slug(part)
+            except ValueError:
+                raise ValueError(f"Not a universe or subverse: {value}") from None
         if (nested / "universe.json").is_file():
             return nested.resolve()
     raise ValueError(f"Not a universe or subverse: {value}")

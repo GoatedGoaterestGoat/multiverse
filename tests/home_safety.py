@@ -1,4 +1,4 @@
-"""Fail any test that writes under the real ~/.multiverse.
+"""Fail any test that writes under the real ~/.multiverse, or under this checkout's own .multiverse.
 
 The guard lives in multiverse.plugins.testing, where PluginTestCase installs it for plugin tests (mv2's and the
 plugins' own). mv2's other tests and the parallel runner install it from here:

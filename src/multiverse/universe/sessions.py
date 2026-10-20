@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..harnesses.types import normalize_session_id
 from ..store import lock, now, read, uid, write
-from . import parent, tree
+from . import parent, tree, records
 
 
 class SessionConflict(ValueError):
@@ -37,6 +37,24 @@ def canonical_home(home):
     return str(Path(home).resolve())
 
 
+def _stored_home(home):
+    """A historical scope was resolved when written; do not follow later symlinks."""
+    if (not isinstance(home, str) or not home or '\0' in home or not Path(home).is_absolute() or home.startswith('//')
+            or os.path.normpath(home) != home):
+        raise ValueError('invalid stored storage scope')
+    return home
+
+
+
+def _different_homes(left, right):
+    """Only disjoint recorded paths AND their present aliases prove separate storage."""
+    try:
+        left, right = _stored_home(left), _stored_home(right)
+        return left != right and canonical_home(left) != canonical_home(right)
+    except (OSError, ValueError, RuntimeError):
+        return False  # Unknown storage cannot authorize a duplicate claim.
+
+
 def journal(directory):
     path = directory / 'sessions.jsonl'
     if not path.exists():
@@ -55,7 +73,7 @@ def journal(directory):
                 for key in ('id', 'from', 'to'):
                     if normalize_session_id(row[key]) != row[key]:
                         raise ValueError('noncanonical identity')
-                if canonical_home(row['home']) != row['home'] or row['id'] in identities:
+                if _stored_home(row['home']) != row['home'] or row['id'] in identities:
                     raise ValueError('invalid scope or repeated transition')
                 if rows and rows[-1]['to'] != row['from']:
                     raise ValueError('disconnected transitions')
@@ -91,12 +109,19 @@ def recover(directory, data):
     return updated, rows[-1] if repaired else None
 
 
+def _recorded_provider(data):
+    value = data.get('native_session_provider')
+    if value is None:
+        identity = data.get('native_service_identity')
+        value = identity.get('provider') if isinstance(identity, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def provider(root, data):
-    if data.get('native_session_provider'):
-        return data['native_session_provider']
-    identity = data.get('native_service_identity') or {}
-    if identity.get('provider'):
-        return identity['provider']
+    if known := _recorded_provider(data):
+        return known
+    if data.get('native_session_provider') is not None or data.get('native_service_identity') is not None:
+        return None  # Malformed stored scope is unknown, never a different namespace.
     if not data.get('harness'):
         return None  # Minimal old records have no known provider namespace.
     # Legacy aliases predate the stored provider. Reading configuration is not
@@ -104,28 +129,98 @@ def provider(root, data):
     from .. import harnesses
     try:
         family = getattr(harnesses.load(root, data['harness']), 'family', '')
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError):
         return None  # Binding alone never requires a surviving harness definition.
     return family if isinstance(family, str) and family else data['harness']
 
 
-def claim(root, directory, data, native_id, home=None):
+def _journal_mentions(path, native_id):
+    """Inspect damaged, readable evidence without parsing or repairing another agent."""
+    return records.mentions(path, native_id)
+
+
+def _damaged_mentions(directory, native_id):
+    """Missing files cannot claim an ID; surviving unreadable evidence still can."""
+    paths = [directory / name for name in ('properties.json', 'runtime.json', 'sessions.jsonl')]
+    try:
+        launches = list((directory / 'launches').iterdir())
+    except FileNotFoundError:
+        launches = []
+    for launch in launches:
+        paths.append(launch / 'request.json')
+    mentioned = False
+    for path in paths:
+        try:
+            mentioned = records.mentions(path, native_id) or mentioned
+        except FileNotFoundError:
+            continue
+    return mentioned
+
+
+def claim(root, directory, data, native_id, home=None, *, operation=None):
     """Caller holds namespace. Earlier generations remain owned by their agent."""
     own_provider = provider(root, data)
     own_directory = directory.resolve()
     own_home = canonical_home(home) if home is not None else data.get('native_session_home')
+    from .agents import orphaned, record_paths
     for scope in tree(top(root)):
-        for path in (scope / 'state' / 'agents').glob('*/properties.json'):
+        for path in record_paths(scope):
             if path.parent.resolve() == own_directory:
                 continue
-            other, rows = effective(path.parent, read(path))
+            try:
+                other = records.properties(path)
+            except records.RecordError as error:
+                owner = f'agent {path.parent.name}'
+                journal = path.parent / 'sessions.jsonl'
+                try:
+                    if orphaned(path.parent):
+                        continue  # Only plugin leftovers; no current or historical claim.
+                    known = (error.data or {}).get('native_session_id')
+                    mentioned = _damaged_mentions(path.parent, native_id) or known == native_id
+                except (OSError, ValueError) as unreadable:
+                    raise SessionConflict(f'Cannot check {owner}: {path} or {journal} cannot be read safely '
+                                          f'({unreadable}); fix permissions or repair the record before retrying') from error
+                if mentioned:
+                    raise SessionConflict(f'Cannot claim session reserved by {owner}: {path} or {journal} '
+                                          'mentions this session; repair the damaged record before retrying') from error
+                continue
+            # A valid lineage cannot change its provider or storage scope. Exclude
+            # known disjoint namespaces before touching potentially unreadable
+            # journals. Unknown legacy/malformed scope still needs inspection.
+            other_provider = _recorded_provider(other)
+            if own_provider and other_provider:
+                if other_provider != own_provider:
+                    continue
+                if _different_homes(own_home, other.get('native_session_home')):
+                    continue
+            try:
+                other, rows = effective(path.parent, other)
+            except (OSError, ValueError, TypeError) as error:
+                journal_path = path.parent / 'sessions.jsonl'
+                owner = f'{other.get("name", path.parent.name)} ({path.parent.name})'
+                if isinstance(error, OSError):
+                    raise SessionConflict(f'Cannot check agent {owner}: {journal_path} cannot be read '
+                                          f'({error}); fix its permissions before retrying') from error
+                try:
+                    mentioned = other.get('native_session_id') == native_id or _journal_mentions(journal_path, native_id)
+                except (OSError, ValueError) as unreadable:
+                    raise SessionConflict(f'Cannot check agent {owner}: {journal_path} cannot be read safely '
+                                          f'({unreadable}); fix its permissions or repair the journal before retrying') from error
+                if mentioned:
+                    raise SessionConflict(f'Cannot claim session reserved by agent {owner}: {journal_path} is invalid '
+                                          f'({error}); repair that agent\'s journal before retrying') from error
+                continue  # Damage proven unrelated to this requested ID must not block the tree.
             identities = {other.get('native_session_id'), *(row['from'] for row in rows), *(row['to'] for row in rows)}
             other_provider = provider(scope, other) if native_id in identities else None
             if native_id not in identities or (own_provider and other_provider and other_provider != own_provider):
                 continue
             homes = {other.get('native_session_home'), *(row['home'] for row in rows)}
-            if own_home and None not in homes and own_home not in homes:
+            if all(_different_homes(own_home, other_home) for other_home in homes):
                 continue
+            if operation == 'bind':
+                raise SessionConflict(f'Cannot bind session {native_id}: it belongs to another agent '
+                                      f'({other.get("name", path.parent.name)}). Use that agent, or bind an '
+                                      'unclaimed session ID to this one')
             raise SessionConflict(f'This terminal switched to another agent\'s session ({other.get("name", "another agent")}); '
                                   'return to this agent\'s own conversation before sending messages')
 

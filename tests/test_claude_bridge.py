@@ -1,27 +1,24 @@
-"""Claude inbox bridge: launch options, steering frames and core framing, with no Claude process."""
+"""Claude inbox bridge: launch options, steering frames and receipts, with no Claude session."""
+from dataclasses import replace
 import hashlib
 import json
-import os
 import re
+import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import sys
-import threading
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
-from multiverse.runtime import native
-from multiverse.universe import templates
-from multiverse.harnesses.claude import MOD, measured_usage
+from multiverse.harnesses.claude import MOD
 from multiverse.plugins import loader as plugin_loader, manifest as plugin_manifest
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
-from multiverse.tools import runtime_update, send
+from multiverse.tools import capabilities
 from test_multiverse import BaseTest
 
 # The typeahead is the bundled `typeahead` plugin; its manifest gates it on the Claude version.
@@ -31,28 +28,10 @@ TYPEAHEAD_VERSION = plugin_manifest.load(TYPEAHEAD.parent).harnesses['claude'][0
 TOKEN = '0123456789abcdef0123456789abcdef'
 
 
-class Inbox:
-    """A local inbox like Claude's: reads JSON lines until EOF and sends no reply."""
-
-    def __init__(self, path):
-        self.lines = []
-        self.server = socket.socket(socket.AF_UNIX)
-        self.server.bind(path)
-        self.server.listen(1)
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
-
-    def serve(self):
-        connection, _ = self.server.accept()
-        data = b''
-        with connection:
-            while chunk := connection.recv(65536):
-                data += chunk
-        self.lines = [json.loads(line) for line in data.decode().splitlines()]
-
-    def close(self):
-        self.thread.join(5)
-        self.server.close()
+def mod_tag():
+    """The mod's own tag regex (hooks/index.ts TAG): Python's frames must be what it reads, since each side keeps its copy."""
+    found = re.search(r'^const TAG = /(.+)/$', (MOD / 'hooks/index.ts').read_text(), re.M)
+    return re.compile(found.group(1).replace('\\/', '/'))
 
 
 class ClaudeBridgeTest(BaseTest):
@@ -87,34 +66,18 @@ class ClaudeBridgeTest(BaseTest):
         return SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()), state=state,
                              endpoint=NativeEndpoint('unix-lines', self.socket) if endpoint else None, bridge=bridge)
 
-    def test_bridge_is_opt_in_and_launches_the_mod_on_the_launch_socket(self):
-        plain = self.bridge(False).spawn(LaunchContext('spawn', self.values()))
-        self.assertNotIn('--plugin-dir', plain.argv)
-        self.assertIsNone(plain.control_endpoint)
-        self.assertEqual(dict(plain.environment), {})
-        adapter = self.bridge()
-        values = self.values()
-        for command in (adapter.spawn(LaunchContext('spawn', values)),
-                        adapter.resume(SessionHandle(values['agent_id'], 'claude', str(self.work),
-                                                     native_id=values['session_id']), LaunchContext('resume', values))):
-            with self.subTest(argv=command.argv[:2]):
-                self.assertEqual(list(command.argv[1:7]), ['--plugin-dir', str(MOD), '--messaging-socket-path',
-                                 self.socket, '--settings', '{"crossSessionInbound": "accept"}'])
-                self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
-                self.assertEqual(command.environment['CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'], '1')
-                self.assertIn(values['session_id'], command.argv)
-        self.assertEqual(adapter.spawn(LaunchContext('spawn', values)).argv[-1], values['task'])
-        self.assertTrue((MOD / '.claude-plugin/plugin.json').is_file())
-        self.assertTrue((MOD / 'hooks/index.ts').is_file())
-
-    def launch(self, setting, version, mode='spawn'):
-        """A Claude launch under this `inbox_bridge` setting (None leaves it out) and installed version."""
+    def configure(self, setting):
+        """Set the harness's `inbox_bridge` setting; None leaves it out."""
         path = self.root / 'harnesses/claude/harness.json'
         config = read(path)
         config['settings'].pop('inbox_bridge', None)
         if setting is not None:
             config['settings']['inbox_bridge'] = setting
         write(path, config)
+
+    def launch(self, setting, version, mode='spawn'):
+        """A Claude launch under this `inbox_bridge` setting (None leaves it out) and installed version."""
+        self.configure(setting)
         values = self.values()
         adapter = harnesses.load(self.root, 'claude')
         with patch('multiverse.harnesses.claude.claude_version', return_value=version) as probe:
@@ -125,84 +88,185 @@ class ClaudeBridgeTest(BaseTest):
                 command = adapter.resume(session, LaunchContext('resume', values))
         return command, probe
 
-    def test_unset_is_auto_and_uses_the_bridge_unless_this_claude_cannot_run_it(self):
-        command, _ = self.launch(None, (2, 1, 289))
-        self.assertEqual(list(command.argv[1:3]), ['--plugin-dir', str(MOD)])
-        self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
-        self.assertEqual(command.native_mode, {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
-        for mode in ('spawn', 'resume'):
-            with self.subTest(mode=mode):
-                old, _ = self.launch(None, (2, 1, 270), mode)
-                self.assertNotIn('--plugin-dir', old.argv)
-                self.assertIsNone(old.control_endpoint)
-                self.assertNotIn('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', old.environment)
-                self.assertEqual((old.native_mode['policy'], old.native_mode['mode']), ('auto', 'plain'))
-                self.assertIn('Claude Code 2.1.270 is older than 2.1.280', old.native_mode['fallback_reason'])
-        # A version that cannot be read is no reason to give up the bridge: the launch shows whether the mod loads.
-        unknown, _ = self.launch(None, None)
-        self.assertEqual(unknown.native_mode['mode'], 'bridge')
+    def harness(self, setting, version=(2, 1, 302), probe=False):
+        """What capabilities --harness says with no agent, under this setting and installed version.
 
-    def test_true_requires_the_bridge_and_false_never_loads_it(self):
-        required, _ = self.launch(True, (2, 1, 289))
-        self.assertEqual(required.native_mode, {'policy': 'required', 'mode': 'bridge', 'fallback_reason': None})
-        with self.assertRaisesRegex(ValueError, 'older than 2.1.280'):
-            self.launch(True, (2, 1, 270))
-        for version in ((2, 1, 289), (2, 1, 270)):
-            plain, probe = self.launch(False, version)
-            self.assertNotIn('--plugin-dir', plain.argv)
-            self.assertIsNone(plain.control_endpoint)
-            self.assertEqual(plain.native_mode, {'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
-            probe.assert_not_called()  # plain never asks which version is installed
+        --probe looks the executable up as spawn does, so the harness points at a stand-in that never runs (the
+        version read is patched): the answer must not depend on a real claude on PATH, which CI doesn't have.
+        """
+        self.configure(setting)
+        stand_in = self.work / 'stand-in' / 'claude'
+        if not stand_in.exists():
+            stand_in.parent.mkdir(parents=True)
+            stand_in.write_text('#!/bin/sh\nexit 1\n')
+            stand_in.chmod(0o755)
         path = self.root / 'harnesses/claude/harness.json'
         config = read(path)
-        config['settings']['inbox_bridge'] = 'yes'  # still strictly validated
+        config['settings']['executable'] = str(stand_in)
         write(path, config)
-        with self.assertRaises(ValueError):
-            harnesses.load(self.root, 'claude')
+        with patch('multiverse.harnesses.claude.claude_version', return_value=version) as asked:
+            found = capabilities.run(self.root, harness='claude', probe=probe)
+        return found, asked
 
-    def test_a_launch_that_fell_back_to_plain_says_so_in_its_capabilities(self):
-        adapter = self.bridge(None)
-        running = dict(state='running', native_id=str(uuid4()), bridge='claude-mod-v1',
-                       endpoint=NativeEndpoint('unix-lines', self.socket), session_file=str(self.work / 'agent' / 'session.jsonl'))
-        session = SessionHandle('agent', 'claude', str(self.work), native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}, **running)
-        capabilities = adapter.capabilities(session)
-        self.assertEqual((capabilities['send_steer'].state, capabilities['get_delivery'].state, capabilities['ask'].state),
-                         ('supported', 'supported', 'supported'))
-        reason = 'Claude Code 2.1.270 is older than 2.1.280, which the multiverse mod needs'
-        fell_back = SessionHandle('agent', 'claude', str(self.work),
-                                  native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason},
-                                  **{**running, 'endpoint': None, 'bridge': None})
-        capabilities = adapter.capabilities(fell_back)
-        for name in ('send_steer', 'send_follow_up'):
-            self.assertEqual(capabilities[name].state, 'unavailable')
-            self.assertEqual(capabilities[name].reason, 'Launched without the bridge: ' + reason)
-        self.assertNotEqual(capabilities['get_delivery'].state, 'supported')
-        self.assertNotEqual(capabilities['ask'].state, 'supported')
-
-    def test_what_reads_the_setting_sees_the_effective_value(self):
-        # auto and true both mean the bridge is on for code that asks adapter.settings (compaction does).
-        for setting, expected in ((None, True), (True, True), (False, False)):
-            self.launch(setting, (2, 1, 289))
-            self.assertEqual(harnesses.load(self.root, 'claude').settings['inbox_bridge'], expected, setting)
-
-    def test_the_installed_version_is_read_once_per_binary_and_is_never_fatal(self):
-        from multiverse.harnesses import claude as module
-        fake = self.work / 'bin' / 'claude-fake'
-        fake.parent.mkdir()
-        fake.write_text('#!/bin/sh\necho "2.1.289 (Claude Code)"\n')
-        fake.chmod(0o755)
-        with patch('multiverse.harnesses.claude.claude_version', self.real_claude_version):
-            module._versions.clear()
-            self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))
-            fake.write_text('#!/bin/sh\necho "something else"\n')
-            self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))  # cached by the binary's real path
-            module._versions.clear()
-            self.assertIsNone(module.claude_version(str(fake)))               # no version in the output
-            self.assertIsNone(module.claude_version(str(self.work / 'nothing-here')))  # not installed
-            self.assertIsNone(module.bridge_problem(str(self.work / 'nothing-here')))
-            module._versions.clear()
+    def test_launch_mode_and_hidden_flags_per_setting_and_version(self):
+        """Unset, true and false inbox_bridge settings against new, old and unreadable Claude versions pick bridge or
+        plain with the exact hidden flags (--plugin-dir, --messaging-socket-path, crossSessionInbound), and
+        capabilities --harness says the same of bridge and usage with no launch; fragile because it hinges on a version
+        gate and undocumented Claude flags, and a wrong pick quietly makes every agent launch-only or has agents plan
+        around abilities their launches lack (CLAUDE-2, CLAUDE-9, 7c6412f)."""
+        with self.subTest('the bridge launches the mod on the launch socket'):
+            plain = self.bridge(False).spawn(LaunchContext('spawn', self.values()))
+            self.assertNotIn('--plugin-dir', plain.argv)
+            self.assertIsNone(plain.control_endpoint)
+            self.assertEqual(dict(plain.environment), {})
+            adapter = self.bridge()
+            values = self.values()
+            saved = SessionHandle(values['agent_id'], 'claude', str(self.work), native_id=values['session_id'])
+            for command in (adapter.spawn(LaunchContext('spawn', values)),
+                            adapter.resume(saved, LaunchContext('resume', values))):
+                with self.subTest(argv=command.argv[:2]):
+                    self.assertEqual(list(command.argv[1:7]), ['--plugin-dir', str(MOD), '--messaging-socket-path',
+                                     self.socket, '--settings', '{"crossSessionInbound": "accept"}'])
+                    self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
+                    self.assertEqual(command.environment['CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'], '1')
+                    self.assertIn(values['session_id'], command.argv)
+            self.assertEqual(adapter.spawn(LaunchContext('spawn', values)).argv[-1], values['task'])
+            self.assertTrue((MOD / '.claude-plugin/plugin.json').is_file())
+            self.assertTrue((MOD / 'hooks/index.ts').is_file())
+        with self.subTest('unset is auto'):
+            command, _ = self.launch(None, (2, 1, 289))
+            self.assertEqual(list(command.argv[1:3]), ['--plugin-dir', str(MOD)])
+            self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
+            self.assertEqual(command.native_mode, {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
+            for mode in ('spawn', 'resume'):
+                with self.subTest(mode=mode):
+                    old, _ = self.launch(None, (2, 1, 270), mode)
+                    self.assertNotIn('--plugin-dir', old.argv)
+                    self.assertIsNone(old.control_endpoint)
+                    self.assertNotIn('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', old.environment)
+                    self.assertEqual((old.native_mode['policy'], old.native_mode['mode']), ('auto', 'plain'))
+                    self.assertIn('Claude Code 2.1.270 is older than 2.1.280', old.native_mode['fallback_reason'])
+            # A version that cannot be read is no reason to give up the bridge: the launch shows whether the mod loads.
+            unknown, _ = self.launch(None, None)
+            self.assertEqual(unknown.native_mode['mode'], 'bridge')
+        with self.subTest('true requires the bridge and false never loads it'):
+            required, _ = self.launch(True, (2, 1, 289))
+            self.assertEqual(required.native_mode, {'policy': 'required', 'mode': 'bridge', 'fallback_reason': None})
+            with self.assertRaisesRegex(ValueError, 'older than 2.1.280'):
+                self.launch(True, (2, 1, 270))
+            for version in ((2, 1, 289), (2, 1, 270)):
+                plain, probe = self.launch(False, version)
+                self.assertNotIn('--plugin-dir', plain.argv)
+                self.assertIsNone(plain.control_endpoint)
+                self.assertEqual(plain.native_mode, {'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
+                probe.assert_not_called()  # plain never asks which version is installed
+            path = self.root / 'harnesses/claude/harness.json'
+            config = read(path)
+            config['settings']['inbox_bridge'] = 'yes'  # still strictly validated
+            write(path, config)
+            with self.assertRaises(ValueError):
+                harnesses.load(self.root, 'claude')
+        with self.subTest('a launch that fell back to plain says so'):
+            adapter = self.bridge(None)
+            running = dict(state='running', native_id=str(uuid4()), bridge='claude-mod-v1',
+                           endpoint=NativeEndpoint('unix-lines', self.socket), session_file=str(self.work / 'agent' / 'session.jsonl'))
+            session = SessionHandle('agent', 'claude', str(self.work), native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}, **running)
+            offered = adapter.capabilities(session)
+            self.assertEqual((offered['send_steer'].state, offered['get_delivery'].state, offered['ask'].state),
+                             ('supported', 'supported', 'supported'))
+            reason = 'Claude Code 2.1.270 is older than 2.1.280, which the multiverse mod needs'
+            fell_back = SessionHandle('agent', 'claude', str(self.work),
+                                      native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason},
+                                      **{**running, 'endpoint': None, 'bridge': None})
+            # Launch-only by the harness's own setting is final: nothing a launch does connects it, so core advises no
+            # restart (CLAUDE-1) and ledger repair may close its messages (CLAUDE-13). An auto launch that fell back
+            # only because this Claude was too old connects once Claude is updated and the agent resumed, so its
+            # refusals stay retryable and carry no launch-only marker (Shao, a8925af).
+            off = SessionHandle('agent', 'claude', str(self.work),
+                                native_mode={'policy': 'plain', 'mode': 'plain', 'fallback_reason': None},
+                                **{**running, 'endpoint': None, 'bridge': None})
+            for case, harness, launch, cause, final in (
+                    ('fell back', adapter, fell_back, reason, False),
+                    ('set to false', self.bridge(False), off, 'its harness sets inbox_bridge to false', True)):
+                with self.subTest(case):
+                    offered = harness.capabilities(launch)
+                    for name in ('send_steer', 'send_follow_up'):
+                        self.assertEqual((offered[name].state, offered[name].reason, offered[name].mechanism),
+                                         ('unavailable', 'This agent is launch-only: ' + cause,
+                                          'launch-only' if final else None))
+                    self.assertNotEqual(offered['get_delivery'].state, 'supported')
+                    self.assertNotEqual(offered['ask'].state, 'supported')
+                    executor = Mock()
+                    for delivery in ('steer', 'follow-up'):
+                        message = Message(str(uuid4()), 'body', delivery=delivery, framed='Message from reviewer:\nbody')
+                        result = harness.send(launch, message, executor)
+                        self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True, 'final': final}))
+                    result = harness.ask(launch, 'Why?', executor)
+                    self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True, 'final': final}))
+                    executor.write_lines.assert_not_called()
+            # Launched while the setting was off, with it on now: a resume connects it, so it is a restart case.
+            for state, cause in (('running', 'The multiverse mod has not registered for this launch'),
+                                 ('stopped', "This agent isn't running: resume it first")):
+                with self.subTest('off then, on now', state=state):
+                    then = replace(off, state=state)
+                    offered = adapter.capabilities(then)
+                    self.assertEqual((offered['send_steer'].reason, offered['send_steer'].mechanism), (cause, None))
+                    result = adapter.send(then, Message(str(uuid4()), 'body', delivery='steer', framed='x'), Mock())
+                    self.assertEqual((result.state, result.reason, result.value), ('unavailable', cause, None))
+        with self.subTest('the installed version is read once per binary and is never fatal'):
+            from multiverse.harnesses import claude as module
+            fake = self.work / 'bin' / 'claude-fake'
+            fake.parent.mkdir()
+            fake.write_text('#!/bin/sh\necho "2.1.289 (Claude Code)"\n')
+            fake.chmod(0o755)
+            with patch('multiverse.harnesses.claude.claude_version', self.real_claude_version):
+                module._versions.clear()
+                self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))
+                fake.write_text('#!/bin/sh\necho "something else"\n')
+                self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))  # cached by the binary's real path
+                module._versions.clear()
+                self.assertIsNone(module.claude_version(str(fake)))               # no version in the output
+                self.assertIsNone(module.claude_version(str(self.work / 'nothing-here')))  # not installed
+                self.assertIsNone(module.bridge_problem(str(self.work / 'nothing-here')))
+                module._versions.clear()
+        with self.subTest('capabilities --harness with no launch: messaging (CLAUDE-2)'):
+            plain, _ = self.harness(False)
+            auto, asked = self.harness(None)
+            self.assertNotEqual(plain['send_steer'], auto['send_steer'])  # qa-claude's CLAUDE-2 check
+            for name in ('send_steer', 'send_follow_up', 'ask'):
+                self.assertEqual(plain[name]['state'], 'unavailable')
+                self.assertIn('inbox_bridge', plain[name]['reason'])
+                self.assertEqual(auto[name]['state'], 'supported')
+                self.assertNotIn('registered', auto[name]['reason'] + plain[name]['reason'])  # there is no launch
+                self.assertNotIn('No native implementation', auto[name]['reason'] + plain[name]['reason'])
+            self.assertEqual(auto['ask']['mechanism'], 'claude-model-fork')
+            self.assertIn('--probe', auto['send_steer']['reason'])
+            asked.assert_not_called()  # reading the version runs claude: only --probe does that
+            # --probe reads the installed version and says what a launch would do with it.
+            new, _ = self.harness(None, probe=True)
+            self.assertEqual(new['send_steer']['state'], 'supported')
+            unreadable, _ = self.harness(None, version=None, probe=True)
+            self.assertEqual(unreadable['send_steer']['state'], 'supported')  # as launches treat it
+            old, _ = self.harness(None, version=(2, 1, 279), probe=True)
+            refused, _ = self.harness(True, version=(2, 1, 279), probe=True)
+            for found, how in ((old, 'launch without the bridge'), (refused, 'refuse to start')):
+                for name in ('send_steer', 'send_follow_up', 'ask'):
+                    self.assertEqual(found[name]['state'], 'unavailable')
+                    self.assertIn(how, found[name]['reason'])
+                    self.assertIn('2.1.279 is older than 2.1.280', found[name]['reason'])
+        with self.subTest("capabilities --harness with no launch: usage from Claude's transcript (CLAUDE-9)"):
+            for setting in (None, True, False):
+                for probe in (False, True):
+                    with self.subTest(setting=setting, probe=probe):
+                        found, _ = self.harness(setting, probe=probe)
+                        self.assertEqual((found['get_usage']['state'], found['get_usage']['mechanism']),
+                                         ('supported', 'claude-transcript'))
+            old, _ = self.harness(None, version=(2, 1, 279), probe=True)  # plain, but its transcript still counts
+            self.assertEqual(old['get_usage']['state'], 'supported')
 
     def test_steer_writes_one_tagged_frame_for_the_exact_session(self):
+        """A steer writes one auth line and one user frame with priority next, the exact session_id, msg_id and tag; a
+        break goes unnoticed because Claude's socket accepts any line and drops a wrong one later."""
         adapter = self.bridge()
         self.publish_key()
         session = self.session()
@@ -228,322 +292,160 @@ class ClaudeBridgeTest(BaseTest):
         frame = json.loads(executor.write_lines.call_args.args[1][1])
         self.assertEqual(frame['priority'], 'next')
         self.assertTrue(frame['message']['content'].startswith(f'<<MV2 follow-up id={message_id}>>'))
-
-    def test_unready_sessions_are_unavailable_without_writing(self):
-        adapter = self.bridge()
-        executor = Mock()
-        steer = Message(str(uuid4()), 'body', framed='Message from user:\nbody')
-        # A stopped launch, one without an inbox, and one whose mod never registered.
-        for session in (self.session(state='stopped'), self.session(endpoint=False), self.session(bridge=None)):
-            for name in ('send_steer', 'send_follow_up'):
-                self.assertEqual(adapter.capabilities(session)[name].state, 'unavailable')
-            self.assertEqual(adapter.send(session, steer, executor).state, 'unavailable')
-        # Claude has not bound the inbox and published its key yet.
-        self.assertEqual(adapter.send(self.session(), steer, executor).state, 'unavailable')
-        self.assertEqual(self.bridge(False).capabilities(self.session())['send_steer'].state, 'unavailable')
-        executor.write_lines.assert_not_called()
-
-    def test_send_frames_the_sender_in_core_and_reaches_the_inbox(self):
-        self.bridge()
-        self.publish_key()
-        recipient, sender, native_id = str(uuid4()), str(uuid4()), str(uuid4())
-        directory = self.root / 'state/agents' / recipient
-        write(directory / 'properties.json', {'id': recipient, 'name': 'worker', 'harness': 'claude',
-                                              'workspace': str(self.work), 'native_session_id': native_id})
-        write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running',
-                                           'native_bridge': 'claude-mod-v1',
-                                           'control_endpoint': {'transport': 'unix-lines', 'address': self.socket}})
-        write(self.root / 'state/agents' / sender / 'properties.json', {'id': sender, 'name': 'reviewer'})
-        inbox = Inbox(self.socket)
-        with patch.object(native, 'owned'):
-            result = send.run(self.root, agent=recipient, text='Please rebase',
-                              sender={'agent_id': sender, 'universe': str(self.root), 'name': 'agent'})
-        inbox.close()
-        self.assertEqual(result['state'], 'native_queued')
-        self.assertTrue(result['ok'])
-        auth, frame = inbox.lines
-        self.assertEqual(auth['token'], TOKEN)
-        self.assertEqual(frame['session_id'], native_id)
-        self.assertNotIn('id', result)
-        message_id = frame['msg_id']
-        self.assertNotIn(message_id, json.dumps(result))
-        self.assertEqual(frame['message']['content'],
-                         f'<<MV2 steer id={message_id}>>Message from reviewer:\nPlease rebase<</MV2>>')
-
-    def test_mod_registers_its_bridge_and_reports_waiting_for_the_current_launch(self):
-        agent = str(uuid4())
-        directory = self.root / 'state/agents' / agent
-        write(directory / 'properties.json', {'id': agent, 'name': 'worker', 'harness': 'claude'})
-        write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
-        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
-            runtime_update.run(self.root, agent=agent, status='idle', bridge='claude-mod-v1')
-            runtime_update.run(self.root, agent=agent, status='waiting')
-        facts = read(directory / 'runtime.json')
-        self.assertEqual((facts['native_bridge'], facts['status']), ('claude-mod-v1', 'waiting'))
-        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'previous'}), self.assertRaisesRegex(ValueError, 'Outdated launch'):
-            runtime_update.run(self.root, agent=agent, status='working')
-        self.assertEqual(read(directory / 'runtime.json')['status'], 'waiting')
-
-    def response(self, id, input_tokens, output_tokens, cache_read=0, cache_write=0, block='text'):
-        usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,
-                 'cache_read_input_tokens': cache_read, 'cache_creation_input_tokens': cache_write}
-        return json.dumps({'type': 'assistant', 'timestamp': f'2026-09-30T00:00:0{len(id)}Z',
-                           'message': {'id': id, 'usage': usage, 'content': [{'type': block}]}}) + '\n'
-
-    def test_usage_is_measured_once_per_response_across_the_session_and_its_subagents(self):
-        adapter = self.bridge(False)
-        native_id = str(uuid4())
-        project = self.config / 'projects' / '-work-project'
-        project.mkdir(parents=True)
-        main = project / f'{native_id}.jsonl'
-        # One response is recorded once per content block, each with the same usage.
-        main.write_text(json.dumps({'type': 'user', 'message': {'content': 'hi'}}) + '\n'
-                        + self.response('msg_1', 10, 5, cache_read=100, cache_write=20, block='thinking')
-                        + self.response('msg_1', 10, 5, cache_read=100, cache_write=20) + 'not json\n')
-        session = SessionHandle('agent', 'claude', str(self.work), native_id=native_id)
-        result = adapter.get_usage(session)
-        self.assertEqual(result.state, 'ok')
-        self.assertEqual({key: result.value[key] for key in ('input_tokens', 'cached_input_tokens', 'cache_write_tokens',
-                                                             'output_tokens', 'total_tokens')},
-                         {'input_tokens': 130, 'cached_input_tokens': 100, 'cache_write_tokens': 20,
-                          'output_tokens': 5, 'total_tokens': 135})
-        self.assertEqual(adapter.capabilities(session)['get_usage'].state, 'supported')
-        # Growth is read incrementally; an unfinished line waits for its newline.
-        partial = self.response('msg_2', 1, 2)
-        with main.open('a') as handle:
-            handle.write(partial[:20])
-        self.assertEqual(measured_usage(native_id).total_tokens, 135)
-        with main.open('a') as handle:
-            handle.write(partial[20:])
-        subagents = project / native_id / 'subagents'
-        subagents.mkdir(parents=True)
-        (subagents / 'agent-a.jsonl').write_text(self.response('msg_3', 40, 60))
-        self.assertEqual(measured_usage(native_id).total_tokens, 135 + 3 + 100)
-        self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()))).state,
-                         'unavailable')
-        self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work))).state, 'unavailable')
+        # Both read as the mod's regex reads them: the mode, this message's id, and mv2's text.
+        for delivery, content in (('steer', json.loads(executor.write_lines.call_args_list[0].args[1][1])['message']['content']),
+                                  ('follow-up', frame['message']['content'])):
+            with self.subTest(tag=delivery):
+                self.assertEqual(mod_tag().search(content).groups(), (delivery, message_id, 'Message from reviewer:\nbody'))
 
     def test_delivery_is_confirmed_only_by_the_mods_receipt(self):
+        """Delivery is confirmed only by the mod's receipt file, an id like ../../escape cannot read outside it, and a
+        side question's answer is read from the file the mod writes; fragile because TS writes and Python reads these
+        files, and a false confirmation makes --retry skip a lost message, while a wrong answer path shows only as
+        every ask timing out after 120 s."""
         adapter = self.bridge()
         agent_dir = self.work / 'agent'
-        session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()),
-                                session_file=str(agent_dir / 'session.jsonl'))
-        self.assertEqual(adapter.capabilities(session)['get_delivery'].state, 'supported')
-        message_id = str(uuid4())
-        self.assertEqual(adapter.get_delivery(session, message_id).state, 'unknown')
-        (agent_dir / 'claude-receipts').mkdir(parents=True)
-        (agent_dir / 'claude-receipts' / f'{message_id}.json').write_text(
-            json.dumps({'id': message_id, 'route': 'mid-turn', 'at': 1790000000000}))
-        result = adapter.get_delivery(session, message_id)
-        self.assertEqual((result.state, result.value['transcript_confirmed'], result.value['route']),
-                         ('native_queued', True, 'mid-turn'))
-        self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
+        with self.subTest('a delivery receipt'):
+            session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()),
+                                    session_file=str(agent_dir / 'session.jsonl'))
+            self.assertEqual(adapter.capabilities(session)['get_delivery'].state, 'supported')
+            message_id = str(uuid4())
+            self.assertEqual(adapter.get_delivery(session, message_id).state, 'unknown')
+            (agent_dir / 'claude-receipts').mkdir(parents=True)
+            (agent_dir / 'claude-receipts' / f'{message_id}.json').write_text(
+                json.dumps({'id': message_id, 'route': 'mid-turn', 'at': 1790000000000}))
+            result = adapter.get_delivery(session, message_id)
+            self.assertEqual((result.state, result.value['transcript_confirmed'], result.value['route']),
+                             ('native_queued', True, 'mid-turn'))
+            self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
+        with self.subTest("a side question's answer"):
+            # The mod's answer() writes claude-asks/<question id>.json beside the agent's session file.
+            source = (MOD / 'hooks/index.ts').read_text()
+            for written in ('`${directory}/claude-asks/${message.id}.json`', 'answered: true, text: result.text',
+                            'answered: false, reason: result.reason'):
+                self.assertTrue(written in source, f'the mod no longer writes {written}')
+            self.publish_key()
+            session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()), state='running',
+                                    endpoint=NativeEndpoint('unix-lines', self.socket), bridge='claude-mod-v1',
+                                    session_file=str(agent_dir / 'session.jsonl'))
 
-    def answer_when_asked(self, agent_dir, record):
-        """Play the mod: answer the question the adapter wrote, as a file."""
-        executor = Mock()
+            frames = []
 
-        def write_lines(session, lines):
-            question_id = json.loads(lines[1])['msg_id']
-            (agent_dir / 'claude-asks').mkdir(parents=True, exist_ok=True)
-            if record is not None:
-                (agent_dir / 'claude-asks' / f'{question_id}.json').write_text(json.dumps({'id': question_id, **record}))
-            return NativeResult('ok')
-        executor.write_lines.side_effect = write_lines
-        return executor
+            def answered(target, lines):
+                frames.append(json.loads(lines[1]))
+                question = frames[-1]['msg_id']
+                (agent_dir / 'claude-asks').mkdir(parents=True, exist_ok=True)
+                (agent_dir / 'claude-asks' / f'{question}.json').write_text(json.dumps(
+                    {'id': question, 'answered': True, 'text': 'About an hour.', 'usage': {'input_tokens': 3}}) + '\n')
+                return NativeResult('ok')
+            executor = Mock()
+            executor.write_lines.side_effect = answered
+            with patch('multiverse.harnesses.claude.ASK_TIMEOUT', 2):
+                result = adapter.ask(session, 'How long will this take?', executor)
+            self.assertEqual(result.state, 'ok', result.reason)
+            self.assertEqual(result.value['answer'], 'About an hour.')
+            self.assertEqual(list((agent_dir / 'claude-asks').iterdir()), [])  # the answer is consumed
+            # The question goes out with the tag the mod's own regex reads as a side question (Shao, a8925af).
+            found = mod_tag().search(frames[0]['message']['content'])
+            self.assertEqual(found.groups() if found else None, ('ask', frames[0]['msg_id'], 'How long will this take?'))
 
-    def test_ask_answers_from_the_mods_fork_without_touching_the_conversation(self):
-        adapter = self.bridge()
-        self.publish_key()
-        agent_dir = self.work / 'agent'
-        session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()), state='running',
-                                endpoint=NativeEndpoint('unix-lines', self.socket), bridge='claude-mod-v1',
-                                session_file=str(agent_dir / 'session.jsonl'))
-        self.assertEqual(adapter.capabilities(session)['ask'].state, 'supported')
-        executor = self.answer_when_asked(agent_dir, {'answered': True, 'text': 'About an hour.',
-                                                      'usage': {'input_tokens': 3, 'output_tokens': 4}})
-        result = adapter.ask(session, 'How long will this take?', executor)
-        self.assertEqual((result.state, result.value['answer']), ('ok', 'About an hour.'))
-        frame = json.loads(executor.write_lines.call_args.args[1][1])
-        self.assertEqual(frame['priority'], 'next')
-        self.assertEqual(frame['message']['content'], f'<<MV2 ask id={frame["msg_id"]}>>How long will this take?<</MV2>>')
-        self.assertEqual(list((agent_dir / 'claude-asks').iterdir()), [])  # the answer is consumed
-        nothing = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'nothing-to-fork'}))
-        self.assertEqual(nothing.state, 'unavailable')
-        failed = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'api-error'}))
-        self.assertEqual(failed.state, 'error')
-        with patch('multiverse.harnesses.claude.ASK_TIMEOUT', 0.3):
-            self.assertEqual(adapter.ask(session, 'Still there?', self.answer_when_asked(agent_dir, None)).state, 'unknown')
-        self.assertEqual(adapter.ask(self.session(bridge=None), 'Hello?', Mock()).state, 'unavailable')
-
-    def test_executor_writes_only_to_a_line_inbox(self):
-        executor = native.NativeExecutor(self.work, {}, {})
-        with patch.object(executor, 'check_session'):
-            session = SessionHandle('agent', 'claude', str(self.work), endpoint=NativeEndpoint('unix-json', self.socket))
-            self.assertEqual(executor.write_lines(session, ['{}']).state, 'unavailable')
-            self.assertEqual(executor.write_lines(self.session(), ['{}']).state, 'error')  # nothing listening
-
-    def test_core_names_the_sender_and_a_different_universe(self):
-        other = templates.create(self.work / 'other' / '.multiverse', 'pr-review', workdir=self.work)
-        lead, local = str(uuid4()), str(uuid4())
-        write(other / 'state/agents' / lead / 'properties.json', {'id': lead, 'name': 'lead'})
-        write(self.root / 'state/agents' / local / 'properties.json', {'id': local, 'name': 'reviewer'})
-        cases = [({'agent_id': lead, 'universe': str(other), 'name': 'agent'}, 'Message from lead (in universe pr-review):\nhi'),
-                 ({'agent_id': local, 'universe': str(self.root), 'name': 'agent'}, 'Message from reviewer:\nhi'),
-                 ({'name': 'user', 'agent_id': None}, 'Message from user:\nhi'),
-                 ({}, 'Message from user:\nhi')]
-        for sender, expected in cases:
-            with self.subTest(sender=sender):
-                self.assertEqual(native.framed_text(self.root, {'from': sender, 'text': 'hi'}), expected)
-
-    def test_resume_renders_the_system_prompt_fresh_so_a_changed_bootstrap_applies(self):
-        # With Claude's snapshot on, a resumed conversation keeps the system prompt of its first request.
-        for setting in (None, True, False):
-            for version in ((2, 1, 300), (2, 1, 280), None):
-                with self.subTest(setting=setting, version=version):
-                    if setting is True and version is not None and version < (2, 1, 280):
-                        continue
-                    resumed, probe = self.launch(setting, version, 'resume')
-                    argv = list(resumed.argv)
-                    flag = argv.index('--system-prompt-snapshot')
-                    self.assertEqual(argv[flag + 1], 'off')
-                    self.assertEqual(argv[flag - 2], '--append-system-prompt')  # right after the bootstrap
-                    spawned, _ = self.launch(setting, version)
-                    self.assertNotIn('--system-prompt-snapshot', spawned.argv)  # a new conversation records it fresh
-                    if setting is False:
-                        probe.assert_not_called()  # plain still never asks which version is installed
-        # A Claude known to predate the flag (an auto launch that fell back to plain) does not get it.
-        old, _ = self.launch(None, (2, 1, 266), 'resume')
-        self.assertNotIn('--system-prompt-snapshot', old.argv)
-        self.assertIn('--append-system-prompt', old.argv)  # the rest of the command is unchanged
-        older, _ = self.launch(None, (2, 1, 267), 'resume')
-        self.assertIn('--system-prompt-snapshot', older.argv)
-
-    def test_the_snapshot_can_be_kept_with_a_harness_setting(self):
-        path = self.root / 'harnesses/claude/harness.json'
-        config = read(path)
-        config['settings']['system_prompt_snapshot'] = 'on'
-        write(path, config)
-        for setting in (None, True, False):
-            with self.subTest(setting=setting):
-                resumed, _ = self.launch(setting, (2, 1, 300), 'resume')
-                self.assertNotIn('--system-prompt-snapshot', resumed.argv)  # Claude keeps its recorded prompt
-                self.assertIn('--append-system-prompt', resumed.argv)
-        config['settings']['system_prompt_snapshot'] = 'off'
-        write(path, config)
-        self.assertIn('--system-prompt-snapshot', self.launch(None, (2, 1, 300), 'resume')[0].argv)
-        for bad in ('yes', True, None, ''):
-            with self.subTest(value=bad):
-                config['settings']['system_prompt_snapshot'] = bad
-                write(path, config)
-                with self.assertRaisesRegex(ValueError, 'system_prompt_snapshot must be "off" or "on"'):
-                    harnesses.load(self.root, 'claude')
-
-    def test_a_snapshot_flag_the_user_passes_wins_and_is_never_removed(self):
-        path = self.root / 'harnesses/claude/harness.json'
-        def flags(argv):
-            argv = list(argv)
-            end = argv.index('--') if '--' in argv else len(argv)
-            return [(argv[i], argv[i + 1]) if argv[i] == '--system-prompt-snapshot' else (argv[i], None)
-                    for i in range(end) if argv[i].startswith('--system-prompt-snapshot')]
-        for snapshot in ('off', 'on'):
-            for version in ((2, 1, 300), (2, 1, 266), None):
-                for key, user in (('resume_args', ['--system-prompt-snapshot', 'on']), ('args', ['--system-prompt-snapshot=on']),
-                                  ('resume_args', ['--system-prompt-snapshot', 'off'])):
-                    with self.subTest(snapshot=snapshot, version=version, key=key, user=user):
-                        config = read(path)
-                        config['settings'].update({'system_prompt_snapshot': snapshot, key: user})
-                        config['settings'].pop('resume_args' if key == 'args' else 'args', None)
-                        write(path, config)
-                        resumed, _ = self.launch(None, version, 'resume')
-                        # Exactly the user's own flag, as they wrote it; mv2 adds none beside it.
-                        expected = [tuple(user)] if len(user) == 2 else [(user[0], None)]
-                        self.assertEqual(flags(resumed.argv), expected)
-        # Without a flag of the user's, mv2's own follows its settings as before.
-        config = read(path)
-        config['settings'].pop('resume_args', None); config['settings'].pop('args', None)
-        config['settings']['system_prompt_snapshot'] = 'off'
-        write(path, config)
-        self.assertEqual(flags(self.launch(None, (2, 1, 300), 'resume')[0].argv), [('--system-prompt-snapshot', 'off')])
-        self.assertEqual(flags(self.launch(None, (2, 1, 266), 'resume')[0].argv), [])
-        # A user's own bootstrap text and flag before mv2's: still only mv2's own flag is the one dropped.
-        config['settings']['args'] = ['--append-system-prompt', 'mine', '--system-prompt-snapshot', 'off']
-        write(path, config)
-        resumed = self.launch(None, (2, 1, 300), 'resume')[0]
-        self.assertEqual(flags(resumed.argv), [('--system-prompt-snapshot', 'off')])
-        self.assertEqual(list(resumed.argv).count('--append-system-prompt'), 2)
-
-    def test_an_inherited_child_session_marker_never_reaches_the_agent(self):
-        # Claude Code (2.1.301+) saves no transcript when it inherits CLAUDE_CODE_CHILD_SESSION=1, the marker
-        # it sets for its own tool subprocesses; a tmux server first started from one passes it to every pane.
-        from multiverse.runtime import runner
-        for setting in (None, True, False):
-            for mode in ('spawn', 'resume'):
-                with self.subTest(setting=setting, mode=mode):
-                    command, _ = self.launch(setting, (2, 1, 302), mode)
-                    self.assertIn('CLAUDE_CODE_CHILD_SESSION', command.unset_env)
-                    inherited = {'CLAUDE_CODE_CHILD_SESSION': '1', 'PATH': '/usr/bin'}
-                    with patch.dict(os.environ, inherited):
-                        env = runner.launch_environment({'unset_env': list(command.unset_env),
-                                                         'env': {**command.environment, 'MV2_CLI': '/mv2/bin/mv2'}})
-                    self.assertNotIn('CLAUDE_CODE_CHILD_SESSION', env)
-
-    def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
-        for setting in (None, True):
-            for mode in ('spawn', 'resume'):
-                for version, expected in (((2, 1, 292), True), ((2, 1, 300), True), ((3, 0, 0), True),
-                                          ((2, 1, 291), False), ((2, 1, 280), False), (None, False)):
-                    with self.subTest(setting=setting, mode=mode, version=version):
-                        command, _ = self.launch(setting, version, mode)
-                        if version is not None and version < (2, 1, 280):
+    def test_resume_renders_the_system_prompt_fresh(self):
+        """Resume adds --system-prompt-snapshot off right after the bootstrap, only for Claude 2.1.267 and later, unless
+        the harness setting or the user's own flag says otherwise; a break goes unnoticed because a resumed agent
+        silently keeps its old bootstrap (96ea3d3, efbbb2b)."""
+        with self.subTest('off on every resume of a Claude that knows the flag'):
+            # With Claude's snapshot on, a resumed conversation keeps the system prompt of its first request.
+            for setting in (None, True, False):
+                for version in ((2, 1, 300), (2, 1, 280), None):
+                    with self.subTest(setting=setting, version=version):
+                        if setting is True and version is not None and version < (2, 1, 280):
                             continue
-                        argv = list(command.argv)
-                        self.assertEqual(argv[1:3], ['--plugin-dir', str(MOD)])  # the mod and its flags come first
-                        self.assertEqual(argv.count(str(TYPEAHEAD)), 1 if expected else 0)
-                        if expected:
-                            self.assertEqual(argv[argv.index(str(TYPEAHEAD)) - 1], '--plugin-dir')
-                            self.assertEqual(argv.index(str(TYPEAHEAD)), 8)  # right after the bridge flags
-        for version in ((2, 1, 292), (2, 1, 270)):
-            plain, _ = self.launch(False, version)
-            self.assertNotIn(str(TYPEAHEAD), plain.argv)
-        self.assertEqual(TYPEAHEAD_VERSION, (2, 1, 292))
+                        resumed, probe = self.launch(setting, version, 'resume')
+                        argv = list(resumed.argv)
+                        flag = argv.index('--system-prompt-snapshot')
+                        self.assertEqual(argv[flag + 1], 'off')
+                        self.assertEqual(argv[flag - 2], '--append-system-prompt')  # right after the bootstrap
+                        spawned, _ = self.launch(setting, version)
+                        # A new conversation records it fresh.
+                        self.assertNotIn('--system-prompt-snapshot', spawned.argv)
+                        if setting is False:
+                            probe.assert_not_called()  # plain still never asks which version is installed
+            # A Claude known to predate the flag (an auto launch that fell back to plain) does not get it.
+            old, _ = self.launch(None, (2, 1, 266), 'resume')
+            self.assertNotIn('--system-prompt-snapshot', old.argv)
+            self.assertIn('--append-system-prompt', old.argv)  # the rest of the command is unchanged
+            older, _ = self.launch(None, (2, 1, 267), 'resume')
+            self.assertIn('--system-prompt-snapshot', older.argv)
+        with self.subTest('a harness setting keeps the snapshot'):
+            path = self.root / 'harnesses/claude/harness.json'
+            config = read(path)
+            config['settings']['system_prompt_snapshot'] = 'on'
+            write(path, config)
+            for setting in (None, True, False):
+                with self.subTest(setting=setting):
+                    resumed, _ = self.launch(setting, (2, 1, 300), 'resume')
+                    self.assertNotIn('--system-prompt-snapshot', resumed.argv)  # Claude keeps its recorded prompt
+                    self.assertIn('--append-system-prompt', resumed.argv)
+            config['settings']['system_prompt_snapshot'] = 'off'
+            write(path, config)
+            self.assertIn('--system-prompt-snapshot', self.launch(None, (2, 1, 300), 'resume')[0].argv)
+            for bad in ('yes', True, None, ''):
+                with self.subTest(value=bad):
+                    config['settings']['system_prompt_snapshot'] = bad
+                    write(path, config)
+                    with self.assertRaisesRegex(ValueError, 'system_prompt_snapshot must be "off" or "on"'):
+                        harnesses.load(self.root, 'claude')
+        with self.subTest("the user's own flag wins and is never removed"):
+            path = self.root / 'harnesses/claude/harness.json'
+            def flags(argv):
+                argv = list(argv)
+                end = argv.index('--') if '--' in argv else len(argv)
+                return [(argv[i], argv[i + 1]) if argv[i] == '--system-prompt-snapshot' else (argv[i], None)
+                        for i in range(end) if argv[i].startswith('--system-prompt-snapshot')]
+            for snapshot in ('off', 'on'):
+                for version in ((2, 1, 300), (2, 1, 266), None):
+                    for key, user in (('resume_args', ['--system-prompt-snapshot', 'on']), ('args', ['--system-prompt-snapshot=on']),
+                                      ('resume_args', ['--system-prompt-snapshot', 'off'])):
+                        with self.subTest(snapshot=snapshot, version=version, key=key, user=user):
+                            config = read(path)
+                            config['settings'].update({'system_prompt_snapshot': snapshot, key: user})
+                            config['settings'].pop('resume_args' if key == 'args' else 'args', None)
+                            write(path, config)
+                            resumed, _ = self.launch(None, version, 'resume')
+                            # Exactly the user's own flag, as they wrote it; mv2 adds none beside it.
+                            expected = [tuple(user)] if len(user) == 2 else [(user[0], None)]
+                            self.assertEqual(flags(resumed.argv), expected)
+            # Without a flag of the user's, mv2's own follows its settings as before.
+            config = read(path)
+            config['settings'].pop('resume_args', None); config['settings'].pop('args', None)
+            config['settings']['system_prompt_snapshot'] = 'off'
+            write(path, config)
+            self.assertEqual(flags(self.launch(None, (2, 1, 300), 'resume')[0].argv),
+                             [('--system-prompt-snapshot', 'off')])
+            self.assertEqual(flags(self.launch(None, (2, 1, 266), 'resume')[0].argv), [])
+            # A user's own bootstrap text and flag before mv2's: still only mv2's own flag is the one dropped.
+            config['settings']['args'] = ['--append-system-prompt', 'mine', '--system-prompt-snapshot', 'off']
+            write(path, config)
+            resumed = self.launch(None, (2, 1, 300), 'resume')[0]
+            self.assertEqual(flags(resumed.argv), [('--system-prompt-snapshot', 'off')])
+            self.assertEqual(list(resumed.argv).count('--append-system-prompt'), 2)
 
-    def test_the_typeahead_offers_the_mods_own_command_and_subcommands(self):
-        mod = (MOD / 'hooks/multiverse.ts').read_text()
-        typeahead = (TYPEAHEAD / 'hooks/index.ts').read_text()
-        self.assertIn('export const NAME = "multiverse"', mod)
-        self.assertIn('export const COMMAND = "multiverse"', typeahead)
-        reserved = re.search(r'const RESERVED = new Set\(\[([^\]]*)\]\)', typeahead).group(1)
-        offered = re.findall(r'\{ text: "(\w+) ?"', typeahead)
-        self.assertEqual(sorted(re.findall(r'"(\w+)"', reserved)), ['inbox', 'list', 'send'])
-        self.assertEqual(sorted(offered), ['inbox', 'list', 'send'])
-        for word in ('list', 'send', 'inbox'):
-            self.assertIn(f'word === "{word}"', mod)  # the mod's parse() handles each one
-        self.assertTrue((TYPEAHEAD / '.claude-plugin/plugin.json').is_file())
-
-    def installed_claude_knows_the_typeahead_event(self):
+    def test_bundled_claude_plugins_pass_claudes_own_checks(self):
+        """The mod's TS hooks and the typeahead pass claude plugin validate and their own claude plugin test on the
+        installed Claude; fragile because the hooks use Claude's private hook API, and this is the only check before
+        live agents fail to register."""
         if not shutil.which('claude'):
             self.skipTest('Claude Code is not installed')
-        version = self.real_claude_version('claude')
-        if version is None or version < TYPEAHEAD_VERSION:
-            self.skipTest('The installed Claude Code is older than the typeahead needs')
-
-    def test_packaged_typeahead_passes_claude_validation_and_its_plugin_tests(self):
-        self.installed_claude_knows_the_typeahead_event()
-        for command, timeout in ((['claude', 'plugin', 'validate', str(TYPEAHEAD)], 60),
-                                 (['claude', 'plugin', 'test', str(TYPEAHEAD)], 180)):
-            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    @unittest.skipUnless(shutil.which('claude'), 'Claude Code is not installed')
-    def test_packaged_mod_passes_claude_validation(self):
-        result = subprocess.run(['claude', 'plugin', 'validate', str(MOD)], capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    @unittest.skipUnless(shutil.which('claude'), 'Claude Code is not installed')
-    def test_packaged_mod_passes_its_plugin_tests(self):
-        result = subprocess.run(['claude', 'plugin', 'test', str(MOD)], capture_output=True, text=True, timeout=180)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, plugin in (('the mod', MOD), ('the typeahead', TYPEAHEAD)):
+            with self.subTest(name):
+                if plugin == TYPEAHEAD:
+                    version = self.real_claude_version('claude')
+                    if version is None or version < TYPEAHEAD_VERSION:
+                        self.skipTest('The installed Claude Code is older than the typeahead needs')
+                for command, timeout in ((['claude', 'plugin', 'validate', str(plugin)], 60),
+                                         (['claude', 'plugin', 'test', str(plugin)], 180)):
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

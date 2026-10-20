@@ -133,6 +133,14 @@ def matches(pane, properties, runtime):
     )))
 
 
+def observation_key(properties, runtime):
+    """Fields used by observe(), copied so reconciliation cannot mutate a cache key."""
+    terminal = runtime.get('tmux')
+    fields = {key: runtime[key] for key in ('launch_id', 'state', 'exit_code', 'ending_at', 'error') if key in runtime}
+    return (properties.get('id'), properties.get('universe_id'), fields,
+            dict(terminal) if isinstance(terminal, dict) else terminal)
+
+
 def observe(properties, runtime, snapshots=None):
     terminal = runtime.get("tmux")
     if not terminal:
@@ -162,5 +170,6 @@ def observe(properties, runtime, snapshots=None):
 def owned(properties, runtime, *, states=('alive',)):
     result = observe(properties, runtime)
     if result["live"] not in states:
-        raise ValueError(f'Cannot operate on agent: {result["live"]}: {result["reason"]}')
+        reason = f': {result["reason"]}' if result["reason"] else ''
+        raise ValueError(f'Cannot operate on agent: {result["live"]}{reason}')
     return Tmux(runtime["tmux"]["socket"]), runtime["tmux"]["pane"]

@@ -11,6 +11,8 @@ Start agents, give them work, let them bring in help, and keep track of them. Al
 
 When an agent starts, mv2 gives it a short note saying that it is part of a team and how to reach the other agents.
 
+For a launch-only Codex agent, `spawn --wait` and `resume --wait` also watch its startup screen for 55 seconds from the launch's start. The default 60-second wait leaves five seconds beyond that window. A recognized refusal fails the wait. An unanswered "Trust this folder?" prompt can keep it waiting for the whole window; after that, mv2 uses process readiness and prints that startup could not be confirmed from the screen. Open the agent's terminal to answer the prompt. A shorter explicit `--wait-timeout` can expire first. See [Codex startup](harnesses.md#codex).
+
 ## Let agents bring in help
 
 Agents can start other agents, message them, and wait for their results, using mv2's commands from their shell. Ask in plain words:

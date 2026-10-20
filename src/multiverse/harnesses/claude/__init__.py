@@ -30,15 +30,17 @@ import json
 import os
 from pathlib import Path
 import re
+import unicodedata
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ...runtime.process import process_started
+from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import Usage
 from ...store import read
@@ -59,6 +61,7 @@ BRIDGE = 'claude-mod-v1'
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
+NOT_RUNNING = "This agent isn't running: resume it first"
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
 
@@ -71,13 +74,93 @@ def claude_home(environment=None):
     return (Path(source['HOME']) if source.get('HOME') else Path.home()) / '.claude'
 
 
-def has_saved_conversation(native_id, environment=None):
+class Unreadable(Exception):
+    """A folder or file under Claude's storage that can't be read, so a lookup can't tell what is there."""
+
+    def __init__(self, path):
+        super().__init__(f"{path} can't be read")
+        self.path = str(path)
+
+
+PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
+
+
+def project_key(path):
+    """Claude's project folder name for a launch directory: the NFC path, every UTF-16 code unit that isn't
+    an ASCII letter or digit replaced by '-', as Bun does (so a character outside the BMP gives '--')."""
+    return ''.join(c if c.isascii() and c.isalnum() else '-' * (2 if ord(c) > 0xFFFF else 1)
+                   for c in unicodedata.normalize('NFC', str(path)))
+
+
+def could_hold(name, workspaces):
+    """Whether Claude could file a session launched in one of `workspaces` under the project folder `name`.
+
+    The name is lossy, so this errs towards yes: the folder's name, ignoring case, is a workspace's key or
+    starts with it plus '-' (Claude's own worktrees under the workspace, and the hashed form past 200 units).
+    With no absolute workspace to go by, any folder could.
+    """
+    keys = {project_key(form)[:PROJECT_KEY_LENGTH].casefold()
+            for workspace in workspaces if isinstance(workspace, str) and os.path.isabs(workspace)
+            for form in (workspace, os.path.realpath(workspace))}
+    folded = name.casefold()
+    return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
+
+
+def session_transcripts(native_id, environment=None, workspaces=()):
+    """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
+
+    Raises Unreadable when a folder can't be listed or searched and could hold the session: Claude files it
+    under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
+    folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
+    that finds nothing would otherwise read as proof the transcript is absent.
+    """
+    projects = claude_home(environment) / 'projects'
+    try:
+        entries = list(os.scandir(projects))
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise Unreadable(projects) from error
+    found = []
+    for entry in entries:
+        candidate = Path(entry.path) / f'{native_id}.jsonl'
+        try:
+            if not entry.is_dir():
+                continue
+            found.append((candidate.stat().st_mtime, candidate))
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            if could_hold(entry.name, workspaces):  # a project folder that can't be searched could hold it
+                raise Unreadable(entry.path) from error
+    return [path for _, path in sorted(found)]
+
+
+def subagent_transcripts(main):
+    """The subagent transcripts beside a main transcript; Unreadable when part of that folder can't be read."""
+    folder = main.parent / main.stem / 'subagents'
+    found = []
+
+    def unreadable(error):
+        if not isinstance(error, FileNotFoundError):
+            raise Unreadable(error.filename or folder) from error
+
+    for directory, _, files in os.walk(folder, onerror=unreadable):
+        found.extend(Path(directory) / name for name in files if name.endswith('.jsonl'))
+    return sorted(found)
+
+
+def has_saved_conversation(native_id, environment=None, workspaces=()):
     """Whether Claude has written a transcript for this session.
 
     Claude writes nothing until the first message, so a session that was never
-    used has none, and `--resume` refuses it.
+    used has none, and `--resume` refuses it. When its storage can't be read this
+    says yes: resume then tries the conversation, and Claude says if it is gone.
     """
-    return any((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
+    try:
+        return bool(session_transcripts(native_id, environment, workspaces))
+    except Unreadable:
+        return True
 
 
 def peer_token(socket_path, home=None):
@@ -95,34 +178,76 @@ def peer_token(socket_path, home=None):
     return token if isinstance(token, str) and TOKEN.match(token) else None
 
 
-def process_file(session):
-    """Claude's own file for this launch's pid (`<home>/sessions/<pid>.json`) and the pid's current start.
+# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux,
+# `ps -o lstart=` in UTC elsewhere (macOS), the same form as the runner's pid_started there.
+LINUX = sys.platform.startswith('linux')
+PROC = Path('/proc')
 
-    (record, started), either None. Undocumented and Claude's own, like the peer key files beside it.
+
+def process_file(session):
+    """Claude's own file for this running launch's pid (`<home>/sessions/<pid>.json`), or None.
+
+    Reads only that file: a launch that is not running, or has no file, costs no process query.
+    Undocumented and Claude's own, like the peer key files beside it.
     """
-    if not isinstance(session.pid, int) or isinstance(session.pid, bool):
-        return None, None
+    pid = session.pid
+    if session.state != 'running' or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
     home = Path(session.home) if session.home else claude_home()
     try:
-        record = json.loads((home / 'sessions' / f'{session.pid}.json').read_text())
+        record = json.loads((home / 'sessions' / f'{pid}.json').read_text())
     except (OSError, ValueError):
-        record = None
-    if not isinstance(record, dict) or not isinstance(record.get('procStart'), str):
-        record = None
-    return record, process_started(session.pid)
+        return None
+    return record if isinstance(record, dict) and isinstance(record.get('procStart'), str) else None
+
+
+def _proc_start(pid):
+    """Linux: (state, start in clock ticks) from /proc/<pid>/stat, or None.
+
+    Fields are counted after the last ')', since the command name can hold spaces and parentheses.
+    """
+    try:
+        stat = (PROC / str(pid) / 'stat').read_text()
+    except (OSError, ValueError):
+        return None
+    fields = stat[stat.rfind(')') + 2:].split(' ') if ')' in stat else []
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return fields[0], fields[19]
+
+
+def same_process(record, pid):
+    """mv2's start of `pid` (as the runner records pid_started) when Claude's file `record` is this live,
+    non-zombie process, else None.
+
+    One ps on macOS. On Linux, /proc first and ps only when the file's ticks match it.
+    """
+    claimed = ' '.join(record['procStart'].split())
+    if LINUX:
+        proc = _proc_start(pid)
+        if proc is None or proc[0] == 'Z' or proc[1] != claimed:
+            return None
+        return process_started(pid)
+    snapshot = process_snapshot(pid)
+    if snapshot is None or snapshot[1].startswith('Z') or snapshot[0] != claimed:
+        return None
+    return snapshot[0]
 
 
 def process_record(session):
     """Claude's file for this exact launch's process, or None.
 
     Only when three starts are one: the one the runner recorded when it started this
-    launch's child, the pid's start now, and the file's procStart. A pid reused by a
-    later process fails the first; execve (/restart) keeps the pid and its start.
+    launch's child, the pid's start now, and the file's procStart (in Claude's format).
+    A pid reused by a later process fails the first; execve (/restart) keeps the pid and its start.
+    Core compares the recorded start: it knows its forms (a Linux token, or the ctime older launches
+    recorded), and is given the start same_process already read, so this costs no extra query.
     """
-    record, started = process_file(session)
-    if record is None or not started or session.pid_started != started:
+    record = process_file(session)
+    if record is None or not session.pid_started:
         return None
-    return record if ' '.join(record['procStart'].split()) == started else None
+    observed = same_process(record, session.pid)
+    return record if observed is not None and start_matches(session.pid_started, session.pid, observed=observed) else None
 
 
 def unverified_relaunch(session):
@@ -130,8 +255,10 @@ def unverified_relaunch(session):
 
     Never trusted for delivery or a binding, only to tell the person to restart the agent.
     """
-    record, started = process_file(session)
-    if session.pid_started or record is None or not started or ' '.join(record['procStart'].split()) != started:
+    if session.pid_started:
+        return False
+    record = process_file(session)
+    if record is None or not same_process(record, session.pid):
         return False
     path = record.get('messagingSocketPath')
     return isinstance(path, str) and os.path.abspath(path) != os.path.abspath(session.endpoint.address)
@@ -183,13 +310,13 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_reading(native_id):
+def context_reading(native_id, workspaces=(), environment=None):
     """(tokens, timestamp) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
     excluded: they have their own context windows.
     """
-    mains = sorted((claude_home() / 'projects').glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
+    mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     with _transcripts_lock:
@@ -215,13 +342,13 @@ def moment(text):
         return None
 
 
-def measured_usage(native_id):
-    """Cumulative usage of the session and its subagents, from their transcripts."""
-    projects = claude_home() / 'projects'
-    mains = sorted(projects.glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
+def measured_usage(native_id, workspaces=(), environment=None):
+    """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
+    than total a scan that skipped part of the storage."""
+    mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
-    paths = [mains[-1], *sorted((mains[-1].parent / native_id / 'subagents').glob('**/*.jsonl'))]
+    paths = [mains[-1], *subagent_transcripts(mains[-1])]
     with _transcripts_lock:
         transcripts = [_transcripts.setdefault(path, Transcript(path)).read() for path in paths]
     responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
@@ -274,7 +401,208 @@ def bridge_problem(executable):
     return None
 
 
-FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
+# A resume whose session Claude has no conversation for starts it fresh under the same ID (PR #3), and says which
+# case it is: never used, or a saved conversation that went missing (Claude deletes them after cleanupPeriodDays).
+# The notes say what this launch does, which holds even when the launch then fails at startup.
+NEVER_USED = ('Claude has no saved conversation for this session: the agent was stopped before its first message, '
+              'so this launch starts it fresh under the same session ID')
+CONVERSATION_MISSING = ("Claude's saved conversation for this session is missing (Claude deletes conversations older "
+                        'than its cleanupPeriodDays setting): this launch starts it fresh under the same session ID, '
+                        'without its earlier context')
+# Earlier records joined a note like these onto native_mode.fallback_reason; launch-only causes filter them out.
+FRESH_NOTES = (NEVER_USED, CONVERSATION_MISSING,
+               'No saved Claude conversation for this session; started it fresh under the same session ID',
+               'Claude has no saved conversation for this session: the agent was stopped before its first message, '
+               'so it started fresh under the same session ID',
+               "Claude's saved conversation for this session is missing (Claude deletes conversations older than its "
+               'cleanupPeriodDays setting): the agent started fresh under the same session ID, without its earlier context')
+FRESH_SESSION = FRESH_NOTES[2]  # the first note's text, kept for callers that name it
+LAUNCH_ONLY = 'This agent is launch-only'
+
+
+def fresh_start(session, environment):
+    """The note for resuming `session` fresh, or None when Claude has its conversation and resume continues it."""
+    if not session.native_id or has_saved_conversation(session.native_id, environment, (session.workspace,)):
+        return None
+    return CONVERSATION_MISSING if had_conversation(session, environment) else NEVER_USED
+
+
+def had_conversation(session, environment):
+    """Whether this session ever had a message, from records that outlive Claude's transcript. False means no
+    evidence, never proof: Claude prunes its prompt history too, and a person's prompts leave mv2 nothing else."""
+    directory = Path(session.session_file).parent if session.session_file else None
+    return bool((directory and (_stored_message(directory, session.native_id)
+                                or _context_since_move(directory, session.native_id)))
+                or _typed_prompt(session.native_id, environment))
+
+
+def _stored_message(directory, native_id):
+    """A message core sent to this session whose row the mod confirmed was stored in the conversation."""
+    try:
+        state = json.loads((directory / 'inbox-state.json').read_text())
+    except (OSError, ValueError):
+        return False
+    for message_id, record in state.items() if isinstance(state, dict) else ():
+        if not isinstance(record, dict):
+            continue
+        attempts = record.get('attempts') if isinstance(record.get('attempts'), list) else []
+        if record.get('target_session') != native_id and not any(
+                isinstance(attempt, dict) and attempt.get('native_session_id') == native_id for attempt in attempts):
+            continue
+        try:
+            if (directory / 'claude-receipts' / f'{normalize_session_id(message_id)}.json').is_file():
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _context_since_move(directory, native_id):
+    """Context the mod reported during the last launch, after the agent last moved to this session (/clear)."""
+    try:
+        usage = json.loads((directory / 'runtime.json').read_text()).get('usage')
+        tokens = usage['context']['tokens']
+        reported = moment(usage['reported_at'])
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return False
+    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0 or reported is None:
+        return False
+    moved = None
+    try:
+        for line in (directory / 'sessions.jsonl').read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            at = moment(row.get('at')) if isinstance(row, dict) and row.get('to') == native_id else None
+            if at and (moved is None or at > moved):
+                moved = at
+    except OSError:
+        pass
+    return moved is None or reported > moved
+
+
+def _typed_prompt(native_id, environment):
+    """A prompt typed into this session, in Claude's own prompt history (each line names its sessionId)."""
+    path = claude_home(environment) / 'history.jsonl'
+    needle = f'"sessionId":"{native_id}"'.encode()
+    try:
+        if not path.is_file():
+            return False
+        with path.open('rb') as stream:
+            tail = b''
+            while chunk := stream.read(1 << 20):
+                if needle in tail + chunk:
+                    return True
+                tail = chunk[-len(needle):]
+    except OSError:
+        return False
+    return False
+
+
+def launch_storage(session, environment):
+    """Where a launch's Claude keeps its transcripts, as an environment for claude_home, or None if unknown.
+
+    session.home is pinned before the launch starts; failing that, the launch's own environment. Never this
+    process's: a recheck run elsewhere, or after HOME changed, would read another storage, find nothing, and
+    take that as proof a prompt never arrived.
+    """
+    home = getattr(session, 'home', None)
+    if isinstance(home, str) and os.path.isabs(home):
+        return {'CLAUDE_CONFIG_DIR': home}
+    source = environment or {}
+    if source.get('CLAUDE_CONFIG_DIR'):  # Claude would resolve a relative one against a working directory we don't know
+        return {'CLAUDE_CONFIG_DIR': source['CLAUDE_CONFIG_DIR']} if os.path.isabs(source['CLAUDE_CONFIG_DIR']) else None
+    return {'HOME': source['HOME']} if source.get('HOME') and os.path.isabs(source['HOME']) else None
+
+
+def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
+    """(answer, why) for whether Claude recorded `prompt`, a launch's command-line first prompt, in session
+    `native_id` from `since` on, reading the storage `environment` names.
+
+    The answer is True for a user row with it, False when the transcript is missing or complete and has none,
+    and None when that can't be told. Then `why` says what can't be read and what to fix, or is None where
+    core's own facts are missing (no session, prompt, storage, or `since` not an aware time).
+    """
+    start, text = moment(since), (prompt or '').strip()
+    if not native_id or not text or start is None or start.tzinfo is None or not environment:
+        return None, None
+    try:
+        paths = session_transcripts(native_id, environment, workspaces)
+    except Unreadable as error:
+        return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
+    damaged = None
+    for path in paths:
+        try:
+            lines = path.read_bytes().split(b'\n')
+        except OSError:
+            return None, f"Claude's transcript {path} can't be read: restore read access to it"
+        for raw in lines:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:  # damaged, or the last row cut short while it was being written
+                damaged = damaged or path
+                continue
+            message = row.get('message') if isinstance(row, dict) and row.get('type') == 'user' else None
+            content = message.get('content') if isinstance(message, dict) else None
+            body = content if isinstance(content, str) else ' '.join(
+                str(block.get('text', '')) for block in content if isinstance(block, dict)) if isinstance(content, list) else ''
+            if text not in body:
+                continue
+            when = moment(row.get('timestamp'))
+            try:
+                if when is None or when >= start:  # a matching row with no usable time still counts as evidence
+                    return True, None
+            except TypeError:  # a time without a zone can't be compared
+                return True, None
+    if damaged:
+        return None, f"Claude's transcript {damaged} has a damaged or unfinished row: if Claude is still writing it, wait"
+    return False, None
+
+
+def prompt_recorded(native_id, prompt, since, environment):
+    """prompt_evidence's answer alone: True, False or None."""
+    return prompt_evidence(native_id, prompt, since, environment)[0]
+
+
+def ignored_storage(caller, effective, home=None):
+    """A caller's CLAUDE_CONFIG_DIR that the resume replaced with the recorded storage, named as Codex names an
+    ignored CODEX_HOME; None when it is unset, the same storage, or nothing says where the kept one is.
+
+    The kept storage is the launch's CLAUDE_CONFIG_DIR when it had one; else, for the default storage, its
+    recorded home (session.home), or HOME/.claude of the launch environment. Never this process's.
+    """
+    requested = (caller or {}).get('CLAUDE_CONFIG_DIR')
+    if not isinstance(requested, str) or not requested:
+        return None
+    effective = effective or {}
+    saved = effective.get('CLAUDE_CONFIG_DIR')
+    if not (isinstance(saved, str) and saved):
+        launch_home = effective.get('HOME')
+        saved = (home if isinstance(home, str) and os.path.isabs(home)
+                 else os.path.join(launch_home, '.claude') if isinstance(launch_home, str) and os.path.isabs(launch_home)
+                 else None)
+    if saved is None:
+        return None
+    try:
+        kept = Path(saved).expanduser().resolve()
+        if Path(requested).expanduser().resolve() == kept:
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None  # a diagnostic can't claim a storage choice it couldn't check
+    return f'Kept its saved Claude storage {json.dumps(str(kept))}; ignored CLAUDE_CONFIG_DIR={json.dumps(requested)}.'
+
+
+def launch_only_cause(launch):
+    """Why a launch has no connection by design: its harness setting, or what kept an auto launch from the mod."""
+    if launch.get('policy') == 'plain':
+        return 'its harness sets inbox_bridge to false'
+    text = str(launch.get('fallback_reason') or '')
+    for note in FRESH_NOTES:  # resume joins its fresh-start note on; it is no cause (the older one holds a '; ')
+        text = text.replace(note, '')
+    return '; '.join(part for part in text.split('; ') if part.strip()) or 'it was launched without the bridge'
 
 
 @dataclass(frozen=True)
@@ -283,12 +611,17 @@ class Bridge:
 
     `launched`: this launch loaded the mod (not plain, not an auto fallback). `registered`: the mod
     reported itself for this launch, so its inbox exists. `ready`: steering, `ask` and receipts can be used
-    now. `reason` says why not. None of this is a service or a reconnectable terminal.
+    now. `reason` says why not. `launch_only`: the launch has no connection, so restarting it as it is can't
+    give it one. `final`: that is the harness's own setting (inbox_bridge false), so no later launch will
+    either; an auto launch that fell back because this Claude was too old is not final, since it connects
+    once Claude is updated and the agent resumed. None of this is a service or a reconnectable terminal.
     """
     launched: bool
     registered: bool
     ready: bool
     reason: str | None
+    launch_only: bool = False
+    final: bool = False
 
 
 def bridge_of(enabled, session):
@@ -300,13 +633,27 @@ def bridge_of(enabled, session):
     registered = bool(launched and session.native_id and session.endpoint
                       and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
     ready = registered and session.state == 'running'
+    # Launch-only: restarting as configured now can't connect it. The setting is off (final), or an auto launch
+    # fell back because this Claude was too old (until it is updated). A launch made while the setting was off,
+    # with it on now, is a restart case: a resume connects it.
+    launch_only = not enabled or (plain and launch.get('policy') != 'plain')
     if ready:
         reason = None
-    elif plain and launch.get('fallback_reason'):
-        reason = f'Launched without the bridge: {launch["fallback_reason"]}'
+    elif launch_only:  # first: resuming a launch-only agent would not connect it
+        cause = launch_only_cause({'policy': 'plain'} if not enabled else launch)
+        reason = f'{LAUNCH_ONLY}: {cause}'
+    elif session.state in ('stopped', 'dormant', 'failed'):
+        reason = NOT_RUNNING
     else:
         reason = NOT_REGISTERED
-    return Bridge(launched, registered, ready, reason)
+    return Bridge(launched, registered, ready, reason, launch_only, final=launch_only and not enabled)
+
+
+def unavailable(bridge):
+    """Why send or ask can't run now. A launch-only one is flagged, so core advises no plain restart, and says
+    whether that is final (core may close its messages) or lasts until Claude is updated and the agent resumed."""
+    return NativeResult('unavailable', bridge.reason,
+                        {'launch_only': True, 'final': bridge.final} if bridge.launch_only else None)
 
 
 class ClaudeAdapter(ConfiguredAdapter):
@@ -338,16 +685,30 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def resume(self, session, context):
         command = self._snapshot_flag(super().resume(session, context))
-        fresh = None
-        if session.native_id and not has_saved_conversation(session.native_id, context.environment):
-            fresh = self._reserve_session(command, session.native_id)
-        command = self._with_bridge(fresh or command, context)
-        if fresh is None:
-            return command
-        # Say so in the agent's details: it now runs without any earlier context.
-        mode = dict(command.native_mode)
-        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
-        return replace(command, native_mode=mode)
+        note = fresh_start(session, context.environment)
+        fresh = self._reserve_session(command, session.native_id) if note else None
+        # The note itself is the resume's notice (`resume_notice`), which core shows and keeps with the launch.
+        return self._with_bridge(fresh or command, context)
+
+    def resume_notice(self, session, caller_environment, effective_environment):
+        """What a resume result adds: a caller's CLAUDE_CONFIG_DIR it ignored for the storage recorded at spawn,
+        and a fresh start (same evidence as `resume`)."""
+        notes = [ignored_storage(caller_environment, effective_environment, session.home),
+                 fresh_start(session, effective_environment)]
+        return ' '.join(note for note in notes if note) or None
+
+    def startup_prompt_evidence(self, session, prompt, since, environment):
+        """For a launch that exited during startup with a wake prompt: whether its Claude recorded the prompt.
+        Core makes the message a definite failure only on False; True or None keep it uncertain."""
+        return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
+                               (session.workspace,))[0]
+
+    def startup_prompt_evidence_reason(self, session, prompt, since, environment):
+        """Asked after startup_prompt_evidence said None: what can't be read and what to fix, in one line
+        without the command (core adds it), or None when Claude has nothing to add."""
+        answer, why = prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
+                                      (session.workspace,))
+        return why if answer is None else None
 
     def _snapshot_flag(self, command):
         """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.
@@ -510,17 +871,43 @@ class ClaudeAdapter(ConfiguredAdapter):
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
         result['session_name'] = Capability('supported', mechanism='--name')
+        if not session.agent_id:  # `mv2 capabilities --harness`: no agent, so no launch to judge
+            return {**result, **self._would_support(executor)}
         # The launch's own record decides whether it used the bridge: an auto launch may have fallen back to plain.
         bridge = self._bridge(session)
         for name in ('send_steer', 'send_follow_up'):
             result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if bridge.ready
-                            else Capability('unavailable', bridge.reason, required=True))
+                            else Capability('unavailable', bridge.reason,
+                                mechanism='launch-only' if bridge.final else None, required=True))
         if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
-        if bridge.ready and session.session_file:
-            result['ask'] = Capability('supported', mechanism='claude-model-fork')
+        result['ask'] = (Capability('supported', mechanism='claude-model-fork') if bridge.ready and session.session_file
+                         else Capability('unavailable', bridge.reason or 'No agent directory recorded'))
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
+        return result
+
+    def _would_support(self, executor):
+        """With no launch (`mv2 capabilities --harness`): what this harness's launches get, from its setting and,
+        with --probe, the installed Claude Code. Reading the version runs claude, so only --probe does."""
+        if self.bridge_policy == 'plain':
+            found, why = None, 'Agents of this harness are launch-only: it sets inbox_bridge to false'
+        elif executor is None:
+            found = (f'Through the multiverse mod, on Claude Code {".".join(map(str, MIN_BRIDGE_VERSION))} or newer; '
+                     '--probe checks the installed version')
+            why = None
+        else:
+            problem = bridge_problem(self.spec['spawn'][0])
+            found = None if problem else 'Through the multiverse mod'
+            why = problem and (f'Launches of this harness refuse to start: {problem}' if self.bridge_policy == 'required'
+                               else f'Agents of this harness launch without the bridge: {problem}')
+        mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
+                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt'}
+        result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
+                         else Capability('unavailable', why, required=name.startswith('send_')))
+                  for name, mechanism in mechanisms.items()}
+        # Usage is measured from the session's transcript, so every launch has it, connected or not.
+        result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
 
     def get_usage(self, session, executor=None):
@@ -537,8 +924,14 @@ class ClaudeAdapter(ConfiguredAdapter):
                 reported['context_reported_at'] = mod.get('reported_at')
         except (OSError, ValueError, TypeError):
             pass
-        usage = measured_usage(session.native_id)
-        reading = context_reading(session.native_id)
+        try:
+            # The launch's own storage (session.home, pinned before it started), not this process's: a dashboard
+            # or CLI with another CLAUDE_CONFIG_DIR would read another storage (LC-26).
+            storage = launch_storage(session, None)
+            usage = measured_usage(session.native_id, (session.workspace,), storage)
+            reading = context_reading(session.native_id, (session.workspace,), storage)
+        except Unreadable as error:
+            return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
         responded = moment(reading[1]) if reading else None
         reported_at = moment(reported.get('context_reported_at'))
@@ -563,7 +956,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', f'Unknown delivery mode: {message.delivery}')
         bridge = self._bridge(session)
         if not bridge.ready:
-            return NativeResult('unavailable', bridge.reason)
+            return unavailable(bridge)
         target, token = self._inbox(session)
         if target is None:
             return NativeResult('unavailable', token)
@@ -588,7 +981,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         """
         bridge = self._bridge(session)
         if not bridge.ready:
-            return NativeResult('unavailable', bridge.reason)
+            return unavailable(bridge)
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         target, token = self._inbox(session)
@@ -614,7 +1007,10 @@ class ClaudeAdapter(ConfiguredAdapter):
                 return NativeResult('ok', 'Answered over the session transcript; nothing was added to it',
                                     {'answer': record.get('text', ''), 'usage': record.get('usage')})
             if record.get('reason') == 'nothing-to-fork':
-                return NativeResult('unavailable', 'The session has no response to answer from yet')
+                # Claude forks the main thread's last request in this process; a new or resumed process has none
+                # until a turn ends, though the conversation it resumed is all there.
+                return NativeResult('unavailable', "This launch hasn't finished a turn yet: Claude answers side "
+                                    "questions only after one, so ask again after the agent's next response")
             return NativeResult('error', f'Claude did not answer: {record.get("reason", "unknown reason")}')
         return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
 

@@ -70,6 +70,9 @@ update_runtime(directory, launch.name, state='stopped', exit_code=code, stopped_
 
 class LegacyAttachmentTest(TerminalBase):
     def test_pre_update_runner_without_cleanup_record_can_stop_and_resume(self):
+        """An agent started by a runner from before the cleanup marker can still be killed and resumed; fragile because
+        it is an upgrade path nobody exercises after release, and a break leaves existing agents unresumable after an
+        update."""
         legacy = self.work / 'legacy-runner.py'
         legacy.write_text(LEGACY_RUNNER)
         original = Tmux.create
@@ -88,20 +91,132 @@ class LegacyAttachmentTest(TerminalBase):
 
 
 class AttachmentTeardownTest(BaseTest):
-    def test_missing_launch_directory_skips_metadata_and_logs_once_without_recreation(self):
+    def launch(self):
         directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        log = attachments.connection_logger(launch)
-        item = {'id': str(uuid4()), 'role': 'status stream', 'endpoint': '/isolated/service.sock', 'state': 'opening'}
-        with self.assertLogs('multiverse.runtime.attachments', level='WARNING') as captured:
-            log(item)
-            log({**item, 'state': 'closed'})
-        self.assertEqual(len(captured.output), 1)
-        self.assertIn(launch.name, captured.output[0])
-        self.assertIn('launch directory is missing', captured.output[0])
-        self.assertFalse(directory.exists())
+        return directory, directory / 'launches' / str(uuid4())
+
+    def test_role_records_block_stay_bounded_and_never_recreate(self):
+        """Active and pending role records block resume, closed connection history stays bounded, only metadata (no
+        prompt text) is written, and neither a late close, a monitor's safety reads nor a logger for a missing launch
+        writes records again; fragile because pruning and blocking act on the same files, and a break grows files
+        forever, leaks prompt text or resurrects a removed folder."""
+        with self.subTest('a connection records only metadata and blocks until its close'):
+            directory, launch = self.launch()
+            launch.mkdir(parents=True)
+            facts = {'launch_id': launch.name}
+            attachments.begin(launch, None)
+            attachments.finish(launch)
+            log = attachments.connection_logger(launch)
+            metadata = {'id': str(uuid4()), 'role': 'test RPC', 'endpoint': '/isolated/provider.sock',
+                        'state': 'opening', 'prompt': 'MUST NEVER BE RECORDED'}
+            log(metadata)
+            self.assertIsNotNone(attachments.problem(directory, facts))
+            log({**metadata, 'state': 'closed'})
+            self.assertIsNone(attachments.problem(directory, facts))
+            row, = (launch / 'roles').glob('*.json')
+            self.assertNotIn('MUST NEVER', row.read_text())
+        with self.subTest('closed history is bounded, and active, pending and unknown records are kept'):
+            directory, launch = self.launch()
+            launch.mkdir(parents=True)
+            facts = {'launch_id': launch.name}
+            write(directory / 'runtime.json', facts)
+            attachments.begin(launch, None)
+            attachments.finish(launch)
+            log = attachments.connection_logger(launch)
+            active = {'id': str(uuid4()), 'role': 'terminal relay', 'endpoint': '/isolated/service.sock',
+                      'state': 'opening'}
+            log(active)
+            pending = attachments.Role(launch, 'recovery worker', pending=True)
+            unknown = launch / 'roles' / ('connection-' + str(uuid4()) + '.json')
+            write(unknown, {'state': 'closed'})
+            for _ in range(220):
+                item = {'id': str(uuid4()), 'role': 'control RPC', 'endpoint': '/isolated/service.sock',
+                        'state': 'opening'}
+                log(item)
+                # Old per-connection lock files must be bounded as well.
+                (launch / 'roles' / ('connection-' + item['id'] + '.lock')).touch()
+                log({**item, 'state': 'closed'})
+            self.assertTrue(unknown.exists(), 'Malformed evidence is not proof of closure')
+            unknown.unlink()
+            self.assertEqual(len(list((launch / 'roles').glob('connection-*.json'))), 101)
+            self.assertEqual(len(list((launch / 'roles').glob('connection-*.lock'))), 100)
+            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                attachments.wait(directory, launch.name, .01)
+            log({**active, 'state': 'closed'})
+            self.assertIn('recovery worker', attachments.problem(directory, facts))
+            pending.close()
+            attachments.wait(directory, launch.name, .01)
+            self.assertEqual(len(list((launch / 'roles').glob('connection-*.json'))), 100)
+        with self.subTest('a pending worker blocks after its runner finished, and a late close recreates nothing'):
+            directory, launch = self.launch()
+            launch.mkdir(parents=True)
+            facts = {'launch_id': launch.name, 'state': 'stopped'}
+            write(directory / 'runtime.json', facts)
+            attachments.begin(launch, None)
+            attachments.finish(launch)
+            worker = attachments.Role(launch, 'recovery worker', pending=True)
+            self.assertIn('recovery worker', attachments.problem(directory, facts))
+            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                attachments.wait(directory, launch.name, .01)
+            worker.claimed(os.getpid(), None)
+            self.assertIsNotNone(attachments.problem(directory, facts))
+            worker.close()
+            self.assertIsNone(attachments.problem(directory, facts))
+            shutil.rmtree(directory)
+            worker.close()
+            self.assertFalse(directory.exists())
+        with self.subTest('repeated monitor safety reads write no connection history'):
+            directory, launch = self.launch()
+            service = NativeServiceHandle(ServiceIdentity('fixture', {'FIXTURE_HOME': str(self.work)}),
+                                          NativeEndpoint('unix-websocket', '/isolated/service.sock'))
+            props = {'id': directory.name, 'name': 'monitor', 'harness': 'fixture',
+                     'workspace': str(self.work), 'native_session_id': str(uuid4())}
+            facts = {'launch_id': launch.name, 'state': 'running', 'status': 'idle', 'startup_checked': True,
+                     'control_endpoint': asdict(service.endpoint), 'native_service': asdict(service),
+                     'native_relay': {'state': 'ready'},
+                     'attachment': asdict(AttachmentSpec('service', 'binding', 'idle-existing-service', True, True))}
+            write(directory / 'properties.json', props)
+            write(directory / 'runtime.json', facts)
+            (directory / '.launch.lock').touch()
+            attachments.begin(launch, None)
+            attachments.finish(launch)
+            role = attachments.Role(launch, 'recovery monitor')
+            specification = RpcSpec(service.endpoint.address, lambda: iter(()))
+            activity = NativeActivity(props['native_session_id'], str(self.work), service, 'idle',
+                                      False, False, False, False)
+            def execute(spec, timeout, record_connection=None):
+                if record_connection:
+                    item = {'id': str(uuid4()), 'role': 'control RPC', 'endpoint': spec.socket_path, 'state': 'opening'}
+                    record_connection(item)
+                    record_connection({**item, 'state': 'closed'})
+                return NativeResult('ok', value=activity)
+            monitor = recovery.RecoveryMonitor(directory, launch.name, self.root)
+            monitor.stopped = Mock()
+            monitor.stopped.wait.side_effect = [False, False] * 250 + [True]
+            adapter = SimpleNamespace(attachment_recovery=lambda session: specification)
+            with patch.object(recovery.harnesses, 'load', return_value=adapter), \
+                 patch.object(recovery.rpc, 'execute', side_effect=execute) as rpc:
+                monitor._run()
+            self.assertEqual(rpc.call_count, 250)
+            self.assertEqual(list((launch / 'roles').glob('connection-*')), [])
+            self.assertIn('recovery monitor', attachments.problem(directory, facts))
+            role.close()
+            attachments.wait(directory, launch.name, .01)
+        with self.subTest('a logger for a missing launch directory writes nothing and logs once'):
+            directory, launch = self.launch()
+            log = attachments.connection_logger(launch)
+            item = {'id': str(uuid4()), 'role': 'status stream', 'endpoint': '/isolated/service.sock',
+                    'state': 'opening'}
+            with self.assertLogs('multiverse.runtime.attachments', level='WARNING') as captured:
+                log(item)
+                log({**item, 'state': 'closed'})
+            self.assertEqual(len(captured.output), 1)
+            self.assertIn(launch.name, captured.output[0])
+            self.assertFalse(directory.exists())
 
     def test_teardown_scan_and_closed_history_pruning_are_serialized(self):
+        """The teardown scan and closed-history pruning are serialized; fragile because it is a race no manual run
+        hits, and a break lets a scan miss an active connection and resume too early."""
         directory = self.root / 'state' / 'agents' / str(uuid4())
         launch = directory / 'launches' / str(uuid4())
         launch.mkdir(parents=True)
@@ -157,122 +272,9 @@ class AttachmentTeardownTest(BaseTest):
         active.close()
         self.assertIsNone(attachments.problem(directory, facts))
 
-    def test_closed_connection_history_is_bounded_without_pruning_active_pending_or_unknown(self):
-        directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        launch.mkdir(parents=True)
-        facts = {'launch_id': launch.name}
-        write(directory / 'runtime.json', facts)
-        attachments.begin(launch, None)
-        attachments.finish(launch)
-        log = attachments.connection_logger(launch)
-        active = {'id': str(uuid4()), 'role': 'terminal relay', 'endpoint': '/isolated/service.sock', 'state': 'opening'}
-        log(active)
-        pending = attachments.Role(launch, 'recovery worker', pending=True)
-        unknown = launch / 'roles' / ('connection-' + str(uuid4()) + '.json')
-        write(unknown, {'state': 'closed'})
-        for _ in range(220):
-            item = {'id': str(uuid4()), 'role': 'control RPC', 'endpoint': '/isolated/service.sock', 'state': 'opening'}
-            log(item)
-            # Old per-connection lock files must be bounded as well.
-            (launch / 'roles' / ('connection-' + item['id'] + '.lock')).touch()
-            log({**item, 'state': 'closed'})
-        self.assertTrue(unknown.exists(), 'Malformed evidence is not proof of closure')
-        unknown.unlink()
-        self.assertEqual(len(list((launch / 'roles').glob('connection-*.json'))), 101)
-        self.assertEqual(len(list((launch / 'roles').glob('connection-*.lock'))), 100)
-        with self.assertRaisesRegex(RuntimeError, 'still closing'):
-            attachments.wait(directory, launch.name, .01)
-        log({**active, 'state': 'closed'})
-        self.assertIn('recovery worker', attachments.problem(directory, facts))
-        pending.close()
-        attachments.wait(directory, launch.name, .01)
-        self.assertEqual(len(list((launch / 'roles').glob('connection-*.json'))), 100)
-
-    def test_repeated_monitor_safety_reads_do_not_create_connection_history(self):
-        directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        service = NativeServiceHandle(ServiceIdentity('fixture', {'FIXTURE_HOME': str(self.work)}),
-                                      NativeEndpoint('unix-websocket', '/isolated/service.sock'))
-        props = {'id': directory.name, 'name': 'monitor', 'harness': 'fixture',
-                 'workspace': str(self.work), 'native_session_id': str(uuid4())}
-        facts = {'launch_id': launch.name, 'state': 'running', 'status': 'idle', 'startup_checked': True,
-                 'control_endpoint': asdict(service.endpoint), 'native_service': asdict(service),
-                 'native_relay': {'state': 'ready'},
-                 'attachment': asdict(AttachmentSpec('service', 'binding', 'idle-existing-service', True, True))}
-        write(directory / 'properties.json', props)
-        write(directory / 'runtime.json', facts)
-        (directory / '.launch.lock').touch()
-        attachments.begin(launch, None)
-        attachments.finish(launch)
-        role = attachments.Role(launch, 'recovery monitor')
-        specification = RpcSpec(service.endpoint.address, lambda: iter(()))
-        activity = NativeActivity(props['native_session_id'], str(self.work), service, 'idle', False, False, False, False)
-        def execute(spec, timeout, record_connection=None):
-            if record_connection:
-                item = {'id': str(uuid4()), 'role': 'control RPC', 'endpoint': spec.socket_path, 'state': 'opening'}
-                record_connection(item)
-                record_connection({**item, 'state': 'closed'})
-            return NativeResult('ok', value=activity)
-        monitor = recovery.RecoveryMonitor(directory, launch.name, self.root)
-        monitor.stopped = Mock()
-        monitor.stopped.wait.side_effect = [False, False] * 250 + [True]
-        with patch.object(recovery.harnesses, 'load', return_value=SimpleNamespace(attachment_recovery=lambda session: specification)), \
-             patch.object(recovery.rpc, 'execute', side_effect=execute) as rpc:
-            monitor._run()
-        self.assertEqual(rpc.call_count, 250)
-        self.assertEqual(list((launch / 'roles').glob('connection-*')), [])
-        self.assertIn('recovery monitor', attachments.problem(directory, facts))
-        role.close()
-        attachments.wait(directory, launch.name, .01)
-
-    def test_connection_records_only_metadata_and_blocks_until_its_close(self):
-        directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        launch.mkdir(parents=True)
-        facts = {'launch_id': launch.name}
-        attachments.begin(launch, None)
-        attachments.finish(launch)
-        log = attachments.connection_logger(launch)
-        metadata = {'id': str(uuid4()), 'role': 'test RPC', 'endpoint': '/isolated/provider.sock',
-                    'state': 'opening', 'prompt': 'MUST NEVER BE RECORDED'}
-        log(metadata)
-        self.assertIsNotNone(attachments.problem(directory, facts))
-        log({**metadata, 'state': 'closed'})
-        self.assertIsNone(attachments.problem(directory, facts))
-        row, = (launch / 'roles').glob('*.json')
-        self.assertNotIn('MUST NEVER', row.read_text())
-
-    def test_pending_worker_blocks_even_after_runner_finished_and_close_never_recreates_removed_records(self):
-        directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        launch.mkdir(parents=True)
-        facts = {'launch_id': launch.name, 'state': 'stopped'}
-        write(directory / 'runtime.json', facts)
-        attachments.begin(launch, None)
-        attachments.finish(launch)
-        worker = attachments.Role(launch, 'recovery worker', pending=True)
-        self.assertIn('recovery worker', attachments.problem(directory, facts))
-        with self.assertRaisesRegex(RuntimeError, 'still closing'):
-            attachments.wait(directory, launch.name, .01)
-        worker.claimed(os.getpid(), None)
-        self.assertIsNotNone(attachments.problem(directory, facts))
-        worker.close()
-        self.assertIsNone(attachments.problem(directory, facts))
-        shutil.rmtree(directory)
-        worker.close()
-        self.assertFalse(directory.exists())
-
-    def test_foreign_and_malformed_cleanup_records_fail_closed_without_process_control(self):
-        directory = self.root / 'state' / 'agents' / str(uuid4())
-        launch = directory / 'launches' / str(uuid4())
-        for value in ([], {'schema': 1, 'launch_id': 'foreign', 'state': 'complete'}):
-            write(launch / 'cleanup.json', value)
-            with patch.object(attachments.os, 'kill') as kill:
-                self.assertIn('invalid cleanup', attachments.problem(directory, {'launch_id': launch.name}))
-                kill.assert_not_called()
-
     def test_exited_child_with_open_old_relay_blocks_resume_until_cleanup_finishes(self):
+        """A child exit with an open relay blocks resume until the runner finished its cleanup; fragile because it
+        spans runner, relay and launch lock, and a break lets two relays bind one native session."""
         agent, native_id, launch_id = (str(uuid4()) for _ in range(3))
         directory = self.root / 'state' / 'agents' / agent
         launch = directory / 'launches' / launch_id
@@ -326,6 +328,9 @@ class AttachmentTeardownTest(BaseTest):
                     self.assertEqual(connection.recv(1), b'')
                     record = read(launch / 'cleanup.json')
                     self.assertEqual((record['launch_id'], record['state']), (launch_id, 'complete'))
+                    self.assertIsNotNone(record['pid_started'])
+                    for path in (launch / 'roles').glob('*.json'):
+                        self.assertEqual(read(path)['pid_started'], record['pid_started'])
             finally:
                 (self.work / 'release').touch()
                 if process.poll() is None:

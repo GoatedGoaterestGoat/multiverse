@@ -27,6 +27,7 @@ import fnmatch
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
@@ -59,6 +60,46 @@ NEEDS = frozenset({"events", "service"})
 
 def host_directory(root):
     return Path(root) / "state" / "plugins" / "host"
+
+
+STATUS_TEXT = ("state", "started_at", "updated_at", "socket", "session", "pane")
+
+
+def _recorded(root):
+    """(what status.json records, keeping only fields of the right type; why the file cannot be used, or None).
+
+    Never raises: a missing file records nothing, and an unreadable one, one that is not JSON (empty, cut short)
+    or not a JSON object leaves the status unknown, with the reason. The host rewrites it when it starts."""
+    path = host_directory(root) / "status.json"
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError) as error:
+        detail = "it is not JSON (empty or cut short)" if isinstance(error, json.JSONDecodeError) else str(error)
+        return {}, f"state/plugins/host/status.json cannot be used: {detail}, so the host's status is unknown"
+    if not isinstance(value, dict):
+        return {}, (f"state/plugins/host/status.json cannot be used: it holds {json.dumps(value)[:40]}, not an "
+                    "object, so the host's status is unknown")
+    recorded = {key: value[key] for key in STATUS_TEXT if isinstance(value.get(key), str)}
+    if _is_pid(value.get("pid")):
+        recorded["pid"] = value["pid"]
+    if isinstance(value.get("workers"), dict):
+        recorded["workers"] = {name: {"pid": info["pid"] if _is_pid(info.get("pid")) else None,
+                                      "state": info["state"] if isinstance(info.get("state"), str) else "unknown",
+                                      "restarts": info["restarts"] if _is_count(info.get("restarts")) else 0}
+                               for name, info in value["workers"].items() if isinstance(info, dict)}
+    if isinstance(value.get("stopped"), dict):
+        recorded["stopped"] = {name: why for name, why in value["stopped"].items() if isinstance(why, str)}
+    return recorded, None
+
+
+def _is_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def needed(root):
@@ -95,12 +136,9 @@ def running(root):
     """Whether a supervisor runs for this tree: its process is alive and its heartbeat (status.json, written every
     SUPERVISE_SECONDS) is recent. It never takes the host lock, so a status check can never make a supervisor
     that is just starting find the lock taken and give up."""
-    try:
-        recorded = json.loads((host_directory(root) / "status.json").read_text())
-    except (OSError, ValueError):
-        return False
-    pid = recorded.get("pid") if isinstance(recorded, dict) else None
-    if recorded.get("state") != "running" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    recorded, _ = _recorded(root)
+    pid = recorded.get("pid")
+    if recorded.get("state") != "running" or pid is None:
         return False
     try:
         os.kill(pid, 0)
@@ -110,7 +148,7 @@ def running(root):
         pass  # alive, someone else's: the beat below decides
     except OSError:
         return False
-    return _age(recorded.get("updated_at", "")) <= HEARTBEAT_SECONDS
+    return _age(recorded.get("updated_at", ""), unknown=float("inf")) <= HEARTBEAT_SECONDS
 
 
 def supervise(root, *, exit_when_idle=True, stopping=None):
@@ -179,8 +217,8 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
 def _start_worker(root, name):
     """A plugin's worker, in a process group of its own: what its calls start (a hung subprocess.run) goes with
     it when it ends."""
-    return subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker", str(root), name],
-                            stdin=subprocess.DEVNULL, start_new_session=True)
+    return subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker", "--supervisor",
+                             str(os.getpid()), str(root), name], stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def _exited(process):
@@ -188,10 +226,41 @@ def _exited(process):
     cannot be another process's, so _reap can kill what it left in that group."""
     if process.returncode is not None:
         return True
+    waitid = getattr(os, "waitid", None)  # macOS has it from Python 3.13 only
+    if waitid is None:
+        return _exit_seen(process)
     try:
-        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        return waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
     except ChildProcessError:
         return process.poll() is not None
+
+
+_exit_lock = threading.Lock()
+
+
+def _exit_seen(process):
+    """Without os.waitid: whether a kqueue has seen the worker exit, which does not reap it either."""
+    with _exit_lock:
+        if getattr(process, "_mv2_ended", False):
+            return True
+        queue = getattr(process, "_mv2_exits", None)
+        if queue is None:
+            if not hasattr(select, "kqueue"):
+                return process.poll() is not None  # reaps it: _reap then cannot end what it left behind
+            queue = select.kqueue()
+            try:
+                queue.control([select.kevent(process.pid, select.KQ_FILTER_PROC, select.KQ_EV_ADD,
+                                             select.KQ_NOTE_EXIT)], 0, 0)
+            except ProcessLookupError:  # it has ended already; unreaped, its pid is still its own
+                queue.close()
+                process._mv2_ended = True
+                return True
+            process._mv2_exits = queue
+        if not queue.control(None, 1, 0):
+            return False
+        queue.close()
+        process._mv2_ended = True
+        return True
 
 
 def _reap(process):
@@ -202,6 +271,9 @@ def _reap(process):
         except (ProcessLookupError, PermissionError):
             pass
     process.wait()
+    queue = getattr(process, "_mv2_exits", None)
+    if queue is not None:
+        queue.close()
 
 
 def _stop_worker(process):
@@ -250,7 +322,7 @@ def _write_status(root, started, workers, restarts, stopped, state="running"):
     try:
         path = host_directory(root) / "status.json"
         with _status_lock(root):
-            previous = json.loads(path.read_text()) if path.is_file() else {}
+            previous, _ = _recorded(root)
             write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
                          "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
                          "workers": {name: {"pid": process.pid,
@@ -270,7 +342,8 @@ def _beat(root, stopping):
         try:
             with _status_lock(root):
                 recorded = json.loads(path.read_text())
-                if recorded.get("state") == "running" and recorded.get("pid") == os.getpid():
+                if (isinstance(recorded, dict) and recorded.get("state") == "running"
+                        and recorded.get("pid") == os.getpid()):
                     write(path, {**recorded, "updated_at": now()})
         except (OSError, ValueError):
             continue
@@ -282,24 +355,18 @@ def left_stopped(root):
     try:
         while universes.parent(top) is not None:
             top = universes.parent(top)
-        recorded = json.loads((host_directory(top) / "status.json").read_text())
     except (OSError, ValueError, AttributeError):
         return {}
-    stopped = recorded.get("stopped") if isinstance(recorded, dict) else None
-    return {name: why for name, why in stopped.items() if isinstance(why, str)} if isinstance(stopped, dict) else {}
+    return _recorded(top)[0].get("stopped", {})
 
 
 def status(root):
     """{running, state, pid, workers, stopped, ...} of this tree's host."""
     root = Path(root)
-    path = host_directory(root) / "status.json"
-    try:
-        recorded = json.loads(path.read_text())
-    except (OSError, ValueError):
-        recorded = {}
+    recorded, problem = _recorded(root)
     alive = running(root)
     return {**recorded, "running": alive, "state": "running" if alive else "stopped",
-            "needed": sorted(needed(root))}
+            "needed": sorted(needed(root)), **({"problem": problem} if problem else {})}
 
 
 def start(root):
@@ -325,10 +392,7 @@ def start(root):
     path.parent.mkdir(parents=True, exist_ok=True)
     where = {"socket": terminal["socket"], "session": terminal["session"], "pane": terminal["pane"]}
     with _status_lock(root):
-        try:
-            recorded = json.loads(path.read_text())
-        except (OSError, ValueError):
-            recorded = {}
+        recorded, _ = _recorded(root)
         if recorded.get("state") == "running" and recorded.get("pid") and running(root):
             write(path, {**recorded, **where})  # the supervisor was quicker: only say where it runs
         else:
@@ -357,7 +421,7 @@ def stop(root):
             Tmux(recorded["socket"]).run("kill-session", "-t", recorded["session"])
         except Exception:
             pass  # already gone
-    return {**status(root), "stopped": not running(root)}
+    return status(root)  # its `running` says whether it stopped
 
 
 def _cursor_path(scope, name):
@@ -403,31 +467,45 @@ def _write_cursor(scope, name, sequence, journal=None):
         return  # removed or moved meanwhile: a cursor must never bring its directories back
     path = _cursor_path(scope, name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # The number first, then the journal it belongs to. Interrupted between the two, a new journal's number is
+    # paired with the old journal, which reads as "this journal started again": its events come again from its
+    # start (at least once). The other order would pair an old, higher number with the new journal and skip them.
+    temporary = path.with_name(".events.cursor.tmp")
+    temporary.write_text(f"{sequence}\n")
+    temporary.replace(path)
     mark = _cursor_journal_path(scope, name)
     if journal and (_cursor_journals.get(str(path)) != journal or not mark.is_file()):
         temporary = mark.with_name(".events.cursor.journal.tmp")
         temporary.write_text(f"{journal}\n")
         temporary.replace(mark)
         _cursor_journals[str(path)] = journal
-    temporary = path.with_name(".events.cursor.tmp")
-    temporary.write_text(f"{sequence}\n")
-    temporary.replace(path)
 
 
 _cursor_journals = {}  # cursor path -> the journal last written beside it by this process
 
 
-def _age(text):
+def _age(text, unknown=0.0):
     try:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
         return max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
-    except (AttributeError, ValueError):
-        return 0.0
+    except (AttributeError, TypeError, ValueError):
+        return unknown
 
 
-def work(root, name):
-    """One plugin's worker: its services, and its handlers over the journals where it is on."""
+def work(root, name, supervisor=None):
+    """One plugin's worker: its services, and its handlers over the journals where it is on.
+
+    `supervisor` is the pid of the supervisor that started it (an older supervisor gives none: then it is this
+    process's parent now). If the supervisor dies without stopping its workers (kill -9, the OOM killer, a crash),
+    this process is reparented and its parent changes: then it stops too, even when that happened before it got
+    here. A parent can change only to init or a subreaper, so another process reusing the supervisor's pid cannot
+    fool the check."""
+    if supervisor is None:
+        supervisor = os.getppid()
     root = Path(root).resolve()
+    if os.getppid() != supervisor:
+        _log(root, f"{name}: supervisor gone; stopping")
+        return 0
     loader.process = "host"
     scopes = needed(root).get(name, [])
     if not scopes:
@@ -438,10 +516,6 @@ def work(root, name):
         _log(root, f"{name}: {error}")
         return 1
     mv = api.Plugin(loaded)
-    # The supervisor that started this worker. If it dies without stopping its workers (kill -9, the OOM killer,
-    # a crash), this process is reparented and its parent changes: then it stops too. A changed parent cannot be
-    # fooled the way a recorded pid could be, by another process reusing that pid.
-    supervisor = os.getppid()
     stopping = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, lambda *_: stopping.set())
@@ -713,13 +787,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m multiverse.plugins.host", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--worker", action="store_true", help="run one plugin's worker")
+    parser.add_argument("--supervisor", type=int, help=argparse.SUPPRESS)
     parser.add_argument("root")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args(argv)
     if args.worker:
         if not args.name:
             parser.error("--worker needs the plugin's name")
-        return work(args.root, args.name)
+        return work(args.root, args.name, args.supervisor)
     return supervise(args.root)
 
 

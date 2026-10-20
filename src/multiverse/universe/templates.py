@@ -22,6 +22,8 @@ def template_source(template):
         personal = Path.home() / ".multiverse" / "templates" / template
         source = personal if personal.is_dir() else TEMPLATES / template
     if not (source / "universe.json").is_file():
+        if source.is_dir():
+            raise ValueError(f"{source} is not a template: it has no universe.json")
         raise ValueError(f"Unknown template: {template}")
     # Templates are trusted local code, but do not follow links outside a template.
     if any(p.is_symlink() for p in source.rglob("*")):
@@ -129,7 +131,13 @@ def refresh_plan(root, template=None, take=()):
     name = template or (manifest or {}).get("template") or meta.get("template")
     if not name:
         raise ValueError(f"{root} records no template; pass --template")
-    base = template_source(name)
+    try:
+        base = template_source(name)
+    except ValueError as error:
+        if template:
+            raise
+        raise ValueError(f"{meta.get('name') or root.name} ({root}) was made from template {name}, which can't be "
+                         f"found ({error}). Compare it with another one: mv2 -u {root} refresh --template NAME_OR_PATH") from None
     source = base / ((manifest or {}).get("source") or "") if not template else base
     if not (source / "universe.json").is_file():
         raise ValueError(f"Template {name} has no universe at {source}")

@@ -1,6 +1,6 @@
 # Environment variables
 
-mv2 reads and sets the variables below. You set only a few of them, and mv2 sets the rest inside every agent session.
+mv2 reads and sets the variables below. You set only a few of them. The runner and native frontend receive launch identity; connected Codex tools use agent-stable identity instead.
 
 ## Variables you set
 
@@ -21,14 +21,19 @@ mv2 removes every inherited `MV2_*` variable before it starts an agent, then set
 | `MV2_UNIVERSE` | The agent's universe directory | The default universe for every `mv2` command the agent runs. |
 | `MV2_AGENT_ID` | The agent's UUID | The default `--agent` for `inbox`, `report` and `session-bind`. It also marks messages from `send` as from this agent. |
 | `MV2_AGENT_DIR` | `state/agents/UUID/` in the universe | Where the Claude mod, the Pi extension and tree compaction read and write the agent's files. |
-| `MV2_LAUNCH_ID` | This launch's UUID | `inbox`, `report` and `session-bind` refuse with "Outdated launch" when it doesn't match `runtime.json`. This stops a replaced process from updating a resumed agent. |
+| `MV2_LAUNCH_ID` | This launch's UUID, absent from connected Codex tools | Launch-scoped callbacks refuse an earlier launch's UUID with "Outdated launch". Runner updates and control calls stay launch-scoped. |
+| `MV2_IDENTITY_MODE` | `codex-agent-v1` in connected Codex tools | Makes `report`, `inbox` and the sender of `send` validate the agent, native thread and saved storage scope. Missing or incomplete proof is refused; it never becomes an operator call. |
 | `MV2_CLI` | The `mv2` executable: the checkout's `bin/mv2`, else the running `mv2`, else `mv2` on `PATH` | Agents run `"$MV2_CLI" COMMAND`. Its directory is also put first on the agent's `PATH`. |
 | `MV2_PYTHON` | The Python interpreter running mv2 | The Claude mod and the Pi extension report status, usage and compaction with it. |
-| `MV2_CONTROL_SOCKET` | `/tmp/mv2-native-LAUNCH/rpc.sock` | The private socket of this launch's bridge. The Pi extension listens on it. |
-| `MV2_TMUX_SOCKET` | The socket of the agent's own tmux server | Agents that spawn agents put them on the same server. |
+| `MV2_CONTROL_SOCKET` | `/tmp/mv2-native-LAUNCH/rpc.sock`, absent from connected Codex tools | The private socket of this launch's bridge. The Pi extension listens on it. |
+| `MV2_TMUX_SOCKET` | The agent's tmux socket, absent from connected Codex tools | Identifies the frontend's server. Child launches use the verified calling agent's runtime record to find its current server. |
 | `MV2_COMPACTION` | `1` | The compaction plugin sets it for connected Claude launches while compaction is on. Its compaction hook acts only then. See [plugin variables](#plugin-variables). |
 
-Outside an agent session, leave `MV2_AGENT_ID` and `MV2_LAUNCH_ID` unset. If they are set, `send` signs messages as that agent, and `inbox` reads that agent's messages.
+Connected Codex tools keep the same agent identity when another Codex client drives the conversation. They do not receive `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` or `MV2_TMUX_SOCKET`. Codex supplies `CODEX_THREAD_ID`; mv2 also checks the saved native storage paths. A `/btw` side conversation inherits these settings, but its different thread ID cannot authorize it as the main agent. It can still run unscoped mv2 commands as the operator; this identity check is not an execution sandbox. A child agent still launches on its parent's tmux server, using the parent's current runtime record rather than a socket saved in the conversation. If that record is missing or damaged, spawning a child names the file to restore; it never falls back to another server.
+
+Each new launch requests `MV2_CLI`, `MV2_PYTHON` and `PATH` from the mv2 installation starting it. These paths are tool settings, not identity proof. The saved environment maps describe the requested values, not measured values in an existing native conversation. While another client is attached, a shared Codex conversation can keep its previous paths. To reload them after moving an installation, close the other clients, then run `mv2 kill NAME` and `mv2 resume NAME`.
+
+Outside an agent session, leave `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID` and `MV2_IDENTITY_MODE` unset. In an agent context, `send` signs as that agent and `inbox` reads its inbox. Copying only part of the identity fails validation.
 
 ## Plugin variables
 
@@ -51,7 +56,21 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | Variable | What mv2 does with it |
 | --- | --- |
 | `CODEX_HOME`, `CODEX_SQLITE_HOME` | Reads them from its own environment to find Codex sessions and the shared Codex app-server. Set them where mv2 runs, because a harness's `env` can't set them. |
-| `CLAUDE_CONFIG_DIR` | Reads it from its own environment to find Claude transcripts. Set it where mv2 runs, because a harness's `env` can't set it. |
-| `CODEX_THREAD_ID`, `CLAUDECODE` | Always removes them from agent environments, so an agent started from inside Codex or Claude Code doesn't inherit its parent's identity. |
+| `CLAUDE_CONFIG_DIR` | Reads it from the spawning environment to choose Claude's storage. Set it where mv2 runs, because a harness's `env` can't set it. A resume keeps the recorded value or absence; if it ignores a different value, its result names the kept storage and the ignored override. |
+| `CODEX_THREAD_ID`, `CLAUDECODE` | Removes the parent's values before a launch. Codex supplies its own `CODEX_THREAD_ID` to its tools. |
+| `CLAUDE_CODE_CHILD_SESSION` | Always removes it when inherited. Claude Code sets it for its own tool subprocesses, and a Claude agent that inherits it saves no transcript. A harness's `env` can still set it. |
+| `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` | Sets it to `1` for Claude bridge launches, because the multiverse mod needs it. |
 | `TMUX`, `TMUX_PANE` | `mv2 attach` reads them to return to the dashboard pane it was started from. |
+
+The launch records the harness's storage environment and replays it on resume.
+Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
+unset; setting it to a default-looking path can change where Claude reads its
+login and global settings. Codex selects canonical storage paths for its
+frontend, service and tools. The native child receives the launching command's
+`HOME`, and storage variables absent from the selected environment are explicitly
+removed, so an older tmux server cannot supply a different home. A resume that
+would change the saved conversation's storage, including a plain launch whose
+saved path now follows a different symlink, is refused before its launch records
+change. The error shows both paths; restore the original storage at the saved
+path, or spawn a new agent for the new storage.

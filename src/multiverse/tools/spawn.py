@@ -3,6 +3,7 @@ from pathlib import Path
 from ..display import cause, outcome
 from ..runtime import lifecycle
 from .. import universe
+from ..universe import agents
 from ._common import add_wait
 
 
@@ -29,10 +30,19 @@ def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", mode
     try:
         record = run(root, name=name, task=task, task_file=task_file, harness=harness, model=model,
                      wait=wait, wait_timeout=wait_timeout)
-    except RuntimeError as error:
+    except (RuntimeError, ValueError) as error:
         if json:
-            raise
-        raise cause(error, name, "did not start") from error
+            from ._launch import failure_record
+            return failure_record(root, name, error)
+        problem = cause(error, name, "did not start")
+        try:
+            saved = agents.directory(universe.resolve(root), name)
+            if agents.runtime(saved).get('state') == 'failed':
+                problem = ValueError(str(problem).rstrip('.') +
+                    f'. Remove it with mv2 remove {name} to reuse the name, or fix the cause and resume it')
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Optional advice cannot hide the original launch failure.
+        raise problem from error
     return record if json else outcome(record, "Started", "did not start")
 
 

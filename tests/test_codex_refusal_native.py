@@ -16,13 +16,17 @@ from multiverse.runtime import lifecycle, native
 from multiverse.store import write
 from multiverse.tools import inspect
 from multiverse.universe import agents
-from multiverse.universe.mailbox import append_message
+from multiverse.universe.mailbox import append_message, message_record
 from test_multiverse import TerminalBase, until
 
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class NativeRefusalTest(TerminalBase):
     def test_separate_writer_refuses_plain_and_bridge_until_new_resume(self):
+        """On live Codex the real active-writer and open-in-another-app refusals reach resume --wait, list, inspect,
+        delivery and wait_ready, attachment-only kill spares the other writer, and only a fresh resume clears them;
+        fragile because it depends on Codex's exact refusal strings and screen, and a miss leaves mv2 saying ready while
+        messages go nowhere."""
         if subprocess.check_output(['codex', '--version'], text=True).strip() != 'codex-cli 0.163.0':
             self.skipTest('native ownership widget evidence pinned to 0.163.0')
         home = isolated_home(self.work / 'native-home', config=
@@ -93,7 +97,13 @@ class NativeRefusalTest(TerminalBase):
             for bridge in (True, False):
                 write(configuration, {'schema': 2, 'adapter': 'codex', 'settings': {
                     'inbox_bridge': bridge, 'resume_args': [] if bridge else ['--no-daemon']}})
-                lifecycle.start(self.root, resume=properties['id'], socket_path=self.socket)
+                launched = lifecycle.start(self.root, resume=properties['id'], socket_path=self.socket,
+                                           wait=not bridge, wait_timeout=20)
+                if not bridge:
+                    # Ask --wait immediately, before the test has observed a
+                    # refusal. Waiting for its record first masked this race.
+                    self.assertFalse(launched['ready'], launched)
+                    self.assertIn('This conversation is open in another app', launched['error'])
                 try:
                     until(lambda: agents.runtime(directory).get('native_refusal'), seconds=15)
                 except AssertionError:
@@ -112,6 +122,7 @@ class NativeRefusalTest(TerminalBase):
                 delivered = native.deliver(self.root, properties['id'], pending['id'])
                 self.assertFalse(delivered['ok'])
                 self.assertEqual(delivered['reason'], message)
+                self.assertEqual(message_record(directory, pending['id'])[1]['submission_state'], 'failed')
                 waited = lifecycle.wait_ready(self.root, directory, facts['launch_id'],
                     harnesses.load(self.root, 'codex'), 2)
                 self.assertFalse(waited['ready'])

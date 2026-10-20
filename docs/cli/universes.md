@@ -9,7 +9,7 @@ mv2 init ~/my-project
 mv2 init ~/my-project --template qa --name my-project
 ```
 
-`init` installs a template into `DIRECTORY/.multiverse`, where `DIRECTORY` defaults to the current directory. It refuses if a `.multiverse` is already there. Running `mv2` with no command, in a folder without a universe, does the same with the `base` template and then opens the dashboard. Neither command starts any agents.
+`init` installs a template into `DIRECTORY/.multiverse`, where `DIRECTORY` defaults to the current directory. It prints `Created universe NAME in PATH.` (`--json` prints the record) and refuses if a `.multiverse` is already there. Running `mv2` with no command, in a folder without a universe, does the same with the `base` template and then opens the dashboard. Neither command starts any agents.
 
 ## Choose which universe a command uses
 
@@ -30,7 +30,7 @@ mv2 subverse feature-x --workspace ~/worktrees/feature-x
 mv2 -u .multiverse/subverses/review spawn --name reviewer --task 'Review the open PR.'
 ```
 
-A subverse is a universe at `subverses/NAME/` with its own definitions, agents and view. It uses its parent's workspace unless `--workspace` points somewhere else, such as an existing Git worktree. mv2 doesn't create the worktree for you. A name can use letters, numbers, `_` and `-`, up to 64 characters.
+A subverse is a universe at `subverses/NAME/` with its own definitions, agents and view. `subverse` prints `Created subverse NAME in PATH.`; `--json` prints the record. It uses its parent's workspace unless `--workspace` points somewhere else, such as an existing Git worktree. mv2 doesn't create the worktree for you. A name can use letters, numbers, `_` and `-`, up to 64 characters.
 
 Subverses don't inherit their parent's prompts after creation. Each one gets a clean copy of its template. To move or remove one, use `mv2 move --subverse` or `mv2 remove --subverse`; see [agents](agents.md#move-and-remove).
 
@@ -38,7 +38,7 @@ Subverses don't inherit their parent's prompts after creation. Each one gets a c
 
 mv2 bundles one template, `base`: the coordination and mv2-help skills, a help command, a review workflow, and Claude, Codex and Pi harness definitions. `mv2 init` and `mv2 subverse` use it unless you pass `--template`.
 
-`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then in `src/multiverse/templates/`. To make your own, such as the `qa` template above, copy `src/multiverse/templates/base/` to `~/.multiverse/templates/qa` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
+`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then in `src/multiverse/templates/`. A template is a directory with a `universe.json` at its top (name, workspace and description) and the definition files you want: `bootstrap.md`, `skills/`, `harnesses/` and so on. It can't contain symlinks. To make your own, such as the `qa` template above, copy `src/multiverse/templates/base/` to `~/.multiverse/templates/qa` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
 
 ## Prompts
 

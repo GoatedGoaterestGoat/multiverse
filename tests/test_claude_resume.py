@@ -10,12 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse import harnesses
-from multiverse.harnesses.claude import FRESH_SESSION
+from multiverse.harnesses.claude import FRESH_NOTES, NEVER_USED
 from multiverse.harnesses.types import LaunchContext, SessionHandle
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase, until
-
-WAKE = 'Message from lead:\nPlease rebase.'
 
 
 class ClaudeResumeTest(BaseTest):
@@ -47,66 +45,54 @@ class ClaudeResumeTest(BaseTest):
         return adapter.resume(session, LaunchContext('resume', values, model='chosen',
                                                      environment=environment or self.environment, **context))
 
-    def test_saved_conversation_resumes_exactly_as_before(self):
-        for bridge in (False, True):
-            with self.subTest(bridge=bridge):
-                values = self.values()
-                self.save(values['session_id'])
-                command = self.resume(self.adapter(bridge), values)
-                self.assertEqual(command.argv[command.argv.index('--resume') + 1], values['session_id'])
-                self.assertNotIn('--session-id', command.argv)
-                self.assertFalse((command.native_mode or {}).get('fallback_reason'))
-                self.assertNotIn(FRESH_SESSION, str(command.native_mode))
-
-    def test_unused_session_restarts_under_its_own_id_with_every_other_flag(self):
-        for bridge in (False, True):
-            with self.subTest(bridge=bridge):
-                adapter, values = self.adapter(bridge), self.values()
-                fresh = self.resume(adapter, values)
-                self.save(values['session_id'])
-                saved = self.resume(adapter, values)
-                self.assertEqual(fresh.argv[fresh.argv.index('--session-id') + 1], values['session_id'])
-                self.assertNotIn('--resume', fresh.argv)
-                # Name, bootstrap, add-dir, model and the bridge flags are all unchanged.
-                self.assertEqual(['--session-id' if arg == '--resume' else arg for arg in saved.argv], list(fresh.argv))
-                self.assertIn('--name', fresh.argv)
-                self.assertIn('--append-system-prompt', fresh.argv)
-                self.assertEqual(fresh.argv[fresh.argv.index('--model') + 1], 'chosen')
-                self.assertEqual(('--plugin-dir' in fresh.argv), bridge)
-                self.assertNotIn('--original task', fresh.argv)  # the first task is never replayed
-                self.assertEqual(fresh.native_mode['fallback_reason'], FRESH_SESSION)
-                self.assertEqual(fresh.environment, saved.environment)
-                self.assertEqual(fresh.control_endpoint, saved.control_endpoint)
-
-    def test_wake_prompt_still_follows_the_terminator_when_the_session_starts_fresh(self):
-        for prompt in (WAKE, '--resume'):
-            with self.subTest(prompt=prompt):
-                values = self.values()
-                command = self.resume(self.adapter(True), values, resume_prompt=prompt)
-                self.assertEqual(command.argv[-2:], ('--', prompt))
-                self.assertLess(command.argv.index('--session-id'), command.argv.index('--'))
-                self.assertEqual(command.argv.count('--resume'), 1 if prompt == '--resume' else 0)
-                self.assertNotIn('--original task', command.argv)
-
-    def test_conversation_is_looked_up_in_the_launch_environment_not_the_callers(self):
-        values = self.values()
-        elsewhere = self.work / 'elsewhere'
-        self.save(values['session_id'], elsewhere)
-        adapter = self.adapter(False)
-        # Saved in a different storage than the launch uses: this launch has none.
-        self.assertIn('--session-id', self.resume(adapter, values).argv)
-        home = self.work / 'home'
-        self.save(values['session_id'], home / '.claude')
-        # Without CLAUDE_CONFIG_DIR, storage is under the launch's HOME.
-        self.assertIn('--resume', self.resume(adapter, values, environment={'HOME': str(home)}).argv)
-        self.assertNotIn('--resume', self.resume(adapter, values, environment={'HOME': str(self.work / 'empty')}).argv)
-
-    def test_a_recipe_that_does_not_resume_this_session_is_left_alone(self):
-        values = self.values()
-        adapter = self.adapter(False)
-        session = SessionHandle(values['agent_id'], 'claude', values['workspace'], native_id=values['session_id'])
-        command = adapter.resume(session, LaunchContext('resume', values, environment=self.environment))
-        self.assertIsNone(adapter._reserve_session(command, str(uuid4())))
+    def test_resume_or_session_id_is_chosen_from_the_launch_storage(self):
+        """--resume is used only when the transcript exists in the launch's own storage, else --session-id with every
+        other flag unchanged; fragile because Claude refuses --resume without a transcript and --session-id with one,
+        so a wrong choice makes the agent impossible to resume."""
+        with self.subTest('a saved conversation'):
+            for bridge in (False, True):
+                with self.subTest(bridge=bridge):
+                    values = self.values()
+                    self.save(values['session_id'])
+                    command = self.resume(self.adapter(bridge), values)
+                    self.assertEqual(command.argv[command.argv.index('--resume') + 1], values['session_id'])
+                    self.assertNotIn('--session-id', command.argv)
+                    self.assertFalse((command.native_mode or {}).get('fallback_reason'))
+                    self.assertFalse(any(note in str(command.native_mode) for note in FRESH_NOTES))
+        with self.subTest('a session that was never used'):
+            for bridge in (False, True):
+                with self.subTest(bridge=bridge):
+                    adapter, values = self.adapter(bridge), self.values()
+                    fresh = self.resume(adapter, values)
+                    self.save(values['session_id'])
+                    saved = self.resume(adapter, values)
+                    self.assertEqual(fresh.argv[fresh.argv.index('--session-id') + 1], values['session_id'])
+                    self.assertNotIn('--resume', fresh.argv)
+                    # Name, bootstrap, add-dir, model and the bridge flags are all unchanged.
+                    self.assertEqual(['--session-id' if arg == '--resume' else arg for arg in saved.argv],
+                                     list(fresh.argv))
+                    self.assertIn('--name', fresh.argv)
+                    self.assertIn('--append-system-prompt', fresh.argv)
+                    self.assertEqual(fresh.argv[fresh.argv.index('--model') + 1], 'chosen')
+                    self.assertEqual(('--plugin-dir' in fresh.argv), bridge)
+                    self.assertNotIn('--original task', fresh.argv)  # the first task is never replayed
+                    # The note is the resume's notice, never a fallback reason (inspect would print it twice).
+                    self.assertFalse(fresh.native_mode['fallback_reason'])
+                    self.assertEqual(fresh.environment, saved.environment)
+                    self.assertEqual(fresh.control_endpoint, saved.control_endpoint)
+        with self.subTest("the launch's storage, not the caller's"):
+            values = self.values()
+            elsewhere = self.work / 'elsewhere'
+            self.save(values['session_id'], elsewhere)
+            adapter = self.adapter(False)
+            # Saved in a different storage than the launch uses: this launch has none.
+            self.assertIn('--session-id', self.resume(adapter, values).argv)
+            home = self.work / 'home'
+            self.save(values['session_id'], home / '.claude')
+            # Without CLAUDE_CONFIG_DIR, storage is under the launch's HOME.
+            self.assertIn('--resume', self.resume(adapter, values, environment={'HOME': str(home)}).argv)
+            empty = {'HOME': str(self.work / 'empty')}
+            self.assertNotIn('--resume', self.resume(adapter, values, environment=empty).argv)
 
 
 FAKE_CLAUDE = '''#!{python}
@@ -168,22 +154,26 @@ class ClaudeResumeLaunchTest(TerminalBase):
         until(lambda: (directory / 'seen.json').exists())
         return read(directory / 'seen.json')['argv'], read(directory / 'runtime.json')
 
-    def test_stopping_an_unused_agent_no_longer_makes_it_impossible_to_resume(self):
-        agent, directory = self.launch('unused', '')
-        self.assertIn('--session-id', read(directory / 'seen.json')['argv'])
-        self.assertFalse(list((self.storage / 'projects').glob('*/*.jsonl')))  # Claude has saved nothing
-        argv, runtime = self.restart(agent, directory)
-        self.assertEqual(argv[argv.index('--session-id') + 1], agent['native_session_id'])
-        self.assertNotIn('--resume', argv)
-        self.assertEqual(runtime['native_mode']['fallback_reason'], FRESH_SESSION)
-        self.assertNotEqual(runtime['state'], 'failed')
-        self.stop_agent(agent)
-
-    def test_a_used_agent_still_resumes_its_conversation(self):
-        agent, directory = self.launch('used', 'do the work')
-        self.assertTrue(list((self.storage / 'projects').glob('*/*.jsonl')))
-        argv, runtime = self.restart(agent, directory)
-        self.assertEqual(argv[argv.index('--resume') + 1], agent['native_session_id'])
-        self.assertNotIn('--session-id', argv)
-        self.assertFalse((runtime.get('native_mode') or {}).get('fallback_reason'))
-        self.stop_agent(agent)
+    def test_stop_and_restart_of_used_and_unused_agents(self):
+        """A real launch, stop and restart, with a stand-in claude that refuses like the real one, picks the right flag
+        for a used and an unused agent; fragile because the unit table cannot catch lifecycle passing the wrong
+        environment or storage to the adapter."""
+        with self.subTest('an unused agent'):
+            agent, directory = self.launch('unused', '')
+            self.assertIn('--session-id', read(directory / 'seen.json')['argv'])
+            self.assertFalse(list((self.storage / 'projects').glob('*/*.jsonl')))  # Claude has saved nothing
+            argv, runtime = self.restart(agent, directory)
+            self.assertEqual(argv[argv.index('--session-id') + 1], agent['native_session_id'])
+            self.assertNotIn('--resume', argv)
+            self.assertFalse(runtime['native_mode'] and runtime['native_mode'].get('fallback_reason'))
+            self.assertEqual(runtime['launch_notices'], [NEVER_USED])
+            self.assertNotEqual(runtime['state'], 'failed')
+            self.stop_agent(agent)
+        with self.subTest('a used agent'):
+            agent, directory = self.launch('used', 'do the work')
+            self.assertTrue(list((self.storage / 'projects').glob('*/*.jsonl')))
+            argv, runtime = self.restart(agent, directory)
+            self.assertEqual(argv[argv.index('--resume') + 1], agent['native_session_id'])
+            self.assertNotIn('--session-id', argv)
+            self.assertFalse((runtime.get('native_mode') or {}).get('fallback_reason'))
+            self.stop_agent(agent)

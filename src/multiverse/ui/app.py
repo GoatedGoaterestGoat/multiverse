@@ -5,11 +5,13 @@ are mixins of MultiverseApp. Their key actions stay app actions, so bindings and
 check_action see them; Textual @on handlers must stay on this class.
 """
 import asyncio
+import functools
 from pathlib import Path
 import sys
+import weakref
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
@@ -29,7 +31,8 @@ from .editing import TreeEditing
 from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
-from .plugin_service import PluginService, error_text, plugin_of, universe_name
+from .stale import CodeWatch
+from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, rate_limits
@@ -99,11 +102,13 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
-    def __init__(self, root, backend=None, *, refresh_interval=1.5, plugin_service=None):
+    def __init__(self, root, backend=None, *, refresh_interval=1.5, plugin_service=None, code_root=None):
         super().__init__()
+        self.code_watch = CodeWatch(code_root)  # notices mv2's own code changing under this long-running process
         self.plugin_service = plugin_service or PluginService()
         self.plugin_actions, self.plugin_screens = {}, {}
         self.registry_generation = None  # loader.generation() when the palette was last read
+        self.doomed = weakref.WeakSet()  # failed plugins' screens still under another screen: closed once on top
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
         self.host_user_stopped = False  # stopped from the Plugins screen with h: do not start it again until h does
@@ -118,7 +123,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.visible_rows = {}
         self.visible_agents = {}
         self.collapsed = set()
-        self.scanning = self.operating = False
+        self.scanning = self.operating = self.operating_plugin = False
         self.inspector_timer = None
         self.inspector = None
         self.draft = None
@@ -189,6 +194,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
 
     def check_action(self, action, parameters):
         if action in ('kill', 'stop', 'resume'):
+            if self.ready() and self.selected and isinstance(self.selected.get('damaged'), dict):
+                return True  # the action itself says why a damaged record cannot be acted on (or goes on, if kill can recover it)
             eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
             return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
         if action == "toggle_focus":
@@ -215,6 +222,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 return
             self.snapshot = snapshot
             self.scan_count += 1
+            await asyncio.to_thread(self.code_watch.check)
             self.title = clean(snapshot["name"])
             self.query_one("#brand", Static).update(Text("◈ " + self.title + (" / DEMO" if self.backend.demo else ""),
                                                         style=snapshot["accent"]))
@@ -236,7 +244,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 self._restore_scroll = None
                 self.call_after_refresh(self.restore_scroll, scroll)
         except Exception as error:
-            self.set_status(f"Could not refresh: {error}", error=True)
+            self.set_status(f"Could not refresh: {self.code_watch.explain(error)}", error=True)
         finally:
             self.scanning = False
             if generation != self._scope_generation:
@@ -256,6 +264,10 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
         if self.host and self.host.get("needed") and not self.host.get("running"):
             line.append(" · host off", style=theme.PEACH)
+        if self.snapshot.get("plugin_trouble"):  # the plugin system itself failed while reading; the agents are unaffected
+            line.append(" · plugins unreadable", style=theme.PEACH)
+        if self.code_watch.stale:  # what is running is no longer what is on disk
+            line.append(" · mv2 changed: reopen", style=theme.PEACH)
         self.query_one("#totals", Static).update(line)
 
     @work(group="plugin-host", exclusive=True, exit_on_error=False)
@@ -417,6 +429,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.query_one("#agents", DataTable).focus()
 
     def action_refresh(self):
+        """Read everything again, plugins too: a plugin repaired on disk loads again here, and its palette entries show."""
+        columns.reset_plugin_caches()
+        self.load_plugin_registry()
         self.refresh_snapshot()
 
     def action_help(self):
@@ -450,7 +465,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         scope, row = self.target_scope(), self.visible_rows.get(self.selected_key)
         row = dict(row) if row else None
         self.submit_operation(f"{entry[0]}: {entry[1]}", self.plugin_service.run_action, scope, entry, row,
-                              after=lambda text: self.set_status(text) if text else None)
+                              after=lambda text: self.set_status(text) if text else None, plugin=True)
 
     async def run_action(self, action, default_namespace=None, namespaces=None):
         """Run an action (a key binding, a button). One a plugin's screen or widget raises is that plugin's
@@ -513,8 +528,11 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     pass
 
     async def close_plugin_screens(self, package, message=""):
-        """Close the failing plugin's screens, and only its: from the lowest one in the stack up (what it opened above
-        itself goes with it), leaving any other plugin's screen and its unsaved input alone. Then take the plugin's
+        """Close the failing plugin's screens, and only its, leaving every other screen and its unsaved input alone,
+        wherever it is in the stack. Textual closes only the top screen: the failing plugin's screens on top close now;
+        one under another screen (a plugin's opened from the palette over it, or one it opened itself) stops running
+        at once, its own handlers (the one for being shown again, say) no longer running, and closes as soon as it is
+        on top again, so it is never shown in the meantime. Then take the plugin's
         widgets out of every screen that stays.
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
@@ -530,16 +548,23 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 pass
 
     async def _close_plugin_screens(self, package, message):
-        def theirs(node):
-            module = type(node).__module__
-            return module == package or module.startswith(package + ".") \
-                or getattr(node, "mv_plugin_package", None) == package
+        def inside(module):
+            return module == package or module.startswith(package + ".")
 
-        stack = self.screen_stack
-        lowest = next((index for index, screen in enumerate(stack) if index and theirs(screen)), None)
-        if lowest is not None:
-            while len(self.screen_stack) > lowest:
-                await self.pop_screen()
+        def theirs(node):
+            return inside(type(node).__module__) or getattr(node, "mv_plugin_package", None) == package
+
+
+        while len(self.screen_stack) > 1 and theirs(self.screen):
+            await self.pop_screen()
+        for screen in self.screen_stack[1:]:
+            if theirs(screen):
+                self.doomed.add(screen)
+                for node in (screen, *screen.walk_children(with_self=False)):  # nothing of it runs while it waits
+                    for timer in list(getattr(node, "_timers", ())):
+                        timer.stop()
+                    self.workers.cancel_node(node)
+                    self.silence(node, inside)
         views = []
         for screen in self.screen_stack:
             for widget in list(screen.walk_children(with_self=False)):
@@ -560,6 +585,44 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     await widget.remove()
         for view in views:
             await view.mount(Static(message, markup=False, classes="view-error"))
+
+    @staticmethod
+    def silence(node, inside):
+        """Stop the failed plugin's own code running on `node`: its handlers, such as the one for the screen being
+        shown again, which may open screens or start work, and the callbacks it queued. `inside(module)` says whether
+        a module is the plugin's. Textual's own handlers and callbacks stay, so the node still answers Textual's waits
+        and is removed as usual; taking every message away would leave it never removed."""
+        handlers, dispatch = node._get_dispatch_methods, node._dispatch_message
+
+        def not_theirs(method_name, message):
+            for owner, handler in handlers(method_name, message):
+                if not inside(owner.__module__):
+                    yield owner, handler
+
+        async def without_their_callbacks(message):
+            if isinstance(message, events.Callback):
+                callback = message.callback
+                while isinstance(callback, functools.partial):
+                    callback = callback.func
+                owner = getattr(callback, "__self__", None)
+                if inside(type(owner).__module__ if owner is not None else getattr(callback, "__module__", None) or ""):
+                    return
+            await dispatch(message)
+
+        node._get_dispatch_methods = not_theirs
+        node._dispatch_message = without_their_callbacks
+
+    def pop_screen(self):
+        """Close the top screen, and then any failed plugin's screen that this leaves on top (close_plugin_screens)."""
+        done = super().pop_screen()
+        if len(self.screen_stack) > 1 and self.screen in self.doomed:
+            self.call_later(self.close_doomed)
+        return done
+
+    async def close_doomed(self):
+        while len(self.screen_stack) > 1 and self.screen in self.doomed:
+            self.doomed.discard(self.screen)
+            await self.pop_screen()
 
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
@@ -583,6 +646,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def action_plugins(self):
         if self.ready():
             root = self.target_scope()
+            self.load_plugin_registry()  # a plugin repaired since the last look loads again
             self.push_screen(PluginsScreen(root, self.scope_name(root), self.plugin_service), self.plugins_changed)
 
     def plugins_changed(self, changed):
@@ -605,7 +669,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             return
         root = self.target_scope()
         try:
-            screen = await asyncio.to_thread(self.plugin_service.screen_class, loaded, reference)
+            screen = await in_daemon(self.plugin_service.screen_class, loaded, reference)  # imports the plugin's module
             if plugin not in await asyncio.to_thread(self.plugin_service.on_here, root):
                 self.set_status(f"{plugin} is off in {universe_name(root)}: turn it on from the Plugins screen (P)", error=True)
                 return
@@ -622,11 +686,15 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
-                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("focus_line", "FOCUS"), ("reason", "OBSERVATION"),
+                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("focus_line", "FOCUS"),
+                      ("launch_mode", "LAUNCH MODE"), ("fallback_reason", "FALLBACK"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
+            mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
+            row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
+                   "fallback_reason": (mode or {}).get("fallback_reason") or ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields
-                                    if key != "task" or row.get(key))
+                                    if key not in ("task", "launch_mode", "fallback_reason") or row.get(key))
             self.push_screen(Details(row["name"], content))
 
     def action_preview(self):
@@ -673,8 +741,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.cancel_draft()
         elif self.moving and not self.operating:
             self.cancel_move()
-        elif not self.operating:
-            self.exit()
+        elif not self.operating or self.operating_plugin:
+            self.exit()  # a plugin's action that has not returned is left behind in its daemon thread
         else:
             self.set_status("An action is still running. You can quit when it finishes.")
 
