@@ -6,8 +6,10 @@ arguments; tmux's command environment need not belong to the displayed agent.
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 import unicodedata
 
@@ -26,6 +28,7 @@ READ_LIMIT = 1024 * 1024
 ITEM_NAME = re.compile(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*')
 ITEM_NAME_LENGTH = 40
 ITEM_READ_LIMIT = 1024
+FOCUS_LONGEST = 86400  # universe.focus.LONGEST: a later `until` is damage, not a focus
 ITEM_LENGTH = 200
 # Only the items this bar draws itself: `compaction`, a core item of the Claude line, is a plugin's here.
 CORE_ITEMS = frozenset(DEFAULTS['items'])
@@ -39,7 +42,10 @@ def object_value(value):
 
 def read_object(path):
     try:
-        with Path(path).open('rb') as source:
+        # Non-blocking, so a FIFO in a record's place never hangs the bar.
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), 'rb') as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                return {}
             data = source.read(READ_LIMIT + 1)
         return object_value(json.loads(data)) if len(data) <= READ_LIMIT else {}
     except (OSError, ValueError, TypeError, RecursionError):
@@ -137,19 +143,26 @@ def unread(directory):
 
 
 def focus_text(directory):
-    """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts; universe.focus owns the file."""
+    """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts.
+
+    universe.focus owns the file; this follows its `active` rules for a record in effect.
+    """
     record = read_object(directory / 'focus.json')
-    if not isinstance(record.get('since'), str):
-        return ''
-    until = record.get('until')
-    if until is None:
-        return 'focused (turn)' if record.get('turns') else 'focused'
+    def moment(value):
+        stamp = datetime.fromisoformat(value)
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
     try:
-        stamp = datetime.fromisoformat(until)
-        left = ((stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)) - datetime.now(timezone.utc)).total_seconds()
-    except (TypeError, ValueError):
+        moment(record['since'])
+        turns = record.get('turns')
+        if turns is not None and (type(turns) is not int or turns < 1):
+            return ''
+        until = record.get('until')
+        if until is None:
+            return 'focused (turn)' if turns else 'focused'
+        left = (moment(until) - datetime.now(timezone.utc)).total_seconds()
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
         return ''
-    if left <= 0:
+    if not 0 < left <= FOCUS_LONGEST:
         return ''
     minutes = math.ceil(left / 60)
     return f'focused {minutes}m' if minutes < 60 else f'focused {minutes // 60}h{minutes % 60:02d}m'

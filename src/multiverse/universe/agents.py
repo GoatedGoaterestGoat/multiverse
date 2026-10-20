@@ -226,12 +226,13 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
             data['delivery_error'] = data['reason']
             data['status'] = 'unknown'
         write(agent_dir / "runtime.json", data)
+        # A turn ends when the harness goes idle from working or waiting on the person. Under the lock,
+        # so a focus --turn, which reads the status under it too, is ordered with this turn end.
+        if data.get('status') == 'idle' and before in ('working', 'waiting'):
+            focus.turn_ended(agent_dir)
     if data.get('status') != before:
         # After the lock: recording an event never holds up the runtime record.
         _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})
-        # A turn ends when the harness goes idle from working or waiting on the person.
-        if data.get('status') == 'idle' and before in ('working', 'waiting'):
-            focus.turn_ended(agent_dir)
     return data
 
 

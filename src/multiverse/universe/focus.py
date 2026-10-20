@@ -11,18 +11,28 @@ harness status goes from working or waiting to idle, `turn_ended` counts one, an
 the last removes the file. With neither, it lasts until `end`. Readers never
 remove an expired record; the next `start` or `end` replaces it.
 
+Starting a focus and counting a turn end both happen under the agent's runtime
+lock, so a turn end saved before a `focus --turn` never counts against it.
+`start` also holds the send lock, so a send that found no focus finishes first.
+Lock order: send, runtime, focus.
+
 The tmux status line reads this file with its own copy of `active`.
 """
 from datetime import datetime, timedelta, timezone
+import json
+import os
 import re
+import stat
 
-from ..store import lock, read, write
+from ..store import lock, write
 
 FILE = "focus.json"
 # A day is the longest timed focus: one that outlives its question is forgotten.
 LONGEST = 86400
 DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# A focus record is a few short fields; anything larger is damage, not a focus. The tmux bar's limit.
+READ_LIMIT = 1024 * 1024
 
 
 def seconds(value):
@@ -43,48 +53,79 @@ def _time(value):
 
 
 def active(record, at=None):
-    """Whether a focus record is still in effect. An unreadable one is not: it must never block messages."""
-    if not isinstance(record, dict) or not isinstance(record.get("since"), str):
-        return False
-    until = record.get("until")
-    if until is None:
-        return True
+    """Whether a focus record is still in effect. A damaged one is not: it must never block messages.
+
+    In effect means a readable `since`, `turns` absent or a positive count, and `until` absent or in
+    the future but no further than the longest focus, which also keeps `ends` and `short` in range.
+    """
+    at = at or datetime.now(timezone.utc)
     try:
-        return _time(until) > (at or datetime.now(timezone.utc))
-    except (TypeError, ValueError):
+        _time(record["since"])
+        turns = record.get("turns")
+        if turns is not None and (type(turns) is not int or turns < 1):
+            return False
+        until = record.get("until")
+        return until is None or at < _time(until) <= at + timedelta(seconds=LONGEST)
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
         return False
+
+
+def _read(agent_dir):
+    """The focus record, or None for anything but a small JSON object in a regular file."""
+    try:
+        # Non-blocking, so a FIFO in its place never hangs a reader.
+        with os.fdopen(os.open(agent_dir / FILE, os.O_RDONLY | os.O_NONBLOCK), "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                return None
+            data = source.read(READ_LIMIT + 1)
+        record = json.loads(data) if len(data) <= READ_LIMIT else None
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def current(agent_dir):
     """The focus in effect, or None."""
-    try:
-        record = read(agent_dir / FILE)
-    except (OSError, ValueError):
-        return None
+    record = _read(agent_dir)
     return record if active(record) else None
 
 
-def start(agent_dir, *, duration=None, turn=False, status=None, by="user"):
+class NoTurns(ValueError):
+    """The harness is not reporting its status now, so no turn end would ever count."""
+
+
+def start(agent_dir, *, duration=None, turn=False, by="user"):
     """Focus for `duration` seconds, until the agent's next turn ends, or until `end`.
 
-    An agent that is working when it focuses has its current turn to finish first,
-    so its next turn is the one after that. Refocusing keeps the original `since`.
+    The status is read under the runtime lock, so a turn end is counted either
+    before this focus exists or against it, never lost in between. An agent
+    focusing itself is always mid-turn, and so is one that is working: that turn
+    finishes first, so the next turn is the one after it. For one that is waiting on
+    the person, or idle, the turn that takes the person's answer is the one that ends
+    it. Refocusing keeps the original `since`.
     """
     if duration is not None and turn:
         raise ValueError("Choose a duration or the next turn, not both")
-    stamp = datetime.now(timezone.utc)
-    with lock(agent_dir / ".focus.lock"):
+    from .agents import runtime
+    # The send lock: a send or retry that found no focus finishes before this one starts.
+    # No lock creates a folder, so a moved or removed agent is never recreated.
+    with (lock(agent_dir / ".send.lock", create_parent=False), lock(agent_dir / ".runtime.lock", create_parent=False),
+          lock(agent_dir / ".focus.lock", create_parent=False)):
+        status = runtime(agent_dir).get("status")
+        if turn and status not in ("working", "waiting", "idle"):
+            raise NoTurns(status)
+        stamp = datetime.now(timezone.utc)
         previous = current(agent_dir)
         record = {"since": previous["since"] if previous else stamp.isoformat(),
                   "until": (stamp + timedelta(seconds=duration)).isoformat() if duration is not None else None,
-                  "turns": (2 if status == "working" else 1) if turn else None, "by": by}
+                  "turns": (2 if by == "agent" or status == "working" else 1) if turn else None, "by": by}
         write(agent_dir / FILE, record)
     return record
 
 
 def end(agent_dir):
     """Remove the focus. Returns the record that was in effect, or None."""
-    with lock(agent_dir / ".focus.lock"):
+    with lock(agent_dir / ".focus.lock", create_parent=False):
         record = current(agent_dir)
         (agent_dir / FILE).unlink(missing_ok=True)
     return record
@@ -93,20 +134,21 @@ def end(agent_dir):
 def turn_ended(agent_dir):
     """Count one turn end for a focus that lasts turns; the last one ends it.
 
-    The status change that calls this has been saved already; failing here must not fail it.
+    Runs under the runtime lock with the status change that ended the turn, which
+    has been saved already: failing here must never fail it.
     """
-    if not (agent_dir / FILE).exists():
-        return  # Never create a lock file in an agent directory that was removed.
     try:
-        with lock(agent_dir / ".focus.lock"):
+        if not (agent_dir / FILE).exists():
+            return  # Never create a lock file in an agent directory that was removed.
+        with lock(agent_dir / ".focus.lock", create_parent=False):
             record = current(agent_dir)
             turns = record.get("turns") if record else None
-            if isinstance(turns, int) and not isinstance(turns, bool):
+            if turns is not None:
                 if turns <= 1:
                     (agent_dir / FILE).unlink(missing_ok=True)
                 else:
                     write(agent_dir / FILE, {**record, "turns": turns - 1})
-    except OSError:
+    except Exception:
         pass  # The focus stays on; unfocus still ends it.
 
 

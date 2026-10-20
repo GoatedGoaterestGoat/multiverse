@@ -35,9 +35,9 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 | `follow-up` | The next thing to do | After the current turn ends |
 | `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
 
-Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` when they want a quick reply or return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
+Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` for a new task, when they want a quick reply, or to return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. A follow-up reply arrives as a prompt, not in the inbox, so an agent waits for one by ending its turn rather than with `mv2 inbox --wait`. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. The one exception is a `steer` or `follow-up` message to a [focused](#focus-an-agent) agent, which is refused and not saved. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
@@ -125,8 +125,17 @@ While an agent is focused:
 - `steer` and `follow-up` messages to it are refused. Nothing is saved, `send` exits 1, and its result says to send `--delivery inbox-only` instead.
 - `inbox-only` messages are saved as usual.
 - `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
+- What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
 
-`unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus. A turn focus started in the middle of a turn lets that turn end first. It needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`.
+`unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
+
+A turn focus ends when the agent's status next goes from working or waiting to idle:
+
+- **An agent that focuses itself, or one you focus while it is working,** finishes its current turn first. The focus ends with the turn after it, which takes your answer.
+- **One you focus while it is waiting on you or idle** has its focus end with the turn that takes your answer: for a permission prompt, that is the current turn.
+- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, and one that delivers a message accepted before the focus. While background work runs, focus with `--for` instead.
+
+A turn focus needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`. Use `--for` then.
 
 Inside an agent, `focus` and `unfocus` act on the agent itself, and an agent can't change another agent's focus. You can name any agent, as in `mv2 focus worker --for 1h`, or press `f` in the [dashboard](../reference/dashboard.md#message-focus-kill-and-resume). `mv2 list`, `mv2 inspect` and the agent's tmux bar show who is focused and until when.
 

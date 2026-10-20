@@ -309,7 +309,7 @@ mv2 focus [--json] [--for DURATION | --turn] [agent]
 | `agent` |  | Agent name (default: yourself inside an agent session) |  |
 | `--json` |  | Return the focus record as JSON |  |
 | `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus) |  |
-| `--turn` |  | End the focus when the agent's next turn ends; mid-turn, that is the turn after this one |  |
+| `--turn` |  | End the focus when the agent's next turn ends; for an agent focusing itself or one that is working, that is the turn after the current one |  |
 
 Use at most one of `--for`, `--turn`.
 

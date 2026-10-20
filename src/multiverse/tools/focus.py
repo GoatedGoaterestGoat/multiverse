@@ -1,6 +1,5 @@
 """Focus an agent while it needs the user: only inbox-only messages reach it, others are refused."""
 from datetime import datetime
-import os
 
 from .. import universe
 from ..store import read
@@ -14,14 +13,18 @@ def configure(parser):
     length.add_argument("--for", dest="duration", metavar="DURATION",
                         help="End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus)")
     length.add_argument("--turn", action="store_true",
-                        help="End the focus when the agent's next turn ends; mid-turn, that is the turn after this one")
+                        help="End the focus when the agent's next turn ends; for an agent focusing itself or one that is working, "
+                             "that is the turn after the current one")
 
 
 def caller():
-    """The ID of the agent running this command, or None for the person; an agent that can't be verified is refused."""
-    from ..runtime.agent_identity import actor
-    agent = actor()
-    return agent.identity if agent else os.environ.get("MV2_AGENT_ID")
+    """The verified agent running this command, or None for the person; an agent that can't be verified is refused.
+
+    The same check as `send`: a stable identity, or the exact current launch of the agent the
+    environment names, in its own universe and directory.
+    """
+    from ..runtime.agent_identity import sender_actor
+    return sender_actor(acting="change focus")
 
 
 def target(root, agent, as_user):
@@ -30,12 +33,14 @@ def target(root, agent, as_user):
     Agents may change only their own focus: a sender that was refused must not
     unfocus the recipient. Outside an agent session, the person may change any.
     """
-    root = universe.resolve(root)
     me = None if as_user else caller()
     if not agent and not me:
         raise ValueError("Name the agent to focus outside an agent session")
-    directory = agents.directory(root, agent or me)
-    if me and directory.name != me:
+    if not agent:
+        return me.directory, True
+    directory = agents.directory(universe.resolve(root), agent)
+    # The same folder, not only the same ID: an agent with this ID in another universe is another agent.
+    if me and directory.resolve() != me.directory.resolve():
         name = read(directory / "properties.json")["name"]
         raise ValueError(f"Agents change only their own focus; {name} or the user can change {name}'s. "
                          f"Send it an inbox-only message instead.")
@@ -45,12 +50,12 @@ def target(root, agent, as_user):
 def run(root=None, *, agent=None, duration=None, turn=False, json=False, as_user=False):
     directory, own = target(root, agent, as_user)
     name = read(directory / "properties.json")["name"]
-    status = agents.runtime(directory).get("status")
-    if turn and status not in ("working", "waiting", "idle"):
+    try:
+        record = focus.start(directory, duration=focus.seconds(duration) if duration is not None else None, turn=turn,
+                             by="agent" if own else "user")
+    except focus.NoTurns:
         raise ValueError(f"{name}'s harness is not reporting its turns now, so a turn focus would never end; "
-                         "focus for a duration with --for, or until mv2 unfocus")
-    record = focus.start(directory, duration=focus.seconds(duration) if duration is not None else None, turn=turn,
-                         status=status, by="agent" if own else "user")
+                         "focus for a duration with --for, or until mv2 unfocus") from None
     return {"agent": name, "focused": True, "ends": focus.ends(record, own), **record}
 
 

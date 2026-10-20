@@ -55,7 +55,7 @@ To see the column, add `"shout"` to `columns` in `.multiverse/views/default.json
 | `extends` | The extension points it uses. Registering for one it doesn't list raises `api.Error`. |
 | `permissions` | What it asks to do; see [permissions](#permissions). |
 | `commands` | `{"NAME": "help text"}` for each `mv2 NAME` it registers. Needs `cli`. |
-| `statusline` | `{"ITEM": {"claude": true, "tmux": false}}`: its status-line items, and whether each shows by default on Claude's line and the tmux bar. Needs `statusline`. |
+| `statusline` | `{"ITEM": {"claude": true, "tmux": false}}`: its status-line items, and whether each shows by default on Claude's line and the tmux bar. Needs `statusline`. An item can't take a name mv2 draws itself (`agent`, `harness`, `status`, `phase`, `summary`, `inbox`, `context`). An item named `focus`, which mv2 took after 1.8, isn't shown, and `mv2 doctor` says why. |
 | `events` | Event types it subscribes to: `"agent.status"`, `"message.*"`, `"*"`. Needs `events`. |
 | `harnesses` | Harness extensions that need no code; see [launch additions](#launch-additions). |
 | `settings` | `{"version", "schema", "defaults", "legacy"}`; see [settings](#settings). |
@@ -129,7 +129,7 @@ Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTH
 | `agent.id`, `.name`, `.harness`, `.live`, `.status`, `.phase`, `.summary`, `.task`, `.universe`, `.directory`, `.record` | The agent as it was read; `agent.reload()` reads it again | `agents.read` to reload |
 | `agent.terminal(lines=30)`, `agent.usage()`, `agent.capabilities()`, `universe.doctor()` | The terminal's last lines; usage, capability and doctor results | `agents.read` |
 | `agent.resume(wait=False)`, `agent.kill()` | | `agents.control` |
-| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME` | `messages.send` |
+| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`. A steer or follow-up to a focused agent is refused and not saved: `ok` is false and `state` is `"focused"` | `messages.send` |
 | `agent.ask(question)` | The answer to a side question that never enters the conversation | `messages.ask` |
 | `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`; `inbox()` leaves them unread | `messages.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |

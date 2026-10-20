@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -16,7 +19,7 @@ from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, Native
 from multiverse.runtime import agent_identity, native
 from multiverse.terminal import statusline
 from multiverse.tools import focus as focus_tool, unfocus
-from multiverse.universe import agents, focus, mailbox
+from multiverse.universe import agents, focus, mailbox, templates
 
 
 class FocusRecordTest(BaseTest):
@@ -61,18 +64,50 @@ class FocusRecordTest(BaseTest):
         self.assertIsNone(focus.end(self.directory))
         self.assertFalse((self.directory / focus.FILE).exists())
 
-    def test_unreadable_focus_never_blocks(self):
-        """A damaged focus.json counts as no focus; otherwise a bad file would refuse every steer to that agent with
-        no way to see why."""
-        (self.directory / focus.FILE).write_text('{not json')
-        self.assertIsNone(focus.current(self.directory))
-        store.write(self.directory / focus.FILE, {'since': 'earlier', 'until': 'soon'})
-        self.assertIsNone(focus.current(self.directory))
+    def test_a_damaged_focus_never_blocks_and_never_raises(self):
+        """Any damaged focus.json counts as no focus, and reading, ending or counting a turn against it never raises;
+        otherwise a bad file refuses every steer to that agent with no way to see why, crashes the dashboard and
+        list (a far-future until), or fails every status update (deep nesting)."""
+        now = datetime.now(timezone.utc)
+        since = now.isoformat()
+        damaged = {
+            'not json': '{not json',
+            'not an object': '[1, 2]',
+            'deeply nested': '[' * 2000 + ']' * 2000,   # within the size limit, past the parser's depth
+            'too large': json.dumps({'since': since, 'until': None, 'pad': 'x' * focus.READ_LIMIT}),
+            'bad since': {'since': 'not-a-time', 'until': None},
+            'no since': {'until': None},
+            'bad until': {'since': since, 'until': 'soon'},
+            'far-future until': {'since': since, 'until': '9999-12-31T23:59:59-14:00'},
+            'until past the longest focus': {'since': since, 'until': (now + timedelta(days=2)).isoformat()},
+            **{f'turns {value!r}': {'since': since, 'until': None, 'turns': value}
+               for value in (0, -1, 'one', {}, True, 1.5)},
+        }
+        for label, value in damaged.items():
+            with self.subTest(label):
+                path = self.directory / focus.FILE
+                if isinstance(value, str):
+                    path.write_text(value)
+                else:
+                    store.write(path, value)
+                self.assertIsNone(focus.current(self.directory))
+                self.assertEqual(statusline.focus_text(self.directory), '')   # the tmux bar's own copy agrees
+                self.status('working')
+                self.status('idle')    # counts a turn end against the damaged record without raising
+                self.assertIsNone(focus.end(self.directory))
+                self.assertFalse(path.exists())
+        for label in ('directory', 'fifo'):
+            with self.subTest(label):
+                path = self.directory / focus.FILE
+                path.mkdir() if label == 'directory' else os.mkfifo(path)
+                self.assertIsNone(focus.current(self.directory))   # a FIFO must not block
+                self.assertEqual(statusline.focus_text(self.directory), '')
+                path.rmdir() if label == 'directory' else path.unlink()
 
     def test_turn_focus_set_mid_turn_lasts_through_the_next_turn(self):
-        """A turn focus started mid-turn outlasts that turn and ends with the next one, and only a working or waiting
-        to idle change counts; a break ends the focus before the user answers."""
-        focus.start(self.directory, turn=True, status='working')
+        """A turn focus started while working outlasts that turn and ends with the next one, and only a working or
+        waiting to idle change counts; a break ends the focus before the user answers."""
+        focus.start(self.directory, turn=True)
         self.status('idle')        # the turn that asked the question ends
         self.assertIsNotNone(focus.current(self.directory))
         self.status('idle')        # an unchanged status is not a turn end
@@ -84,22 +119,63 @@ class FocusRecordTest(BaseTest):
         self.assertFalse((self.directory / focus.FILE).exists())
 
     def test_turn_focus_set_while_idle_or_waiting_lasts_one_turn(self):
-        """A turn focus started while idle or waiting ends after exactly one turn; a break holds messages back for a
-        turn longer, or none."""
+        """A turn focus the person starts while the agent is idle or waiting on them ends after exactly one turn, the
+        one that takes the answer, but one the agent starts itself always outlasts its current turn; a break holds
+        messages back for a turn longer, or none."""
         for status in ('idle', 'waiting'):
             with self.subTest(status=status):
                 self.status(status)
-                focus.start(self.directory, turn=True, status=status)
+                focus.start(self.directory, turn=True)
                 if status == 'idle':
                     self.status('working')
                 self.assertIsNotNone(focus.current(self.directory))
                 self.status('idle')
                 self.assertIsNone(focus.current(self.directory))
+        # The agent runs focus --turn inside its turn, whatever its last reported status says.
+        self.status('waiting')
+        self.assertEqual(focus.start(self.directory, turn=True, by='agent')['turns'], 2)
+
+    def test_a_turn_end_saved_before_a_turn_focus_never_counts_against_it(self):
+        """A focus --turn that starts just after a turn end was saved is not consumed by that turn end; a break ends
+        the new focus at once, before the turn it was meant for."""
+        self.status('working')
+        started = []
+        def focus_in_the_gap(*arguments, **options):
+            # Runs where the turn end used to be counted: after the status is saved and the runtime lock released.
+            if not started:
+                started.append(focus.start(self.directory, turn=True))
+        with patch.object(agents, '_event', side_effect=focus_in_the_gap):
+            self.status('idle')
+        self.assertEqual(started[0]['turns'], 1)
+        self.assertEqual(focus.current(self.directory), started[0])
+
+    def test_a_focus_waits_for_a_send_in_progress(self):
+        """A focus starts only after a send that found no focus has finished; a break lets a steer that was admitted
+        before the focus be saved and submitted after focus said it was in effect."""
+        done = threading.Event()
+        with store.lock(self.directory / '.send.lock'):
+            worker = threading.Thread(target=lambda: (focus.start(self.directory), done.set()))
+            worker.start()
+            self.assertFalse(done.wait(0.3))
+            self.assertIsNone(focus.current(self.directory))
+        worker.join(5)
+        self.assertTrue(done.is_set())
+        self.assertIsNotNone(focus.current(self.directory))
+
+    def test_focus_never_recreates_a_removed_agent_folder(self):
+        """focus and unfocus on an agent folder that was removed fail and leave nothing behind; a break brings back a
+        damaged leftover folder that list then shows."""
+        directory = self.root / 'state/agents' / str(uuid4())
+        for label, action in (('focus', focus.start), ('unfocus', focus.end)):
+            with self.subTest(label), self.assertRaises(OSError):
+                action(directory)
+            self.assertFalse(directory.exists())
 
     def test_a_relaunch_is_not_a_turn_end_and_timed_focus_ignores_turns(self):
         """A relaunch (unknown then idle) is not a turn end, and a timed focus ignores turns; either break ends a
         focus early."""
-        focus.start(self.directory, turn=True, status='idle')
+        self.status('idle')
+        focus.start(self.directory, turn=True)
         self.status('unknown')
         self.status('idle')
         self.assertIsNotNone(focus.current(self.directory))
@@ -217,6 +293,85 @@ class FocusCommandTest(BaseTest):
         with self.assertRaisesRegex(ValueError, 'Name the agent'):
             focus_tool.run(self.root)
 
+    def test_a_mismatched_or_outdated_agent_identity_is_refused(self):
+        """focus and unfocus inside an agent need the same verified identity as send: an agent can't claim another's
+        ID, directory or launch, and an outdated launch is refused; a break lets one agent silence another or clear
+        the focus the person set on it."""
+        asker, helper = self.directories['asker'], self.directories['helper']
+        focus.start(asker)
+        mine = self.agent_environment('helper')
+        claims = {
+            "another agent's ID": ({**mine, 'MV2_AGENT_ID': asker.name}, 'does not match its saved record'),
+            "another agent's directory": ({**mine, 'MV2_AGENT_DIR': str(asker)}, 'does not match its saved record'),
+            'an outdated launch': ({**mine, 'MV2_LAUNCH_ID': str(uuid4())},
+                                   'Outdated launch; refusing to change focus as this agent'),
+            'no universe': ({key: value for key, value in mine.items() if key != 'MV2_UNIVERSE'}, 'incomplete'),
+        }
+        for label, (environment, expected) in claims.items():
+            for action in (unfocus.run, focus_tool.run):
+                with self.subTest(label, action=action.__module__), patch.dict(os.environ, environment), \
+                        self.assertRaisesRegex(ValueError, expected):
+                    action(self.root)
+        self.assertTrue(focus.current(asker))
+        self.assertIsNone(focus.current(helper))
+
+    def test_an_agent_cannot_change_a_same_id_agent_in_another_universe(self):
+        """A verified agent naming an agent in another universe that has its own ID is refused; a break compares IDs
+        only, so -u OTHER changes another universe's agent."""
+        directory = self.directories['asker']
+        spec = AgentIdentitySpec('fixture-agent-v1', 'FIXTURE_THREAD', ('FIXTURE_HOME',))
+        service = NativeServiceHandle(ServiceIdentity('fixture', {'FIXTURE_HOME': str(self.work)}),
+                                      NativeEndpoint('unix-websocket', str(self.work / 'service.sock')))
+        properties = {**store.read(directory / 'properties.json'), 'native_service_identity': asdict(service.identity)}
+        properties['agent_identity'] = agent_identity.record(spec, properties, service)
+        store.write(directory / 'properties.json', properties)
+        other = templates.create(self.work / 'other' / '.multiverse', 'other', workdir=self.work / 'other')
+        twin = other / 'state/agents' / directory.name
+        store.write(twin / 'properties.json', {'id': directory.name, 'name': 'twin', 'harness': 'claude',
+            'workspace': str(self.work), 'universe_id': store.read(other / 'universe.json')['id']})
+        store.write(twin / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'idle'})
+        stable = {'MV2_IDENTITY_MODE': spec.mode, 'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': directory.name,
+                  'MV2_AGENT_DIR': str(directory), 'FIXTURE_THREAD': properties['native_session_id'],
+                  'FIXTURE_HOME': str(self.work)}
+        with patch.dict(os.environ, stable):
+            with self.assertRaisesRegex(ValueError, 'only their own focus'):
+                focus_tool.run(other, agent='twin')
+            self.assertIsNone(focus.current(twin))
+            self.assertEqual(focus_tool.run(other)['agent'], 'asker')   # no name: itself, in its own universe
+        self.assertTrue(focus.current(directory))
+
+    def test_the_claude_mods_status_reports_end_a_turn_focus(self):
+        """The status reports the Claude mod makes (python -m multiverse.tools.runtime_update --status, in the agent's
+        environment) count turn ends, so a turn focus the agent set ends once the user's answer turn ends; a break
+        leaves Claude agents focused for good, which only this path shows."""
+        directory = self.directories['asker']
+        source = str(Path(__file__).resolve().parents[1] / 'src')
+        environment = {**os.environ, **self.agent_environment('asker'), 'PYTHONPATH': source}
+        def report(status, *extra):
+            # Exactly the mod's argv (harnesses/claude/mod/hooks/index.ts, report()).
+            result = subprocess.run([environment['MV2_PYTHON'], '-m', 'multiverse.tools.runtime_update',
+                                     '--status', status, *extra], env=environment, cwd=self.work,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        report('working', '--bridge', 'claude-mod-v1')
+        self.output('focus', '--turn', agent='asker')
+        self.assertEqual(focus.current(directory)['turns'], 2)
+        report('idle')       # the turn that asked ends
+        self.assertEqual(focus.current(directory)['turns'], 1)
+        report('working')    # the user answers
+        report('idle')
+        self.assertIsNone(focus.current(directory))
+
+    def test_the_refusal_says_who_focused_the_agent(self):
+        """A refusal says the agent needs the user only when the agent focused itself; otherwise a sender is told the
+        agent waits on the user when the person focused it."""
+        self.output('focus', 'asker')
+        self.output('send', 'asker', '--text', 'ping', code=1)
+        self.assertIn('asker is focused until unfocused by the user, so it takes only inbox-only', self.stderr)
+        self.output('focus', agent='asker')
+        self.output('send', 'asker', '--text', 'ping', code=1)
+        self.assertIn("because it needs the user's attention", self.stderr)
+
     def test_a_verified_agent_identity_focuses_itself_and_an_unverified_one_is_refused(self):
         """A bridge agent identified by its verified conversation acts on itself, and an unverified one is refused; a
         break lets a mismatched process change a focus."""
@@ -266,8 +421,8 @@ class FocusCommandTest(BaseTest):
         self.output('send', 'asker', '--text', 'before')
         mailbox.update_message(self.directories['asker'], self.history('asker')[0]['id'], submission_state='failed')
         self.output('focus', 'asker', '--for', '1h')
-        output = self.output('deliver', 'asker', '--retry', code=1)
-        self.assertTrue(output.startswith('Not retried: asker is focused until '), output)
+        self.assertEqual(self.output('deliver', 'asker', '--retry', code=1), '')
+        self.assertTrue(self.stderr.startswith('Not retried: asker is focused until '), self.stderr)
         self.assertEqual(len(self.calls), 1)
         # --check is not held back: it reports the definite failure (exit 1) instead of the focus.
         self.output('deliver', 'asker', '--check', code=1)
@@ -276,6 +431,27 @@ class FocusCommandTest(BaseTest):
         self.output('unfocus', 'asker')
         self.output('deliver', 'asker', '--retry')
         self.assertEqual(len(self.calls), 2)
+
+    def test_a_focus_that_starts_during_a_retry_stops_it(self):
+        """A focus that starts while deliver --retry works through failed messages stops it before the next one is
+        submitted; a break slips steers past a focus that was already in effect."""
+        directory = self.directories['asker']
+        for text in ('first', 'second'):
+            self.output('send', 'asker', '--text', text)
+        for message in self.history('asker'):
+            mailbox.update_message(directory, message['id'], submission_state='failed')
+        submit = native.send_or_wake
+        def focus_after_first(*arguments, **options):
+            receipt = submit(*arguments, **options)
+            # As if mv2 focus ran now: it waits for this retry's send lock, then starts.
+            store.write(directory / focus.FILE, {'since': datetime.now(timezone.utc).isoformat(), 'until': None,
+                                                 'turns': None, 'by': 'user'})
+            return receipt
+        self.calls.clear()
+        with patch.object(native, 'send_or_wake', side_effect=focus_after_first):
+            self.output('deliver', 'asker', '--retry', code=1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn('The rest were not retried: asker is focused until unfocused', self.stderr)
 
     def test_list_inspect_and_the_tmux_bar_show_focus(self):
         """list, list --json, inspect and the tmux bar show the focus and when it ends, and stop once it expires;

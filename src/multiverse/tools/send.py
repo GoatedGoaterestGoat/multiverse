@@ -91,8 +91,9 @@ def _running(directory):
 
 def refusal(name, record):
     """Why a focused agent refused a message, and what the sender can do instead."""
-    return (f"{name} is focused {focus.ends(record)} because it needs the user's attention, so it takes only "
-            f"inbox-only messages. Send again with --delivery inbox-only; {name} reads it from its inbox.")
+    why = "because it needs the user's attention" if record.get("by") == "agent" else "by the user"
+    return (f"{name} is focused {focus.ends(record)} {why}, so it takes only inbox-only messages. "
+            f"Send again with --delivery inbox-only; {name} reads it from its inbox.")
 
 
 def _send_one(root, directory, text, sender, delivery, queue_only):

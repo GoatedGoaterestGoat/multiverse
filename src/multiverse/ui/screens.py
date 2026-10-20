@@ -111,8 +111,10 @@ class Form(ModalScreen[dict | None]):
         self.dismiss(values)
 
 
-class Choice(ModalScreen[str | None]):
-    """Pick one of `options`, given as (key, label) pairs: Enter chooses, Esc cancels."""
+class ChoiceScreen(ModalScreen[str | None]):
+    """Pick one of `options`, given as (key, label) pairs: Enter chooses, Esc cancels.
+
+    Not `Choice`: that is the settings selector widget, and app.tcss styles screens by type."""
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, title, options, description=""):

@@ -69,7 +69,7 @@ class DemoBackend:
             delivery = "inbox-only" if queue_only else delivery
             if agent.get("focus") and delivery != "inbox-only":
                 return {"delivery": delivery, "state": "focused", "saved": False, "ok": False,
-                        "reason": f'{agent["name"]} is focused {focus.ends(agent["focus"])}.'}
+                        "reason": f'{agent["name"]} is focused {focus.ends(agent["focus"])}.', "focus": agent["focus"]}
             self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text,
                                   "delivery": delivery})
             return {"delivery": delivery, "state": "queued", "saved": True}

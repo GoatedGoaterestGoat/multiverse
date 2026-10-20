@@ -38,7 +38,7 @@ Claude Code and Codex connect whenever the installed version allows it. Otherwis
 
 ## Messages and the inbox
 
-Every message is saved to the recipient's inbox first, and then delivered. You choose how it is delivered:
+Every message is saved to the recipient's inbox first, and then delivered; the one exception is a message a focused agent refuses (below). You choose how it is delivered:
 
 | Delivery | Arrives |
 | --- | --- |
@@ -48,7 +48,7 @@ Every message is saved to the recipient's inbox first, and then delivered. You c
 
 A `steer` or `follow-up` message to a stopped agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. A saved or delivered message has not necessarily been read or answered.
 
-An agent that waits on your answer can **focus**. While it is focused, it refuses `steer` and `follow-up` messages, so nothing buries its question, and `inbox-only` messages still arrive. See [focus an agent](cli/messaging.md#focus-an-agent). Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
+An agent that waits on your answer can **focus**. While it is focused, it refuses `steer` and `follow-up` messages without saving them, so nothing buries its question, and `inbox-only` messages still arrive. What you type in its terminal reaches it as usual. See [focus an agent](cli/messaging.md#focus-an-agent). Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
 
 ## Agent state
 

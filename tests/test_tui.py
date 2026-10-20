@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Input, OptionList, Static, TextArea
 from textual import events
 from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
-from multiverse.ui.screens import Choice, Form
+from multiverse.ui.screens import ChoiceScreen, Form
 from multiverse.ui.app import MultiverseApp
 from isolation import isolate
 
@@ -93,10 +93,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             key = agent_key(agent)
             await pilot.press("f", "escape")
             await self.settle(pilot)
-            self.assertNotIsInstance(self.app.screen, Choice)
+            self.assertNotIsInstance(self.app.screen, ChoiceScreen)
             self.assertIsNone(self.app.visible_agents[key].get("focus"))
             await pilot.press("f")
-            self.assertIsInstance(self.app.screen, Choice)
+            self.assertIsInstance(self.app.screen, ChoiceScreen)
             choices = self.app.screen.query_one("#choices", OptionList)
             self.assertEqual([str(choices.get_option_at_index(i).prompt) for i in range(choices.option_count)],
                              ["5 minutes", "20 minutes", "1 hour", "Until its next turn ends", "Until unfocused"])
@@ -133,6 +133,27 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("end", "enter")
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
+
+    async def test_a_message_refused_by_a_new_focus_comes_back_in_its_inbox_only_form(self):
+        """If the agent focuses while the message form is open, the refused message comes back in the focused form
+        with its text, and sends inbox-only; a break loses what the person typed."""
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            agent = dict(self.app.selected)
+            await pilot.press("m")
+            self.app.screen.query_one("#field-text", TextArea).load_text("Here is the answer")
+            self.backend.focus(Path(agent["universe"]), agent["id"])
+            await pilot.press("ctrl+enter")
+            await self.settle(pilot)
+            self.assertEqual(self.backend.messages, [])
+            self.assertIsInstance(self.app.screen, Form)
+            self.assertIn("(focused)", str(self.app.screen.query_one("#dialog-title").render()))
+            self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "Here is the answer")
+            self.assertIn("back in its form", self.status())
+            await pilot.press("ctrl+enter")
+            await self.settle(pilot)
+            self.assertEqual([(m["text"], m["delivery"]) for m in self.backend.messages],
+                             [("Here is the answer", "inbox-only")])
 
     async def test_a_failing_backend_operation_never_ends_the_dashboard(self):
         """Send, inspect, spawn and attach raising, attach inside Textual's suspend, leave the error on show, the rows

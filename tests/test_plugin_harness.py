@@ -34,6 +34,21 @@ class LaunchPlanTest(PluginTestCase):
             "statusline": {"trees": {"claude": True, "tmux": False}}}, {"plugin.py": GUARD})
         self.enable("guard")
 
+    def test_an_item_named_focus_is_not_shown_and_the_plugin_stays_valid(self):
+        """A plugin's status-line item named focus, a name core took after API 1.8, is left out and doctor says why,
+        while the plugin stays valid; a break turns a 1.x plugin that loaded before into an invalid one, with no
+        commands, screens or launch additions."""
+        self.write_plugin("moods", {"extends": ["statusline"],
+                                    "statusline": {"focus": {"claude": True, "tmux": True}, "mood": {}}})
+        self.enable("moods")
+        found = {entry.name: entry for entry in loader.entries(self.root)}
+        self.assertTrue(found["moods"].usable, found["moods"].problem)
+        names = [item["name"] for item in harness.declared_items(self.root, loader.active(self.root))]
+        self.assertIn("mood", names)
+        self.assertNotIn("focus", names)
+        self.assertIn("moods's status-line item 'focus' is not shown: mv2 draws that item itself now; rename it",
+                      harness.item_conflicts(self.root))
+
     def info(self, **changes):
         values = dict(universe=self.root, agent_id="a", agent_name="worker", mode="spawn", family="claude",
                       harness="claude", version=(2, 1, 296), bridge=True)

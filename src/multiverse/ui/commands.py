@@ -5,9 +5,10 @@ from pathlib import Path
 from textual import work
 
 from ..display import clean
+from ..tools.unfocus import summary as unfocus_summary
 from ..universe import focus
 from .plugin_service import in_daemon
-from .screens import Choice, Form
+from .screens import ChoiceScreen, Form
 
 # The focus lengths the dashboard offers: (choice, label, backend arguments).
 FOCUS_LENGTHS = (("5m", "5 minutes", {"duration": "5m"}), ("20m", "20 minutes", {"duration": "20m"}),
@@ -68,17 +69,25 @@ class AgentCommands:
 
     def action_message(self):
         if self.ready() and self.selected and not self.damaged_selection():
-            agent = dict(self.selected)
-            held = agent.get("focus")
-            # A focused agent takes only inbox-only messages, from the person too.
-            title, delivery, description = (f'Message {agent["name"]}', "steer", "") if not held else (
-                f'Message {agent["name"]} (focused)', "inbox-only",
-                f'{agent["name"]} is focused {focus.ends(held)}, so this message goes to its inbox without '
-                f'interrupting it. To answer it directly, attach with Enter.')
-            self.push_screen(Form(title, [("text", "Message", "", True, True)], description=clean(description)),
-                             lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
-                                                                  agent["id"], values["text"], delivery, describe=sent)
-                             if values is not None else None)
+            self.message_form(dict(self.selected))
+
+    def message_form(self, agent, text="", held=None):
+        """The message form; while the agent is focused, its inbox-only form."""
+        held = held or agent.get("focus")
+        # A focused agent takes only inbox-only messages, from the person too.
+        title, delivery, description = (f'Message {agent["name"]}', "steer", "") if not held else (
+            f'Message {agent["name"]} (focused)', "inbox-only",
+            f'{agent["name"]} is focused {focus.ends(held)}, so this message goes to its inbox without '
+            f'interrupting it. To answer it directly, attach with Enter.')
+        def refused(result, typed):
+            # It focused while the form was open: offer the same text again, inbox-only.
+            if (result or {}).get("state") == "focused":
+                self.message_form(agent, typed, result.get("focus"))
+        self.push_screen(Form(title, [("text", "Message", text, True, True)], description=clean(description)),
+                         lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
+                                                              agent["id"], values["text"], delivery, describe=sent,
+                                                              after=lambda result: refused(result, values["text"]))
+                         if values is not None else None)
 
     def action_toggle_focus(self):
         if not (self.ready() and self.selected) or self.damaged_selection():
@@ -96,7 +105,7 @@ class AgentCommands:
             if arguments is not None:
                 self.submit_operation("Focus", self.backend.focus, root, agent["id"], arguments.get("duration"),
                                       arguments.get("turn", False), describe=focused)
-        self.push_screen(Choice(f"Focus {name}", [entry[:2] for entry in lengths], description=clean(
+        self.push_screen(ChoiceScreen(f"Focus {name}", [entry[:2] for entry in lengths], description=clean(
             f"While {name} is focused, steer and follow-up messages to it are refused and their senders are "
             f"told to send inbox-only, so nothing buries what it needs from you. Esc cancels.")), chosen)
 
@@ -165,7 +174,7 @@ def sent(result):
     """Status for a sent message: saved, then whatever native delivery reported."""
     result = result or {}
     if result.get('state') == 'focused':
-        return "Not sent: " + result.get('reason', 'the agent is focused'), True
+        return "Not sent: it is focused now, so the message is back in its form to send inbox-only.", True
     if result.get('delivery') == 'inbox-only':
         return "Saved to its inbox; it reads it at its next inbox check.", False
     receipt = result.get('native_delivery', {})
@@ -180,10 +189,7 @@ def focused(result):
 
 def unfocused(result):
     """Status for an unfocus: messages reach the agent again, and what waits in its inbox."""
-    count = result.get('unread', 0)
-    line = (f"Unfocused {result['agent']}; messages reach it normally again." if result.get('was_focused')
-            else f"{result['agent']} was not focused.")
-    return line + (f" It has {count} unread inbox {'message' if count == 1 else 'messages'}." if count else ""), False
+    return unfocus_summary(result), False
 
 
 def killed(result):
