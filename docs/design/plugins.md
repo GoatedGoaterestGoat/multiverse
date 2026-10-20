@@ -930,10 +930,10 @@ launch.
     applies them; rejoining a native thread that is subscribed or active may
     keep its old config, and mv2 never forces an unload or restart to change
     that. Bridge tool identity is per agent, through the session RPC: the same shared
-    conversation is one agent. Restart running Codex bridge agents once after
-    updating: `mv2 kill NAME`, then `mv2 resume NAME`, with no other client
-    attached so Codex can reload the conversation environment. There is no
-    automatic adoption or update hook.
+    conversation is one agent. A frontend restart does not guarantee new tool
+    settings. Current mv2 can validate a retained bridge launch for data callbacks;
+    it does not rewrite the native environment. See
+    [upgrade identity proof](shared-conversations.md#upgrade-running-codex-bridge-agents).
   - **Sharing and refusals:** same-server sharing that Codex accepts is
     normal. A separate-writer native refusal is retained as the launch's
     primary error, even if native retry later succeeds; only a successful new

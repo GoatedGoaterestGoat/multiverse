@@ -18,12 +18,13 @@ def cli_run(root=None, *, agent=None, session_id, json=False):
 
 
 def run(root=None, *, agent=None, session_id, json=False):  # `json`: presentation only
-    caller = actor()
+    caller = actor(data=True)
     if caller:
         root = universe.resolve(root)
         directory = agents.directory(root, agent)
         with lock(directory / '.launch.lock'):
-            actor()
+            if actor(data=True) != caller:
+                raise ValueError('Agent identity changed before verifying its session binding')
             data = read(directory / 'properties.json')
             if directory.resolve() != caller.directory.resolve() or normalize_session_id(session_id) != data.get('native_session_id'):
                 raise ValueError('Agent identity can only verify its existing session binding; the runner owns binding changes')

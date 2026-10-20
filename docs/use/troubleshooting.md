@@ -162,14 +162,11 @@ mv2 deliver NAME --retry
 
 If the reason says `Kill this unbound launch and spawn again.`, the launch never recorded a session. Kill it, remove it and spawn again. mv2 never restarts the shared daemon. It also never replays a message that may have arrived.
 
-### Codex: "restart the agent (mv2 kill, then mv2 resume) with no other client attached"
+### Codex callbacks retain an old launch identity
 
-`mv2 report` and `mv2 inbox` print this for a Codex agent whose conversation still holds environment values from an older mv2. Close any other client that has the conversation open, such as a `codex resume` window, so Codex reloads the conversation. Then run:
+Run the callback through the current mv2 installation. It accepts an older bridge conversation when the retained launch request and current thread, storage and agent records all match. If it refuses, inspect the named identity or request record; a different thread, changed storage or missing proof remains refused.
 
-```sh
-mv2 kill NAME
-mv2 resume NAME
-```
+Codex can retain an idle conversation's tool settings for up to 30 minutes after its last client leaves by default. Stopping and resuming the frontend does not guarantee that those settings reload. If `MV2_CLI` points at a separate older checkout, that checkout still runs its old checks; use the current installation. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### Codex: "This conversation is open in another app"
 

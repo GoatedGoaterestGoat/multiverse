@@ -33,6 +33,7 @@ Core also looks for these optional methods and attributes:
 | `family` | Which status line defaults apply: `claude`, `codex`, `pi` or `''` |
 | `session_home(environment)` | Resolve an explicit candidate storage home; return `None` when its supplied environment cannot identify one. |
 | `session_storage_evidence(session, home)` | Read-only proof that this exact conversation exists under an absolute candidate home: `ok` with `value.present` true or false, or `unknown` with a reason for incomplete evidence. |
+| `allow_recorded_launch(session)` | Explicitly allow core to verify retained bridge-launch identity for data callbacks; exactly `True` opts in, absent/default is false. The current adapter policy must equal the saved policy; this never grants control authority. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
 | `status_watch(session)` | A passive status stream the runner follows |
@@ -79,7 +80,7 @@ A `reported` harness binds its ID in one of two ways:
 
 An adapter can report a verified native session change, such as Claude's `/clear`, without replacing the mv2 agent. Core records the change in the agent's session lineage, keeps the earlier conversations owned by that agent, and follows the current one for delivery, usage and resume. An adapter that reports no changes keeps exact-session behavior. See [session lineage](../design/session-lineage.md).
 
-A bridged Codex conversation can have several clients at once. Its shell holds only agent-stable values, so `report` and `inbox` work from any client, while runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
+A bridged Codex conversation can have several clients at once. Its tool configuration requests agent-stable values, so `report` and `inbox` work from any client. An adapter can opt into proof from a retained bridge request when an older loaded conversation lacks the mode marker. Runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
 
 ## Bridge and plain
 

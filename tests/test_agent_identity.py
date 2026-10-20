@@ -1,6 +1,7 @@
 """One agent's conversation authority is separate from a terminal generation."""
 import contextlib
-from dataclasses import asdict
+from copy import deepcopy
+from dataclasses import asdict, replace
 from functools import partial
 import io
 import os
@@ -11,6 +12,7 @@ import threading
 import time
 from unittest.mock import patch
 from uuid import uuid4
+from types import SimpleNamespace
 
 from multiverse import cli
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
@@ -26,7 +28,7 @@ class AgentIdentityTest(BaseTest):
         super().setUp()
         self.identity, self.native = str(uuid4()), str(uuid4())
         self.directory = self.root / 'state' / 'agents' / self.identity
-        self.spec = AgentIdentitySpec('fixture-agent-v1', 'FIXTURE_THREAD', ('FIXTURE_HOME',))
+        self.spec = AgentIdentitySpec('fixture-agent-v1', 'FIXTURE_THREAD', ('FIXTURE_HOME', 'OPTIONAL_HOME'))
         service = NativeServiceHandle(ServiceIdentity('fixture', {'FIXTURE_HOME': str(self.work)}),
                                       NativeEndpoint('unix-websocket', str(self.work / 'service.sock')))
         self.props = {'id': self.identity, 'name': 'one-agent', 'harness': 'pi', 'workspace': str(self.work),
@@ -136,7 +138,7 @@ class AgentIdentityTest(BaseTest):
         old.pop('MV2_IDENTITY_MODE')
         with self.subTest(mode='old launch'), patch.dict(os.environ, old, clear=True):
             self.assertIsNone(agent_identity.actor())
-            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
+            with self.assertRaisesRegex(ValueError, 'identity could not be verified'):
                 report.run(self.root, agent=self.identity)
         self.assertNotIn('summary', read(self.directory / 'properties.json'))
 
@@ -179,6 +181,123 @@ class AgentIdentityTest(BaseTest):
         (directory / 'properties.json').write_text('[]')
         with self.subTest(mode='legacy', changed='damaged'), self.assertRaisesRegex(ValueError, 'properties.json'):
             agent_identity.sender_actor(env)
+
+    def test_recorded_bridge_launch_proves_only_data_callbacks(self):
+        """Cached pre-update tools need every historical and current proof; one missing guard silently authorizes another launch."""
+        old = '1d4f573b-35a6-4628-99ee-0c23d518f47d'  # QA's measured a8d2f81 launch shape.
+        env = {key: value for key, value in self.env.items() if key != 'MV2_IDENTITY_MODE'}
+        env['MV2_LAUNCH_ID'] = old
+        request = {'env': {key: env[key] for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')},
+                   'shared_service': True, 'native_mode': {'policy': 'required', 'mode': 'bridge'},
+                   'rpc_proxy': {'socket_path': '/old/relay', 'upstream_path': '/old/service',
+                                 'settings': {}, 'binds_session': True}}
+        path = self.directory / 'launches' / old / 'request.json'
+        facts = {'launch_id': uid(), 'state': 'failed', 'reason': 'retained failure',
+                 'native_mode': {'mode': 'bridge'}, 'tmux': {'socket': '/current/server'}}
+        write(self.directory / 'runtime.json', facts)
+        adapter = SimpleNamespace(allow_recorded_launch=lambda session: True,
+                                  agent_identity_policy=lambda: self.spec)
+        # A current per-launch caller still uses its original generation checks,
+        # even if a previous connected launch left a saved stable policy.
+        with patch('multiverse.harnesses.load', side_effect=AssertionError('current launch needs no adapter lookup')), \
+                patch.dict(os.environ, {**env, 'MV2_LAUNCH_ID': facts['launch_id']}, clear=True):
+            self.assertEqual(agent_identity.sender_actor().identity, self.identity)
+            self.assertEqual(_common.callback(self.root, self.identity, agent_scoped=True)[2], facts['launch_id'])
+        write(path, request)
+        append_message(self.directory, 'retained inbox', {'name': 'user'})
+        with patch('multiverse.harnesses.load', return_value=adapter), patch.dict(os.environ, env, clear=True):
+            # The compatibility route must not turn generic actor()/child spawning into stable authority.
+            self.assertIsNone(agent_identity.actor())
+            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
+                agent_identity.calling_socket()
+            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
+                runtime_update.run(self.root, agent=self.identity, status='idle')
+            before = (self.directory / 'properties.json').read_bytes()
+            self.assertEqual(session_bind.run(self.root, agent=self.identity, session_id=self.native)['id'], self.identity)
+            self.assertEqual((self.directory / 'properties.json').read_bytes(), before)
+            caller = agent_identity.sender_actor()
+            with patch.object(session_bind, 'actor', side_effect=[caller, None]), self.assertRaises(ValueError):
+                session_bind.run(self.root, agent=self.identity, session_id=self.native)
+            with self.assertRaisesRegex(ValueError, 'verify its existing'):
+                session_bind.run(self.root, agent=self.identity, session_id=uid())
+            self.assertEqual(report.run(self.root, agent=self.identity, summary='cached tools')['summary'], 'cached tools')
+            self.assertEqual(inbox.run(self.root, agent=self.identity)['messages'][0]['text'], 'retained inbox')
+            self.assertEqual(agent_identity.sender_actor().identity, self.identity)
+            self.assertEqual(dict(os.environ), env)  # no MODE or current-LID substitution
+            self.assertEqual(read(path), request)
+            self.assertEqual(read(self.directory / 'runtime.json'), facts)
+            other = self.root / 'state' / 'agents' / uid()
+            write(other / 'properties.json', {'id': other.name, 'name': 'other'})
+            send.run(self.root, agent='other', text='cached sender', delivery='inbox-only')
+            from multiverse.universe.mailbox import inbox as history
+            self.assertEqual(history(other, all_messages=True)['messages'][0]['from']['agent_id'], self.identity)
+            for action in (report.run, inbox.run):
+                with self.subTest(target='another agent', action=action), self.assertRaises(ValueError):
+                    action(self.root, agent='other')
+            with self.assertRaises(ValueError):
+                session_bind.run(self.root, agent='other', session_id=self.native)
+
+        # Each row changes just one proof. Final/current records never repair a missing old request.
+        cases = []
+        for key in request['env']:
+            for value in (None, 'foreign'):
+                changed = deepcopy(request)
+                if value is None:
+                    del changed['env'][key]
+                else:
+                    changed['env'][key] = value
+                cases.append((f'request {key} {value}', {}, self.props, changed, adapter))
+        for field, value in (('shared_service', False), ('shared_service', 1),
+                             ('native_mode', {'mode': 'plain'}), ('native_mode', []),
+                             ('rpc_proxy', {'binds_session': False}), ('rpc_proxy', {'binds_session': 1}),
+                             ('rpc_proxy', []), ('env', [])):
+            cases.append((f'request {field} {value}', {}, self.props, {**request, field: value}, adapter))
+        for key, value in (('MV2_LAUNCH_ID', old.upper()), ('MV2_AGENT_DIR', str(self.work))):
+            changed = deepcopy(request)
+            changed['env'][key] = value
+            cases.append((f'caller and request {key}', {key: value}, self.props, changed, adapter))
+        for key, value in (('MV2_IDENTITY_MODE', 'wrong-mode'), ('MV2_IDENTITY_MODE', ''),
+                           ('MV2_LAUNCH_ID', uid()), ('MV2_LAUNCH_ID', old.upper()),
+                           ('MV2_LAUNCH_ID', '../' + old), ('MV2_LAUNCH_ID', ''),
+                           ('FIXTURE_THREAD', uid()), ('FIXTURE_HOME', '/foreign'),
+                           ('OPTIONAL_HOME', '/foreign'),
+                           ('MV2_AGENT_DIR', str(self.work))):
+            cases.append((f'caller {key} {value}', {key: value}, self.props, request, adapter))
+        for key, value in (('id', uid()), ('native_session_id', uid()), ('workspace', str(self.work / 'foreign')),
+                           ('universe_id', uid()), ('native_service_identity', {'provider': 'foreign', 'scope': {}}),
+                           ('agent_identity', {})):
+            cases.append((f'properties {key}', {}, {**self.props, key: value}, request, adapter))
+        changed = deepcopy(self.props)
+        changed['agent_identity']['native_id'] = uid()
+        cases.append(('saved policy native id', {}, changed, request, adapter))
+        changed = deepcopy(self.props)
+        changed['agent_identity']['schema'] = 2
+        cases.append(('saved policy schema', {}, changed, request, adapter))
+        for label, selected in (
+                ('no opt-in', SimpleNamespace(agent_identity_policy=lambda: self.spec)),
+                ('false opt-in', SimpleNamespace(allow_recorded_launch=lambda session: False,
+                                                agent_identity_policy=lambda: self.spec)),
+                ('non-boolean opt-in', SimpleNamespace(allow_recorded_launch=lambda session: 1,
+                                                      agent_identity_policy=lambda: self.spec)),
+                ('different adapter policy', SimpleNamespace(allow_recorded_launch=lambda session: True,
+                    agent_identity_policy=lambda: replace(self.spec, mode='other-v1')))):
+            cases.append((label, {}, self.props, request, selected))
+        for value in (None, [], 'torn'):
+            cases.append((f'unreadable request {value}', {}, self.props, value, adapter))
+        for label, changed_env, properties, retained, selected in cases:
+            write(self.directory / 'properties.json', properties)
+            if retained is None:
+                path.unlink(missing_ok=True)
+            elif retained == 'torn':
+                path.write_text('{')
+            else:
+                write(path, retained)
+            before = (self.directory / 'properties.json').read_bytes()
+            with self.subTest(proof=label), patch('multiverse.harnesses.load', return_value=selected), \
+                    patch.dict(os.environ, {**env, **changed_env}, clear=True):
+                with self.assertRaises(ValueError):
+                    report.run(self.root, agent=self.identity, summary='must not write')
+                self.assertEqual((self.directory / 'properties.json').read_bytes(), before)
 
     def test_an_agent_cannot_rebind_fake_runner_status_or_become_another(self):
         """An agent's identity can neither rebind its session, report runner status, nor act as an agent it

@@ -1022,11 +1022,11 @@ New bridge bootstrap does not ask the model to bind a session. In stable agent
 mode, `session-bind` can only verify the identical already-bound native UUID,
 without changing properties, timestamps, runtime or events. It cannot establish
 or replace a binding. Plain-mode registration retains its existing strict
-launch callback. Restart running Codex bridge agents once after updating:
-`mv2 kill NAME`, then `mv2 resume NAME`, with no other client attached so Codex
-releases and reloads the conversation with clean stable values. An old
-conversation environment is refused with this restart guidance; there is no
-automatic adoption, legacy authority bypass or redirect of old relay sockets.
+launch callback. An adapter's optional `allow_recorded_launch(session)` hook
+can permit core's retained bridge proof for data callbacks when the mode marker
+is absent. It defaults false and must return exactly true; the current adapter
+policy must match the saved policy. Core never substitutes a current launch ID
+or redirects an old relay. See [upgrade identity proof](shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 A native competing writer is different from same-server sharing. Codex 0.163.0
 can return `-32600` with `already has an active writer`; plain TUI shows

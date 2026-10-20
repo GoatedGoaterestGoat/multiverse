@@ -52,6 +52,10 @@ class ConfiguredAdapter:
     # Variables mv2 itself reads to find this harness's native sessions; they come from mv2's environment.
     storage_env = ()
 
+    def allow_recorded_launch(self, session):
+        """Opt in to core's historical-launch proof for data callbacks only."""
+        return False
+
     @classmethod
     def configured(cls, name, settings):
         unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'env',

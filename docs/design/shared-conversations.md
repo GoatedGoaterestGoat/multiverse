@@ -25,8 +25,8 @@ old configuration cannot make those cached values current.
 
 The adapter declares an optional agent identity policy. Core builds its tool
 environment from the canonical universe, full agent ID, agent directory, CLI and
-Python paths, PATH and an explicit `MV2_IDENTITY_MODE`. The CLI, Python and PATH
-values are saved per agent and reused on later launches. The provider declares
+Python paths, PATH and an explicit `MV2_IDENTITY_MODE`. Each launch requests its current CLI, Python and PATH
+values; saved values describe the request rather than the loaded native environment. The provider declares
 the native conversation marker and storage scope used to validate the caller.
 Core checks them against the agent's persisted binding, workspace and service
 identity. Missing or inconsistent proof is rejected; it never becomes an
@@ -41,10 +41,10 @@ given the latest launch ID as a substitute for its own identity.
 
 | Operation | Identity and ownership rules |
 | --- | --- |
-| Own `report` and `inbox`, including `inbox --wait` | Explicit agent proof; valid across terminal replacement and while its wrapper is stopped or failed. It cannot clear a launch error or make a terminal ready. |
+| Own `report` and `inbox`, including `inbox --wait` | Explicit agent proof or opted-in retained bridge proof; valid across terminal replacement and while its wrapper is stopped or failed. It cannot clear a launch error or make a terminal ready. |
 | `send`, `deliver`, `ask`, usage and management commands | A validated agent may act normally. Recipient native session, message receipts, target launch and pane checks remain unchanged. |
-| `session-bind` from an agent-stable shell | Only verifies the exact already-bound ID, without writing. Establishing or changing a binding still requires the strict runner callback. |
-| `runtime-update`, runner binding, control RPC and attachment relay | Exact launch identity remains required. Old terminals cannot control replacement attachments. |
+| `session-bind` with agent proof, including a retained bridge launch | Only verifies the exact already-bound ID, without writing. Establishing or changing a binding still requires the strict runner callback. |
+| `runtime-update`, runner binding, control RPC, attachment relay and child-spawn socket selection | Exact launch identity remains required. Old terminals cannot control replacement attachments. |
 
 Plugin MCP environment references alone do not acquire native-shell authority:
 the shell's native conversation proof is required. Explicit plugin/API

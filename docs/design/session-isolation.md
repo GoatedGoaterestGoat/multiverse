@@ -14,9 +14,10 @@ control. These observations describe the local terminal, not native work that
 may survive elsewhere. Copying agent state does not stop the original process.
 Session binding validates a native UUID, rejects stale launch callbacks and
 refuses to replace an agent's already-bound UUID. Codex resume fails if no native
-session is recorded; it never falls back to the latest session. CLI callbacks
-from an old launch cannot read or advance the current inbox, bind its
-session, or change its status/runtime. Offline regression coverage exercises
+session is recorded; it never falls back to the latest session. Launch-strict callbacks from an old launch cannot change current status or runtime.
+An opted-in shared bridge can prove its retained launch request plus its current
+native thread and scope for data callbacks and verify-only binding, as described
+in [shared conversations](shared-conversations.md#upgrade-running-codex-bridge-agents). Offline regression coverage exercises
 those callback guards without launching any workers.
 
 These are cooperative identity checks, not a security boundary. Explicit binding
