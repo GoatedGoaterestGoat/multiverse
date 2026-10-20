@@ -1,5 +1,6 @@
 """Neither the plugin system failing nor a plugin failing to load takes the agent list, a refresh or the Plugins screen
-down, and a failed plugin repaired on disk loads without a restart."""
+down, a failed plugin repaired on disk loads without a restart, and Enter on a plugin says what it can do, or why not,
+whatever state the plugin is in."""
 import json
 from pathlib import Path
 import sys
@@ -32,6 +33,21 @@ def register(mv):
     mv.dashboard.action("Recovered", lambda context: "recovered")
 '''
 SCHEMA = {"type": "object", "properties": {"count": {"type": "integer"}}}
+OWN = '''
+def register(mv):
+    mv.dashboard.settings(screen="screens:Settings")
+'''
+OWN_SCREENS = '''
+from textual.screen import ModalScreen
+from textual.widgets import Static
+
+class Settings(ModalScreen):
+    BINDINGS = [("escape", "app.pop_screen", "Close")]
+    def __init__(self, root, backend):
+        super().__init__()
+    def compose(self):
+        yield Static("my own settings", id="own")
+'''
 
 
 class RepairTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
@@ -108,6 +124,26 @@ class RepairTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.run_action("badfield: Repaired")
                 self.assertIn("it works now", d.status)
                 self.assertEqual(plugins.settings_of(self.root, "badfield")[0]["count"], 4)
+
+    async def test_enter_on_a_plugin_with_its_own_settings_screen_opens_it_where_it_is_off_and_says_why_when_it_cannot(self):
+        """Enter on a plugin whose settings are edited on its own screen opens that screen while the plugin is off
+        here, and names why when the plugin cannot load, never 'no schema'; fragile because the screen's class is known
+        only by loading the plugin, which an off or failed one used to skip, and the person who pressed Enter for
+        Space got a message about a schema the plugin never had."""
+        manifest = {"module": "plugin", "settings": {"version": 1}, "extends": ["dashboard.settings"]}
+        self.write_plugin("owner", manifest, {"plugin.py": OWN, "screens.py": OWN_SCREENS})  # off here: never enabled
+        self.write_plugin("rotten", manifest, {"plugin.py": RAISING, "screens.py": OWN_SCREENS})
+        self.enable("rotten")
+        async with self.dashboard() as d:
+            with self.subTest("a plugin that is off here"):
+                screen = await d.open_settings("owner")
+                self.assertIn("my own settings", str(screen.query_one("#own").render()))
+                await d.close_screen()
+            with self.subTest("a plugin that fails to load"):
+                with self.assertRaises(AssertionError) as shown:
+                    await d.open_settings("rotten")
+                self.assertIn("load failure", str(shown.exception))
+                self.assertNotIn("no schema", str(shown.exception))
 
 if __name__ == "__main__":
     unittest.main()

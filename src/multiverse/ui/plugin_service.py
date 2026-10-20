@@ -264,4 +264,4 @@ class PluginService:
     def settings_screen(self, root, name, reference):
         """The plugin's own settings screen class, imported now."""
         found = plugins.entry(Path(root), name)
-        return loader.load(found).resolve(reference)
+        return loader.load(found, off=not found.on).resolve(reference)  # a plugin is configured where it is off, too
