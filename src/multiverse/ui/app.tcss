@@ -70,7 +70,7 @@ Footer { background: $mv-mantle; }
 .short.drawer #inspect-work { max-height: 1; }
 .drawer #inspect-group { margin-top: 0; }
 .narrow #totals { width: auto; }
-Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background: $mv-crust 75%; }
+Form, ChoiceScreen, Details, ArtifactPreview, PluginsScreen { align: center middle; background: $mv-crust 75%; }
 #dialog { width: 72; max-width: 94%; height: auto; max-height: 90%; border: round $mv-teal; background: $mv-base; padding: 1 2; }
 #dialog-title { text-style: bold; height: auto; margin-bottom: 1; }
 #dialog-description { height: auto; color: $mv-subtext0; margin-bottom: 1; }
@@ -80,6 +80,8 @@ Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background
 .multiline { height: 7; border: round $mv-surface1; margin-bottom: 1; }
 .multiline:focus { border: round $mv-teal; }
 #form-error { height: auto; color: $mv-red; }
+ChoiceScreen #choices { height: auto; max-height: 12; border: none; background: $mv-base; padding: 0; }
+ChoiceScreen #choices > .option-list--option-highlighted { background: $mv-cursor-focus; color: $mv-teal; text-style: bold; }
 .short #dialog { padding: 0 1; }
 .short #dialog-title { margin-bottom: 0; }
 .short #form-fields { max-height: 50vh; }

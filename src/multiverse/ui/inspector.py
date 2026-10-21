@@ -207,6 +207,11 @@ def progress(state, row):
     state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
 
 
+def focused(state, row):
+    if row.get("focus"):
+        state.append("\n◉ " + clean(row.get("focus_line", "Focused")) + " · f unfocuses", style=theme.MAUVE)
+
+
 def context(state, row):
     state.append("\n" + clean(row.get("context_line", "Context: N/A")), style=theme.SUBTEXT0)
 
@@ -260,7 +265,8 @@ def versions(state, row):
 
 
 # What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
-AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugin_problems, progress, context, native_mode, versions)
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugin_problems, progress, focused, context,
+               native_mode, versions)
 
 
 def agent_state(row):

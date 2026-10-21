@@ -29,12 +29,21 @@ def unread(directory):
 
 
 def cli_run(root=None, *, agent=None, phase=None, summary=None):
-    """`Reported working.`, and how many inbox-only messages wait when there are any."""
+    """`Reported working.`, and how many inbox-only messages wait when there are any.
+
+    Done means the current task is finished, so what waits in the inbox is the agent's next work: the line says to
+    read and address it before the turn ends.
+    """
     record = run(root, agent=agent, phase=phase, summary=summary)
     line = f"Reported {record.get('phase') or 'unknown'}."
     count = unread(callback(root, agent, agent_scoped=True)[1])
     if count:
-        line += f" You have {count} unread inbox {'message' if count == 1 else 'messages'}."
+        noun = 'message' if count == 1 else 'messages'
+        if record.get('phase') == 'done':
+            line += (f" You have {count} unread inbox {noun}: read {'it' if count == 1 else 'them'} now with mv2 inbox "
+                     f"and address {'it' if count == 1 else 'them'} before you finish.")
+        else:
+            line += f" You have {count} unread inbox {noun}."
     return line
 
 

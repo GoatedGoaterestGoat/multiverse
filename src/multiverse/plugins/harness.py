@@ -17,6 +17,7 @@ import shutil
 import subprocess
 
 from . import agent_files, loader
+from .manifest import LATER_CORE_ITEMS
 
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
@@ -418,13 +419,13 @@ def declared_items(root, active):
     """The status-line items of the plugins on here: [{"name", "plugin", "claude", "tmux"}].
 
     An item named after a plugin belongs to that plugin alone (compaction's
-    `compaction`), and a name two plugins declare is shown for neither; both are
-    in item_conflicts(), for doctor."""
+    `compaction`), a name two plugins declare is shown for neither, and one core
+    took after 1.8 (LATER_CORE_ITEMS) is core's; all are in item_conflicts(), for doctor."""
     names = {found.name for found in loader.entries(root)} if root is not None else {loaded.name for loaded in active}
     owners = {}
     for loaded in active:
         for item in loaded.manifest.statusline:
-            if item.name in names and item.name != loaded.name:
+            if item.name in LATER_CORE_ITEMS or item.name in names and item.name != loaded.name:
                 continue
             owners.setdefault(item.name, []).append((loaded, item))
     return [{"name": item.name, "plugin": loaded.name, "claude": item.claude, "tmux": item.tmux}
@@ -438,7 +439,10 @@ def item_conflicts(root):
     problems, owners = [], {}
     for loaded in (found for found in found_here if found.usable):
         for item in loaded.manifest.statusline:
-            if item.name in names and item.name != loaded.name:
+            if item.name in LATER_CORE_ITEMS:
+                problems.append(f"{loaded.name}'s status-line item {item.name!r} is not shown: "
+                                f"mv2 draws that item itself now; rename it")
+            elif item.name in names and item.name != loaded.name:
                 problems.append(f"{loaded.name}'s status-line item {item.name!r} is not shown: "
                                 f"that name belongs to the {item.name} plugin")
             else:

@@ -161,7 +161,8 @@ Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
 from observed liveness. The report CLI prints one line (`Reported working.`, plus `You have N unread inbox
-messages.` when inbox-only messages wait, counted without marking them read)
+messages.` when inbox-only messages wait, counted without marking them read; after `done` it also says to
+read and address them before finishing)
 without echoing the summary or task/properties data; its Python `run()` result
 remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
@@ -1476,6 +1477,7 @@ this independent block after `items`:
   "items": {
     "agent": true,
     "harness": true,
+    "focus": true,
     "status": false,
     "phase": true,
     "summary": false,
@@ -1503,6 +1505,9 @@ defaults also work with older files that have no `tmux` block.
 `phase` and `summary` share a segment, positioned at the first enabled one.
 Summary is optional and capped at 60 characters, cutting at a word where
 possible. Text has terminal control sequences removed and tmux formats escaped.
+`focus` shows `focused` while the agent is focused (`focused 18m` with the time
+left of a timed focus, `focused (turn)` until its next turn ends), read from the
+agent's `focus.json`; an expired or unreadable record shows nothing.
 `inbox` counts unread inbox-only messages without marking them read, capped at
 `50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
 steer/follow-up messages do not count. Optional `context` shows measured latest

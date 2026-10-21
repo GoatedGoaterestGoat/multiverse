@@ -15,6 +15,7 @@ import threading
 from rich.text import Text
 
 from ..display import clean, live_label
+from ..universe import focus
 from . import theme
 
 # Below this table width, columns that are not `compact` are hidden.
@@ -49,7 +50,8 @@ class Column:
 
 
 class NameColumn(Column):
-    """Tree guides in each ancestor's accent, a fold arrow on groups, and a dot on agents waiting for input."""
+    """Tree guides in each ancestor's accent, a fold arrow on groups, a dot on agents waiting for input
+    and a ring on focused agents."""
     def render(self, row):
         color = row["accent"]
         group = row["kind"] == "group"
@@ -62,6 +64,8 @@ class NameColumn(Column):
             label.append(" ●", style=f"bold {theme.PEACH}")
         if not group and row.get("damaged"):
             label.append(" ⚠", style=f"bold {theme.RED}")
+        if not group and row.get("focus"):
+            label.append(" ◉", style=f"bold {theme.MAUVE}")
         return label
 
 
@@ -80,6 +84,16 @@ class StatusColumn(Column):
         if text.plain == "waiting":
             text.style = f"bold reverse {theme.PEACH}"
         return text
+
+
+class FocusColumn(Column):
+    """How long a focus lasts: `18m`, `turn` or `on`; a group counts its focused agents."""
+    def agent(self, row):
+        held = row.get("focus")
+        return Text(focus.short(held), style=f"bold {theme.MAUVE}") if held else Text("—", style=theme.OVERLAY1)
+
+    def group_value(self, row):
+        return f'{row["focused"]} ◉' if row.get("focused") else ""
 
 
 class ContextColumn(Column):
@@ -110,6 +124,7 @@ COLUMNS = {column.key: column for column in (
     ContextColumn("context", "Context", 10, compact=False),
     Column("cost", "Cost", 7, compact=False),
     StatusColumn("status", "Status", 9, compact=False),
+    FocusColumn("focus", "Focus", 6, compact=False),
     Column("phase", "Phase", 8),
     SummaryColumn("summary", "Working on", 48, flexible=True),
     Column("id", "ID", 12, compact=False),

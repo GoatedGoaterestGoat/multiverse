@@ -2,6 +2,7 @@
 from pathlib import Path
 from ..display import error_text, shorten, state, live_label
 from ..runtime import lifecycle
+from ..universe import focus
 from .. import universe
 
 NAME_WIDTH = 24
@@ -48,6 +49,8 @@ def run(root=None, *, recursive=False, json=False, wide=False):
             lines.append('  ! ' + row['delivery_problem'])
         if row.get('recovery_note'):
             lines.append('  Note: Reconnected automatically.')
+        if row.get('focus'):
+            lines.append(f"  Focused {focus.ends(row['focus'])}: send it only --delivery inbox-only messages.")
     return "\n".join(lines)
 
 

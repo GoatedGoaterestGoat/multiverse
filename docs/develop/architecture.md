@@ -10,7 +10,7 @@ Everything lives in `src/multiverse/`.
 | --- | --- |
 | `cli.py` | The `mv2` command line. `COMMANDS` lists every command, and each maps to a module in `tools/`. |
 | `tools/` | One module per command, each with `configure(parser)` and `run(...)`. The dashboard calls the same `run` functions. `runtime_update.py` is for harness integrations, not a command. |
-| `universe/` | Everything on disk. The package resolves universes and walks subverses. Its modules are `agents` (agent records), `mailbox` (inbox, read position, delivery tracking), `templates` (install and refresh), `catalog` (skills, commands, workflows, bootstrap), `relocate` and `trash`. |
+| `universe/` | Everything on disk. The package resolves universes and walks subverses. Its modules are `agents` (agent records), `mailbox` (inbox, read position, delivery tracking), `focus` (whether an agent takes only inbox-only messages, and until when), `templates` (install and refresh), `catalog` (skills, commands, workflows, bootstrap), `relocate` and `trash`. |
 | `runtime/` | Everything that runs. Its modules are `lifecycle` (spawn, resume, wake, readiness, listing, kill), `native` (runs adapter specs, delivers messages, keeps receipts), `rpc` (JSON-RPC transport and launch relay), `recovery` (reconnecting idle Codex terminals) and `runner` (the process in each agent's pane). |
 | `terminal/` | tmux: commands, pane tags, liveness from panes, and the status line script tmux runs. |
 | `harnesses/` | Adapters. `types.py` is the contract and `base.py` holds the shared argv rendering. There is one package each for `claude`, `codex` and `pi`, plus `legacy` for schema-1 definitions. See [harness adapters](harness-adapters.md). |

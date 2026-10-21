@@ -1,5 +1,6 @@
 """In-memory universe for exploring and testing the real UI without processes."""
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
@@ -7,7 +8,7 @@ from multiverse.ui import theme
 from multiverse.ui.views import DEFAULT_COLUMNS
 from multiverse.ui.tree import counts, within
 from multiverse.store import uid
-from multiverse.universe import slug
+from multiverse.universe import focus, slug
 
 
 class DemoBackend:
@@ -62,10 +63,32 @@ class DemoBackend:
             self.agents.append(row)
             return deepcopy(row)
 
-    def send(self, root, reference, text):
+    def send(self, root, reference, text, delivery="steer", queue_only=False):
         with self.lock:
-            self.find(root, reference)
-            self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text})
+            agent = self.find(root, reference)
+            delivery = "inbox-only" if queue_only else delivery
+            if agent.get("focus") and delivery != "inbox-only":
+                return {"delivery": delivery, "state": "focused", "saved": False, "ok": False,
+                        "reason": f'{agent["name"]} is focused {focus.ends(agent["focus"])}.', "focus": agent["focus"]}
+            self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text,
+                                  "delivery": delivery})
+            return {"delivery": delivery, "state": "queued", "saved": True}
+
+    def focus(self, root, reference, duration=None, turn=False):
+        with self.lock:
+            agent = self.find(root, reference)
+            stamp = datetime.now(timezone.utc)
+            until = stamp + timedelta(seconds=focus.seconds(duration)) if duration else None
+            agent["focus"] = {"since": stamp.isoformat(), "until": until.isoformat() if until else None,
+                              "turns": 1 if turn else None, "by": "user"}
+            return {"agent": agent["name"], "focused": True, "ends": focus.ends(agent["focus"]), **agent["focus"]}
+
+    def unfocus(self, root, reference):
+        with self.lock:
+            agent = self.find(root, reference)
+            held = agent.pop("focus", None)
+            return {"agent": agent["name"], "focused": False, "was_focused": held is not None,
+                    "unread": 0, "unread_while_focused": 0}
 
     def stop(self, root, reference):
         return self.kill(root, reference)
