@@ -145,15 +145,18 @@ class NativeDeliveryTest(BaseTest):
 
     def test_settings_env_refuses_names_mv2_manages_or_reads(self):
         """A harness's settings.env can't set mv2's MV2_* identity, the names every launch fixes, or the storage the
-        harness's sessions are read from; a break goes unnoticed because the agent still starts, but as another agent
-        or writing sessions where mv2 never looks (#19, Shao a8925af)."""
+        harness's sessions are read from, though Pi's, which mv2 doesn't use to locate Pi sessions, it can; a break goes unnoticed because the
+        agent still starts, but as another agent or writing sessions where mv2 never looks (#19, Shao a8925af, #26)."""
         for name, adapter in harnesses.BUILTINS.items():
-            for key in ('MV2_AGENT_ID', 'MV2_UNIVERSE', 'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE', *adapter.storage_env):
+            read_from = () if name == 'pi' else adapter.storage_env
+            for key in ('MV2_AGENT_ID', 'MV2_UNIVERSE', 'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE', *read_from):
                 with self.subTest(harness=name, key=key):
                     with self.assertRaisesRegex(ValueError, f'env cannot set {key}'):
                         adapter.configured(name, {'env': {key: 'x'}})
             with self.subTest(harness=name, key='an ordinary name'):
                 self.assertEqual(adapter.configured(name, {'env': {'DEBUG': '1'}}).environment, {'DEBUG': '1'})
+        self.assertEqual(harnesses.BUILTINS['pi'].configured('pi', {'env': {'PI_CODING_AGENT_DIR': '/pi'}}).environment,
+                         {'PI_CODING_AGENT_DIR': '/pi'})
         self.assertEqual({key for adapter in harnesses.BUILTINS.values() for key in adapter.storage_env},
                          {'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'PI_CODING_AGENT_DIR'})
 

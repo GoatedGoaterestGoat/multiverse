@@ -19,12 +19,13 @@ RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
 # from one: its identity, which a Claude reads at startup (CLAUDECODE, the child-session marker that turns
 # transcript saving off, the session, attended and bridge IDs, the entry point and worktree), its IDE port and inbox,
 # and its tool shells' own values. Claude Code removes the same identity when it starts a fresh Claude itself
-# (2.1.303). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone.
+# (2.1.303). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
+# CLAUDE_CODE_TMPDIR: Claude sets it only for a sandboxed shell, and its errors tell users to set it themselves.
 PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
                  'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
                  'CLAUDE_CODE_HOST_WORKTREE_FENCE', 'CLAUDE_CODE_EVAL_INTERVIEW_SESSION',
                  'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
-                 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_TMPDIR', 'CLAUDE_CODE_EXECPATH',
+                 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH',
                  'CLAUDE_CODE_INVOKED_SKILLS')
 
 
@@ -49,8 +50,11 @@ class ConfiguredAdapter:
     # The built-in adapter a harness uses ('codex', 'claude', 'pi'); '' for a local definition.
     family = ''
     resume_prompt_args = None
-    # Variables mv2 itself reads to find this harness's native sessions; they come from mv2's environment.
+    # The harness's storage: core records each one's value or absence at spawn and replays it on resume.
     storage_env = ()
+    # Whether settings.env may set them. Not where mv2 finds sessions through them (Claude, Codex): their
+    # values must come from mv2's environment. Where it doesn't (Pi), spawn records the harness's value.
+    settings_storage = False
 
     def allow_recorded_launch(self, session):
         """Opt in to core's historical-launch proof for data callbacks only."""
@@ -120,7 +124,7 @@ class ConfiguredAdapter:
         managed = sorted(key for key in env if key.startswith('MV2_') or key in RESERVED_ENV)
         if managed:
             raise ValueError(f'env cannot set {", ".join(managed)}: mv2 manages these for every launch')
-        storage = sorted(key for key in env if key in self.storage_env)
+        storage = sorted(key for key in env if key in self.storage_env and not self.settings_storage)
         if storage:
             raise ValueError(f'env cannot set {", ".join(storage)}: mv2 reads these to find this harness\'s '
                              'sessions, so set them in the environment mv2 runs in')

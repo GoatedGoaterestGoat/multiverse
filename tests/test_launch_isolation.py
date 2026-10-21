@@ -686,11 +686,55 @@ class LaunchIsolationTest(unittest.TestCase):
             self.assertEqual(legacy["workspace"], str(other))
             self.assertEqual(backend.create.call_args.args[1], other)
 
+    def test_a_pi_harness_setting_its_agent_directory_is_what_spawn_records(self):
+        """A Pi harness's settings.env can set PI_CODING_AGENT_DIR (Pi never reads it to find sessions): spawn records
+        and runs with that value over the caller's and the tmux server's, and resume keeps it after the setting
+        changes, saying it ignored the new setting, while --start-fresh takes the current setting; a break goes unnoticed because Pi still starts, in another directory
+        with other settings and auth (Shao #26)."""
+        executable = self.work / 'pi-stand-in'
+        executable.write_text(f'#!{sys.executable}\n')
+        executable.chmod(0o755)
+        manifest = self.root / 'harnesses/pi/harness.json'
+        definition = read(manifest)
+        definition['settings'].update(inbox_bridge=False, executable=str(executable),
+                                      env={'PI_CODING_AGENT_DIR': str(self.work / 'pi-from-settings')})
+        write(manifest, definition)
+        backend = Mock()
+        backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
+        with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                patch.dict(os.environ, {'PI_CODING_AGENT_DIR': str(self.work / 'pi-from-caller')}):
+            result = lifecycle.start(self.root, name='pi-settings', harness='pi')
+            directory = self.root / 'state/agents' / result['id']
+            (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
+            for mode, expected in (('spawn', str(self.work / 'pi-from-settings')),
+                                   ('resume', str(self.work / 'pi-from-settings')),
+                                   ('fresh', str(self.work / 'pi-fresh-setting'))):
+                if mode == 'resume':
+                    definition['settings']['env'] = {'PI_CODING_AGENT_DIR': str(self.work / 'pi-setting-changed')}
+                    write(manifest, definition)
+                    result = lifecycle.start(self.root, resume=result['id'])
+                    self.assertIn(f'ignored its harness setting PI_CODING_AGENT_DIR="{self.work / "pi-setting-changed"}"',
+                                  ' '.join(result.get('notices', [])))
+                elif mode == 'fresh':
+                    # An explicit fresh start is a new conversation: it takes the setting as a spawn does.
+                    (directory / 'session.jsonl').unlink()
+                    definition['settings']['env'] = {'PI_CODING_AGENT_DIR': expected}
+                    write(manifest, definition)
+                    result = lifecycle.start(self.root, resume=result['id'], start_fresh=True)
+                    self.assertNotIn('ignored its harness setting', ' '.join(result.get('notices', [])))
+                request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': str(self.work / 'pi-from-server')}):
+                    environment = runner.launch_environment(request)
+                self.assertEqual(environment.get('PI_CODING_AGENT_DIR'), expected, mode)
+                self.assertEqual(read(directory / 'properties.json')['native_storage_environment']['PI_CODING_AGENT_DIR'],
+                                 expected, mode)
+
     def test_child_env_has_only_the_launch_identity_and_no_parent_markers(self):
         """For every bundled adapter, as shipped, with a replaced unset_env or setting a marker itself, the native
         child the real runner starts gets only the launch's identity and socket, and none of a parent's markers
         (CODEX_THREAD_ID, CLAUDECODE, CLAUDE_CODE_CHILD_SESSION, the IDE port, the messaging socket and token) or
-        NO_COLOR unless its harness sets one; a break goes unnoticed because the child still runs, but as its parent,
+        NO_COLOR unless its harness sets one, while the user's own CLAUDE_CODE_TMPDIR passes through; a break goes unnoticed because the child still runs, but as its parent,
         or as a Claude that inherited CLAUDE_CODE_CHILD_SESSION and saves no transcript, so resume silently starts
         fresh and usage reads nothing, or one holding the parent's inbox secret (a6a7628, a81fed1, 74887d9,
         CLAUDE-5)."""
@@ -702,11 +746,12 @@ class LaunchIsolationTest(unittest.TestCase):
                    # values: a tmux server first started from a Claude Code session passes them to every pane.
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
-                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_TMPDIR", "CLAUDE_CODE_EXECPATH",
+                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
                    "CLAUDE_CODE_INVOKED_SKILLS")
+        # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through.
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
                   **{name: "parent" for name in markers}, "CLAUDE_CODE_CHILD_SESSION": "1", "NO_COLOR": "1",
-                  "TERM": "tmux-256color"}
+                  "TERM": "tmux-256color", "CLAUDE_CODE_TMPDIR": "/users-own/tmp"}
         values = self.adapter_values()
         # environment.md suggests replacing unset_env (for NO_COLOR, say); the markers must stay removed then.
         variants = ({}, {"unset_env": ["NO_COLOR"]}, {"env": {"CLAUDE_CODE_CHILD_SESSION": "0"}})
@@ -751,6 +796,7 @@ class LaunchIsolationTest(unittest.TestCase):
                     self.assertEqual({key: env[key] for key in (*markers, "NO_COLOR") if key in env},
                                      settings.get("env", {}))
                     self.assertEqual(env["TERM"], "tmux-256color")
+                    self.assertEqual(env.get("CLAUDE_CODE_TMPDIR"), "/users-own/tmp")
                     self.assertTrue(env["PATH"].startswith("/child/bin" + os.pathsep))
 
         # Claude Code (2.1.301+) saves no transcript when it inherits CLAUDE_CODE_CHILD_SESSION=1, the marker it

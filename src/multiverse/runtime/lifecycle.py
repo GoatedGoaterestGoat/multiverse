@@ -340,7 +340,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
-        notices = display.notice_lines(missing_notices, [item.notice for item in storage_notices],
+        # A harness setting for its storage applies at spawn, and so to a fresh start; a resume keeps the
+        # recorded value, and says so.
+        from_settings = getattr(adapter, 'environment', None) if getattr(adapter, 'settings_storage', False) else None
+        from_settings = from_settings if isinstance(from_settings, dict) else {}
+        ignored_settings = [f'Kept its recorded {key} {"unset" if storage.get(key) is None else json.dumps(storage[key])}; '
+                            f'ignored its harness setting {key}={json.dumps(value)}.'
+                            for key, value in from_settings.items()
+                            if resume and not start_fresh and key in storage and storage[key] != value]
+        notices = display.notice_lines(missing_notices, ignored_settings, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
         command = adapter.resume(session, context) if resume and not fresh else adapter.spawn(context)
@@ -348,7 +356,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # its effective selection with recorded strings, never re-resolve history.
         selected_storage = dict(storage)
         for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
-            selected_storage.update({key: selected[key] for key in storage if key in selected})
+            selected_storage.update({key: selected[key] for key in storage
+                                     if key in selected and not (resume and not start_fresh and key in from_settings)})
         if resume and not start_fresh:
             recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
                                 **(properties.get('native_storage_environment') or {})}
