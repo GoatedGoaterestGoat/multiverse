@@ -307,7 +307,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
-                                agent_environment=agent_environment, storage_keys=tuple(storage))
+                                agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
@@ -447,7 +447,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 progress.mark('preparing native attachment')
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
-                                    agent_environment=agent_environment, storage_keys=tuple(storage))
+                                    agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
             if command.shared_service:
                 try:
                     command = _storage_command(adapter.resume(session, context) if resume else adapter.spawn(context), storage)
@@ -762,7 +762,11 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
         terminal = previous.get('tmux') or {}
         adoption = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
                                             Tmux(terminal.get('socket')), recorded=candidate_recorded)
-        adopted = adoption.environment
+        adopted = dict(adoption.environment)
+        if own_keys and adopted.get(own_keys[0]):
+            # An explicit storage root does not depend on the candidate user's
+            # HOME. Only adoption of its default storage must pin that HOME.
+            adopted.pop('HOME', None)
         if family == 'codex':
             # The finder proved this first home's conversation. Save its canonical
             # scope now; later resumes compare these strings without re-resolving history.

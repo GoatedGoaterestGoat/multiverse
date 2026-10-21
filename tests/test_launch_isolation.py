@@ -21,7 +21,7 @@ from multiverse.universe import agents, storage as storage_records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import runner
 from multiverse import harnesses
-from multiverse.harnesses.types import LaunchContext, SessionHandle, SharedServiceSpec, ServiceIdentity, NativeEndpoint
+from multiverse.harnesses.types import LaunchContext, SessionHandle, SharedServiceSpec, ServiceIdentity, NativeEndpoint, NativeResult
 from multiverse.universe import templates
 import json
 from multiverse.cli import parser, run
@@ -228,11 +228,11 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({key: result['native_storage_environment'][key] for key in storage}, expected)
 
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
-        """Legacy adoption must find the exact conversation or prove no child ever started; otherwise storage can strand history, service preparation can erase unknown keys, and two independent fresh-start decisions can repeat their notice."""
+        """Legacy adoption must find the exact conversation or prove no child ever started; otherwise storage can strand history, bridge preparation can reject HOME as a storage key or erase unknown keys, and two independent fresh-start decisions can repeat their notice."""
         from multiverse.harnesses.claude import project_key
-        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
+        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
-            if family == 'claude' and found in ('restored-spelling', 'scope-spelling'):
+            if family == 'claude' and found in ('restored-spelling', 'scope-spelling', 'default-server-bridge', 'default-server-auto'):
                 continue
             with self.subTest(family=family, found=found):
                 key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
@@ -242,7 +242,9 @@ class LaunchIsolationTest(unittest.TestCase):
                 executable.chmod(0o755)
                 manifest = self.root / 'harnesses' / family / 'harness.json'
                 definition = read(manifest)
-                definition['settings'].update(inbox_bridge=False, executable=str(executable))
+                definition['settings'].update(inbox_bridge=found == 'default-server-bridge', executable=str(executable))
+                if found == 'default-server-auto':
+                    definition['settings'].pop('inbox_bridge')
                 write(manifest, definition)
                 directory, properties, _, _ = lifecycle._record(self.root, family + '-legacy-' + found, '', family, None, None)
                 properties['workspace'] = str(self.work)
@@ -253,8 +255,8 @@ class LaunchIsolationTest(unittest.TestCase):
                          'tmux': {'socket': str(self.work / 'old.sock'), 'session': '$1', 'pane': '%1'}}
                 write(directory / 'runtime.json', facts)
                 homes = {key: self.work / family / found / key for key in ('server', 'caller', 'request')}
-                server_home = self.work / family / found / 'server-user' if found == 'default-server' else self.work
-                if found == 'default-server':
+                server_home = self.work / family / found / 'server-user' if found.startswith('default-server') else self.work
+                if found.startswith('default-server'):
                     homes['server'] = server_home / ('.claude' if family == 'claude' else '.codex')
                 if found in ('server-spelling', 'restored-spelling', 'scope-spelling'):
                     actual_server = homes['server'].with_name('actual-server')
@@ -283,7 +285,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 for source, home in homes.items():
                     folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
                     folder.mkdir(parents=True)
-                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
+                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
                         identifier = properties['native_session_id']
                         if family == 'claude':
                             (folder / (identifier + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': identifier}) + '\n')
@@ -296,7 +298,7 @@ class LaunchIsolationTest(unittest.TestCase):
                     homes['caller'].symlink_to(homes['server'], target_is_directory=True)
                 backend = Mock()
                 server_environment = {'HOME': str(server_home)}
-                if found != 'default-server':
+                if not found.startswith('default-server'):
                     server_environment[key] = str(homes['server'])
                 backend.environment.side_effect = server_environment.get
                 backend.create.return_value = {'socket': str(self.work / 'new.sock'), 'session': '$2', 'pane': '%2'}
@@ -313,6 +315,8 @@ class LaunchIsolationTest(unittest.TestCase):
                         patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                         patch('multiverse.runtime.attachments._observation', return_value=(True, None)), \
                         patch.object(os, 'scandir', scandir), \
+                        patch.object(lifecycle.native, 'start_shared_service', return_value=NativeEndpoint('unix-websocket', str(self.work / 'fake-service.sock'))), \
+                        patch.object(lifecycle.native.NativeExecutor, 'rpc', return_value=NativeResult('ok', value={'exclude': [], 'writable_roots': []})), \
                         patch.dict(os.environ, {key: str(homes['caller'])}):
                     fresh = found == 'empty-before-child' and family == 'claude'
                     if found in ('none', 'multiple', 'unreadable') or found.startswith('empty-') and not fresh:
@@ -321,13 +325,15 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
-                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
+                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
                         result = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(result['native_session_home'], str(chosen.resolve()))
+                        if found in ('default-server-bridge', 'default-server-auto'):
+                            self.assertEqual(result['runtime']['native_mode']['mode'], 'bridge')
                         expected = {key: str(chosen.resolve() if family == 'codex' else chosen)}
-                        if found not in ('request', 'restored-spelling', 'scope-spelling'):
-                            expected['HOME'] = os.environ['HOME'] if found == 'caller' or fresh else str(server_home)
-                        if found == 'default-server' and family == 'claude':
+                        if found.startswith('default-server'):
+                            expected['HOME'] = str(server_home)
+                        if found.startswith('default-server') and family == 'claude':
                             expected[key] = None
                         if family == 'codex' and found != 'request':
                             expected['CODEX_SQLITE_HOME'] = None
@@ -341,6 +347,12 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual(sum('fresh' in notice for notice in result['notices']), 1)
                         again = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(again['native_storage_environment'], result['native_storage_environment'])
+                        if family == 'codex' and found == 'default-server':
+                            definition['settings']['inbox_bridge'] = True
+                            write(manifest, definition)
+                            bridged = lifecycle.start(self.root, resume=directory.name)
+                            self.assertEqual(bridged['runtime']['native_mode']['mode'], 'bridge')
+                            self.assertEqual(bridged['native_storage_environment'], result['native_storage_environment'])
                         if family == 'codex' and found in ('server-spelling', 'restored-spelling', 'scope-spelling'):
                             canonical = chosen.resolve()
                             moved = canonical.with_name(canonical.name + '-original')
@@ -377,7 +389,7 @@ class LaunchIsolationTest(unittest.TestCase):
                                     patch.object(lifecycle.native, 'start_shared_service',
                                                  return_value=NativeEndpoint('unix-websocket', str(self.work / 'fake-service.sock'))):
                                 lifecycle.start(self.root, resume=directory.name)
-                            self.assertEqual([None if mask is None else set(mask) for mask in masks], [set(expected), set(expected)])
+                            self.assertEqual([None if mask is None else set(mask) for mask in masks], [set(expected) - {'HOME'}, set(expected) - {'HOME'}])
 
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,

@@ -53,7 +53,7 @@ Codex checks the native thread UUID in a rollout's metadata header under the can
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
 | `Capability` | `state` (`supported`, `unavailable`, `error`), `reason`, `mechanism`, `required` |
 
-For legacy storage adoption, `LaunchContext.storage_keys` lists proven keys. `None` keeps the complete selection used by existing callers; an empty tuple proves none. A listed key absent from `environment` is known unset; an omitted key is unknown and retains native inheritance. Adapters still enforce their own conversation's identity requirements.
+For legacy storage adoption, `LaunchContext.storage_keys` lists proven harness storage variables, never `HOME`. A default-storage adoption can retain `HOME` in the launch environment without adding it to this mask. `None` keeps the complete selection used by existing callers; an empty tuple proves none. A listed key absent from `environment` is known unset; an omitted key is unknown and retains native inheritance. Adapters still enforce their own conversation's identity requirements.
 
 ### Rules
 
