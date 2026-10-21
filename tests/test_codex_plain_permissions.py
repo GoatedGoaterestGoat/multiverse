@@ -14,14 +14,15 @@ from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHan
 
 class PlainPermissionsTest(unittest.TestCase):
     def test_plain_retry_removes_only_the_generated_root_after_native_refusal(self):
-        """A read-only native exit retries only mv2's root; rendered diagnostics are easy to miss, while removing a user's root silently changes permissions."""
+        """A read-only exit retries only mv2's root and explains approval-never failures; wrong grants or recovery advice silently strand agent callbacks."""
         values = {'workspace': '/workspace', 'agent_dir': '/outside/agent', 'name': 'worker',
                   'control_socket': '/tmp/private/relay.sock', 'bootstrap_json': json.dumps('bootstrap'),
                   'task': 'literal task', 'session_id': '0b9925e8-814b-474d-b813-2dc9478ba0c9'}
         session = SessionHandle('agent', 'codex', '/workspace', native_id=values['session_id'])
         for mode in ('spawn', 'resume'):
             for base_settings in ({'inbox_bridge': False}, {'args': ['--no-daemon']}, {}):
-                for flags in ([], ['--sandbox', 'read-only'], ['--sandbox', 'workspace-write'],
+                for flags in ([], ['--sandbox', 'read-only'], ['--sandbox', 'read-only', '-a', 'never'],
+                              ['--sandbox', 'workspace-write'],
                               ['--profile', 'named'], ['--add-dir', values['agent_dir'], '--add-dir=/user/root']):
                     with self.subTest(mode=mode, settings=base_settings, flags=flags):
                         settings = {**base_settings, 'args': [*base_settings.get('args', []), *flags]}
@@ -38,6 +39,8 @@ class PlainPermissionsTest(unittest.TestCase):
                         self.assertEqual(plain.notices, (), 'Notice applies only when native refusal selects the retry')
                         self.assertIn('read-only', retry.notices[-1])
                         self.assertIn(values['agent_dir'], retry.notices[-1])
+                        if '-a' in flags and flags[flags.index('-a') + 1] == 'never':
+                            self.assertIn('with approval policy never, they fail', retry.notices[-1])
                         self.assertEqual(retry.argv[-1], values['task'] if mode == 'spawn' else values['session_id'])
                         if plain is not command:
                             self.assertIsNone(command.startup_retry, 'Bridge grants never use the plain retry')

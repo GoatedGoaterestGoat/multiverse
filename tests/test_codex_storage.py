@@ -33,6 +33,7 @@ class CodexStorageTest(unittest.TestCase):
                                ('compressed', None), ('compressed-with-plain', True),
                                ('foreign-header', None), ('invalid-root-id', None), ('duplicate-id', None), ('damaged', None),
                                ('incomplete', None), ('directory', None), ('symlink', None),
+                               ('linked-sessions-root', None), ('linked-dated-folder', None),
                                ('unreadable', None), ('scan-budget', None), ('header-budget', None)):
             with self.subTest(case=case), tempfile.TemporaryDirectory(prefix='mv2-codex-proof-') as temporary:
                 home = Path(temporary).resolve()
@@ -65,6 +66,11 @@ class CodexStorageTest(unittest.TestCase):
                     target = home / 'elsewhere.jsonl'
                     target.write_bytes(fixture)
                     path.symlink_to(target)
+                elif case in ('linked-sessions-root', 'linked-dated-folder'):
+                    source = home / 'sessions' if case == 'linked-sessions-root' else path.parent
+                    target = home / 'linked-target'
+                    source.rename(target)
+                    source.symlink_to(target, target_is_directory=True)
                 elif case == 'other-id':
                     path.rename(path.with_name('rollout-2026-10-17T18-54-10-00000000-0000-0000-0000-000000000001.jsonl'))
                 if case in ('reverted', 'archived-reverted'):
