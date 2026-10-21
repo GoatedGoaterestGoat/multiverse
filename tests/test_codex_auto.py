@@ -80,7 +80,7 @@ else:
         """Each inbox_bridge policy and Codex condition picks bridge or plain before any native child starts, starting
         the daemon at most once; fragile because it depends on Codex flags, daemon availability and config/read
         support that change by version, and a wrong pick starts a second native child or silently makes a
-        temporary fallback's delivery refusal final."""
+        temporary fallback's delivery refusal final, or points deleted-daemon recovery at the workspace instead of the default home."""
         with self.subTest('harness auto capability is undecided, not launch-only'):
             for setting, mechanism in (({}, None), ({'inbox_bridge': True}, None),
                                        ({'inbox_bridge': False}, 'launch-only')):
@@ -195,20 +195,27 @@ else:
             values = {'name': 'worker', 'workspace': '/workspace', 'agent_dir': '/outside/state/agent',
                       'bootstrap_json': json.dumps('bootstrap'), 'task': '--literal prompt',
                       'session_id': native_id, 'control_socket': '/tmp/owned/rpc.sock'}
-            context = LaunchContext('spawn', values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'),
-                                    executor=executor, environment={'CODEX_HOME': '/native storage'})
             session = SessionHandle('agent', 'codex', '/workspace', native_id=native_id)
             strict = CodexAdapter.configured('codex', {'inbox_bridge': True})
-            with self.assertRaisesRegex(ValueError, 'deleted working directory') as raised:
-                strict.resume(session, context)
-            self.assertIn('daemon restart', str(raised.exception))
-            self.assertIn("CODEX_HOME='/native storage'", str(raised.exception))
-            self.assertIn('when other Codex work is idle', str(raised.exception))
-            command = CodexAdapter.configured('codex', {}).resume(session, context)
-            self.assertEqual(command.native_mode['mode'], 'plain')
-            self.assertIn('deleted working directory', command.native_mode['fallback_reason'])
-            self.assertIn(native_id, command.argv)
-            self.assertEqual(executor.rpc.call_count, 2, 'Diagnosis must not mutate or restart the daemon')
+            home = self.work / 'fixture-user'
+            for environment, expected in (({'CODEX_HOME': '/native storage'}, "CODEX_HOME='/native storage'"),
+                                          ({'CODEX_HOME': ''}, f'CODEX_HOME={home}/.codex'),
+                                          ({}, f'CODEX_HOME={home}/.codex')):
+                with self.subTest(storage=environment), patch.dict(os.environ, {'HOME': str(home)}):
+                    executor.rpc.reset_mock()
+                    context = LaunchContext('spawn', values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'),
+                                            executor=executor, environment=environment)
+                    with self.assertRaisesRegex(ValueError, 'deleted working directory') as raised:
+                        strict.resume(session, context)
+                    self.assertIn('daemon restart', str(raised.exception))
+                    self.assertIn(expected, str(raised.exception))
+                    self.assertIn('when other Codex work is idle', str(raised.exception))
+                    command = CodexAdapter.configured('codex', {}).resume(session, context)
+                    self.assertEqual(command.native_mode['mode'], 'plain')
+                    self.assertIn('deleted working directory', command.native_mode['fallback_reason'])
+                    self.assertIn(expected, command.native_mode['fallback_reason'])
+                    self.assertIn(native_id, command.argv)
+                    self.assertEqual(executor.rpc.call_count, 2, 'Diagnosis must not mutate or restart the daemon')
 
     def test_resume_reselects_mode_and_preserves_exact_identity(self):
         """Resume may change the mode but keeps the exact native thread, workspace, task and saved CODEX_HOME; a break
