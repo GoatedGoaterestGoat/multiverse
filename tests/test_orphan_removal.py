@@ -50,6 +50,10 @@ class OrphanRemovalTest(BaseTest):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
                     path.unlink()
+                    if path.name == 'ready':
+                        # The next cleanup scan creates .connections.lock in every
+                        # earlier empty launch it visits; do not share that fixture.
+                        path.parent.rmdir()
         with self.subTest('a torn runtime still has a live runner in its cleanup journal'):
             runtime = self.directory / 'runtime.json'
             runtime.write_text('{')
@@ -65,6 +69,8 @@ class OrphanRemovalTest(BaseTest):
             finally:
                 runtime.unlink(missing_ok=True)
                 cleanup.unlink(missing_ok=True)
+                if cleanup.parent.exists():
+                    cleanup.parent.rmdir()
                 if not self.directory.exists():
                     write(self.note, {'leftover': True})
         with self.subTest('main lost-spawn folders contain no startup or session evidence'):

@@ -162,7 +162,8 @@ class MessagingCliTest(BaseTest):
             with patch.object(native, 'send_or_wake', side_effect=refuse):
                 self.output('send', 'third', '--text', secret, code=1)
             for text in (str(directory / 'properties.json'), reason,
-                         'mv2 remove ' + directory.name, 'then spawn a new agent'):
+                         'mv2 resume ' + directory.name + ' --start-fresh',
+                         'to keep this agent with a new conversation'):
                 self.assertIn(text, self.stderr)
             self.assertNotIn(secret, self.stderr)
             self.assertEqual(self.history('third')[-1]['tracking']['submission_state'], 'failed')
