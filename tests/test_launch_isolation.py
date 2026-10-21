@@ -391,6 +391,31 @@ class LaunchIsolationTest(unittest.TestCase):
                                 lifecycle.start(self.root, resume=directory.name)
                             self.assertEqual([None if mask is None else set(mask) for mask in masks], [set(expected) - {'HOME'}, set(expected) - {'HOME'}])
 
+        # Each is independent evidence that a missing transcript may have held
+        # real work. None may become a silent fresh start when another guard changes.
+        from multiverse.runtime.storage_adoption import _never_started
+        for evidence in ('rebound', 'phase', 'sessions.jsonl', 'session.jsonl', 'native-delivery.json',
+                         'claude-receipts/receipt.json', 'request.json', 'ready', 'cleanup.json', 'roles'):
+            with self.subTest(never_started_evidence=evidence):
+                identifier = str(uuid4())
+                directory = self.work / 'never-started-guards' / identifier
+                launch = directory / 'launches' / str(uuid4())
+                launch.mkdir(parents=True)
+                properties = {'id': identifier, 'native_session_id': identifier, 'phase': 'starting'}
+                facts = {'launch_id': launch.name, 'state': 'failed'}
+                write(directory / 'runtime.json', facts)
+                adapter = Mock(session_mode='assigned')
+                self.assertTrue(_never_started(adapter, properties, facts, directory))
+                if evidence == 'rebound':
+                    properties['native_session_id'] = str(uuid4())
+                elif evidence == 'phase':
+                    properties['phase'] = 'working'
+                else:
+                    path = (launch if evidence in ('request.json', 'ready', 'cleanup.json', 'roles') else directory) / evidence
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('{}\n')
+                self.assertFalse(_never_started(adapter, properties, facts, directory))
+
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,
         pages and a partial tail; fragile because of byte-offset arithmetic, and a break silently loses or

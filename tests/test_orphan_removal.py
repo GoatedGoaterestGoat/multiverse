@@ -21,7 +21,8 @@ class OrphanRemovalTest(BaseTest):
     def test_an_orphan_folder_is_removed_only_with_independent_proof(self):
         """A record-free agent folder goes to trash intact only when no exact-tagged terminal or unreadable server
         suggests a live launch, and surviving core evidence never gets the remove hint; fragile because the folder has
-        no record to prove absence, and a wrong removal trashes a running agent (bd3d410)."""
+        no record to prove absence, and a wrong removal trashes a running agent; a torn runtime must not hide the
+        only surviving process proof in its cleanup journal (bd3d410)."""
         pane = {'pane_id': '%1', 'session_id': '$1', 'pane_pid': '123', 'pane_dead': '0',
                 '@mv2_agent_id': self.directory.name,
                 '@mv2_universe_id': read(self.root / 'universe.json')['id'], '@mv2_launch_id': uid()}
@@ -49,6 +50,23 @@ class OrphanRemovalTest(BaseTest):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
                     path.unlink()
+        with self.subTest('a torn runtime still has a live runner in its cleanup journal'):
+            runtime = self.directory / 'runtime.json'
+            runtime.write_text('{')
+            cleanup = self.directory / 'launches' / uid() / 'cleanup.json'
+            write(cleanup, {'schema': 1, 'launch_id': cleanup.parent.name, 'state': 'active', 'pid': 990001})
+            try:
+                with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
+                        patch.object(attachments, '_observation', return_value=(False, None)), \
+                        self.assertRaisesRegex(records.RecordError, 'still closing'):
+                    relocate.remove_agent(self.root, self.directory.name)
+                self.assertTrue(cleanup.exists())
+                self.assertEqual(runtime.read_text(), '{')
+            finally:
+                runtime.unlink(missing_ok=True)
+                cleanup.unlink(missing_ok=True)
+                if not self.directory.exists():
+                    write(self.note, {'leftover': True})
         with self.subTest('main lost-spawn folders contain no startup or session evidence'):
             launch = self.directory / 'launches' / uid()
             launch.mkdir(parents=True)

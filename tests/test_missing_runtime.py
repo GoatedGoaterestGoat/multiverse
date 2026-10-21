@@ -167,10 +167,12 @@ class DiscoveryTest(BaseTest):
                 self.assertNotIn('control_endpoint', facts)
 
     def test_runtime_only_kill_uses_exact_tags_without_inventing_native_authority(self):
-        """A lost properties record must not strand its pane, but recovery must not cancel a guessed conversation or close another generation."""
+        """A lost properties record must not strand its pane, but recovery must not cancel a guessed conversation,
+        close another generation or erase PID proof needed when a child outlives the pane."""
         (self.directory / 'properties.json').unlink()
         (self.launch / 'request.json').unlink()
-        facts = {'launch_id': self.launch.name, 'state': 'running',
+        facts = {'launch_id': self.launch.name, 'state': 'running', 'pid': 990001, 'pid_started': 'saved child',
+                 'runner_pid': 990002, 'runner_started': 'saved runner',
                  'tmux': {'socket': '/recorded.sock', 'session': '$1', 'pane': '%2'}}
         write(self.directory / 'runtime.json', facts)
         for label in ('different launch', 'unreadable server', 'replaced record', 'exact pane'):
@@ -186,10 +188,14 @@ class DiscoveryTest(BaseTest):
                     write(self.directory / 'properties.json', self.properties)
                 return dict(panes), error
             panes = {'%2': pane}
+            def wait(*args, **kwargs):
+                retained = read(self.directory / 'runtime.json')
+                for key in ('pid', 'pid_started', 'runner_pid', 'runner_started'):
+                    self.assertEqual(retained.get(key), facts[key], 'Closing the pane must retain process proof')
             with self.subTest(label=label), patch.object(missing_runtime.Tmux, 'snapshot', snapshot), \
                     patch.object(missing_runtime.Tmux, 'run', side_effect=close) as control, \
                     patch.object(missing_runtime.harnesses, 'load', side_effect=AssertionError('no native identity')), \
-                    patch.object(attachments, 'wait'), patch.object(attachments, 'problem', return_value=None):
+                    patch.object(attachments, 'wait', side_effect=wait), patch.object(attachments, 'problem', return_value=None):
                 if label == 'exact pane':
                     result = lifecycle.kill(self.root, self.directory.name)
                     self.assertEqual(result['state'], 'dormant')
