@@ -416,6 +416,110 @@ class LaunchIsolationTest(unittest.TestCase):
                     path.write_text('{}\n')
                 self.assertFalse(_never_started(adapter, properties, facts, directory))
 
+    def test_explicit_fresh_start_requires_absence_and_retires_the_old_binding(self):
+        """Missing-conversation recovery must preserve the agent but retire its old ID; accepting unknown/present
+        evidence or reusing the old ID can silently strand history or deliver old input into a new conversation."""
+        from multiverse.harnesses.claude import project_key
+        from multiverse.universe import sessions
+        for family in ('claude', 'codex', 'pi'):
+            for evidence in ('absent', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending'):
+                if family != 'codex' and evidence == 'scope-present':
+                    continue
+                with self.subTest(family=family, evidence=evidence):
+                    key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
+                    executable = self.work / (family + '-fresh-fake')
+                    version = '2.1.306 (Claude Code)' if family == 'claude' else 'codex-cli 0.163.0'
+                    executable.write_text(f'#!{sys.executable}\nprint({version!r})\n')
+                    executable.chmod(0o755)
+                    manifest = self.root / 'harnesses' / family / 'harness.json'
+                    definition = read(manifest)
+                    definition['settings'].update(inbox_bridge=False, executable=str(executable))
+                    write(manifest, definition)
+                    directory, properties, _, _ = lifecycle._record(self.root, family + '-fresh-' + evidence, '', family, None, None)
+                    old = str(uuid4())
+                    old_home, caller = (self.work / family / evidence / part for part in ('old', 'caller'))
+                    for home in (old_home, caller):
+                        (home / 'projects').mkdir(parents=True)
+                        (home / 'sessions').mkdir()
+                    properties.update(workspace=str(self.work), native_session_id=old, native_session_home=str(old_home),
+                                      native_storage_environment={key: str(old_home)})
+                    if evidence == 'unproven-pending':
+                        properties['native_fresh_pending'] = True
+                    write(directory / 'properties.json', properties)
+                    launch = str(uuid4())
+                    write(directory / 'runtime.json', {'launch_id': launch, 'state': 'dormant',
+                        'tmux': {'socket': str(self.work / 'fresh-old.sock'), 'session': '$1', 'pane': '%1'}})
+                    write(directory / 'launches' / launch / 'request.json', {'env': {key: str(old_home), 'HOME': str(self.work)}, 'unset_env': []})
+                    append_message(directory, 'keep this inbox', {})
+                    if evidence in ('present', 'scope-present', 'duplicate'):
+                        if family == 'claude':
+                            path = old_home / 'projects' / project_key(str(self.work)) / (old + '.jsonl')
+                            path.parent.mkdir()
+                            path.write_text(json.dumps({'type': 'user', 'sessionId': old}) + '\n')
+                        elif family == 'codex':
+                            path = old_home / 'sessions' / ('rollout-2026-10-21T12-00-00-' + old + '.jsonl')
+                            path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': old}}) + '\n')
+                        else:
+                            (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': old}) + '\n')
+                        if evidence == 'scope-present':
+                            properties.pop('native_session_home')
+                            properties.pop('native_storage_environment')
+                            properties['native_service_identity'] = {'provider': 'codex', 'scope': {'CODEX_HOME': str(old_home)}}
+                            write(directory / 'properties.json', properties)
+                            write(directory / 'launches' / launch / 'request.json', {'env': {}, 'unset_env': []})
+                        if evidence == 'duplicate' and family != 'pi':
+                            copy = caller / path.relative_to(old_home)
+                            copy.parent.mkdir(parents=True, exist_ok=True)
+                            copy.write_bytes(path.read_bytes())
+                    before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
+                    backend = Mock()
+                    backend.environment.side_effect = PermissionError('unreadable server') if evidence == 'unreadable' else {key: str(caller if evidence == 'scope-present' else old_home), 'HOME': str(self.work)}.get
+                    backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
+                    original_lstat = Path.lstat
+                    def lstat(path, *args, **kwargs):
+                        if family == 'pi' and evidence == 'unreadable' and path == directory / 'session.jsonl':
+                            raise PermissionError('unreadable conversation file')
+                        return original_lstat(path, *args, **kwargs)
+                    with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                            patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
+                            patch.object(Path, 'lstat', lstat), \
+                            patch.dict(os.environ, {key: str(caller)}):
+                        if evidence != 'absent':
+                            with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable'):
+                                lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
+                            self.assertEqual({path: path.read_bytes() for path in before}, before)
+                            backend.create.assert_not_called()
+                            continue
+                        result = lifecycle.start(self.root, resume=directory.name, start_fresh=True)
+                    self.assertEqual(result['id'], properties['id'])
+                    self.assertEqual(result['name'], properties['name'])
+                    self.assertEqual((directory / 'inbox.jsonl').read_bytes(), before[directory / 'inbox.jsonl'])
+                    self.assertNotEqual(result.get('native_session_id'), old)
+                    request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                    self.assertEqual(request['env'][key], str(caller))
+                    self.assertNotIn(old, ' '.join(request['argv']))
+                    self.assertEqual(sum('starting fresh' in notice for notice in result['notices']), 1)
+                    self.assertFalse(result['native_fresh_pending'])
+                    with self.subTest('a flipped pending bit cannot start another conversation'):
+                        properties_path = directory / 'properties.json'
+                        published = read(properties_path)
+                        write(properties_path, {**published, 'native_fresh_pending': True})
+                        with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                                self.assertRaisesRegex(ValueError, 'conversation.*published|conversation.*started'):
+                            lifecycle.start(self.root, resume=directory.name)
+                        write(properties_path, published)
+                    rows = sessions.journal(directory)
+                    self.assertEqual((rows[-1]['from'], rows[-1]['reason']), (old, 'missing-conversation'))
+                    if family != 'claude':
+                        with self.assertRaisesRegex(ValueError, 'retired'):
+                            agents.bind_session(self.root, directory.name, old, result['runtime']['launch_id'])
+                        result = agents.bind_session(self.root, directory.name, str(uuid4()), result['runtime']['launch_id'])
+                    self.assertEqual(sessions.effective(directory, result)[0]['native_session_id'], result['native_session_id'])
+                    with sessions.namespace(self.root), self.assertRaises(sessions.SessionConflict):
+                        sessions.claim(self.root, self.work / 'another-agent', properties, old, str(old_home))
+                    self.assertIsNone(lifecycle.native._session_changes(directory, result, old))
+
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,
         pages and a partial tail; fragile because of byte-offset arithmetic, and a break silently loses or

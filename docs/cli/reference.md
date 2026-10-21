@@ -28,7 +28,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`catalog`](#catalog) | List local capabilities without loading their prompts. |
 | [`command`](#command) | Print an exact matching prompt; never execute it. |
 | [`spawn`](#spawn) | Launch an agent in a tagged tmux pane. |
-| [`resume`](#resume) | Resume an agent using its recorded native session. |
+| [`resume`](#resume) | Resume an agent, or explicitly recover its missing native conversation. |
 | [`stop`](#stop) | Alias for kill: end native work, then remove the owned tmux wrapper. |
 | [`kill`](#kill) | End native work and its process, then remove the agent's tmux wrapper. |
 | [`move`](#move) | Move a stopped agent, or a subverse whose agents are all stopped, to another universe. |
@@ -146,16 +146,17 @@ Use at most one of `--task`, `--task-file`.
 
 ## resume
 
-Resume an agent using its recorded native session.
+Resume an agent, or explicitly recover its missing native conversation.
 
 ```sh
-mv2 resume [--model MODEL] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json] agent
+mv2 resume [--model MODEL] [--start-fresh] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--model` | `MODEL` |  |  |
+| `--start-fresh` |  | Recover a missing conversation with a new one, only after every candidate storage proves it absent |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
 | `--json` |  | Print the full launch record as JSON |  |

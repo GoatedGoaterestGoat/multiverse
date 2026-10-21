@@ -61,6 +61,15 @@ mv2 resume worker --model opus --wait
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
+If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
+agent's folder, name and inbox and starts a new conversation in the calling
+shell's storage. It requires a stopped agent and proof that the old conversation
+is absent from every candidate storage home (or the harness's session file).
+Present, duplicate, unreadable or unknown evidence refuses without changing the
+records. The result announces the fresh start. The old ID stays retired in the
+session journal; it is not reused for the new conversation, and old messages are
+not moved into it. This flag does not reset a readable conversation.
+
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 
 Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.

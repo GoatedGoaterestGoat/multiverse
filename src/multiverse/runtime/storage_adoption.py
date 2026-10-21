@@ -113,7 +113,38 @@ def _never_started(adapter, properties, previous, directory):
         return False
 
 
-def discover(adapter, properties, previous, directory, request, ambient, backend, *, recorded=None):
+def prove_missing(adapter, properties, previous, directory, ambient, backend):
+    """An explicit recovery discards no readable or uninspectable conversation."""
+    if getattr(adapter, 'session_mode', None) == 'file':
+        path = directory / 'session.jsonl'
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return Adoption({}, f'Conversation file {str(path)!r} is absent; starting fresh with a new conversation', True)
+        except OSError as error:
+            raise ValueError(f'Cannot verify missing conversation {path}: {error}; restore read access before retrying') from error
+        raise ValueError(f'Conversation file {path} still exists; --start-fresh only recovers a missing conversation')
+    keys = tuple(getattr(adapter, 'storage_env', ()))
+    saved_candidates = []
+    service = properties.get('native_service_identity') or {}
+    if not isinstance(service, dict):
+        raise ValueError('Cannot verify conversation storage: repair the saved native service identity')
+    for source in (properties.get('native_storage_environment'), properties.get('native_environment'),
+                   service.get('scope')):
+        if source and (not isinstance(source, dict) or keys and keys[0] in source or 'HOME' in source):
+            if not isinstance(source, dict):
+                raise ValueError('Cannot verify conversation storage: repair the saved storage record')
+            saved_candidates.append(dict(source))
+    if keys and properties.get('native_session_home'):
+        # This is an evidence candidate only; it does not change the literal
+        # variable's presence in the replacement launch.
+        saved_candidates.append({keys[0]: properties['native_session_home']})
+    return discover(adapter, properties, previous, directory, {}, ambient, backend,
+                    recorded_candidates=saved_candidates, require_absent=True)
+
+
+def discover(adapter, properties, previous, directory, request, ambient, backend, *, recorded=None,
+             recorded_candidates=(), require_absent=False):
     """Adopt exactly one proven candidate, with absence proved in every other home."""
     keys = tuple(getattr(adapter, 'storage_env', ()))
     identifier = previous.get('launch_id')
@@ -135,6 +166,7 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
     candidates = []
     if recorded is not None:
         candidates.append(('saved storage', dict(recorded), properties['workspace']))
+    candidates.extend(('saved storage', source, properties['workspace']) for source in recorded_candidates)
     if historical:
         candidates.append(('launch request', historical, properties['workspace']))
     # A complete global environment distinguishes unset from unknown. An absent
@@ -176,6 +208,15 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
         except Exception as error:
             problems.append(f'{label}: {type(error).__name__}: {error}')
     found = [home for home, (present, _) in homes.items() if present is True]
+    if require_absent:
+        if not problems and not found and homes and caller and all(value[0] is False for value in homes.values()):
+            return Adoption(caller[1], f'Conversation is absent from every candidate storage; starting fresh in '
+                                      f'{caller[0]!r} with a new conversation', True)
+        choices = ', '.join(f'{home!r} ({"present" if present is True else "absent" if present is False else "unknown"})'
+                            for home, (present, _) in homes.items()) or 'no identifiable home'
+        raise ValueError(f'Cannot start fresh: every candidate conversation storage must be readable and absent. '
+                         f'Candidates: {choices}. ' + '; '.join(problems) +
+                         ' Restore access or resume the existing conversation; no records were changed')
     if (not problems and not found and homes and caller and all(value[0] is False for value in homes.values())
             and _never_started(adapter, properties, previous, directory)):
         return Adoption(caller[1],
@@ -189,8 +230,8 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
             f'Candidates: {choices}. ' + ('; '.join(problems) + '. ' if problems else '') +
             f'Resume from a shell whose {variable} points at the home holding this conversation. '
             'Restore access to unreadable candidates and resolve duplicate copies before retrying; no storage was adopted. '
-            'If the conversation is gone and this agent might have run a turn, remove this agent with '
-            f'mv2 remove {properties["id"]}, then spawn a new agent')
+            'If the conversation is gone from every readable candidate, use '
+            f'mv2 resume {properties["id"]} --start-fresh to keep this agent with a new conversation')
     home = found[0]
     selected = homes[home][1]
     return Adoption(selected, f'Adopted the existing conversation storage {home!r} after finding this session there')

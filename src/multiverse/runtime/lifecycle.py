@@ -183,7 +183,9 @@ def plain_fallback(command, error):
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
-          _queue_wake=False, _restart_queue=False):
+          _queue_wake=False, _restart_queue=False, start_fresh=False):
+    if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
+        raise ValueError('--start-fresh requires an explicit resume without a wake prompt')
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
     if (resume_prompt is not None or resume_message_id is not None) and not resume:
@@ -302,7 +304,23 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
         environment = {**ambient, **saved, **target}
         storage_notices = []
-        storage = _storage_environment(adapter, properties, environment, ambient, resume, agent_dir, previous,
+        retired_id = properties.get('native_session_id')
+        fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
+        if start_fresh:
+            terminal = previous.get('tmux') or {}
+            storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
+                                                                  ambient, Tmux(terminal.get('socket'))))
+            # Preparation is still read-only. The old binding is retired only
+            # once the replacement command is valid and ready to be published.
+            for key in agents.sessions.FRESH_FIELDS:
+                properties.pop(key, None)
+            properties['native_session_id'] = uid() if session_mode == 'assigned' else None
+            saved = {}
+            environment = {**ambient, **target}
+        if fresh:
+            mode, session = 'spawn', None
+            values['session_id'] = properties.get('native_session_id') or ''
+        storage = _storage_environment(adapter, properties, environment, ambient, resume and not start_fresh, agent_dir, previous,
                                        storage_notices)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
@@ -324,14 +342,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         properties['native_session_provider'] = provider
         notices = display.notice_lines(missing_notices, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
-                                    fresh_start=not any(item.fresh_start for item in storage_notices)) if resume else [])
-        command = adapter.resume(session, context) if resume else adapter.spawn(context)
+                                    fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
+        command = adapter.resume(session, context) if resume and not fresh else adapter.spawn(context)
         # An adapter may resolve a saved path through a changed symlink. Compare
         # its effective selection with recorded strings, never re-resolve history.
         selected_storage = dict(storage)
         for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
             selected_storage.update({key: selected[key] for key in storage if key in selected})
-        if resume:
+        if resume and not start_fresh:
             recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
                                 **(properties.get('native_storage_environment') or {})}
             for key, value in selected_storage.items():
@@ -347,7 +365,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             command = replace(command, fallback=None)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
-            if resume and properties.get('native_service_identity') not in (None, identity):
+            if resume and not start_fresh and properties.get('native_service_identity') not in (None, identity):
                 raise ValueError('Native service storage/account scope differs from the saved session; '
                                  'resume with the original native storage settings or spawn a new agent')
             properties['native_service_identity'] = identity
@@ -376,7 +394,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env.update(command.shared_service.environment)
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
-        if resume:
+        if start_fresh:
+            properties, retirement = agents.sessions.retire(root, agent_dir, retired_id, properties, launch_id,
+                                                            previous_launch=previous.get('launch_id'))
+            agents._session_event(agent_dir, retirement)
+        elif resume:
             with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
                 current = read(agent_dir / 'properties.json')
                 current.update({key: properties[key] for key in ('model', 'workspace', 'native_environment',
@@ -396,7 +418,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
-              _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
+              _initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery))
+        if fresh:
+            # The replacement launch has now been published. If retirement
+            # crashed earlier, its next resume used spawn preparation above.
+            with lock(agent_dir / '.properties.lock'):
+                properties = read(agent_dir / 'properties.json')
+                properties['native_fresh_pending'] = False
+                write(agent_dir / 'properties.json', properties)
         backend = Tmux(socket_path)
         terminal = None
         progress = None
@@ -450,7 +479,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                     agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
             if command.shared_service:
                 try:
-                    command = _storage_command(adapter.resume(session, context) if resume else adapter.spawn(context), storage)
+                    command = _storage_command(adapter.resume(session, context) if resume and not fresh else adapter.spawn(context), storage)
                     if _recovery:
                         native.validate_recovery_command(command, session)
                         command = replace(command, fallback=None)

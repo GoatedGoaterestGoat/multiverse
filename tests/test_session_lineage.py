@@ -163,7 +163,8 @@ class SessionLineageTest(BaseTest):
 
     def test_append_is_authoritative_after_pointer_write_crashes(self):
         """The journal append stays authoritative when the pointer write crashes; fragile because only a simulated
-        crash reaches that state, and another agent could then claim the session."""
+        crash reaches that state, and another agent could then claim the session; a fresh-start retirement also
+        recovers its new storage and cannot resurrect the old binding while waiting for a reported ID."""
         target = str(uuid4())
         original = sessions.write
         def fail_pointer(path, value):
@@ -180,6 +181,49 @@ class SessionLineageTest(BaseTest):
         self.assertEqual(len(self.rows()), 1)
         self.change(target)
         self.assertEqual(len(self.rows()), 1)
+        for assigned in (False, True):
+            with self.subTest(retirement_assigned=assigned):
+                self.fresh('retired-' + str(assigned))
+                previous = read(self.agent / 'properties.json')
+                target = str(uuid4()) if assigned else None
+                home = self.home + '-replacement'
+                replacement = {**previous, 'native_session_id': target, 'native_session_home': home,
+                               'native_storage_environment': {'PI_CODING_AGENT_DIR': home},
+                               'native_environment': {}, 'native_service_identity': None}
+                def fail_new_pointer(path, value):
+                    if Path(path).name == 'properties.json' and value.get('native_session_id') != self.old:
+                        raise OSError('simulated crash')
+                    return original(path, value)
+                with patch.object(sessions, 'write', side_effect=fail_new_pointer), self.assertRaisesRegex(OSError, 'simulated crash'):
+                    sessions.retire(self.root, self.agent, self.old, replacement, str(uuid4()), previous_launch='launch')
+                retained = read(self.agent / 'properties.json')
+                self.assertEqual({key: retained[key] for key in previous}, previous)
+                # Even before recovering the pointer, neither old nor newly
+                # reserved storage may be skipped by a peer's ownership scan.
+                for identity, scope in ((self.old, self.home), (target, home)):
+                    if identity:
+                        with sessions.namespace(self.root), self.assertRaises(sessions.SessionConflict):
+                            sessions.claim(self.root, other, read(other / 'properties.json'), identity, scope)
+                recovered = agents.session_properties(self.root, self.agent)
+                self.assertEqual(recovered['native_session_id'], target)
+                self.assertEqual(recovered['native_session_home'], home)
+                self.assertEqual(recovered['native_storage_environment'], replacement['native_storage_environment'])
+                self.assertTrue(recovered['native_fresh_pending'])
+                self.assertTrue(sessions.pending_fresh(self.agent, recovered))
+                for identity, scope in ((self.old, self.home), (target, home)):
+                    if identity:
+                        with sessions.namespace(self.root), self.assertRaises(sessions.SessionConflict):
+                            sessions.claim(self.root, other, read(other / 'properties.json'), identity, scope)
+                if not assigned:
+                    target = str(uuid4())
+                    with patch.object(agents, 'write', side_effect=fail_new_pointer), self.assertRaisesRegex(OSError, 'simulated crash'):
+                        agents.bind_session(self.root, self.agent.name, target, 'launch')
+                    self.assertIsNone(read(self.agent / 'properties.json')['native_session_id'])
+                    recovered = agents.session_properties(self.root, self.agent)
+                    self.assertEqual(recovered['native_session_id'], target)
+                    self.assertFalse(recovered['native_fresh_pending'])
+                with self.assertRaisesRegex(ValueError, 'retired'):
+                    agents.rebind_session(self.root, self.agent.name, target, self.old, 'detected', 'launch', home=home)
 
     def test_two_agents_cannot_claim_one_session_concurrently(self):
         """Two processes cannot claim one session at once; fragile because only real concurrency exposes the

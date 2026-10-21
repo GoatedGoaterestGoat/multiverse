@@ -1,5 +1,13 @@
 # Troubleshooting
 
+You can still use `inbox --agent NAME` and `report --agent NAME` as the operator
+when an agent's runtime record is damaged. These commands do not repair that
+record; callbacks from an agent still require their verified identity.
+
+A leftover folder with damaged records may conservatively reserve a name when
+that text appears in a surviving record. Inspect or repair the named folder, or
+use `mv2 remove UUID` to move it to the trash after its normal liveness checks.
+
 Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
 
 ## Start here
@@ -95,9 +103,9 @@ env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 i
 
 `Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.
 
-Connected Codex tools do not carry a launch ID. Their `report`, `inbox` and message sender use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
+Current launches omit the launch ID from connected Codex tools; older loaded conversations can retain it. Their data callbacks use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
 
-If a connected Codex conversation says it still has values from before the update, restart it as described in [updating](updating.md). No other client should be attached during that restart. Do not work around the error by copying identity values into the old conversation.
+Use the current mv2 installation for an older connected Codex conversation. Its own retained bridge request and current conversation proof can authorize data callbacks without replacing cached tool settings. Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves; restarting the frontend does not guarantee fresh settings. A separate old checkout still runs old code. If the current installation refuses the identity, inspect the saved records; do not copy identity values into the conversation. See [the upgrade rules](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### A name is taken or ambiguous
 
@@ -142,6 +150,7 @@ Every message is saved before delivery, so nothing is lost. What to do depends o
 | `Launched without compaction: compaction.json has not been converted: ...` | This is not launch-only. The connection works, but an old `compaction.json` hasn't been converted yet. Run `mv2 plugins migrate --apply`, then kill and resume the agent. |
 | `plugin compaction was left out: its settings cannot be used: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable, so Claude's own `/compact` applies. `mv2 doctor` names the problem, so fix it and relaunch. |
 | `Claude has no saved conversation for this session: the agent was stopped before its first message, ...` | This is not launch-only. There was nothing to resume, so the agent started fresh under the same session ID. `mv2 resume` prints the same line. |
+| `Cannot prove unique conversation storage` | Resume from the shell whose storage variable points at the real conversation. If every known candidate is readable and the conversation is absent everywhere, use `mv2 resume NAME --start-fresh` to keep the agent and inbox with a new conversation. This never discards readable history. |
 | `Claude's saved conversation for this session is missing (Claude deletes conversations older than its cleanupPeriodDays setting): ...` | This is not launch-only. The agent had a conversation, but Claude's file for it is gone, so it started fresh without its earlier context. `mv2 resume` prints the same line. mv2 tells the two cases apart from its delivery receipts, the context the agent last reported, and Claude's prompt history. To keep conversations, set a large `cleanupPeriodDays` in Claude's settings. |
 
 Sometimes a connected launch never becomes ready: `--wait` times out, and sends report `messaging is not connected for this session`. The launch may be waiting at a Claude login or workspace trust prompt. Attach and answer it.

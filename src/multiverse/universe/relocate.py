@@ -85,11 +85,10 @@ def _session_namespaces(stack, *roots):
 def _session_claims(root, directory):
     data, rows = sessions.effective(directory, read(directory / 'properties.json'))
     data['native_session_provider'] = sessions.provider(directory.parents[2], data)
-    claims = {(data.get('native_session_id'), data.get('native_session_home')),
-              *((row[key], row['home']) for row in rows for key in ('from', 'to'))}
+    claims = sessions.claims(data, rows)
     for native_id, home in claims:
         if native_id:
-            sessions.claim(root, directory, data, native_id, home)
+            sessions.claim(root, directory, {**data, 'native_session_home': home}, native_id, home)
     return data
 
 

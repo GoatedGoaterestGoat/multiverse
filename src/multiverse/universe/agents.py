@@ -116,8 +116,9 @@ def name_matches(path, name):
             raise records.RecordError(path, f'Cannot check {owner}: cannot read safely ({unreadable}); '
                                       f'{remedy} before retrying') from error
         if mentioned:
-            raise records.RecordError(path, f'Cannot check {owner}: damaged record mentions name {name!r}; '
-                                      'repair it before retrying') from error
+            raise records.RecordError(path.parent, f'Cannot check {owner}: a surviving damaged record contains '
+                                      f'{name!r}, so mv2 cannot prove the name is free. Repair the records, or use '
+                                      f'mv2 remove {path.parent.name} to move this leftover agent to the trash before retrying') from error
         return False
 
 
@@ -272,10 +273,14 @@ def _bind_session_locked(root, agent_dir, session_id, launch_id):
             raise ValueError("Outdated launch")
         data, _ = sessions.recover(agent_dir, read(agent_dir / "properties.json"))
         session_id = normalize_session_id(session_id)
+        sessions.require_unretired(agent_dir, session_id)
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
         sessions.claim(root, agent_dir, data, session_id, operation="bind")
+        sessions.record_initial_binding(agent_dir, data, session_id, launch_id)
         data.update(native_session_id=session_id, updated_at=now())
+        if data.get('native_fresh_pending'):
+            data['native_fresh_pending'] = False
         if data.get('agent_identity'):
             data['agent_identity'] = {**data['agent_identity'], 'native_id': session_id}
         write(agent_dir / "properties.json", data)
