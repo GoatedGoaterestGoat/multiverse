@@ -798,7 +798,7 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
         candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
         terminal = previous.get('tmux') or {}
-        adoption = storage_adoption.discover(adapter, properties, previous, directory, request, ambient,
+        adoption = storage_adoption.discover(adapter, properties, previous, directory, ambient,
                                             Tmux(terminal.get('socket')), recorded=candidate_recorded)
         adopted = dict(adoption.environment)
         if own_keys and adopted.get(own_keys[0]):

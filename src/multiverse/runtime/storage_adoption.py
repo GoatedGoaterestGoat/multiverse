@@ -2,6 +2,7 @@
 from pathlib import Path
 from dataclasses import dataclass
 import os
+import stat
 
 from ..harnesses.types import SessionHandle
 from ..universe import storage as records
@@ -26,6 +27,9 @@ def _candidate_home(adapter, environment, base):
     selected = dict(environment)
     home = selected.get('HOME')
     if home is not None and (not isinstance(home, str) or not Path(home).is_absolute() or '\0' in home):
+        return None, selected
+    if any(value is not None and (not isinstance(value, str) or '\0' in value)
+           for key in keys for value in (selected.get(key),)):
         return None, selected
     if not home and not (keys and selected.get(keys[0])):
         return None, selected
@@ -113,9 +117,63 @@ def _never_started(adapter, properties, previous, directory):
         return False
 
 
+def _launch_environments(directory, keys):
+    """Read storage evidence from every retained request, without granting launch authority."""
+    launches = directory / 'launches'
+    try:
+        entries = sorted(launches.iterdir())
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise ValueError(f'Cannot verify conversation storage: cannot read {launches}: {error}') from error
+    environments = []
+    for launch in entries:
+        path = launch / 'request.json'
+        try:
+            if not stat.S_ISDIR(launch.lstat().st_mode):
+                raise ValueError(f'Cannot verify conversation storage: {launch} is not a regular launch directory')
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                continue  # Failed preparations need not have published a request.
+            if not stat.S_ISREG(mode):
+                raise ValueError(f'Cannot verify conversation storage: {path} is not a regular request file')
+            request = agent_records.properties(path)
+        except (OSError, agent_records.RecordError) as error:
+            raise ValueError(f'Cannot verify conversation storage: repair or restore read access to {path}: {error}') from error
+        env, unset = request.get('env', {}), request.get('unset_env', [])
+        if (not isinstance(env, dict) or not isinstance(unset, list)
+                or any(not isinstance(key, str) or '\0' in key for key in unset)
+                or any(key in env and (not isinstance(env[key], str) or '\0' in env[key]) for key in (*keys, 'HOME'))):
+            raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
+        selected = records.request_environment(request, (*keys, 'HOME'))
+        if selected:
+            environments.append((f'launch request {path}', selected))
+    return environments
+
+
+def _saved_environments(properties, keys):
+    service = properties.get('native_service_identity', {})
+    if not isinstance(service, dict):
+        raise ValueError('Cannot verify conversation storage: repair the saved native service identity')
+    candidates = []
+    for source in (properties.get('native_storage_environment'), properties.get('native_environment'), service.get('scope')):
+        if source is None:
+            continue
+        if not isinstance(source, dict):
+            raise ValueError('Cannot verify conversation storage: repair the saved storage record')
+        if keys and keys[0] in source or 'HOME' in source:
+            candidates.append(dict(source))
+    if keys and properties.get('native_session_home') is not None:
+        # An evidence candidate only, not the replacement launch's literal variable.
+        candidates.append({keys[0]: properties['native_session_home']})
+    return candidates
+
+
 def prove_missing(adapter, properties, previous, directory, ambient, backend):
     """An explicit recovery discards no readable or uninspectable conversation."""
     if getattr(adapter, 'session_mode', None) == 'file':
+        _launch_environments(directory, tuple(getattr(adapter, 'storage_env', ())))
         path = directory / 'session.jsonl'
         try:
             path.lstat()
@@ -124,51 +182,17 @@ def prove_missing(adapter, properties, previous, directory, ambient, backend):
         except OSError as error:
             raise ValueError(f'Cannot verify missing conversation {path}: {error}; restore read access before retrying') from error
         raise ValueError(f'Conversation file {path} still exists; --start-fresh only recovers a missing conversation')
-    keys = tuple(getattr(adapter, 'storage_env', ()))
-    saved_candidates = []
-    service = properties.get('native_service_identity') or {}
-    if not isinstance(service, dict):
-        raise ValueError('Cannot verify conversation storage: repair the saved native service identity')
-    for source in (properties.get('native_storage_environment'), properties.get('native_environment'),
-                   service.get('scope')):
-        if source and (not isinstance(source, dict) or keys and keys[0] in source or 'HOME' in source):
-            if not isinstance(source, dict):
-                raise ValueError('Cannot verify conversation storage: repair the saved storage record')
-            saved_candidates.append(dict(source))
-    if keys and properties.get('native_session_home'):
-        # This is an evidence candidate only; it does not change the literal
-        # variable's presence in the replacement launch.
-        saved_candidates.append({keys[0]: properties['native_session_home']})
-    return discover(adapter, properties, previous, directory, {}, ambient, backend,
-                    recorded_candidates=saved_candidates, require_absent=True)
+    return discover(adapter, properties, previous, directory, ambient, backend, require_absent=True)
 
 
-def discover(adapter, properties, previous, directory, request, ambient, backend, *, recorded=None,
-             recorded_candidates=(), require_absent=False):
+def discover(adapter, properties, previous, directory, ambient, backend, *, recorded=None, require_absent=False):
     """Adopt exactly one proven candidate, with absence proved in every other home."""
     keys = tuple(getattr(adapter, 'storage_env', ()))
-    identifier = previous.get('launch_id')
-    path = directory / 'launches' / identifier / 'request.json' if identifier else None
-    try:
-        if path is not None:
-            path.stat()
-    except FileNotFoundError:
-        pass  # A missing request supplies no candidate.
-    else:
-        # The general reader tolerates missing/damaged historical evidence.
-        # Adoption cannot treat an unreadable candidate location as absent.
-        request = agent_records.properties(path) if path is not None else {}
-        env, unset = request.get('env', {}), request.get('unset_env', [])
-        if (not isinstance(env, dict) or not isinstance(unset, list)
-                or any(key in env and not isinstance(env[key], str) for key in (*keys, 'HOME'))):
-            raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
-    historical = records.request_environment(request, (*keys, 'HOME'))
     candidates = []
     if recorded is not None:
         candidates.append(('saved storage', dict(recorded), properties['workspace']))
-    candidates.extend(('saved storage', source, properties['workspace']) for source in recorded_candidates)
-    if historical:
-        candidates.append(('launch request', historical, properties['workspace']))
+    candidates.extend(('saved storage', source, properties['workspace']) for source in _saved_environments(properties, keys))
+    candidates.extend((label, source, properties['workspace']) for label, source in _launch_environments(directory, keys))
     # A complete global environment distinguishes unset from unknown. An absent
     # server supplies no candidate, while an unreadable server prevents proof.
     problems = []
@@ -192,7 +216,7 @@ def discover(adapter, properties, previous, directory, request, ambient, backend
             if home is None:
                 # A partial old request with no home is not a new location to
                 # scan. It cannot supply a default from this checking process.
-                if label != 'launch request':
+                if not label.startswith('launch request ') or environment.get('HOME') or keys and environment.get(keys[0]):
                     problems.append(f'{label} does not identify a storage home')
                 continue
             if label == 'calling shell':

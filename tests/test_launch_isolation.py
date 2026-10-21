@@ -417,13 +417,17 @@ class LaunchIsolationTest(unittest.TestCase):
                 self.assertFalse(_never_started(adapter, properties, facts, directory))
 
     def test_explicit_fresh_start_requires_absence_and_retires_the_old_binding(self):
-        """Missing-conversation recovery must preserve the agent but retire its old ID; accepting unknown/present
-        evidence or reusing the old ID can silently strand history or deliver old input into a new conversation."""
+        """Fresh recovery must reject unknown or present history and retire only a proven missing conversation, or history and saved input can be stranded."""
         from multiverse.harnesses.claude import project_key
         from multiverse.universe import sessions
         for family in ('claude', 'codex', 'pi'):
-            for evidence in ('absent', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending'):
+            for evidence in ('absent', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
+                             'history-damaged-runtime', 'history-missing-runtime', 'history-new-preparation',
+                             'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment'):
                 if family != 'codex' and evidence == 'scope-present':
+                    continue
+                historical = evidence.startswith('history-')
+                if historical and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -451,7 +455,27 @@ class LaunchIsolationTest(unittest.TestCase):
                         'tmux': {'socket': str(self.work / 'fresh-old.sock'), 'session': '$1', 'pane': '%1'}})
                     write(directory / 'launches' / launch / 'request.json', {'env': {key: str(old_home), 'HOME': str(self.work)}, 'unset_env': []})
                     append_message(directory, 'keep this inbox', {})
-                    if evidence in ('present', 'scope-present', 'duplicate'):
+                    if historical:
+                        properties.pop('native_session_home')
+                        properties.pop('native_storage_environment')
+                        write(directory / 'properties.json', properties)
+                        if evidence == 'history-missing-runtime':
+                            (directory / 'runtime.json').unlink()
+                        else:
+                            write(directory / 'runtime.json', {'launch_id': launch if evidence == 'history-damaged-runtime' else str(uuid4()),
+                                  'state': 'invalid' if evidence == 'history-damaged-runtime' else 'failed'})
+                    old_request = directory / 'launches' / launch / 'request.json'
+                    if evidence.startswith('older-'):
+                        # The current request is readable; only an older one is damaged.
+                        latest = str(uuid4())
+                        write(directory / 'runtime.json', {'launch_id': latest, 'state': 'dormant',
+                              'tmux': {'socket': str(self.work / 'fresh-old.sock'), 'session': '$1', 'pane': '%1'}})
+                        write(directory / 'launches' / latest / 'request.json', {'env': {key: str(caller), 'HOME': str(self.work)}})
+                        if evidence == 'older-damaged-request':
+                            old_request.write_text('{')
+                        elif evidence == 'older-invalid-environment':
+                            write(old_request, {'env': {key: None}})
+                    if evidence in ('present', 'scope-present', 'duplicate') or historical:
                         if family == 'claude':
                             path = old_home / 'projects' / project_key(str(self.work)) / (old + '.jsonl')
                             path.parent.mkdir()
@@ -473,22 +497,35 @@ class LaunchIsolationTest(unittest.TestCase):
                             copy.write_bytes(path.read_bytes())
                     before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
                     backend = Mock()
-                    backend.environment.side_effect = PermissionError('unreadable server') if evidence == 'unreadable' else {key: str(caller if evidence == 'scope-present' else old_home), 'HOME': str(self.work)}.get
+                    backend.snapshot.return_value = ({}, None)
+                    backend.environment.side_effect = PermissionError('unreadable server') if evidence == 'unreadable' else {key: str(caller if historical or evidence == 'scope-present' else old_home), 'HOME': str(self.work)}.get
                     backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
                     original_lstat = Path.lstat
+                    original_read = Path.read_bytes
+                    def read_bytes(path):
+                        if evidence == 'older-unreadable-request' and path == old_request:
+                            raise PermissionError('unreadable older request')
+                        return original_read(path)
                     def lstat(path, *args, **kwargs):
                         if family == 'pi' and evidence == 'unreadable' and path == directory / 'session.jsonl':
                             raise PermissionError('unreadable conversation file')
                         return original_lstat(path, *args, **kwargs)
                     with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                            patch('multiverse.runtime.missing_runtime.Tmux', return_value=backend), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
+                            patch.object(Path, 'read_bytes', read_bytes), \
                             patch.dict(os.environ, {key: str(caller)}):
                         if evidence != 'absent':
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable'):
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
-                            self.assertEqual({path: path.read_bytes() for path in before}, before)
+                            self.assertEqual({path: original_read(path) for path in before}, before)
+                            self.assertFalse((directory / 'sessions.jsonl').exists())
                             backend.create.assert_not_called()
+                            if historical:
+                                resumed = lifecycle.start(self.root, resume=directory.name)
+                                self.assertEqual(resumed['native_session_id'], old)
+                                self.assertEqual(resumed['native_session_home'], str(old_home))
                             continue
                         result = lifecycle.start(self.root, resume=directory.name, start_fresh=True)
                     self.assertEqual(result['id'], properties['id'])

@@ -104,9 +104,16 @@ variables, so a child harness keeps the expected home.
 
 Older Claude and Codex agents may lack a storage snapshot. Existing proven
 Codex service scopes or explicit launch requests remain usable. Otherwise mv2
-looks for that exact conversation in candidate homes from the saved launch
-request, the calling shell (or its harness default), and the old tmux server's
-global environment. Each terminal variable is read whole, including embedded
+looks for that exact conversation in candidate homes from every retained launch
+request, the saved storage map, session home and service scope, the calling shell
+(or its harness default), and the old tmux server's global environment. Missing
+or damaged runtime authority does not discard this storage evidence or restore
+permission to control an old process. An unreadable or damaged retained request
+blocks adoption and `--start-fresh`; recovery requires readable absence in every
+candidate, even when the latest launch failed before publishing its request.
+An old request recording neither a storage location nor `HOME` adds no location
+of its own; mv2 still checks the calling shell and available terminal server.
+Each terminal variable is read whole, including embedded
 newlines and trailing whitespace; unreadable or ambiguous escaped output blocks adoption. The adapter
 reads Claude's session transcript or Codex's
 rollout metadata; it starts no native process. Exactly one home must contain the
