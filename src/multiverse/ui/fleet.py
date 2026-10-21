@@ -154,6 +154,8 @@ class FleetView:
             return
         if row:
             content = self.scope_trail(row)
+            if row.get("focus"):
+                content += " · ◉ " + clean(row["focus_line"])
             content += " · " + clean(row.get("summary") or row.get("description") or "n new agent · g new subverse")
             self.update_selection(content)
         else:

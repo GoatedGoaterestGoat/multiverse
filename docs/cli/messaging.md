@@ -35,7 +35,9 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 | `follow-up` | The next thing to do | After the current turn ends |
 | `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` for a new task, when they want a quick reply, or to return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. A follow-up reply arrives as a prompt, not in the inbox, so an agent waits for one by ending its turn rather than with `mv2 inbox --wait`. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
+
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. The one exception is a `steer` or `follow-up` message to a [focused](#focus-an-agent) agent, which is refused and not saved. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
@@ -60,6 +62,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
 | `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
+| `Not sent: NAME is focused until …` | The agent is [focused](#focus-an-agent), so nothing was saved | Send it again with `--delivery inbox-only`, or wait until it unfocuses |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
@@ -106,6 +109,37 @@ until its message is confirmed in the conversation. The check reports an entry
 that is still queued without resending it. `--retry` selects definite failures;
 it never resends an accepted or uncertain submission.
 
+## Focus an agent
+
+An agent whose reply needs the user's answer focuses itself before it ends its turn. While it is focused, other agents' messages can't start new work and bury the question.
+
+```sh
+mv2 focus --turn       # until its next turn ends
+mv2 focus --for 20m    # for a time such as 5m, 20m, 1h or 1h30m, at most 1d
+mv2 focus              # until mv2 unfocus
+mv2 unfocus            # end it, and say how many unread inbox messages wait
+```
+
+While an agent is focused:
+
+- `steer` and `follow-up` messages to it are refused. Nothing is saved, `send` exits 1, and its result says to send `--delivery inbox-only` instead.
+- `inbox-only` messages are saved as usual.
+- `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
+- What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
+- One exception for now: a `steer` or `follow-up` that was sent before the focus began, to an agent that was still starting, is delivered once the agent is up.
+
+`unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
+
+A turn focus ends when the agent's status next goes from working or waiting to idle:
+
+- **An agent that focuses itself, or one you focus while it is working,** finishes its current turn first. The focus ends with the turn after it, which takes your answer.
+- **One you focus while it is waiting on you or idle** has its focus end with the turn that takes your answer: for a permission prompt, that is the current turn.
+- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, and one that delivers a message accepted before the focus. While background work runs, focus with `--for` instead.
+
+A turn focus needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`. Use `--for` then.
+
+Inside an agent, `focus` and `unfocus` act on the agent itself, and an agent can't change another agent's focus. You can name any agent, as in `mv2 focus worker --for 1h`, or press `f` in the [dashboard](../reference/dashboard.md#message-focus-kill-and-resume). `mv2 list`, `mv2 inspect` and the agent's tmux bar show who is focused and until when.
+
 ## Read an inbox
 
 Agents check their inbox at startup, between steps and before finishing. You can read any agent's inbox too.
@@ -134,7 +168,7 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
 
 ## Inside Claude and Pi sessions
 

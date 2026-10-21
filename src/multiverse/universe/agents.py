@@ -1,7 +1,7 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
-from . import sessions, records
+from . import focus, sessions, records
 import fcntl
 import re
 
@@ -226,6 +226,10 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
             data['delivery_error'] = data['reason']
             data['status'] = 'unknown'
         write(agent_dir / "runtime.json", data)
+        # A turn ends when the harness goes idle from working or waiting on the person. Under the lock,
+        # so a focus --turn, which reads the status under it too, is ordered with this turn end.
+        if data.get('status') == 'idle' and before in ('working', 'waiting'):
+            focus.turn_ended(agent_dir)
     if data.get('status') != before:
         # After the lock: recording an event never holds up the runtime record.
         _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})

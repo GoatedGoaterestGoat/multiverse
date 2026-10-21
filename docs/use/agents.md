@@ -47,6 +47,12 @@ The header counts live agents and agents waiting for you, so you can leave the d
 
 `working` and `waiting` need a live connection to the harness; see [harnesses](harnesses.md). Without one, the status is `unknown`.
 
+## Keep a question on top
+
+An agent that asks you something focuses itself before it ends its turn. A focused agent shows a `◉` after its name. Other agents can't interrupt it until you answer: mv2 refuses their steer and follow-up messages, and only inbox-only ones reach it. Answer in its terminal, which a focus never blocks.
+
+Press `f` on an agent to focus it yourself, for a time or until its next turn ends. Press `f` again to unfocus it. [Focus an agent](../cli/messaging.md#focus-an-agent) explains what a focus refuses.
+
 ## Stop, resume and clean up
 
 - **`K`** stops an agent after you confirm. Its conversation stays on disk.

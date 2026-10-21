@@ -39,6 +39,9 @@ EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
 CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context"})
+# Core items added after 1.8, which keeps 1.x manifests valid: a plugin's item with one of these names
+# is not shown, and doctor says why, but its manifest stays valid.
+LATER_CORE_ITEMS = frozenset({"focus"})
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 PERMISSIONS = {
     "agents.read": "read this universe's agents: names, state, reported work, terminal tails and usage",

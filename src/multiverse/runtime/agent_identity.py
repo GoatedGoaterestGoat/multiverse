@@ -57,11 +57,12 @@ class AgentActor:
         return {'agent_id': self.identity, 'universe': str(self.root), 'name': self.name}
 
 
-def sender_actor(environment=None):
+def sender_actor(environment=None, *, acting="send"):
     """Stable conversation authority, or the exact current legacy launch.
 
     A launch-strict sender cannot fall through to an operator merely because it
     predates saved identity policies. No process observation or adoption occurs.
+    `acting` names what the caller does as this agent, for the refusals.
     """
     env = os.environ if environment is None else environment
     caller = actor(env)
@@ -71,7 +72,7 @@ def sender_actor(environment=None):
         return None
     if any(not isinstance(env.get(key), str) or not env[key]
            for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')):
-        raise ValueError('Calling agent identity is incomplete; cannot send as this agent')
+        raise ValueError(f'Calling agent identity is incomplete; cannot {acting} as this agent')
     from ..universe import agents, records
     root = Path(env['MV2_UNIVERSE']).resolve()
     identity = normalize_session_id(env['MV2_AGENT_ID'])
@@ -82,7 +83,7 @@ def sender_actor(environment=None):
             or Path(env['MV2_AGENT_DIR']).resolve() != directory.resolve()):
         raise ValueError('Calling agent identity does not match its saved record')
     if agents.runtime(directory).get('launch_id') != env['MV2_LAUNCH_ID']:
-        raise ValueError('Outdated launch; refusing to send as this agent')
+        raise ValueError(f'Outdated launch; refusing to {acting} as this agent')
     return AgentActor(root, directory, identity, properties['name'])
 
 

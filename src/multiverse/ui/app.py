@@ -92,7 +92,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New agent"), Binding("g", "subverse", "New subverse"),
-        Binding("m", "message", "Message"), Binding("p", "preview", "Inspector"), Binding("x", "cut", "Move"), Binding("K", "kill", "Kill"),
+        Binding("m", "message", "Message"), Binding("f", "toggle_focus", "Focus", show=False), Binding("p", "preview", "Inspector"),
+        Binding("x", "cut", "Move"), Binding("K", "kill", "Kill"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), 
@@ -197,6 +198,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 return True  # the action itself says why a damaged record cannot be acted on (or goes on, if kill can recover it)
             eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
             return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
+        if action == "toggle_focus":
+            return bool(self.ready() and self.selected)
         if action == "filter":
             # Handle the opening slash before buffered keys are forwarded to
             # the old widget, but leave literal slashes in editors and drafts.
@@ -255,7 +258,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         limits = rate_limits(self.snapshot["agents"])
         failures = self.plugin_service.error_count() + len((self.host or {}).get("stopped") or ())
         line = Text((limits + " · " if limits else "")
-                    + f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents'
+                    + f'{totals["alive"]} live · {totals["waiting"]} waiting · '
+                    + (f'{totals["focused"]} focused · ' if totals.get("focused") else '')
+                    + f'{totals["blocked"]} blocked · {totals["total"]} agents'
                     + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
         if self.host and self.host.get("needed") and not self.host.get("running"):
             line.append(" · host off", style=theme.PEACH)
@@ -681,8 +686,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
-                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("launch_mode", "LAUNCH MODE"),
-                      ("fallback_reason", "FALLBACK"), ("reason", "OBSERVATION"),
+                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("focus_line", "FOCUS"),
+                      ("launch_mode", "LAUNCH MODE"), ("fallback_reason", "FALLBACK"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None

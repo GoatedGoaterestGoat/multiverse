@@ -1,6 +1,6 @@
 """Show an agent's key facts and the end of its live terminal."""
 import re
-from ..universe import agents
+from ..universe import agents, focus
 from ..runtime import lifecycle
 from .. import universe
 from ..display import error_text, label, mode, state, notice_lines
@@ -61,7 +61,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     if json:
         result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
                 "status": row.get("status"), "phase": row.get("phase"), "summary": row.get("summary", ""),
-                "error": error, "fallback": fallback, "terminal": capture if capture else None, "note": note}
+                "error": error, "fallback": fallback, "focus": row.get("focus"),
+                "terminal": capture if capture else None, "note": note}
         if damage:
             result['damaged'] = damage
         if notices:
@@ -80,6 +81,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
         out.append(row['delivery_problem'])
     if row.get('recovery_note'):
         out.append('Note: Reconnected automatically.')
+    if row.get('focus'):
+        out.append(f"Focused {focus.ends(row['focus'])}: it takes only inbox-only messages.")
     shown = tail(capture, lines)
     if shown:
         out += ["", f"Terminal (last {len(shown)} lines):", *shown]

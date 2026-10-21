@@ -12,6 +12,7 @@
     "items": {
       "agent": true,
       "harness": true,
+      "focus": true,
       "status": false,
       "phase": true,
       "summary": false,

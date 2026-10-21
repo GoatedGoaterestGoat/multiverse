@@ -15,7 +15,7 @@ from .tools._common import add_universe, output
 # Harness integrations report status with `python -m multiverse.tools.runtime_update`;
 # it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "report",
+            "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "focus", "unfocus", "report",
             "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor",
             "refresh", "update", "plugins")
 

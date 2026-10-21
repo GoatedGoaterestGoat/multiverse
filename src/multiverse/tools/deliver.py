@@ -2,7 +2,7 @@
 import sys
 from .. import display, store, universe
 from ..runtime import native
-from ..universe import agents, mailbox
+from ..universe import agents, focus, mailbox
 from ._common import delivery_summary
 from ._messaging import delivery_line
 
@@ -24,9 +24,14 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     name = store.read(directory / 'properties.json')['name']
     launch_id = agents.runtime(directory).get('launch_id')
     native_id = store.read(directory / 'properties.json').get('native_session_id')
+    history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
+    held = focus.current(directory) if retry else None
+    if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
+                    and message['tracking']['submission_state'] in ('failed', 'launch-only') for message in history):
+        return _focused(name, held, [], _present_error or _present)
     results = []
     finalized = 0
-    for message in mailbox.inbox(directory, limit=None, all_messages=True)['messages']:
+    for message in history:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']
@@ -55,6 +60,11 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 receipt = final
             elif retry:
                 with store.lock(directory / '.send.lock'):
+                    # A focus takes the send lock to start, so one that started after the check above stops
+                    # the retry here, before anything more is submitted.
+                    held = focus.current(directory)
+                    if held:
+                        return _focused(name, held, results, _present_error or _present)
                     if state == 'launch-only' and not native.reopen_launch_only(root, directory, message['id']):
                         finalized += 1
                         continue
@@ -89,6 +99,14 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results),
             **({'finalized': finalized} if finalized else {})}
+
+
+def _focused(name, held, results, present):
+    """A retry refused, or stopped part way, because the recipient is focused."""
+    reason = f'{name} is focused {focus.ends(held)} and takes only inbox-only messages; retry after it unfocuses.'
+    if present:
+        present(f'{"The rest were not retried" if results else "Not retried"}: {reason}')
+    return {'messages': results, 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held}
 
 
 def cli_run(root=None, *, json=False, **options):

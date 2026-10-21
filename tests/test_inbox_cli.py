@@ -106,7 +106,12 @@ class InboxCliTest(BaseTest):
             spawned.assert_not_called()  # The count is taken in this process.
             ran.assert_not_called()
             self.assertIn(f'{remaining} unread inbox message', line)
+            self.assertNotIn('address', line)
             unchanged('report')
+            # Done ends the task, so the line sends the agent to what waits instead of letting it stop.
+            line = report.cli_run(self.root, agent=self.agent, phase='done')
+            self.assertIn(f'{remaining} unread inbox messages: read them now with mv2 inbox and address them', line)
+            unchanged('report done')
             doctor.run(self.root)
             unchanged('doctor')
             self.assertEqual(json.loads(self.output('--json')), peek)

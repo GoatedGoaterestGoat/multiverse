@@ -16,7 +16,7 @@ from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
-from ..universe import agents, catalog, mailbox, records
+from ..universe import agents, catalog, focus, mailbox, records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import native, attachments, agent_identity, registration, missing_runtime
@@ -145,7 +145,7 @@ def listing(root, recursive=False, only=None):
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
-                             "runtime": facts}))
+                             "focus": focus.current(path.parent), "runtime": facts}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
             except Exception as error:  # content no reader expected: this agent's row says so, the others still list

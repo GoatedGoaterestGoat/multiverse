@@ -3,17 +3,20 @@
 The wrapper invokes this file with exact root, agent, launch and adapter-family
 arguments; tmux's command environment need not belong to the displayed agent.
 """
+from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import re
+import stat
 import sys
 import unicodedata
 
 
 DEFAULTS = {
     'refresh_seconds': 2,
-    'items': {'agent': True, 'harness': True, 'status': False, 'phase': True,
+    'items': {'agent': True, 'harness': True, 'focus': True, 'status': False, 'phase': True,
               'summary': False, 'inbox': True, 'context': False},
     'harnesses': {'codex': {'items': {'status': True}},
                   'claude': {'items': {'phase': False, 'inbox': False}}},
@@ -25,6 +28,7 @@ READ_LIMIT = 1024 * 1024
 ITEM_NAME = re.compile(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*')
 ITEM_NAME_LENGTH = 40
 ITEM_READ_LIMIT = 1024
+FOCUS_LONGEST = 86400  # universe.focus.LONGEST: a later `until` is damage, not a focus
 ITEM_LENGTH = 200
 # Only the items this bar draws itself: `compaction`, a core item of the Claude line, is a plugin's here.
 CORE_ITEMS = frozenset(DEFAULTS['items'])
@@ -38,8 +42,16 @@ def object_value(value):
 
 def read_object(path):
     try:
-        with Path(path).open('rb') as source:
-            data = source.read(READ_LIMIT + 1)
+        # Non-blocking, so a FIFO in a record's place never hangs the bar. The descriptor is closed here:
+        # wrapping a directory's would fail and leak it.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return {}
+            with os.fdopen(descriptor, 'rb', closefd=False) as source:
+                data = source.read(READ_LIMIT + 1)
+        finally:
+            os.close(descriptor)
         return object_value(json.loads(data)) if len(data) <= READ_LIMIT else {}
     except (OSError, ValueError, TypeError, RecursionError):
         return {}
@@ -135,6 +147,33 @@ def unread(directory):
         return None
 
 
+def focus_text(directory):
+    """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts.
+
+    universe.focus owns the file; this follows its `active` rules for a record in effect.
+    """
+    record = read_object(directory / 'focus.json')
+    def moment(value):
+        stamp = datetime.fromisoformat(value)
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+    try:
+        moment(record['since'])
+        turns = record.get('turns')
+        if record.get('by') not in ('agent', 'user') or turns is not None and (type(turns) is not int
+                                                                               or turns not in (1, 2)):
+            return ''
+        until = record.get('until')
+        if until is None:
+            return 'focused (turn)' if turns else 'focused'
+        left = (moment(until) - datetime.now(timezone.utc)).total_seconds()
+    except (KeyError, TypeError, ValueError, OverflowError, AttributeError):
+        return ''
+    if not 0 < left <= FOCUS_LONGEST:
+        return ''
+    minutes = math.ceil(left / 60)
+    return f'focused {minutes}m' if minutes < 60 else f'focused {minutes // 60}h{minutes % 60:02d}m'
+
+
 def number(value):
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
             and 0 <= value <= 2**63 - 1 and math.isfinite(value))
@@ -226,6 +265,10 @@ def render(root, agent_id, launch_id, family=''):
             name = clean(properties.get('harness'), 40)
             if name:
                 parts.append(name)
+        elif item == 'focus':
+            text = focus_text(directory)
+            if text:
+                parts.append(text)
         elif item == 'status':
             if status and not (items['phase'] and phase == status):
                 parts.append(f'status {status}')

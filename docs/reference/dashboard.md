@@ -13,7 +13,7 @@ mv2 -u .multiverse/subverses/review tui
 ## Layout
 
 - **The list** is one tree. The universe and each subverse are folders, with their agents underneath. Folders fold and unfold.
-- **The header** counts live agents and agents waiting for you (an orange `●` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
+- **The header** counts live agents, agents waiting for you (an orange `●` marks them) and focused agents (a `◉` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
 - **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a plugin the launch left out. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode and fallback reason.
 - **The bottom line** shows key hints and the result of your last action. The hints are clickable.
 
@@ -29,6 +29,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90% |
 | `cost` | The session's cost so far (off by default) |
 | `phase`, `summary` | What the agent last reported with `mv2 report` |
+| `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 
@@ -47,6 +48,7 @@ Choose columns in the universe's `views/default.json` (see [views](#views)). [Co
 | `n` | Create an agent in the selected folder |
 | `g` | Create a subverse in the selected folder |
 | `m` | Message the selected agent |
+| `f` | Focus the selected agent, or unfocus it |
 | `K` or `s` | Kill the selected agent, after confirming |
 | `r` | Resume a stopped or dormant agent |
 | `p` | Show or hide the inspector |
@@ -74,9 +76,10 @@ Press `n` to add a draft row in the selected folder. Type the name, then press `
 
 Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and the `base` template. For anything else, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
 
-## Message, kill and resume
+## Message, focus, kill and resume
 
-- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt.
+- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. On a focused agent, the message goes to its inbox without interrupting it; to answer it, attach with Enter. If the agent focuses while the form is open, the form comes back with your text, to send inbox-only.
+- **`f`** asks how long to [focus](../cli/messaging.md#focus-an-agent) the selected agent: 5 minutes, 20 minutes, 1 hour, until its next turn ends, or until you unfocus it. The turn choice shows only while the harness reports the agent's status. On a focused agent, `f` unfocuses it and says how many inbox messages wait. The inspector and `v` say until when an agent is focused.
 - **`K`** asks for confirmation, then kills the agent. Its record and conversation are kept.
 - **`r`** resumes it.
 
