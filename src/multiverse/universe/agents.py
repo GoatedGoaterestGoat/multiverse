@@ -39,7 +39,13 @@ def orphaned(directory):
         if not launch.is_dir():
             return False
         # Unknown evidence stays conservative, including registration and roles.
-        if any(path.name not in ('bootstrap.md', 'task.md') for path in launch.iterdir()):
+        for path in launch.iterdir():
+            if path.name in ('bootstrap.md', 'task.md'):
+                continue
+            if path.name == '.connections.lock':
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                    continue  # Older cleanup scans could leave this empty lock.
             return False
     return True
 

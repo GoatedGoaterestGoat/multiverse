@@ -3,10 +3,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from multiverse.runtime import lifecycle
-from multiverse.runtime import attachments
+from multiverse.runtime import attachments, missing_runtime
 from multiverse.store import read, uid, write
 from multiverse.terminal.tmux import Tmux
-from multiverse.tools import list_agents
+from multiverse.tools import list_agents, doctor, inspect
 from multiverse.universe import records, relocate
 from test_multiverse import BaseTest
 
@@ -22,7 +22,8 @@ class OrphanRemovalTest(BaseTest):
         """A record-free agent folder goes to trash intact only when no exact-tagged terminal or unreadable server
         suggests a live launch, and surviving core evidence never gets the remove hint; fragile because the folder has
         no record to prove absence, and a wrong removal trashes a running agent; a torn runtime must not hide the
-        only surviving process proof in its cleanup journal (bd3d410)."""
+        only surviving process proof in its cleanup journal, and cleanup inspection must not manufacture evidence that
+        removes the orphan hint on the next listing (bd3d410)."""
         pane = {'pane_id': '%1', 'session_id': '$1', 'pane_pid': '123', 'pane_dead': '0',
                 '@mv2_agent_id': self.directory.name,
                 '@mv2_universe_id': read(self.root / 'universe.json')['id'], '@mv2_launch_id': uid()}
@@ -37,7 +38,8 @@ class OrphanRemovalTest(BaseTest):
                 self.assertNotIn('runtime.json', str(caught.exception))
             self.assertTrue(self.note.exists())
             self.assertFalse((self.root / 'trash').exists())
-        for name in ('runtime.json', 'sessions.jsonl', 'launches/' + uid() + '/ready'):
+        for name in ('runtime.json', 'sessions.jsonl', 'launches/' + uid() + '/ready',
+                     'launches/' + uid() + '/.connections.lock'):
             path = self.directory / name
             with self.subTest(evidence=name):
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,9 +52,8 @@ class OrphanRemovalTest(BaseTest):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
                     path.unlink()
-                    if path.name == 'ready':
-                        # The next cleanup scan creates .connections.lock in every
-                        # earlier empty launch it visits; do not share that fixture.
+                    if path.parent != self.directory:
+                        # Keep each evidence subcase independent of later cleanup checks.
                         path.parent.rmdir()
         with self.subTest('a torn runtime still has a live runner in its cleanup journal'):
             runtime = self.directory / 'runtime.json'
@@ -78,8 +79,21 @@ class OrphanRemovalTest(BaseTest):
             launch.mkdir(parents=True)
             (launch / 'bootstrap.md').write_text('old bootstrap')
             (launch / 'task.md').write_text('old task')
-            row = lifecycle.listing(self.root)[0]
-            self.assertEqual(row['damaged'].get('recover'), 'remove')
+            for old_lock in (False, True):
+                with self.subTest(old_lock=old_lock):
+                    if old_lock:
+                        (launch / '.connections.lock').touch()
+                    before = sorted(path.relative_to(self.directory) for path in self.directory.rglob('*'))
+                    for _ in range(2):
+                        self.assertEqual(lifecycle.listing(self.root)[0]['damaged'].get('recover'), 'remove')
+                        self.assertEqual(inspect.facts(self.root, self.directory.name)['damaged'].get('recover'), 'remove')
+                        self.assertTrue(any(f'remove it with mv2 remove {self.directory.name}' in problem
+                                            for problem, _ in doctor.check(self.root)))
+                        with patch.object(Tmux, 'snapshot', return_value=({}, None)):
+                            missing_runtime.require_stopped(self.directory, {
+                                'id': self.directory.name, 'universe_id': read(self.root / 'universe.json')['id']},
+                                operation='move or remove', orphan=True)
+                    self.assertEqual(sorted(path.relative_to(self.directory) for path in self.directory.rglob('*')), before)
             shown = list_agents.run(self.root, wide=True)
             self.assertIn('leftover folder with no agent records', shown)
             self.assertIn(f'mv2 remove {self.directory.name}', shown)

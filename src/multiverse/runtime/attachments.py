@@ -40,11 +40,18 @@ _UNSET = object()
 
 
 @contextmanager
-def _connections_lock(launch):
-    # Create only the lock file, never a removed launch/agent directory. This
-    # also supports older launches whose journal lock did not exist yet.
-    with (launch / '.connections.lock').open('a') as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+def _connections_lock(launch, *, create=True):
+    # Writers create their lock before any connection record. Readers use it
+    # when present, but must not add evidence to an abandoned or legacy launch.
+    try:
+        stream = (launch / '.connections.lock').open('a' if create else 'r')
+    except FileNotFoundError:
+        if create:
+            raise
+        yield
+        return
+    with stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX if create else fcntl.LOCK_SH)
         try:
             yield
         finally:
@@ -322,7 +329,7 @@ def problem(directory, facts):
         if runner['pid'] and facts.get('pid') and not gone(facts, exit_at):
             return _blocked('older child (no cleanup record)', directory / 'runtime.json', facts['pid'], facts.get('pid_started'), observations)
     try:
-        with _connections_lock(launch):
+        with _connections_lock(launch, create=False):
             for path in (launch / 'roles').glob('*.json'):
                 try:
                     role = read(path)

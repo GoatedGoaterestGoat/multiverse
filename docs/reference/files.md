@@ -266,6 +266,7 @@ Each launch directory holds:
 | `output-tail.txt` | The terminal's last 40 lines (8 KiB at most) after an early or nonzero exit. |
 | `native-service.log` | Output of the Codex app-server when this launch started it. |
 | `cleanup.json`, `roles/` | Whether this launch's own connections and helpers have closed. A resume or a finished `kill` waits for them. |
+| `.connections.lock` | Serializes connection records with cleanup inspection. Readers use an existing lock without creating one. An empty regular lock left by an older inspection is not startup evidence. |
 | `native-refusal.json` | A native refusal recorded for this launch, such as Codex's "open in another app". |
 
 ## subverses/ and trash/
