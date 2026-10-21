@@ -8,7 +8,10 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from textual.widgets import DataTable, Static
+
 from multiverse import plugins
+from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.ui.plugins_screen import PluginsScreen
 
@@ -35,6 +38,13 @@ def register(mv):
 SCHEMA = {"type": "object", "properties": {"count": {"type": "integer"}}}
 OWN = '''
 def register(mv):
+    mv.dashboard.settings(screen="screens:Settings")
+'''
+SLOW = '''
+import time
+
+def register(mv):
+    time.sleep(SECONDS)
     mv.dashboard.settings(screen="screens:Settings")
 '''
 OWN_SCREENS = '''
@@ -144,6 +154,58 @@ class RepairTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     await d.open_settings("rotten")
                 self.assertIn("load failure", str(shown.exception))
                 self.assertNotIn("no schema", str(shown.exception))
+
+    async def test_enter_while_a_plugins_settings_are_opening_opens_one_screen_and_never_the_generic_form_for_a_slow_plugin(self):
+        """Enter repeated while a plugin's settings screen is still being opened (the plugin loads first) opens one
+        screen, and Enter on a plugin that is only still loading says so instead of opening the form its schema
+        generates; fragile because each Enter started a worker with no memory of the last, so a held key stacked
+        identical screens that each save on their own, and a slow plugin with a schema lost its own screen to a form."""
+        own = {"module": "plugin", "extends": ["dashboard.settings"], "settings": {"version": 1}}
+        both = {**own, "settings": {"version": 1, "schema": "settings.schema.json", "defaults": "defaults.json"}}
+        self.write_plugin("cold", own, {"plugin.py": SLOW.replace("SECONDS", "0.15"), "screens.py": OWN_SCREENS})
+        self.write_plugin("warm", own, {"plugin.py": SLOW.replace("SECONDS", "0"), "screens.py": OWN_SCREENS})
+        self.enable("warm")
+        self.write_plugin("slowboth", both, {"plugin.py": SLOW.replace("SECONDS", "1.0"), "screens.py": OWN_SCREENS,
+                                             "settings.schema.json": json.dumps(SCHEMA),
+                                             "defaults.json": json.dumps({"schema": 1, "count": 2})})
+        names = lambda d: [type(screen).__name__ for screen in d.app.screen_stack]
+        async with self.dashboard() as d:
+            shown = await d.open_plugins()
+
+            def select(name):
+                table = shown.query_one("#plugins-table", DataTable)
+                table.move_cursor(row=[item["name"] for item in shown.items].index(name), animate=False)
+
+            with self.subTest("Enter three times in one turn on a plugin that is not loaded yet"):
+                select("cold")
+                for _ in range(3):  # what a held key does: all before the first worker has loaded anything
+                    shown.action_settings()
+                await d.until(lambda: "Settings" in names(d), "its settings screen")
+                self.assertEqual(names(d).count("Settings"), 1, names(d))
+                while d.app.screen is not shown:
+                    await d.close_screen()
+            with self.subTest("Enter twice, one after the other, on an enabled plugin whose screen the listing knows"):
+                shown.load()
+                await d.until(lambda: next(i for i in shown.items if i["name"] == "warm")["settings"].get("screen"), "its listing")
+                select("warm")
+                for _ in range(2):
+                    shown.action_settings()
+                    await d.until(lambda: "Settings" in names(d), "its settings screen")
+                    self.assertEqual(names(d).count("Settings"), 1, names(d))
+                    await d.close_screen()  # Enter must work again once the screen is up and gone
+            with self.subTest("Enter on a plugin with its own screen and a schema, while it is still loading"):
+                select("slowboth")
+                shown.action_settings()
+                await d.until(lambda: d.app.screen is not shown or "still loading" in str(shown.query_one(".cerror", Static).render()),
+                              "an answer")
+                self.assertIs(d.app.screen, shown, names(d))  # not the form its schema generates
+                self.assertIn("again", str(shown.query_one(".cerror", Static).render()))
+                await d.until(lambda: not loader.loading(plugins.entry(self.root, "slowboth")), "slowboth to finish loading")
+                shown.action_settings()
+                await d.until(lambda: d.app.screen is not shown, "its settings screen")
+                self.assertEqual(names(d)[-1], "Settings", names(d))  # its own screen, not PluginSettingsScreen
+                self.assertEqual(names(d).count("Settings"), 1, names(d))
+
 
 if __name__ == "__main__":
     unittest.main()

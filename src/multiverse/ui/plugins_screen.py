@@ -90,7 +90,7 @@ class PluginsScreen(ModalScreen):
         super().__init__()
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
         self.items, self.problems, self.host = [], [], None
-        self.changed = self.busy = False
+        self.changed = self.busy = self.opening = False
         self.note = None  # a status line a plugin screen left
 
     def compose(self):
@@ -236,7 +236,7 @@ class PluginsScreen(ModalScreen):
 
     def action_settings(self):
         item = self.selected()
-        if item is None or self.busy:
+        if item is None or self.busy or self.opening:  # opening: a held Enter must not stack identical screens
             return
         settings = item.get("settings")
         if not settings:
@@ -244,8 +244,10 @@ class PluginsScreen(ModalScreen):
             return
         self.error("")
         if settings.get("screen"):
+            self.opening = True
             self.open_own_screen(item)
         elif settings.get("fields") is None and settings.get("own_view"):
+            self.opening = True
             self.open_own_view(item)  # not loaded here (off, or not yet): learned now, never by the listing
         elif settings.get("fields") is None and settings.get("schema") is None:
             self.error(f"{item['name']}'s settings cannot be edited here: {settings.get('problem') or 'no schema'}")
@@ -261,6 +263,8 @@ class PluginsScreen(ModalScreen):
             if view.get("screen"):
                 screen = await asyncio.to_thread(self.service.settings_screen, self.root, name, view["screen"])
                 self.app.push_screen(screen(root=self.root, backend=self.app.backend), self.edited)
+            elif view.get("loading"):  # its own screen is a moment away: not the form its schema generates instead
+                self.error(f"{name} is still loading; press Enter again in a moment.")
             elif view.get("fields") is not None or item["settings"].get("schema") is not None:
                 # Its own fields, else the screen built from its schema, as for a plugin that failed to load.
                 shown = {**item, "settings": {**item["settings"], "fields": view.get("fields")}}
@@ -269,6 +273,8 @@ class PluginsScreen(ModalScreen):
                 self.error(f"{name}'s settings cannot be edited here: {view.get('problem') or 'no schema'}")
         except Exception as error:
             self.error(f"{name}'s settings screen failed: {error}")
+        finally:
+            self.opening = False
 
     @work(group="plugins-screen", exit_on_error=False)
     async def open_own_screen(self, item):
@@ -277,6 +283,8 @@ class PluginsScreen(ModalScreen):
             self.app.push_screen(screen(root=self.root, backend=self.app.backend), self.edited)
         except Exception as error:
             self.error(f"{item['name']}'s settings screen failed: {error}")
+        finally:
+            self.opening = False
 
     def edited(self, saved):
         if saved:
