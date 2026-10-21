@@ -264,9 +264,10 @@ class SettingsTest(PluginTestCase):
     def test_settings_edit_writes_only_valid_named_changes(self):
         """A settings edit changes only named keys, DELETE removes one, a schema refusal or the plugin's own check
         (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, a plugin's
-        own settings screen is offered where it is off too (or why it can't be), and enabling twice never reinstalls
-        defaults; fragile because the check and the screen need the plugin's code even where it is off
-        (COMPACTION-2), and a break quietly writes a bad file or says "no schema" on the Plugins screen."""
+        own settings screen is had where it is off too (or why not), on request and never by listing it, and
+        enabling twice never reinstalls defaults; fragile because the check and the screen need the plugin's code
+        even where it is off (COMPACTION-2), and a break quietly writes a bad file, says "no schema" on the Plugins
+        screen, or imports off plugins on every mv2 plugins."""
         with self.subTest("only the named keys"):
             manifest_ = self.greeter("greeter")
             path = settings.path(self.root, "greeter")
@@ -353,17 +354,23 @@ class SettingsTest(PluginTestCase):
             self.assertEqual(code, 0, err)
             self.assertEqual(json.loads(out), {"ran": True})
             self.assertIn("plugin screened: its settings cannot be used: level must be 1 or 2", err)
-        with self.subTest("off here: its own screen is still offered, or it says why not"):
+        with self.subTest("off here: listed without importing it; its own screen comes on request, or why not"):
             settings.path(self.root, "screened").write_text('{"schema": 1, "level": 1}')
             self.enable("screened", on=False)
-            loader.reset()  # a fresh dashboard: nothing loaded yet
+            loader.reset()  # a fresh process: nothing loaded yet
             item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
-            self.assertEqual((item["state"], item["settings"]["screen"]), ("off", "screens:Settings"))
+            self.assertNotIn("screened", {Path(key).name for key in loader._loaded})  # off: never imported here
+            self.assertEqual((item["state"], item["settings"]["own_view"], item["settings"]["problem"]),
+                             ("off", True, None))  # the file is fine: no load problem in its place
+            self.assertEqual(plugins.settings_view(self.root, "screened"),
+                             {"screen": "screens:Settings", "fields": None, "problem": None})
             loader.reset()
             with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
                 item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
-            self.assertIsNone(item["settings"]["screen"])
-            self.assertIn("MV2_PLUGINS=off", item["settings"]["problem"] or "")
+                view = plugins.settings_view(self.root, "screened")
+            self.assertIsNone(item["settings"]["problem"])
+            self.assertEqual((view["screen"], view["fields"]), (None, None))
+            self.assertIn("MV2_PLUGINS=off", view["problem"])
 
 
 class LoadingTest(PluginTestCase):

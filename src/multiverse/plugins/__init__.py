@@ -263,10 +263,10 @@ def listing(root, wait=loader.REFRESH_WAIT):
     [{name, on, state, source, version, description, problem, errors, permissions,
       commands, settings: {path, source, problem, schema} or None, shadowed}]
 
-    It never waits out a slow register(): a plugin whose load is still running is `loading`, and its own
-    settings screen is offered once it has loaded (loader.generation() rises then). A plugin with settings is
-    loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings check refuses
-    reads `unusable` here as it does in doctor."""
+    It never waits out a slow register(): a plugin whose load is still running is `loading`. A plugin that is on
+    and has settings is loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings
+    check refuses reads `unusable` here as it does in doctor. A plugin that is off is never imported here; its
+    own settings screen or fields (settings `own_view`) come from settings_view(), on request."""
     from . import host
     current = entries(root)
     checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
@@ -312,11 +312,11 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 schema, schema_problem = settings_files.schema_of(manifest), None
             except ValueError as error:
                 schema, schema_problem = None, str(error)
-            view, unviewed = _settings_view(found)
-            registered = view.registrations if view is not None else None
+            registered = found.loaded.registrations if isinstance(found.loaded, loader.Loaded) else None
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
-                                or schema_problem or unviewed, "schema": schema,
+                                or schema_problem, "schema": schema,  # the settings file's problem, nothing else
+                                "own_view": "dashboard.settings" in manifest.extends,
                                 "values": {} if waiting else current.values,
                                 "screen": registered.settings_screen if registered else None,
                                 "fields": ([asdict(item) for item in registered.settings_fields]
@@ -879,19 +879,29 @@ def anchor_events(root, name, again=False):
         pass
 
 
-def _settings_view(found):
-    """(the plugin's Loaded record or None, why its own settings view can't be learned or None), loading it when
-    needed: its screen or fields are where settings are edited and unusable ones fixed, so they are offered whether
-    or not this process has loaded the plugin yet, and where it is off too, as `mv2 plugins settings` edits there."""
+def settings_view(root, name, wait=loader.REFRESH_WAIT):
+    """A plugin's own settings view, for the Plugins screen's Enter: {"screen": "module:Class" or None,
+    "fields": [field dicts] or None, "problem": why it can't be had, or None}.
+
+    It loads the plugin, also where it is off, as `mv2 plugins settings` edits there: its screen or fields are
+    where settings are edited and unusable ones fixed. The only caller that imports a plugin for this, and only
+    when a person asks; listing() never does. "problem" is the load's (still loading, untrusted, safe mode, a
+    failed import), never the settings file's."""
+    found = entry(Path(root), name)
+    if found.manifest is None or "dashboard.settings" not in found.manifest.extends:
+        return {"screen": None, "fields": None, "problem": f"{name} has no settings view of its own"}
     loaded = found.loaded if isinstance(found.loaded, loader.Loaded) else None
-    if loaded is None and found.manifest is not None and "dashboard.settings" in found.manifest.extends:
+    if loaded is None:
         try:
-            loaded = loader.load(found, off=not found.on, wait=loader.REFRESH_WAIT)
+            loaded = loader.load(found, off=not found.on, wait=wait)
         except loader.StillLoading:
-            return None, f"{found.name} is still loading"  # offered once it has
+            return {"screen": None, "fields": None, "problem": f"{name} is still loading"}
         except PluginError as error:
-            return None, str(error)
-    return loaded, None
+            return {"screen": None, "fields": None, "problem": str(error)}
+    registered = loaded.registrations
+    return {"screen": registered.settings_screen,
+            "fields": [asdict(item) for item in registered.settings_fields] if registered.settings_fields else None,
+            "problem": None}
 
 
 def settings_checked(root, name, wait=None):

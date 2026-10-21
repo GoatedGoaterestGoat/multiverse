@@ -634,11 +634,23 @@ Plugin utilities:
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage
   contributions receive (native ID, launch, state, native mode, the launch's
-  plugins record).
+  plugins record, and the agent's recorded `workspace` (1.11)).
 - `mv.harness_info(universe, harness)` gives a harness's family, executable,
   `unset_env`, whether its bridge is on, its settings, and `home`: its own data
-  directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
-  Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
+  directory as this process's environment names it (Claude's
+  `CLAUDE_CONFIG_DIR` or `~/.claude`, Codex's `CODEX_HOME` or `~/.codex`, Pi's
+  `PI_CODING_AGENT_DIR` when set).
+- `mv.harness_info(universe, harness, agent=AGENT)` (1.12) answers for that
+  agent's launches instead, from its records only, because the dashboard or the
+  plugin host may run with another environment. `home` is the recorded session
+  home, else the storage a resume would replay (the storage map, or the legacy
+  launch evidence resume adopts, read through `universe.storage`, which core
+  shares). `storage` is the environment that selects that store wherever it is
+  replayed: each storage variable's value or `None` for one the launch had
+  unset, a relative value made absolute against the agent's workspace, and the
+  launch's `HOME` with an unset or empty home variable. Both are `None` when the
+  records don't prove them. Only an agent never launched gets this process's
+  environment.
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
   processes), `ensure_dir` (1.10) and `now`.
 - `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
