@@ -261,6 +261,10 @@ class PluginService:
     def screen_class(self, loaded, reference):
         return loaded.resolve(reference)
 
+    def settings_view(self, root, name):
+        """A plugin's own settings screen or fields, loading it now (also where it is off), or why not."""
+        return plugins.settings_view(Path(root), name)
+
     def settings_screen(self, root, name, reference):
         """The plugin's own settings screen class, imported now."""
         found = plugins.entry(Path(root), name)
