@@ -498,7 +498,10 @@ def _session_changes(directory, properties, target):
     # Returning to an earlier owned conversation can repeat an ID. Use its
     # latest departure, not an earlier lap through the lineage.
     starts = [index for index, row in enumerate(rows) if row['from'] == target]
-    return rows[starts[-1]:] if starts else None
+    changes = rows[starts[-1]:] if starts else None
+    # Missing-conversation recovery retires a lineage rather than moving its
+    # input to an unrelated fresh conversation.
+    return changes if changes and not any(row.get('kind') == 'fresh-start' for row in changes) else None
 
 
 def retarget_message(directory, properties, message, tracking):
@@ -662,14 +665,16 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             elif check:
                 return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         if check:
-            if tracking.get('submission_state') == 'failed':
-                return {**tracking['attempts'][-1], 'ok': False}
             target = tracking.get('target_session') or message.get('target_session')
             receipt_session = session
             if target and target != session.native_id:
                 if not _session_changes(directory, executor.properties, target):
-                    raise ValueError('Message targets a different native session; refusing reconciliation')
+                    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                            'reason': 'Message targets a conversation outside this agent\'s recorded lineage; delivery cannot be checked',
+                            'value': {'outside_lineage': True}}
                 receipt_session = replace(session, native_id=target)
+            if tracking.get('submission_state') == 'failed':
+                return {**tracking['attempts'][-1], 'ok': False}
             try:
                 result = adapter.get_delivery(receipt_session, message_id, executor)
                 if not (isinstance(result.value, dict) and result.value.get('transcript_confirmed') is True):

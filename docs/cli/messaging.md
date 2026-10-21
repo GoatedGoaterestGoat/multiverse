@@ -114,14 +114,23 @@ setting; accepted and uncertain deliveries are never reopened.
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
 until its message is confirmed in the conversation. The check reports an entry
 that is still queued without resending it. `--retry` selects definite failures;
-it never resends an accepted or uncertain submission. An unconfirmed acceptance
-stays visible after a stop or resume. For Claude, once the accepting process is
+it never resends an accepted or uncertain submission. Checks normally cover the
+current launch. Across a resume, Codex keeps checking saved queue receipts for
+the same conversation; it does not search for other older acceptances. Harnesses
+with transcript evidence, including Claude, keep older same-session acceptances
+visible. Once the accepting process is
 proved gone and the same conversation is ready and idle again, a check can use
 its transcript to confirm delivery or prove that the message was lost when the
 agent stopped. Unreadable or incomplete evidence stays uncertain. A proved loss
-is reported once as not delivered, with advice to send a new message deliberately;
-`--retry` does not resend it. The text may still be drafted in the terminal.
-The final result remains in inbox history.
+is reported once with the message text and advice to send a new message deliberately;
+`--retry` does not resend it. If the harness restored a draft, it has not been
+submitted. A proven loss emits `message.failed` for plugins. The final result
+remains in inbox history. A message aimed outside the agent's recorded session
+lineage is reported once as uncheckable and stays uncertain in history; verify
+the original conversation before resending it.
+An accepted command-line wake prompt has no correlatable native receipt and is
+excluded from recurring checks. An uncertain or failed wake keeps its existing
+evidence check and is never resent automatically.
 Identical accepted messages need separate stored copies: each text row confirms
 at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
 an exact message-ID receipt confirms only that message.

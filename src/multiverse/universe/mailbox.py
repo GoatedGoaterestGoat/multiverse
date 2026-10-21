@@ -339,6 +339,9 @@ def update_message(agent_dir, message_id, **changes):
         attempts = after.get('attempts') or [{}]
         reason = attempts[-1].get('reason') if isinstance(attempts[-1], dict) else None
         _event(agent_dir, "message.failed", {"id": message_id, "reason": reason})
+    if after.get('final_reason') == 'lost' and before.get('final_reason') != 'lost':
+        _event(agent_dir, "message.failed", {"id": message_id,
+               "reason": (after.get('last_receipt') or {}).get('reason'), "lost_when_stopped": True})
     return after
 
 
@@ -351,6 +354,19 @@ def claim_cancelled_report(agent_dir, message_id):
         if current.get('submission_state') != 'cancelled' or current.get('cancelled_reported_at'):
             return None
         states[message_id] = claimed = {**current, 'cancelled_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return claimed
+
+
+def claim_uncheckable_report(agent_dir, message_id):
+    """Claim a diagnostic once without turning uncertain delivery into failure."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if current.get('uncheckable_reported_at'):
+            return None
+        states[message_id] = claimed = {**current, 'uncheckable_reported_at': now()}
         write(agent_dir / 'inbox-state.json', states)
         return claimed
 

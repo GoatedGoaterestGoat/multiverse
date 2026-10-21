@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+import contextlib
 import json
 import threading
 from unittest.mock import patch
@@ -314,7 +315,8 @@ class InboxDeliveryTest(DeliveryFixture):
                         patch.object(attachments, '_observation', return_value=observations), patch.object(Path, 'stat', stat), \
                         patch.object(claude, '_receipt', side_effect=receipt_after_negative), \
                         patch.object(adapter, 'get_delivery', side_effect=(ClaudeAdapter.configured('claude', {}).get_delivery
-                            if case == 'identical-late-publication' else lambda *args: self.behavior)):
+                            if case == 'identical-late-publication' else lambda *args: self.behavior)), \
+                        patch.object(deliver.mailbox, '_event') as event:
                     if case == 'concurrent-checks':
                         snapshot = deliver.mailbox.inbox
                         barrier = threading.Barrier(2)
@@ -403,15 +405,19 @@ class InboxDeliveryTest(DeliveryFixture):
                     self.assertEqual(state['submission_state'], 'cancelled' if final else 'accepted')
                     if final:
                         self.assertEqual(state['final_reason'], 'lost')
-                        self.assertTrue(any('lost when' in line and 'draft' in line for line in lines))
+                        self.assertTrue(any('lost when' in line and 'draft' in line and message['text'] in line for line in lines))
                         self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                        failures = [call.args[2] for call in event.call_args_list if call.args[1] == 'message.failed']
+                        self.assertEqual(len(failures), 1)
+                        self.assertEqual(failures[0]['id'], message['id'])
+                        self.assertTrue(failures[0]['lost_when_stopped'])
                     elif case == 'confirmed':
                         self.assertTrue(state['native_receipt']['transcript_confirmed'])
                     self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
                 self.assertEqual(len(self.calls), 1, 'No reconciliation or retry can replay an accepted message')
 
     def test_check_confirms_without_resending(self):
-        """deliver --check keeps unconfirmed acceptances across launches, treats a still-queued native entry as
+        """deliver --check scopes old acceptances to available same-session evidence, treats a still-queued native entry as
         accepted, reports failed messages, and never resends; fragile because check and retry share code paths, and
         a resend duplicates a prompt in the conversation (d292f88)."""
         with self.subTest('an uncertain submission is confirmed'):
@@ -426,31 +432,33 @@ class InboxDeliveryTest(DeliveryFixture):
             self.assertNotIn('acknowledged_at', state)
             self.assertEqual(native.deliver(self.root, self.agent, message['id'], retry=True)['state'], 'native_queued')
             self.assertEqual(len(self.calls), 1)
-        with self.subTest('an unconfirmed acceptance cannot disappear when its launch is replaced'):
-            self.recipient()
-            self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
-            older = self.send()
-            update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
-            current = self.send()
-            missing = self.send()
-            checked = []
-            def check(session, message_id, executor):
-                checked.append(message_id)
-                if message_id == missing['id']:
-                    return NativeResult('unknown', 'No receipt yet')
-                return NativeResult('native_queued', value={'transcript_confirmed': True})
-            adapter = harnesses.load(self.root, 'claude')
-            with patch.object(adapter, 'get_delivery', side_effect=check):
-                first = deliver.run(self.root, agent=self.agent, check=True)
-                second = deliver.run(self.root, agent=self.agent, check=True)
-            # Missing evidence for an accepted message is not a failure, and is asked again.
-            self.assertTrue(first['ok'] and second['ok'])
-            self.assertEqual(checked, [older['id'], current['id'], missing['id'], missing['id']])
-            tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
-            confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
-            self.assertTrue(confirmed[current['id']])
-            self.assertTrue(confirmed[older['id']])
-            self.assertEqual(len(self.calls), 3)
+        for retained in (False, True):
+            with self.subTest(older_acceptance_hook=retained):
+                self.recipient()
+                self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
+                older = self.send()
+                update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+                current = self.send()
+                missing = self.send()
+                checked = []
+                def check(session, message_id, executor):
+                    checked.append(message_id)
+                    if message_id == missing['id']:
+                        return NativeResult('unknown', 'No receipt yet')
+                    return NativeResult('native_queued', value={'transcript_confirmed': True})
+                adapter = harnesses.load(self.root, 'claude')
+                proof = patch.object(adapter, 'accepted_message_evidence', lambda *a, **kw: None, create=True)
+                with proof if retained else contextlib.nullcontext(), patch.object(adapter, 'get_delivery', side_effect=check):
+                    first = deliver.run(self.root, agent=self.agent, check=True)
+                    second = deliver.run(self.root, agent=self.agent, check=True)
+                # Missing evidence for an accepted message is not a failure, and is asked again.
+                self.assertTrue(first['ok'] and second['ok'])
+                self.assertEqual(checked, ([older['id']] if retained else []) + [current['id'], missing['id'], missing['id']])
+                tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
+                confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
+                self.assertTrue(confirmed[current['id']])
+                self.assertEqual(bool(confirmed[older['id']]), retained)
+                self.assertEqual(len(self.calls), 3)
         with self.subTest('an entry still waiting in the native queue'):
             self.recipient()
             self.behavior = NativeResult('native_queued', 'Accepted by native after-turn queue',
@@ -470,6 +478,33 @@ class InboxDeliveryTest(DeliveryFixture):
                                          {'transcript_confirmed': True})
             self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+        for outside_state in ('accepted', 'failed', 'unknown', 'pending'):
+            with self.subTest(outside_lineage_state=outside_state):
+                self.recipient()
+                message = self.send('uncheckable old conversation')
+                update_message(self.directory, message['id'], submission_state=outside_state)
+                properties = read(self.directory / 'properties.json')
+                write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+                lines = []
+                adapter = harnesses.load(self.root, 'claude')
+                with patch.object(adapter, 'get_delivery', side_effect=AssertionError('foreign conversation must not be queried')):
+                    snapshot = deliver.mailbox.inbox
+                    barrier = threading.Barrier(2)
+                    def simultaneous(*args, **kwargs):
+                        result = snapshot(*args, **kwargs)
+                        barrier.wait(timeout=5)
+                        return result
+                    with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous), ThreadPoolExecutor(2) as pool:
+                        results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                                check=True, _present=lines.append), range(2)))
+                    self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
+                    first = next(result for result in results if result['messages'])
+                    self.assertFalse(first['ok'])
+                    self.assertEqual(len(first['messages']), 1)
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], outside_state)
+                self.assertTrue(any(message['text'] in line and 'Do not resend' in line for line in lines), lines)
+                self.assertEqual(len(self.calls), 1)
         with self.subTest('a failed message is reported, never reconciled or resent'):
             self.recipient()
             message = append_message(self.directory, 'refused', {}, delivery='steer')

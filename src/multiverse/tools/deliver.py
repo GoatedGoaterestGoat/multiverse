@@ -1,6 +1,6 @@
 """Check uncertain native deliveries or retry a recipient's definite failures."""
 import sys
-from .. import display, store, universe
+from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
 from ._common import delivery_summary
@@ -21,7 +21,10 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         raise ValueError('Choose exactly one of --check or --retry')
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
-    name = store.read(directory / 'properties.json')['name']
+    properties = store.read(directory / 'properties.json')
+    name = properties['name']
+    launch_id = agents.runtime(directory).get('launch_id')
+    native_id = properties.get('native_session_id')
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
     held = focus.current(directory) if retry else None
     if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
@@ -36,20 +39,37 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         state = tracking['submission_state']
         if check and state == 'cancelled' and tracking.get('cancelled_reported_at'):
             continue
-        # Acceptance is not delivery. Replacing a launch must never hide an
-        # unconfirmed message; reconciliation fences its exact conversation.
+        if check and tracking.get('uncheckable_reported_at'):
+            continue
+        # Revisit older acceptances only where the harness can still settle
+        # them: a native queue receipt, or evidence for the same conversation.
         attempts = tracking.get('attempts') or [{}]
         evidence = tracking.get('native_receipt')
         confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True
-        accepted = not retry and state == 'accepted' and not confirmed
+        target = tracking.get('target_session') or message.get('target_session')
+        outside_lineage = bool(check and state != 'cancelled' and target and target != native_id
+                               and not native._session_changes(directory, properties, target))
+        accepted = check and state == 'accepted' and not confirmed and tracking.get('delivery_method') != 'resume_prompt'
+        if accepted:
+            same_session = bool(native_id and target == native_id)
+            queued = same_session and isinstance(evidence, dict) and evidence.get('queued_submission_id') and attempts[-1].get('native_session_id') == native_id
+            old_evidence = False
+            if same_session and attempts[-1].get('launch_id') != launch_id and not queued:
+                adapter = harnesses.load(root, properties['harness'])
+                old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
+            accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
         if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
-            final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') else None
+            final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage else None
             if final is not None and retry:
                 finalized += 1
                 continue
-            if check and state == 'cancelled':
+            if outside_lineage:
+                # Recheck the pointer under the launch lock before claiming a
+                # once-only diagnostic; this history snapshot can predate a rebind.
+                receipt = native.deliver(root, directory.name, message['id'], check=True)
+            elif check and state == 'cancelled':
                 claimed = mailbox.claim_cancelled_report(directory, message['id'])
                 if claimed is None:
                     continue
@@ -82,11 +102,14 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             # Another checker may have selected the same still-accepted snapshot.
             if mailbox.claim_cancelled_report(directory, message['id']) is None:
                 continue
+        uncheckable = isinstance(receipt.get('value'), dict) and receipt['value'].get('outside_lineage') is True
+        if check and uncheckable and mailbox.claim_uncheckable_report(directory, message['id']) is None:
+            continue
         summary = delivery_summary(receipt)
         notices = display.notice_lines(receipt.get('notices'))
         if notices:
             summary['notices'] = notices
-        if accepted and receipt.get('state') not in ('error', 'cancelled'):
+        if accepted and not uncheckable and receipt.get('state') not in ('error', 'cancelled'):
             # Missing evidence for an accepted message is not a failure.
             summary['ok'] = True
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message}, **summary})
