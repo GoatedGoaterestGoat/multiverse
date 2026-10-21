@@ -17,7 +17,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Harness | Version | What was checked |
 | --- | --- | --- |
 | Codex CLI | 0.163.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
-| Claude Code | 2.1.304 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Claude Code | 2.1.306 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 Other releases may behave differently. The Claude Code mod API is early access and can change between releases.
