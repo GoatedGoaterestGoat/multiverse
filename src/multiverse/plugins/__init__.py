@@ -881,7 +881,8 @@ def anchor_events(root, name, again=False):
 
 def settings_view(root, name, wait=loader.REFRESH_WAIT):
     """A plugin's own settings view, for the Plugins screen's Enter: {"screen": "module:Class" or None,
-    "fields": [field dicts] or None, "problem": why it can't be had, or None}.
+    "fields": [field dicts] or None, "problem": why it can't be had, or None, "loading": whether that is only
+    because its load is still running (try again), not because it failed}.
 
     It loads the plugin, also where it is off, as `mv2 plugins settings` edits there: its screen or fields are
     where settings are edited and unusable ones fixed. The only caller that imports a plugin for this, and only
@@ -889,19 +890,19 @@ def settings_view(root, name, wait=loader.REFRESH_WAIT):
     failed import), never the settings file's."""
     found = entry(Path(root), name)
     if found.manifest is None or "dashboard.settings" not in found.manifest.extends:
-        return {"screen": None, "fields": None, "problem": f"{name} has no settings view of its own"}
+        return {"screen": None, "fields": None, "problem": f"{name} has no settings view of its own", "loading": False}
     loaded = found.loaded if isinstance(found.loaded, loader.Loaded) else None
     if loaded is None:
         try:
             loaded = loader.load(found, off=not found.on, wait=wait)
         except loader.StillLoading:
-            return {"screen": None, "fields": None, "problem": f"{name} is still loading"}
+            return {"screen": None, "fields": None, "problem": f"{name} is still loading", "loading": True}
         except PluginError as error:
-            return {"screen": None, "fields": None, "problem": str(error)}
+            return {"screen": None, "fields": None, "problem": str(error), "loading": False}
     registered = loaded.registrations
     return {"screen": registered.settings_screen,
             "fields": [asdict(item) for item in registered.settings_fields] if registered.settings_fields else None,
-            "problem": None}
+            "problem": None, "loading": False}
 
 
 def settings_checked(root, name, wait=None):

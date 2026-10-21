@@ -363,7 +363,11 @@ class SettingsTest(PluginTestCase):
             self.assertEqual((item["state"], item["settings"]["own_view"], item["settings"]["problem"]),
                              ("off", True, None))  # the file is fine: no load problem in its place
             self.assertEqual(plugins.settings_view(self.root, "screened"),
-                             {"screen": "screens:Settings", "fields": None, "problem": None})
+                             {"screen": "screens:Settings", "fields": None, "problem": None, "loading": False})
+            loader.reset()  # a fresh process whose load is still running: not failed, so no schema fallback
+            with mock.patch.object(loader, "load", side_effect=loader.StillLoading("slow")):
+                view = plugins.settings_view(self.root, "screened")
+            self.assertEqual((view["loading"], view["problem"]), (True, "screened is still loading"))
             loader.reset()
             with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
                 item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
