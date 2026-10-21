@@ -101,7 +101,7 @@ class StorageEnvironmentTest(TerminalBase):
                 else:
                     self.assertEqual(actual, str(server))
                 with self.assertRaisesRegex(ValueError, 'Cannot prove unique conversation storage'):
-                    storage_adoption.discover(CodexAdapter.configured('codex', {}), props, previous, directory, {},
+                    storage_adoption.discover(CodexAdapter.configured('codex', {}), props, previous, directory,
                                               {'HOME': str(self.work), 'CODEX_HOME': str(caller)}, self.backend)
         # Empty and unset are distinct controls for the same raw-value reader.
         self.backend.run('set-environment', '-g', 'CODEX_HOME', '')

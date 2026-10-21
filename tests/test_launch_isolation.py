@@ -421,13 +421,15 @@ class LaunchIsolationTest(unittest.TestCase):
         from multiverse.harnesses.claude import project_key
         from multiverse.universe import sessions
         for family in ('claude', 'codex', 'pi'):
-            for evidence in ('absent', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
+            for evidence in ('absent', 'absent-again', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
                              'history-damaged-runtime', 'history-missing-runtime', 'history-new-preparation',
-                             'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment'):
+                             'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service'):
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
                 if historical and family == 'pi':
+                    continue
+                if evidence == 'malformed-service' and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -449,6 +451,8 @@ class LaunchIsolationTest(unittest.TestCase):
                                       native_storage_environment={key: str(old_home)})
                     if evidence == 'unproven-pending':
                         properties['native_fresh_pending'] = True
+                    if evidence == 'malformed-service':
+                        properties['native_service_identity'] = []
                     write(directory / 'properties.json', properties)
                     launch = str(uuid4())
                     write(directory / 'runtime.json', {'launch_id': launch, 'state': 'dormant',
@@ -516,7 +520,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.object(Path, 'lstat', lstat), \
                             patch.object(Path, 'read_bytes', read_bytes), \
                             patch.dict(os.environ, {key: str(caller)}):
-                        if evidence != 'absent':
+                        if evidence not in ('absent', 'absent-again'):
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable'):
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
                             self.assertEqual({path: original_read(path) for path in before}, before)
@@ -556,6 +560,31 @@ class LaunchIsolationTest(unittest.TestCase):
                     with sessions.namespace(self.root), self.assertRaises(sessions.SessionConflict):
                         sessions.claim(self.root, self.work / 'another-agent', properties, old, str(old_home))
                     self.assertIsNone(lifecycle.native._session_changes(directory, result, old))
+                    if evidence == 'absent-again':
+                        # Retirement records a legitimate null service for plain agents.
+                        self.assertIsNone(read(directory / 'properties.json')['native_service_identity'])
+                        replacement = result['native_session_id']
+                        if family == 'claude':
+                            transcript = caller / 'projects' / project_key(str(self.work)) / (replacement + '.jsonl')
+                            row = {'type': 'user', 'sessionId': replacement}
+                        elif family == 'codex':
+                            transcript = caller / 'sessions' / ('rollout-2026-10-21T12-00-00-' + replacement + '.jsonl')
+                            row = {'type': 'session_meta', 'payload': {'id': replacement}}
+                        else:
+                            transcript = directory / 'session.jsonl'
+                            row = {'type': 'session', 'id': replacement}
+                        transcript.parent.mkdir(parents=True, exist_ok=True)
+                        transcript.write_text(json.dumps(row) + '\n')
+                        transcript.unlink()
+                        with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                                patch.dict(os.environ, {key: str(caller)}):
+                            repeated = lifecycle.start(self.root, resume=directory.name, start_fresh=True)
+                        self.assertEqual(repeated['name'], properties['name'])
+                        self.assertNotEqual(repeated.get('native_session_id'), replacement)
+                        self.assertEqual((directory / 'inbox.jsonl').read_bytes(), before[directory / 'inbox.jsonl'])
+                        self.assertEqual((sessions.journal(directory)[-1]['from'], sessions.journal(directory)[-1]['reason']),
+                                         (replacement, 'missing-conversation'))
 
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,

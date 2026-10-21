@@ -154,6 +154,8 @@ def _launch_environments(directory, keys):
 
 def _saved_environments(properties, keys):
     service = properties.get('native_service_identity', {})
+    if service is None:
+        service = {}
     if not isinstance(service, dict):
         raise ValueError('Cannot verify conversation storage: repair the saved native service identity')
     candidates = []
