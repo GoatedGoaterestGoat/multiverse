@@ -80,6 +80,9 @@ def working_tree(source, target):
     links = {path for path, _ in gitlinks(source)}
     files = git(source, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
     for name in filter(None, (os.fsdecode(name) for name in files)):
+        if name.endswith("/"):  # an untracked repository or worktree inside this one: not part of the checkout
+            print(f"linux-tests: skipping {name}, a repository of its own", file=sys.stderr)
+            continue
         if name in links or name.split("/")[0] == ".multiverse" or not os.path.lexists(os.path.join(source, name)):
             continue  # a submodule (below), the universe, or a file deleted but not yet committed
         os.makedirs(os.path.dirname(os.path.join(target, name)) or target, exist_ok=True)

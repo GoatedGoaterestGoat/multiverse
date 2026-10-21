@@ -36,7 +36,7 @@ scripts/linux-tests.sh --commit HEAD --python 3.11      # a commit, as committed
 
 Run it:
 - before landing a change to anything that differs on Linux: reading `/proc`, boot IDs, `sys.platform` branches, process identity, or the runner's process tracking;
-- in the pre-push gate, as one full run next to the macOS one.
+- once for the whole suite before a branch is pushed, next to the full `tests/run.py` run on macOS.
 
 It can't run native Claude, Codex or Pi: none is installed there, so their live tests skip, as on CI. `test_pi_bridge` skips too, without Node. On a Mac, Docker runs aarch64 Linux, while CI runs x86-64.
 
