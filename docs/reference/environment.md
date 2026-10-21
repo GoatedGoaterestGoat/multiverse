@@ -25,17 +25,21 @@ mv2 removes every inherited `MV2_*` variable before it starts an agent, then set
 | `MV2_IDENTITY_MODE` | `codex-agent-v1` in connected Codex tools | Makes `report`, `inbox` and the sender of `send` validate the agent, native thread and saved storage scope. Missing or incomplete proof is refused; it never becomes an operator call. |
 | `MV2_CLI` | The `mv2` executable: the checkout's `bin/mv2`, else the running `mv2`, else `mv2` on `PATH` | Agents run `"$MV2_CLI" COMMAND`. Its directory is also put first on the agent's `PATH`. |
 | `MV2_PYTHON` | The Python interpreter running mv2 | The Claude mod and the Pi extension report status, usage and compaction with it. |
-| `MV2_CONTROL_SOCKET` | `/tmp/mv2-native-LAUNCH/rpc.sock`, absent from connected Codex tools | The private socket of this launch's bridge. The Pi extension listens on it. |
-| `MV2_TMUX_SOCKET` | The agent's tmux socket, absent from connected Codex tools | Identifies the frontend's server. Child launches use the verified calling agent's runtime record to find its current server. |
+| `MV2_CONTROL_SOCKET` | `/tmp/mv2-native-LAUNCH/rpc.sock`; current launches omit it from connected Codex tools | The private socket of this launch's bridge. The Pi extension listens on it. Older loaded Codex conversations may retain an obsolete value; it does not authorize a current control call. |
+| `MV2_TMUX_SOCKET` | The agent's tmux socket; current launches omit it from connected Codex tools | Identifies the frontend's server. Older loaded conversations may retain it. Child launches use the verified calling agent's runtime record to find its current server. |
 | `MV2_COMPACTION` | `1` | The compaction plugin sets it for connected Claude launches while compaction is on. Its compaction hook acts only then. See [plugin variables](#plugin-variables). |
 
 Connected Codex tools keep the same agent identity when another Codex client drives the conversation. Current launches do not pass `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` or `MV2_TMUX_SOCKET`. Codex supplies `CODEX_THREAD_ID`; mv2 also checks the saved native storage paths. A `/btw` side conversation inherits these settings, but its different thread ID cannot authorize it as the main agent. It can still run unscoped mv2 commands as the operator; this identity check is not an execution sandbox. A child agent still launches on its parent's tmux server, using the parent's current runtime record rather than a socket saved in the conversation. If that record is missing or damaged, spawning a child names the file to restore; it never falls back to another server.
 
 Each launch requests `MV2_CLI`, `MV2_PYTHON` and `PATH` from the mv2 installation starting it. These paths are tool settings, not identity proof. The saved maps describe requests, not measured values in a loaded conversation. Codex can retain an idle conversation for up to 30 minutes after its last client leaves by default, so restarting the frontend does not guarantee new tool settings.
 
-Use the current mv2 installation for callbacks from an older Codex bridge conversation. Its retained launch request and the current thread, storage, workspace and agent records must all match. This permits `report`, `inbox`, sending as the agent and verification of the existing binding; child spawning through this compatibility route and all runner/control callbacks keep their launch checks. A separate old mv2 checkout still runs its old code and is not covered. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
+Use the current mv2 installation for callbacks from an older Codex bridge conversation. Its retained launch request and the current thread, storage, workspace and agent records must all match. This permits the agent's own `report`, `inbox`, `focus`, `unfocus`, sending as the agent and verification of the existing binding; child spawning through this compatibility route and all runner/control callbacks keep their launch checks. A separate old mv2 checkout still runs its old code and is not covered. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 Outside an agent session, leave `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID` and `MV2_IDENTITY_MODE` unset. In an agent context, `send` signs as that agent and `inbox` reads its inbox. Copying only part of the identity fails validation.
+
+An operator can read `inbox --agent NAME` and write `report --agent NAME` even
+when the runtime record is damaged. This does not grant an agent caller any
+authority or repair the runtime record.
 
 ## Plugin variables
 

@@ -40,7 +40,20 @@ class InboxCliTest(BaseTest):
     def test_reads_that_must_not_consume_never_move_the_cursor(self):
         """--peek, --all, --last, --since, invalid combinations, wait timeouts, report's unread count and doctor never
         move the read cursor, and an unread page consumes only its 50; fragile because every new read option is a
-        new way to advance it, and a break silently marks messages read."""
+        new way to advance it, and a break silently marks messages read; an operator must still read and report
+        when runtime is damaged, without bypassing a launch caller's authority."""
+        with self.subTest('an operator can read and report despite a torn runtime'):
+            runtime = self.directory / 'runtime.json'
+            original = runtime.read_bytes()
+            runtime.write_text('{')
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+            with patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(inbox_tool.run(self.root, agent=self.agent, peek=True)['messages'], [])
+                self.assertEqual(report.run(self.root, agent=self.agent, summary='operator note')['summary'], 'operator note')
+            with self.assertRaises(ValueError):
+                inbox_tool.run(self.root, agent=self.agent, peek=True)
+            self.assertEqual(runtime.read_text(), '{')
+            runtime.write_bytes(original)
         cursor = self.directory / 'inbox.cursor'
         for machine in (False, True):
             output = io.StringIO()

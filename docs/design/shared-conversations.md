@@ -13,7 +13,7 @@ Run callbacks through the current mv2 installation. A connected Codex conversati
 
 Core requires a canonical historical launch ID and a readable `launches/LID/request.json` under this same agent. Its recorded universe, full agent ID, agent directory and launch ID must match the caller. The request must have `shared_service=true`, bridge mode and a relay with `binds_session=true`. Core then applies the current saved-policy, exact bound native thread, canonical storage, workspace, universe and agent-directory checks.
 
-This route permits only the agent's own `report`, `inbox`, sending as the agent and verification of its existing session binding. Missing or damaged proof, a foreign thread or scope, and an incorrect explicit identity mode remain refused. Runner and control updates retain strict launch checks. For this retained-launch compatibility caller, `calling_socket` also requires the current launch. No caller environment is rewritten or given the current launch ID.
+This route permits only the agent's own `report`, `inbox`, `focus`, `unfocus`, sending as the agent and verification of its existing session binding. Missing or damaged proof, a foreign thread or scope, and an incorrect explicit identity mode remain refused. Runner and control updates retain strict launch checks. For this retained-launch compatibility caller, `calling_socket` also requires the current launch. No caller environment is rewritten or given the current launch ID.
 
 By default, Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves. Restarting the frontend does not guarantee that its cached tool settings change. The compatibility route lets verified old tools work without changing those settings. A separate older mv2 checkout still runs its old callback code and is not covered; use the current installation.
 
@@ -30,14 +30,15 @@ operator call. A genuinely unscoped human CLI remains an operator call.
 Read-only commands such as `catalog`, `list`, `command` and `doctor` do not
 resolve the caller's agent identity and remain available with stale shell values.
 
-The native tool environment contains no `MV2_LAUNCH_ID`, generation-private
-control socket or tmux socket. The frontend, runner and relay retain those private
+Current launches omit `MV2_LAUNCH_ID`, the generation-private control socket and
+tmux socket from native tools; older loaded conversations may retain them. The frontend, runner and relay retain those private
 values. No old relay address is rebound to a new terminal, and no callback is
 given the latest launch ID as a substitute for its own identity.
 
 | Operation | Identity and ownership rules |
 | --- | --- |
 | Own `report` and `inbox`, including `inbox --wait` | Explicit agent proof or opted-in retained bridge proof; valid across terminal replacement and while its wrapper is stopped or failed. It cannot clear a launch error or make a terminal ready. |
+| Own `focus` and `unfocus` | The same verified sender identity, including opted-in retained bridge proof; an agent cannot change another agent's focus. |
 | `send`, `deliver`, `ask`, usage and management commands | A validated agent may act normally. Recipient native session, message receipts, target launch and pane checks remain unchanged. |
 | `session-bind` with agent proof, including a retained bridge launch | Only verifies the exact already-bound ID, without writing. Establishing or changing a binding still requires the strict runner callback. |
 | `runtime-update`, runner binding, control RPC and attachment relay | Exact launch identity remains required. Old terminals cannot control replacement attachments. |
