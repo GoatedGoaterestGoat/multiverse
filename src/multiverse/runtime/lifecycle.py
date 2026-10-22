@@ -308,7 +308,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
         if start_fresh:
             storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
-                                                                  ambient, _storage_terminal(previous, socket_path)))
+                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path)))
             # Preparation is still read-only. The old binding is retired only
             # once the replacement command is valid and ready to be published.
             for key in agents.sessions.FRESH_FIELDS:
@@ -750,10 +750,17 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_terminal(previous, socket_path=None):
-    """Storage discovery may inspect a recorded or explicitly selected server, never guess the default."""
+def _storage_terminals(previous, directory, socket_path=None):
+    """Storage discovery may inspect a recorded or explicitly selected server, never guess the default.
+
+    Every retained launch request names the server it ran under. A legacy launch inherited its storage
+    variable from that server alone, so it stays evidence when runtime.json is lost or a later launch
+    failed before it had a terminal.
+    """
     socket = (previous.get('tmux') or {}).get('socket') or socket_path
-    return Tmux(socket) if socket else None
+    sockets = [socket] if socket else []
+    sockets += [saved for saved in storage_adoption.recorded_sockets(directory) if saved not in sockets]
+    return [Tmux(saved) for saved in sockets]
 
 
 def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices, *, socket_path=None):
@@ -803,7 +810,7 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
         candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
         adoption = storage_adoption.discover(adapter, properties, previous, directory, ambient,
-                                            _storage_terminal(previous, socket_path), recorded=candidate_recorded)
+                                            _storage_terminals(previous, directory, socket_path), recorded=candidate_recorded)
         adopted = dict(adoption.environment)
         if own_keys and adopted.get(own_keys[0]):
             # An explicit storage root does not depend on the candidate user's

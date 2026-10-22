@@ -117,8 +117,8 @@ def _never_started(adapter, properties, previous, directory):
         return False
 
 
-def _launch_environments(directory, keys):
-    """Read storage evidence from every retained request, without granting launch authority."""
+def _launch_requests(directory):
+    """Every retained request, as evidence only: it grants no launch authority."""
     launches = directory / 'launches'
     try:
         entries = sorted(launches.iterdir())
@@ -126,7 +126,7 @@ def _launch_environments(directory, keys):
         return []
     except OSError as error:
         raise ValueError(f'Cannot verify conversation storage: cannot read {launches}: {error}') from error
-    environments = []
+    requests = []
     for launch in entries:
         path = launch / 'request.json'
         try:
@@ -138,9 +138,31 @@ def _launch_environments(directory, keys):
                 continue  # Failed preparations need not have published a request.
             if not stat.S_ISREG(mode):
                 raise ValueError(f'Cannot verify conversation storage: {path} is not a regular request file')
-            request = agent_records.properties(path)
+            requests.append((path, agent_records.properties(path)))
         except (OSError, agent_records.RecordError) as error:
             raise ValueError(f'Cannot verify conversation storage: repair or restore read access to {path}: {error}') from error
+    return requests
+
+
+def recorded_sockets(directory):
+    """The terminal servers retained requests ran under. A legacy launch's storage came from its server."""
+    sockets = []
+    for path, request in _launch_requests(directory):
+        env = request.get('env', {})
+        saved = env.get('MV2_TMUX_SOCKET') if isinstance(env, dict) else None
+        if saved is None:
+            continue
+        if not isinstance(saved, str) or not saved or '\0' in saved or not Path(saved).is_absolute():
+            raise ValueError(f'Cannot verify conversation storage: repair the recorded terminal socket in {path}')
+        if saved not in sockets:
+            sockets.append(saved)
+    return sockets
+
+
+def _launch_environments(directory, keys):
+    """Read storage evidence from every retained request, without granting launch authority."""
+    environments = []
+    for path, request in _launch_requests(directory):
         env, unset = request.get('env', {}), request.get('unset_env', [])
         if (not isinstance(env, dict) or not isinstance(unset, list)
                 or any(not isinstance(key, str) or '\0' in key for key in unset)
@@ -172,7 +194,7 @@ def _saved_environments(properties, keys):
     return candidates
 
 
-def prove_missing(adapter, properties, previous, directory, ambient, backend):
+def prove_missing(adapter, properties, previous, directory, ambient, backends):
     """An explicit recovery discards no readable or uninspectable conversation."""
     if getattr(adapter, 'session_mode', None) == 'file':
         _launch_environments(directory, tuple(getattr(adapter, 'storage_env', ())))
@@ -184,11 +206,14 @@ def prove_missing(adapter, properties, previous, directory, ambient, backend):
         except OSError as error:
             raise ValueError(f'Cannot verify missing conversation {path}: {error}; restore read access before retrying') from error
         raise ValueError(f'Conversation file {path} still exists; --start-fresh only recovers a missing conversation')
-    return discover(adapter, properties, previous, directory, ambient, backend, require_absent=True)
+    return discover(adapter, properties, previous, directory, ambient, backends, require_absent=True)
 
 
-def discover(adapter, properties, previous, directory, ambient, backend, *, recorded=None, require_absent=False):
-    """Adopt exactly one proven candidate, with absence proved in every other home."""
+def discover(adapter, properties, previous, directory, ambient, backends, *, recorded=None, require_absent=False):
+    """Adopt exactly one proven candidate, with absence proved in every other home.
+
+    `backends` are the terminal servers records name; each one running is a candidate.
+    """
     keys = tuple(getattr(adapter, 'storage_env', ()))
     candidates = []
     if recorded is not None:
@@ -198,7 +223,7 @@ def discover(adapter, properties, previous, directory, ambient, backend, *, reco
     # A complete global environment distinguishes unset from unknown. An absent
     # server supplies no candidate, while an unreadable server prevents proof.
     problems = []
-    if backend is not None:
+    for backend in backends:
         try:
             values = {key: backend.environment(key) for key in (*keys, 'HOME')}
             if any(value is not None and not isinstance(value, str) for value in values.values()):

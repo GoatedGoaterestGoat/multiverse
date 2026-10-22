@@ -417,14 +417,15 @@ class LaunchIsolationTest(unittest.TestCase):
                 self.assertFalse(_never_started(adapter, properties, facts, directory))
 
     def test_explicit_fresh_start_requires_absence_and_retires_the_old_binding(self):
-        """Fresh recovery must reject unknown or present history and retire only a proven missing conversation, or history and saved input can be stranded."""
+        """Fresh recovery must reject unknown or present history, including a home only a retained request's terminal server names once runtime.json is lost, and retire only a proven missing conversation, or history and saved input can be stranded."""
         from multiverse.harnesses.claude import project_key
         from multiverse.universe import sessions
         for family in ('claude', 'codex', 'pi'):
             for evidence in ('absent', 'absent-again', 'absent-again-unbound', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
                              'history-damaged-runtime', 'history-missing-runtime', 'history-new-preparation',
                              'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service',
-                             'caller-home-missing-runtime', 'caller-home-damaged-runtime'):
+                             'caller-home-missing-runtime', 'caller-home-damaged-runtime',
+                             'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation'):
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
@@ -436,6 +437,9 @@ class LaunchIsolationTest(unittest.TestCase):
                     continue
                 unknown_server = evidence.startswith('caller-home-')
                 if unknown_server and family != 'claude':
+                    continue
+                server_home = evidence.startswith('server-')
+                if server_home and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -489,6 +493,17 @@ class LaunchIsolationTest(unittest.TestCase):
                         decoy = account / '.claude' / 'projects' / project_key(str(self.work)) / (old + '.jsonl')
                         decoy.parent.mkdir(parents=True)
                         decoy.write_text(json.dumps({'type': 'user', 'sessionId': old}) + '\n')
+                    if server_home:
+                        # A pre-#23 launch inherited its storage only from the server its request names.
+                        properties.pop('native_session_home')
+                        properties.pop('native_storage_environment')
+                        write(directory / 'properties.json', properties)
+                        write(old_request, {'env': {'MV2_TMUX_SOCKET': str(self.work / 'fresh-old.sock')}, 'unset_env': []})
+                        if evidence == 'server-missing-runtime':
+                            (directory / 'runtime.json').unlink()
+                        else:
+                            write(directory / 'runtime.json', {'launch_id': launch if evidence == 'server-damaged-runtime' else str(uuid4()),
+                                  'state': 'invalid' if evidence == 'server-damaged-runtime' else 'failed'})
                     if evidence.startswith('older-'):
                         # The current request is readable; only an older one is damaged.
                         latest = str(uuid4())
@@ -499,7 +514,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             old_request.write_text('{')
                         elif evidence == 'older-invalid-environment':
                             write(old_request, {'env': {key: None}})
-                    if evidence in ('present', 'scope-present', 'duplicate') or historical:
+                    if evidence in ('present', 'scope-present', 'duplicate') or historical or server_home:
                         if family == 'claude':
                             path = old_home / 'projects' / project_key(str(self.work)) / (old + '.jsonl')
                             path.parent.mkdir()
@@ -525,7 +540,13 @@ class LaunchIsolationTest(unittest.TestCase):
                     backend.environment.side_effect = PermissionError('unreadable server') if evidence == 'unreadable' else {key: str(caller if historical or evidence == 'scope-present' else old_home), 'HOME': str(self.work)}.get
                     if unknown_server:
                         backend.environment.side_effect = {'HOME': str(account)}.get
+                    if server_home:
+                        backend.environment.side_effect = {key: str(old_home), 'HOME': str(self.work)}.get
                     backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
+                    servers = []
+                    def terminal(socket=None):
+                        servers.append(socket)
+                        return backend
                     original_lstat = Path.lstat
                     original_read = Path.read_bytes
                     def read_bytes(path):
@@ -536,7 +557,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         if family == 'pi' and evidence == 'unreadable' and path == directory / 'session.jsonl':
                             raise PermissionError('unreadable conversation file')
                         return original_lstat(path, *args, **kwargs)
-                    with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                    with patch.object(lifecycle, 'Tmux', side_effect=terminal), \
                             patch('multiverse.runtime.missing_runtime.Tmux', return_value=backend), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
@@ -553,7 +574,11 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({path: original_read(path) for path in before}, before)
                             self.assertFalse((directory / 'sessions.jsonl').exists())
                             backend.create.assert_not_called()
-                            if historical:
+                            if server_home:
+                                # Found through the request's server, with runtime.json naming none.
+                                self.assertIn(str(self.work / 'fresh-old.sock'), servers)
+                                self.assertIn(f'{str(old_home)!r} (present)', str(refused.exception))
+                            if historical or server_home:
                                 resumed = lifecycle.start(self.root, resume=directory.name)
                                 self.assertEqual(resumed['native_session_id'], old)
                                 self.assertEqual(resumed['native_session_home'], str(old_home))

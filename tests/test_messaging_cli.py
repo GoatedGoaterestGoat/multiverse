@@ -151,7 +151,7 @@ class MessagingCliTest(BaseTest):
             backend = SimpleNamespace(environment=lambda key: environment.get(key))
             try:
                 storage_adoption.discover(LOAD(self.root, 'claude'), store.read(directory / 'properties.json'),
-                    store.read(directory / 'runtime.json'), directory, environment, backend)
+                    store.read(directory / 'runtime.json'), directory, environment, [backend])
             except ValueError as error:
                 reason = str(error)
             else:
