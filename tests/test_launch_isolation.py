@@ -874,8 +874,8 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_a_pi_harness_setting_its_agent_directory_is_what_spawn_records(self):
         """A Pi harness's settings.env can set PI_CODING_AGENT_DIR (Pi never reads it to find sessions): spawn records
         and runs with that value over the caller's and the tmux server's, and resume keeps it after the setting
-        changes, saying it ignored the new setting or a different shell value, while --start-fresh takes the current
-        setting; a break goes unnoticed because Pi still starts, in another directory
+        changes, saying it ignored the new setting or a different shell value but not a link to the same directory
+        (the documented move), while --start-fresh takes the current setting; a break goes unnoticed because Pi still starts, in another directory
         with other settings and auth (Shao #26)."""
         executable = self.work / 'pi-stand-in'
         executable.write_text(f'#!{sys.executable}\n')
@@ -896,6 +896,7 @@ class LaunchIsolationTest(unittest.TestCase):
             for mode, expected in (('spawn', str(self.work / 'pi-from-settings')),
                                    ('resume', str(self.work / 'pi-from-settings')),
                                    ('shell', str(self.work / 'pi-from-settings')),
+                                   ('moved', str(self.work / 'pi-from-settings')),
                                    ('fresh', str(self.work / 'pi-fresh-setting'))):
                 if mode == 'resume':
                     definition['settings']['env'] = {'PI_CODING_AGENT_DIR': str(self.work / 'pi-setting-changed')}
@@ -912,6 +913,18 @@ class LaunchIsolationTest(unittest.TestCase):
                     result = lifecycle.start(self.root, resume=result['id'])
                     self.assertIn(f'Kept its recorded PI_CODING_AGENT_DIR "{expected}"; '
                                   f'ignored PI_CODING_AGENT_DIR="{self.work / "pi-shell-changed"}".', result.get('notices', []))
+                elif mode == 'moved':
+                    # The documented move: the directory moved, a link left at its old path, the harness and the
+                    # shell pointed at the new one. The agent keeps its recorded path, which now reaches the same
+                    # directory, so nothing was ignored and nothing is said.
+                    moved = self.work / 'pi-moved'
+                    moved.mkdir()
+                    (self.work / 'pi-from-settings').symlink_to(moved, target_is_directory=True)
+                    definition['settings']['env'] = {'PI_CODING_AGENT_DIR': str(moved)}
+                    write(manifest, definition)
+                    os.environ['PI_CODING_AGENT_DIR'] = str(moved)
+                    result = lifecycle.start(self.root, resume=result['id'])
+                    self.assertNotIn('ignored', ' '.join(result.get('notices', [])))
                 elif mode == 'fresh':
                     # An explicit fresh start is a new conversation: it takes the setting as a spawn does.
                     (directory / 'session.jsonl').unlink()

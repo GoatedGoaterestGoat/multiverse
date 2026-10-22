@@ -346,7 +346,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         ignored_settings = [f'Kept its recorded {key} {"unset" if storage.get(key) is None else json.dumps(storage[key])}; '
                             f'ignored its harness setting {key}={json.dumps(value)}.'
                             for key, value in from_settings.items()
-                            if resume and not start_fresh and key in storage and storage[key] != value]
+                            if resume and not start_fresh and key in storage and not _same_directory(storage[key], value)]
         notices = display.notice_lines(missing_notices, ignored_settings, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
@@ -836,6 +836,18 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
                 **{key: adopted[key] for key in own_keys if key in adopted},
                 **({'HOME': adopted['HOME']} if adopted.get('HOME') else {})}
     return {**historical, **{key: environment.get(key) for key in own_keys}}
+
+
+def _same_directory(recorded, value):
+    """Whether a recorded storage path and a setting reach one directory, so keeping one ignores nothing."""
+    if recorded == value:
+        return True
+    if not (isinstance(recorded, str) and isinstance(value, str) and os.path.isabs(recorded) and os.path.isabs(value)):
+        return False
+    try:
+        return os.path.realpath(recorded) == os.path.realpath(value)
+    except (OSError, ValueError):
+        return False
 
 
 def _storage_command(command, storage):

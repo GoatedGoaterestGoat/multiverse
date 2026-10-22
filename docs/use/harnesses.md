@@ -145,6 +145,16 @@ Pi is launch-only unless `inbox_bridge` is `true`. With that setting, mv2 loads 
 
 Each agent has its own Pi session file, which resume needs.
 
+### Move Pi's directory
+
+An agent keeps the `PI_CODING_AGENT_DIR` it was spawned with, and a resume replays it. Its conversation is the session file in its own agent folder, so that directory holds only Pi's settings, auth and extensions. To move it:
+
+1. Stop the agents that use it.
+2. Move the directory, and leave a link at the old path: `mv OLD NEW && ln -s NEW OLD`.
+3. Point new agents at `NEW`: set `env.PI_CODING_AGENT_DIR` in the Pi `harness.json`, or in the shell mv2 runs in.
+
+An existing agent still runs with `OLD`, which now reaches `NEW`, and its resume prints no notice, because it ignores nothing. Keep the link while any agent spawned with `OLD` remains.
+
 ## Custom commands
 
 A schema-1 `harness.json` runs any command-line agent from `spawn` and `resume` argument lists, with no adapter code. It is launch-only, so it has no message delivery, status or wake. See [files](../reference/files.md#schema-1) for the fields. To write a built-in adapter, see [harness adapters](../develop/harness-adapters.md).
