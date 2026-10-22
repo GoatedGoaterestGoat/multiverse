@@ -90,7 +90,10 @@ workspace is the launch's own, so a recheck of a failed wake reads that launch's
 folder even after the agent moved on. GOAT applies the same rule to its search. The
 same scan answers core's `session_storage_evidence(session, home)` for each
 candidate home of an agent with no recorded storage: present, absent only when
-every folder that could hold the transcript was read, or unknown.
+every folder that could hold the transcript was read, or unknown. An absent answer
+says `store_read`: false, with a reason naming it, when the conversation store
+(`projects/`) doesn't exist, so core counts absence in a recorded home only where
+the store was read.
 When part of the storage that could hold the session can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as
 proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on

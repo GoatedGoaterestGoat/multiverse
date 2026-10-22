@@ -365,10 +365,24 @@ class ClaudeUnreadableStorageTest(BaseTest):
             (empty / 'projects' / '-private-tmp-scratch').mkdir(parents=True)
             evidence = lambda home, handle=session: adapter.session_storage_evidence(handle, home)
             self.assertEqual((evidence(str(self.storage)).state, evidence(str(self.storage)).value), ('ok', {'present': True}))
-            self.assertEqual((evidence(str(empty)).state, evidence(str(empty)).value), ('ok', {'present': False}))
-            self.assertEqual(evidence(str(self.work / 'no-such-home')).value, {'present': False})
+            self.assertEqual((evidence(str(empty)).state, evidence(str(empty)).value), ('ok', {'present': False, 'store_read': True}))
+            # Absence of a recorded home counts only when its conversation store (projects/) exists and was read: a
+            # store that isn't there, as in an unmounted volume left as an empty mount point, proves nothing, so the
+            # answer says the store wasn't read, naming it, and core decides (Shao's PR #26 item 3). An empty store
+            # was read.
+            no_projects = self.work / 'no-projects'
+            no_projects.mkdir()
+            linked_projects = self.work / 'linked-projects'
+            linked_projects.mkdir()
+            (linked_projects / 'projects').symlink_to(self.work / 'nowhere-projects', target_is_directory=True)
+            for case, home in (('no home', self.work / 'no-such-home'), ('a home with no projects folder', no_projects),
+                               ('a projects folder that is a dangling link', linked_projects)):
+                with self.subTest(store=case):
+                    found = evidence(str(home))
+                    self.assertEqual((found.state, found.value), ('ok', {'present': False, 'store_read': False}))
+                    self.assertIn(str(home / 'projects'), found.reason)
             self.lock(empty / 'projects' / '-private-tmp-scratch')  # another workspace's folder proves nothing either way
-            self.assertEqual(evidence(str(empty)).value, {'present': False})
+            self.assertEqual(evidence(str(empty)).value, {'present': False, 'store_read': True})
             (empty / 'projects' / '-private-tmp-scratch').chmod(0o700)
             self.lock(self.project)  # the folder that could hold it
             found = evidence(str(self.storage))

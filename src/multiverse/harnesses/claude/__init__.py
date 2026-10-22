@@ -1065,7 +1065,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         Core adopts a legacy agent's storage only when exactly one candidate home says present and the
         others absent (LC-28). Absent means every project folder that could hold it was read (the folder
         rule): another workspace's unreadable folder doesn't count, but one that could hold it, or an
-        unreadable projects folder, is unknown.
+        unreadable projects folder, is unknown. An absent answer says `store_read`: true when the
+        conversation store (projects/) existed and was read, false when it doesn't exist or is a dangling
+        link, with a reason naming it. Only core knows whether a home is the caller's own destination or a
+        recorded one, where absence counts only if the store was read.
         """
         if not session.native_id:
             return NativeResult('unknown', 'No Claude session ID to look for')
@@ -1079,7 +1082,17 @@ class ClaudeAdapter(ConfiguredAdapter):
             problem = transcript_identity(path, session.native_id)
             if problem:
                 return NativeResult('unknown', problem)
-        return NativeResult('ok', value={'present': bool(found)})
+        if found:
+            return NativeResult('ok', value={'present': True})
+        store = Path(home) / 'projects'
+        try:
+            os.stat(store)
+        except FileNotFoundError:
+            return NativeResult('ok', f"Claude's conversation store {store} doesn't exist",
+                                value={'present': False, 'store_read': False})
+        except OSError:
+            pass  # a store that exists but can't be read was already unknown
+        return NativeResult('ok', value={'present': False, 'store_read': True})
 
     def observed_binding(self, session):
         """The session this launch's exact process is on now, from Claude's own process file, or None.
