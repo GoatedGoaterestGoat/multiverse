@@ -189,7 +189,7 @@ mv2 resume NAME
 
 A launch error or `Note:` reads `Cannot isolate shared native session environment: ... failed to resolve feature override precedence: No such file or directory`. The shared Codex daemon was started from a directory that has since been deleted, such as a removed worktree. With `inbox_bridge` unset, the agent runs plain. With `true`, the launch fails.
 
-The message ends with a restart command for your Codex home, like `cd /home/me && CODEX_HOME=/home/me/.codex codex app-server daemon restart`. Restarting interrupts every Codex session on that daemon. Run the command exactly as printed, and only when no other Codex work is running. Then resume the agent, killing it first if it is running plain. mv2 never restarts the daemon itself.
+The message ends with a restart command for the agent's selected Codex home, like `cd /home/me && CODEX_HOME=/home/me/.codex codex app-server daemon restart`. It uses the launch's `HOME` when `CODEX_HOME` is unset or empty, including a home retained during legacy adoption. Restarting interrupts every Codex session on that daemon. Run the command exactly as printed, and only when no other Codex work is running. Then resume the agent, killing it first if it is running plain. mv2 never restarts the daemon itself.
 
 ## Environment
 

@@ -140,7 +140,8 @@ class CodexAdapter(ConfiguredAdapter):
                 reason = f'Cannot isolate shared native session environment: {observed.reason}'
                 if ('failed to resolve feature override precedence' in observed.reason
                         and 'No such file or directory' in observed.reason):
-                    home = str(Path(context.environment.get('CODEX_HOME') or '~/.codex').expanduser().resolve())
+                    from .identity import storage_environment
+                    home = storage_environment(context)['CODEX_HOME']
                     executable = self.spec['spawn'][0]
                     if '/' in executable and not Path(executable).is_absolute():
                         executable = str((Path(context.values['workspace']) / executable).resolve())

@@ -80,7 +80,7 @@ else:
         """Each inbox_bridge policy and Codex condition picks bridge or plain before any native child starts, starting
         the daemon at most once; fragile because it depends on Codex flags, daemon availability and config/read
         support that change by version, and a wrong pick starts a second native child or silently makes a
-        temporary fallback's delivery refusal final, or points deleted-daemon recovery at the workspace instead of the default home."""
+        temporary fallback's delivery refusal final, or points deleted-daemon recovery at the operator's home instead of the recorded launch home."""
         with self.subTest('harness auto capability is undecided, not launch-only'):
             for setting, mechanism in (({}, None), ({'inbox_bridge': True}, None),
                                        ({'inbox_bridge': False}, 'launch-only')):
@@ -197,14 +197,15 @@ else:
                       'session_id': native_id, 'control_socket': '/tmp/owned/rpc.sock'}
             session = SessionHandle('agent', 'codex', '/workspace', native_id=native_id)
             strict = CodexAdapter.configured('codex', {'inbox_bridge': True})
-            home = self.work / 'fixture-user'
+            home = self.work / 'recorded-user'
             for environment, expected in (({'CODEX_HOME': '/native storage'}, "CODEX_HOME='/native storage'"),
                                           ({'CODEX_HOME': ''}, f'CODEX_HOME={home}/.codex'),
-                                          ({}, f'CODEX_HOME={home}/.codex')):
-                with self.subTest(storage=environment), patch.dict(os.environ, {'HOME': str(home)}):
+                                          ({}, f'CODEX_HOME={home}/.codex'),
+                                          ({'CODEX_HOME': '~/custom'}, f'CODEX_HOME={home}/custom')):
+                with self.subTest(storage=environment), patch.dict(os.environ, {'HOME': str(self.work / 'operator-user')}):
                     executor.rpc.reset_mock()
                     context = LaunchContext('spawn', values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'),
-                                            executor=executor, environment=environment)
+                                            executor=executor, environment={'HOME': str(home), **environment})
                     with self.assertRaisesRegex(ValueError, 'deleted working directory') as raised:
                         strict.resume(session, context)
                     self.assertIn('daemon restart', str(raised.exception))
