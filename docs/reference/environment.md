@@ -111,7 +111,7 @@ records name. Missing
 or damaged runtime authority does not discard this storage evidence or restore
 permission to control an old process. An unreadable or damaged retained request
 blocks adoption and `--start-fresh`; recovery requires readable absence in every
-candidate, even when the latest launch failed before publishing its request.
+candidate, even when the latest launch failed before publishing its request. A missing recorded storage root outside the caller's own home is unknown for `--start-fresh`, since its volume may be unmounted or its folder renamed. Restore the root, or create it to confirm that its conversation is absent. The caller's own storage root may be absent.
 An old request recording neither a storage location nor `HOME` adds no location
 of its own; mv2 still checks the calling shell and the terminal servers.
 Those are the server in `runtime.json` or one you select explicitly, and every

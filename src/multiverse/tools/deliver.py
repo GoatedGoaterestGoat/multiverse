@@ -39,6 +39,9 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         tracking = message['tracking']
         final_lineage = bool(tracking.get('uncheckable_reported_at'))
         state = tracking['submission_state']
+        if retry and final_lineage:
+            finalized += 1
+            continue
         if check and state == 'cancelled' and tracking.get('cancelled_reported_at'):
             continue
         if check and tracking.get('uncheckable_reported_at'):
@@ -60,16 +63,14 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 adapter = harnesses.load(root, properties['harness'])
                 old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
             accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
-        if not (retry and final_lineage) and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+        if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
             if final is not None and retry:
                 finalized += 1
                 continue
-            if final_lineage:
-                receipt = native.deliver(root, directory.name, message['id'], retry=True)
-            elif outside_lineage:
+            if outside_lineage:
                 # Recheck the pointer under the launch lock before claiming a
                 # once-only diagnostic; this history snapshot can predate a rebind.
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
@@ -123,7 +124,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
     if _present and finalized:
-        _present(f'{name}: {finalized} earlier {"refusal is" if finalized == 1 else "refusals are"} final' +
+        _present(f'{name}: {finalized} earlier {"message is" if finalized == 1 else "messages are"} final' +
                  ('; nothing to retry.' if not results else '.'))
     elif _present and not results:
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')

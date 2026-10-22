@@ -49,6 +49,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
     if value.get('outside_lineage') is True:
+        if value.get('retired_by_fresh_start') is True:
+            return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
+                    'Send a new message if you still want it delivered.')
         if value.get('final') is True:
             return (f'{name}: cannot retry saved message {json.dumps(clean(text), ensure_ascii=False)}: '
                     'its conversation is outside the recorded lineage. Verify the original conversation, '

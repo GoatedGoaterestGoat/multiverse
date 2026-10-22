@@ -425,7 +425,8 @@ class LaunchIsolationTest(unittest.TestCase):
                              'history-damaged-runtime', 'history-missing-runtime', 'history-new-preparation',
                              'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service',
                              'caller-home-missing-runtime', 'caller-home-damaged-runtime',
-                             'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation'):
+                             'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation',
+                             'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'caller-root-missing'):
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
@@ -439,7 +440,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 if unknown_server and family != 'claude':
                     continue
                 server_home = evidence.startswith('server-')
-                if server_home and family == 'pi':
+                if (server_home or 'root-' in evidence) and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -514,6 +515,8 @@ class LaunchIsolationTest(unittest.TestCase):
                             old_request.write_text('{')
                         elif evidence == 'older-invalid-environment':
                             write(old_request, {'env': {key: None}})
+                        elif evidence == 'older-null-socket':
+                            write(old_request, {'env': {key: str(old_home), 'MV2_TMUX_SOCKET': None}})
                     if evidence in ('present', 'scope-present', 'duplicate') or historical or server_home:
                         if family == 'claude':
                             path = old_home / 'projects' / project_key(str(self.work)) / (old + '.jsonl')
@@ -534,6 +537,16 @@ class LaunchIsolationTest(unittest.TestCase):
                             copy = caller / path.relative_to(old_home)
                             copy.parent.mkdir(parents=True, exist_ok=True)
                             copy.write_bytes(path.read_bytes())
+                    if evidence.startswith('root-') or evidence == 'caller-root-missing':
+                        gone = caller if evidence == 'caller-root-missing' else old_home
+                        if evidence == 'root-renamed':
+                            gone.rename(gone.with_name('renamed'))
+                        else:
+                            (gone / 'projects').rmdir()
+                            (gone / 'sessions').rmdir()
+                            gone.rmdir()
+                            if evidence == 'root-dangling':
+                                gone.symlink_to(gone.with_name('unmounted'), target_is_directory=True)
                     before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
                     backend = Mock()
                     backend.snapshot.return_value = ({}, None)
@@ -565,12 +578,15 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.dict(os.environ, {key: str(caller), **({'HOME': str(caller)} if unknown_server else {})}):
                         if unknown_server:
                             os.environ.pop(key)
-                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound') and not unknown_server:
+                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing') and not unknown_server:
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable') as refused:
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
                             if evidence in ('present', 'duplicate', 'unreadable') and family != 'pi':
                                 self.assertNotIn('  Restore', str(refused.exception))
                                 self.assertIn('. Restore access', str(refused.exception))
+                            if evidence.startswith('root-'):
+                                self.assertIn('unknown', str(refused.exception))
+                                self.assertIn('create it to confirm', str(refused.exception))
                             self.assertEqual({path: original_read(path) for path in before}, before)
                             self.assertFalse((directory / 'sessions.jsonl').exists())
                             backend.create.assert_not_called()

@@ -504,6 +504,15 @@ def _session_changes(directory, properties, target):
     return changes if changes and not any(row.get('kind') == 'fresh-start' for row in changes) else None
 
 
+def _retired_session(directory, properties, target):
+    """Whether a validated fresh start ended the message target’s conversation lineage."""
+    effective, rows = agents.sessions.effective(directory, properties)
+    if effective != properties:
+        return False
+    departures = [index for index, row in enumerate(rows) if row['from'] == target]
+    return bool(departures and any(row.get('kind') == 'fresh-start' for row in rows[departures[-1]:]))
+
+
 def retarget_message(directory, properties, message, tracking):
     """Caller holds launch.lock. Move only definitely unaccepted agent input."""
     target = tracking.get('target_session') or message.get('target_session')
@@ -679,7 +688,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                 if not _session_changes(directory, executor.properties, target):
                     return {'state': 'unknown', 'ok': False, 'message_id': message_id,
                             'reason': 'Message targets a conversation outside this agent\'s recorded lineage; delivery cannot be checked',
-                            'value': {'outside_lineage': True}}
+                            'value': {'outside_lineage': True,
+                                      'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
                 receipt_session = replace(session, native_id=target)
             if tracking.get('submission_state') == 'failed':
                 return {**tracking['attempts'][-1], 'ok': False}

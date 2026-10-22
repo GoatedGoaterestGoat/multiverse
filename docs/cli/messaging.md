@@ -86,8 +86,7 @@ that cancellation, including concurrent checks. It stays in history; neither
 A message outside the recorded conversation lineage is also reported only once
 by `--check`. Its saved delivery evidence remains unchanged, but it is final for
 retry and no longer counts as a delivery problem in list, inspect or doctor.
-`--retry` says it cannot retry that message: verify the original conversation,
-then send a new message if you still want it delivered.
+`--retry` counts these messages with earlier final refusals and exits successfully unless another retry fails. For a conversation retired by `--start-fresh`, the one report says the message never reached the new conversation and advises sending a new message. For other out-of-lineage messages, verify the original conversation before sending a new one.
 
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. It does not resend them. List, inspect and doctor show how many
@@ -132,8 +131,7 @@ is reported once with the message text and advice to send a new message delibera
 `--retry` does not resend it. If the harness restored a draft, it has not been
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
-lineage is reported once as uncheckable and stays uncertain in history; verify
-the original conversation before resending it.
+lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
 An accepted command-line wake prompt has no correlatable native receipt and is
 excluded from recurring checks. An uncertain or failed wake keeps its existing
 evidence check and is never resent automatically.

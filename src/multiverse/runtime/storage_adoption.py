@@ -149,9 +149,11 @@ def recorded_sockets(directory):
     sockets = []
     for path, request in _launch_requests(directory):
         env = request.get('env', {})
-        saved = env.get('MV2_TMUX_SOCKET') if isinstance(env, dict) else None
-        if saved is None:
+        if not isinstance(env, dict):
+            raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
+        if 'MV2_TMUX_SOCKET' not in env:
             continue
+        saved = env['MV2_TMUX_SOCKET']
         if not isinstance(saved, str) or not saved or '\0' in saved or not Path(saved).is_absolute():
             raise ValueError(f'Cannot verify conversation storage: repair the recorded terminal socket in {path}')
         if saved not in sockets:
@@ -233,7 +235,9 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
             reason = str(error)
             if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):
                 problems.append('cannot read the recorded terminal server environment: ' + reason)
-    candidates.append(('calling shell', _environment(ambient, keys), Path.cwd()))
+    caller_environment = _environment(ambient, keys)
+    caller_home, _ = _candidate_home(adapter, caller_environment, Path.cwd())
+    candidates.append(('calling shell', caller_environment, Path.cwd()))
     session = SessionHandle.from_records(properties, previous, directory)
     unbound = (require_absent and getattr(adapter, 'session_mode', None) == 'reported'
                and sessions.unbound_fresh(directory, properties))
@@ -253,6 +257,17 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
                 caller = (home, selected)
             if home in homes:
                 continue
+            if require_absent and home != caller_home:
+                try:
+                    if not stat.S_ISDIR(Path(home).stat().st_mode):
+                        raise ValueError('the recorded storage root is not a directory')
+                except (OSError, ValueError) as error:
+                    homes[home] = (None, selected)
+                    if isinstance(error, FileNotFoundError):
+                        problems.append(f'{home}: recorded storage root is missing; restore it, or create it to confirm the conversation is absent')
+                    else:
+                        problems.append(f'{home}: cannot inspect the recorded storage root: {error}')
+                    continue
             if unbound:
                 # No UUID was bound after this retirement. The lineage proves
                 # absence of a current conversation; a finder cannot query None.
