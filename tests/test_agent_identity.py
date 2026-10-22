@@ -18,7 +18,7 @@ from multiverse import cli
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity
 from multiverse.store import read, uid, write
-from multiverse.tools import _common, catalog, inbox, list_agents, report, runtime_update, session_bind, send
+from multiverse.tools import _common, catalog, inbox, list_agents, report, runtime_update, session_bind, send, focus, unfocus
 from multiverse.universe.mailbox import append_message
 from test_multiverse import BaseTest
 
@@ -223,6 +223,8 @@ class AgentIdentityTest(BaseTest):
             self.assertEqual(report.run(self.root, agent=self.identity, summary='cached tools')['summary'], 'cached tools')
             self.assertEqual(inbox.run(self.root, agent=self.identity)['messages'][0]['text'], 'retained inbox')
             self.assertEqual(agent_identity.sender_actor().identity, self.identity)
+            self.assertTrue(focus.run(self.root, agent=self.identity)['focused'])
+            self.assertFalse(unfocus.run(self.root, agent=self.identity)['focused'])
             self.assertEqual(dict(os.environ), env)  # no MODE or current-LID substitution
             self.assertEqual(read(path), request)
             self.assertEqual(read(self.directory / 'runtime.json'), facts)
@@ -231,7 +233,7 @@ class AgentIdentityTest(BaseTest):
             send.run(self.root, agent='other', text='cached sender', delivery='inbox-only')
             from multiverse.universe.mailbox import inbox as history
             self.assertEqual(history(other, all_messages=True)['messages'][0]['from']['agent_id'], self.identity)
-            for action in (report.run, inbox.run):
+            for action in (report.run, inbox.run, focus.run, unfocus.run):
                 with self.subTest(target='another agent', action=action), self.assertRaises(ValueError):
                     action(self.root, agent='other')
             with self.assertRaises(ValueError):
@@ -297,6 +299,9 @@ class AgentIdentityTest(BaseTest):
                     patch.dict(os.environ, {**env, **changed_env}, clear=True):
                 with self.assertRaises(ValueError):
                     report.run(self.root, agent=self.identity, summary='must not write')
+                for action in (focus.run, unfocus.run):
+                    with self.assertRaises(ValueError):
+                        action(self.root, agent=self.identity)
                 self.assertEqual((self.directory / 'properties.json').read_bytes(), before)
 
     def test_an_agent_cannot_rebind_fake_runner_status_or_become_another(self):

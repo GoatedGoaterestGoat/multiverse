@@ -69,7 +69,7 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     if state in ('error', 'unavailable'):
         # A file path is actionable evidence, not an opaque native identifier.
         why = (clean(reason) if value.get('pre_submission_failure') is True else
-               failure_reason(reason, text, preserve_details=value.get('wake_refused') is True))
+               failure_reason(reason, text, preserve_details=value.get('wake_refused') is True or value.get('check_error') is True))
         if value.get('launch_only') is True and value.get('final') is False:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason and resume with a working bridge, "
                     f"then mv2 deliver {name} --retry.")

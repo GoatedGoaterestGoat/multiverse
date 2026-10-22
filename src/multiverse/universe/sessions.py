@@ -143,7 +143,7 @@ def journal(directory):
                 identities.add(row['id'])
                 rows.append(row)
     except (ValueError, TypeError, KeyError) as error:
-        raise ValueError(f'Invalid session journal: {error}') from error
+        raise ValueError(f'Invalid session journal {path}: {error}') from error
     return rows
 
 

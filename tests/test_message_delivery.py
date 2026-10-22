@@ -548,6 +548,58 @@ class InboxDeliveryTest(DeliveryFixture):
             update_message(self.directory, current['id'], native_receipt={'transcript_confirmed': True})
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
             self.assertTrue(all(message_record(self.directory, item['id'])[1]['submission_state'] == 'accepted' for item in older))
+        for damage in ('journal', 'harness'):
+            with self.subTest(per_message_error=damage):
+                self.recipient(native_session_home=str(self.work))
+                messages = [self.send(f'error input {index}') for index in range(2)]
+                for item in messages:
+                    update_message(self.directory, item['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+                properties = read(self.directory / 'properties.json')
+                if damage == 'journal':
+                    write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+                    (self.directory / 'sessions.jsonl').write_text('{')
+                lines = []
+                manager = patch.object(harnesses, 'load', side_effect=ValueError('fixture harness cannot load')) if damage == 'harness' else contextlib.nullcontext()
+                with manager:
+                    result = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                self.assertFalse(result['ok'])
+                self.assertEqual(len(result['messages']), 2)
+                self.assertEqual(len(lines), 2)
+                reason = str(self.directory / 'sessions.jsonl') if damage == 'journal' else 'fixture harness cannot load'
+                self.assertTrue(all(reason in line for line in lines), lines)
+                self.assertEqual(len(self.calls), 2)
+        with self.subTest('an older acceptance in an earlier owned conversation stays out of checks'):
+            from multiverse.universe import agents
+            self.recipient(native_session_home=str(self.work))
+            message = self.send('older owned conversation')
+            target = str(uuid4())
+            agents.rebind_session(self.root, self.agent, self.native_id, target, 'clear', self.launch, home=str(self.work))
+            write(self.directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running', 'tmux': self.terminal})
+            adapter = harnesses.load(self.root, 'claude')
+            with patch.object(adapter, 'get_delivery', side_effect=AssertionError('older conversation must not be queried')), \
+                    patch.object(adapter, 'accepted_message_evidence', side_effect=AssertionError('older conversation has no applicable evidence'), create=True):
+                self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+            self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], 'accepted')
+        with self.subTest('retry reports an outside-lineage failure once without needing check first'):
+            self.recipient()
+            self.behavior = NativeResult('error', 'failed before submission')
+            message = self.send('failed in an unrelated conversation')
+            properties = read(self.directory / 'properties.json')
+            write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+            with patch.object(native, 'send_or_wake', side_effect=AssertionError('outside lineage must not retry')):
+                lines = []
+                first = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+                second = deliver.run(self.root, agent=self.agent, retry=True)
+                third = deliver.run(self.root, agent=self.agent, check=True)
+            self.assertFalse(first['ok'])
+            self.assertIn('outside', first['messages'][0]['reason'])
+            self.assertTrue(any('Inspect the original conversation' in line for line in lines), lines)
+            self.assertFalse(any('then mv2 deliver' in line for line in lines), lines)
+            self.assertTrue(second['ok'])
+            self.assertEqual(second['finalized'], 1)
+            self.assertEqual(second['messages'], [])
+            self.assertEqual(third['messages'], [])
+            self.assertIsNone(deliver.mailbox.delivery_problem(self.directory, self.agent))
         with self.subTest('a failed message is reported, never reconciled or resent'):
             self.recipient()
             message = append_message(self.directory, 'refused', {}, delivery='steer')

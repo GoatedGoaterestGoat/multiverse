@@ -84,12 +84,12 @@ that cancellation, including concurrent checks. It stays in history; neither
 `--check` nor `--retry` resends it.
 
 A message outside the recorded conversation lineage is also reported only once
-by `--check`. Its saved delivery evidence remains unchanged, but it is final for
+by `--check`, or by `--retry` for a definite failure. Its saved delivery evidence remains unchanged, but it is final for
 retry and no longer counts as a delivery problem in list, inspect or doctor.
 `--retry` counts these messages with earlier final refusals and exits successfully unless another retry fails. For a conversation retired by `--start-fresh`, the one report says the message never reached the new conversation and advises sending a new message. For other out-of-lineage messages, verify the original conversation before sending a new one.
 
 `--check` also reports definite failures and exits nonzero while any checked
-message failed. It does not resend them. List, inspect and doctor show how many
+message failed. A damaged session journal or unloadable harness gives each affected message its own error; the remaining messages are still checked. Record errors name their file. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.
 
 Older definite refusals receive the same classification when list, inspect and

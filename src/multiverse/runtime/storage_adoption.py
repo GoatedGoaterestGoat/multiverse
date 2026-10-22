@@ -235,9 +235,7 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
             reason = str(error)
             if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):
                 problems.append('cannot read the recorded terminal server environment: ' + reason)
-    caller_environment = _environment(ambient, keys)
-    caller_home, _ = _candidate_home(adapter, caller_environment, Path.cwd())
-    candidates.append(('calling shell', caller_environment, Path.cwd()))
+    candidates.append(('calling shell', _environment(ambient, keys), Path.cwd()))
     session = SessionHandle.from_records(properties, previous, directory)
     unbound = (require_absent and getattr(adapter, 'session_mode', None) == 'reported'
                and sessions.unbound_fresh(directory, properties))
@@ -257,7 +255,7 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
                 caller = (home, selected)
             if home in homes:
                 continue
-            if require_absent and home != caller_home:
+            if require_absent and label != 'calling shell':
                 try:
                     if not stat.S_ISDIR(Path(home).stat().st_mode):
                         raise ValueError('the recorded storage root is not a directory')

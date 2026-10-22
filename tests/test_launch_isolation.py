@@ -320,8 +320,9 @@ class LaunchIsolationTest(unittest.TestCase):
                         patch.dict(os.environ, {key: str(homes['caller'])}):
                     fresh = found == 'empty-before-child' and family == 'claude'
                     if found in ('none', 'multiple', 'unreadable') or found.startswith('empty-') and not fresh:
-                        with self.assertRaisesRegex(ValueError, 'conversation.*storage'):
+                        with self.assertRaisesRegex(ValueError, 'conversation.*storage') as refused:
                             lifecycle.start(self.root, resume=directory.name)
+                        self.assertIn(f'mv2 resume {directory.name} --start-fresh', str(refused.exception))
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
@@ -395,7 +396,8 @@ class LaunchIsolationTest(unittest.TestCase):
         # real work. None may become a silent fresh start when another guard changes.
         from multiverse.runtime.storage_adoption import _never_started
         for evidence in ('rebound', 'phase', 'sessions.jsonl', 'session.jsonl', 'native-delivery.json',
-                         'claude-receipts/receipt.json', 'request.json', 'ready', 'cleanup.json', 'roles'):
+                         'claude-receipts/receipt.json', 'request.json', 'ready', 'cleanup.json', 'roles',
+                         'native-receipt', 'invalid-attempts', 'missing-launches', 'missing-current-launch', 'non-directory-launch'):
             with self.subTest(never_started_evidence=evidence):
                 identifier = str(uuid4())
                 directory = self.work / 'never-started-guards' / identifier
@@ -410,11 +412,35 @@ class LaunchIsolationTest(unittest.TestCase):
                     properties['native_session_id'] = str(uuid4())
                 elif evidence == 'phase':
                     properties['phase'] = 'working'
+                elif evidence in ('native-receipt', 'invalid-attempts'):
+                    saved = {'submission_state': 'failed', 'attempts': []}
+                    saved['native_receipt' if evidence == 'native-receipt' else 'attempts'] = {'evidence': True} if evidence == 'native-receipt' else {}
+                    write(directory / 'inbox-state.json', {'message': saved})
+                elif evidence == 'missing-launches':
+                    launch.rmdir()
+                    launch.parent.rmdir()
+                elif evidence == 'missing-current-launch':
+                    launch.rename(launch.with_name(str(uuid4())))
+                elif evidence == 'non-directory-launch':
+                    launch.rmdir()
+                    launch.write_text('damaged')
                 else:
                     path = (launch if evidence in ('request.json', 'ready', 'cleanup.json', 'roles') else directory) / evidence
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text('{}\n')
-                self.assertFalse(_never_started(adapter, properties, facts, directory))
+                from multiverse.runtime import storage_adoption
+                original_present = storage_adoption._present
+                def disappearing_entry(path):
+                    # Concurrent cleanup removes the damaged launch after the
+                    # directory inventory, before probing children. Absence of
+                    # those children must not turn that entry into proof.
+                    if path.parent == launch:
+                        launch.unlink(missing_ok=True)
+                    return original_present(path)
+                boundary = (patch.object(storage_adoption, '_present', side_effect=disappearing_entry)
+                            if evidence == 'non-directory-launch' else contextlib.nullcontext())
+                with boundary:
+                    self.assertFalse(_never_started(adapter, properties, facts, directory))
 
     def test_explicit_fresh_start_requires_absence_and_retires_the_old_binding(self):
         """Fresh recovery must reject unknown or present history, including a home only a retained request's terminal server names once runtime.json is lost, and retire only a proven missing conversation, or history and saved input can be stranded."""
@@ -426,7 +452,7 @@ class LaunchIsolationTest(unittest.TestCase):
                              'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service',
                              'caller-home-missing-runtime', 'caller-home-damaged-runtime',
                              'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation',
-                             'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'caller-root-missing'):
+                             'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'root-recorded-caller', 'caller-root-missing'):
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
@@ -545,6 +571,8 @@ class LaunchIsolationTest(unittest.TestCase):
                             (gone / 'projects').rmdir()
                             (gone / 'sessions').rmdir()
                             gone.rmdir()
+                            if evidence == 'root-recorded-caller':
+                                caller = old_home
                             if evidence == 'root-dangling':
                                 gone.symlink_to(gone.with_name('unmounted'), target_is_directory=True)
                     before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}

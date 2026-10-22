@@ -59,8 +59,17 @@ class DamagedPeerClaimsTest(BaseTest):
         for raw in ('{"name": "reserved"', '{"name": "\\u0072eserved"'):
             with self.subTest(name_in=raw):
                 path.write_text(raw)
-                with self.assertRaisesRegex(ValueError, self.peer.name):
+                with self.assertRaisesRegex(ValueError, self.peer.name) as caught:
                     agents.check_available_name(self.root, 'reserved')
+                self.assertEqual(caught.exception.file, path)
+                self.assertTrue(str(caught.exception).startswith('properties.json:'))
+                self.assertNotIn('mv2 remove', str(caught.exception))
+        with self.subTest('a missing identity still offers removal of the leftover folder'):
+            path.unlink()
+            write(self.peer / 'runtime.json', {'name': 'reserved', 'state': 'failed'})
+            with self.assertRaisesRegex(ValueError, 'mv2 remove ' + self.peer.name):
+                agents.check_available_name(self.root, 'reserved')
+            (self.peer / 'runtime.json').unlink()
         for raw, journal in (('{"native_session_id": "' + self.native, None),
                              ('{"name": [], "native_session_id": "' + encoded_id + '"}', None),
                              ('{"native_session_id": "' + encoded_id, None),

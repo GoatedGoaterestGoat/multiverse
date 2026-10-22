@@ -88,7 +88,7 @@ class OrphanRemovalTest(BaseTest):
                         self.assertEqual(lifecycle.listing(self.root)[0]['damaged'].get('recover'), 'remove')
                         self.assertEqual(inspect.facts(self.root, self.directory.name)['damaged'].get('recover'), 'remove')
                         self.assertIn(' · leftover folder · ', inspect.cli_run(self.root, agent=self.directory.name).splitlines()[0])
-                        self.assertTrue(any(f'remove it with mv2 remove {self.directory.name}' in problem
+                        self.assertTrue(any('leftover folder' in problem and f'remove it with mv2 remove {self.directory.name}' in problem
                                             for problem, _ in doctor.check(self.root)))
                         with patch.object(Tmux, 'snapshot', return_value=({}, None)):
                             missing_runtime.require_stopped(self.directory, {

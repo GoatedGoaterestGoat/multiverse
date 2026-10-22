@@ -63,7 +63,7 @@ mv2 resume worker --model opus --wait
 
 If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
 agent's folder, name and inbox and starts a new conversation in the calling
-shell's storage. It requires a stopped agent and proof that the old conversation
+shell's storage, except that Pi's current harness setting for `PI_CODING_AGENT_DIR` takes precedence over the shell. It requires a stopped agent and proof that the old conversation
 is absent from every candidate storage home (or the harness's session file).
 Present, duplicate, unreadable or unknown evidence refuses without changing the
 records. The result announces the fresh start. The old ID stays retired in the

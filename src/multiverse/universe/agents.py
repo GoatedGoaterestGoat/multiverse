@@ -122,9 +122,11 @@ def name_matches(path, name):
             raise records.RecordError(path, f'Cannot check {owner}: cannot read safely ({unreadable}); '
                                       f'{remedy} before retrying') from error
         if mentioned:
-            raise records.RecordError(path.parent, f'Cannot check {owner}: a surviving damaged record contains '
-                                      f'{name!r}, so mv2 cannot prove the name is free. Repair the records, or use '
-                                      f'mv2 remove {path.parent.name} to move this leftover agent to the trash before retrying') from error
+            remedy = (f'Repair the records, or use mv2 remove {path.parent.name} to move this leftover folder '
+                      'to the trash before retrying' if properties_missing(path.parent) else
+                      'Repair this damaged properties file before retrying')
+            raise records.RecordError(path, f'Cannot check {owner}: a surviving damaged record contains '
+                                      f'{name!r}, so mv2 cannot prove the name is free. {remedy}') from error
         return False
 
 
