@@ -83,6 +83,12 @@ advice to send a new message if you still want it delivered. Later checks omit
 that cancellation, including concurrent checks. It stays in history; neither
 `--check` nor `--retry` resends it.
 
+A message outside the recorded conversation lineage is also reported only once
+by `--check`. Its saved delivery evidence remains unchanged, but it is final for
+retry and no longer counts as a delivery problem in list, inspect or doctor.
+`--retry` says it cannot retry that message: verify the original conversation,
+then send a new message if you still want it delivered.
+
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.

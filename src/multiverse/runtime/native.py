@@ -631,12 +631,20 @@ def reopen_launch_only(root, directory, message_id):
         return True
 
 
+def _final_lineage_receipt(message_id):
+    return {'state': 'unavailable', 'ok': False, 'message_id': message_id, 'reused': True,
+            'reason': 'This saved message cannot be retried: its conversation is outside the recorded lineage',
+            'value': {'outside_lineage': True, 'final': True}}
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('uncheckable_reported_at'):
+            return _final_lineage_receipt(message_id)
         if (check and tracking.get('delivery_method') == 'resume_prompt'
                 and tracking.get('submission_state') in ('submitting', 'unknown', 'accepted')):
             from . import wake
@@ -777,6 +785,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('uncheckable_reported_at'):
+            return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)
         properties = records.properties(directory / 'properties.json')
         observation = None

@@ -113,6 +113,10 @@ blocks adoption and `--start-fresh`; recovery requires readable absence in every
 candidate, even when the latest launch failed before publishing its request.
 An old request recording neither a storage location nor `HOME` adds no location
 of its own; mv2 still checks the calling shell and available terminal server.
+Only a recorded or explicitly selected terminal server supplies that candidate.
+If the old server is unknown, mv2 does not query the unrelated default server;
+the caller's harness default uses the caller's `HOME`, alongside retained storage
+evidence.
 Each terminal variable is read whole, including embedded
 newlines and trailing whitespace; unreadable or ambiguous escaped output blocks adoption. The adapter
 reads Claude's session transcript or Codex's

@@ -28,6 +28,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
     held = focus.current(directory) if retry else None
     if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
+                    and not message['tracking'].get('uncheckable_reported_at')
                     and message['tracking']['submission_state'] in ('failed', 'launch-only') for message in history):
         return _focused(name, held, [], _present_error or _present)
     results = []
@@ -36,6 +37,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']
+        final_lineage = bool(tracking.get('uncheckable_reported_at'))
         state = tracking['submission_state']
         if check and state == 'cancelled' and tracking.get('cancelled_reported_at'):
             continue
@@ -58,14 +60,16 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 adapter = harnesses.load(root, properties['harness'])
                 old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
             accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
-        if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+        if not (retry and final_lineage) and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
-            final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage else None
+            final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
             if final is not None and retry:
                 finalized += 1
                 continue
-            if outside_lineage:
+            if final_lineage:
+                receipt = native.deliver(root, directory.name, message['id'], retry=True)
+            elif outside_lineage:
                 # Recheck the pointer under the launch lock before claiming a
                 # once-only diagnostic; this history snapshot can predate a rebind.
                 receipt = native.deliver(root, directory.name, message['id'], check=True)

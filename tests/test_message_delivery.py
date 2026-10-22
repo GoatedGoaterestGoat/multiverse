@@ -505,6 +505,13 @@ class InboxDeliveryTest(DeliveryFixture):
                 self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], outside_state)
                 self.assertTrue(any(message['text'] in line and 'Do not resend' in line for line in lines), lines)
                 self.assertEqual(len(self.calls), 1)
+                retry_lines = []
+                with patch.object(native, 'send_or_wake', side_effect=AssertionError('final lineage report must not retry')):
+                    retried = deliver.run(self.root, agent=self.agent, retry=True, _present=retry_lines.append)
+                self.assertFalse(retried['ok'])
+                self.assertEqual(len(retried['messages']), 1)
+                self.assertTrue(any('cannot retry' in line and 'new message' in line for line in retry_lines), retry_lines)
+                self.assertIsNone(deliver.mailbox.delivery_problem(self.directory, self.agent))
         with self.subTest('a failed message is reported, never reconciled or resent'):
             self.recipient()
             message = append_message(self.directory, 'refused', {}, delivery='steer')

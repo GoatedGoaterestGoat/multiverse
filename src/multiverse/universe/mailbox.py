@@ -140,7 +140,7 @@ def delivery_problem(agent_dir, name, *, is_final=None):
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir)
         failed = {identifier for identifier, state in states.items()
-                  if state.get('submission_state') == 'failed'}
+                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at')}
         if not failed:
             return None
         _, _, messages = _messages(agent_dir)

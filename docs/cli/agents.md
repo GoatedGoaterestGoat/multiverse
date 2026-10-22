@@ -69,6 +69,9 @@ Present, duplicate, unreadable or unknown evidence refuses without changing the
 records. The result announces the fresh start. The old ID stays retired in the
 session journal; it is not reused for the new conversation, and old messages are
 not moved into it. This flag does not reset a readable conversation.
+If a replacement Codex conversation stops before any native ID was bound,
+the matching fresh-start journal proves there is no bound conversation to
+protect, so another `--start-fresh` is allowed. A missing ID alone is not proof.
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 
@@ -120,7 +123,7 @@ This includes abandoned launch folders containing only bootstrap or task files,
 with no request, ready marker, registration, cleanup or connection records.
 A regular file named `launches` cannot hold launch records either; it stays with
 the leftovers instead of blocking unrelated names or conversations.
-List and doctor identify the leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
+List, inspect and doctor identify it as a leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
 checks that no terminal is tagged for that agent on the current servers before
 moving the folder and its plugin leftovers to trash; unreadable servers or new
 core records refuse the move. A refusal names any tagged pane that must be verified and closed first.

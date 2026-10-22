@@ -307,9 +307,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         retired_id = properties.get('native_session_id')
         fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
         if start_fresh:
-            terminal = previous.get('tmux') or {}
             storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
-                                                                  ambient, Tmux(terminal.get('socket'))))
+                                                                  ambient, _storage_terminal(previous, socket_path)))
             # Preparation is still read-only. The old binding is retired only
             # once the replacement command is valid and ready to be published.
             for key in agents.sessions.FRESH_FIELDS:
@@ -321,7 +320,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             mode, session = 'spawn', None
             values['session_id'] = properties.get('native_session_id') or ''
         storage = _storage_environment(adapter, properties, environment, ambient, resume and not start_fresh, agent_dir, previous,
-                                       storage_notices)
+                                       storage_notices, socket_path=socket_path)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
@@ -751,7 +750,13 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices):
+def _storage_terminal(previous, socket_path=None):
+    """Storage discovery may inspect a recorded or explicitly selected server, never guess the default."""
+    socket = (previous.get('tmux') or {}).get('socket') or socket_path
+    return Tmux(socket) if socket else None
+
+
+def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices, *, socket_path=None):
     """Replay storage values and explicit absence before the adapter computes home."""
     own_keys = getattr(adapter, 'storage_env', ())
     keys = tuple(dict.fromkeys([*own_keys, *(key for cls in harnesses.BUILTINS.values()
@@ -797,9 +802,8 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
             return {**historical, **adopted}
         candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
-        terminal = previous.get('tmux') or {}
         adoption = storage_adoption.discover(adapter, properties, previous, directory, ambient,
-                                            Tmux(terminal.get('socket')), recorded=candidate_recorded)
+                                            _storage_terminal(previous, socket_path), recorded=candidate_recorded)
         adopted = dict(adoption.environment)
         if own_keys and adopted.get(own_keys[0]):
             # An explicit storage root does not depend on the candidate user's

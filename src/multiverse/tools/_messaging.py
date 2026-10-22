@@ -49,6 +49,10 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
     if value.get('outside_lineage') is True:
+        if value.get('final') is True:
+            return (f'{name}: cannot retry saved message {json.dumps(clean(text), ensure_ascii=False)}: '
+                    'its conversation is outside the recorded lineage. Verify the original conversation, '
+                    'then send a new message if you still want it delivered.')
         return (f'{name}: cannot check message {json.dumps(clean(text), ensure_ascii=False)}: '
                 'its conversation is outside the recorded lineage. Inspect the original conversation. Do not resend without verifying it.')
     if state == 'cancelled' and value.get('lost_when_stopped') is True:

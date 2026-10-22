@@ -210,6 +210,14 @@ def pending_fresh(directory, data):
     return True
 
 
+def unbound_fresh(directory, data):
+    """Only a validated retirement with no subsequent binding proves there is no current native ID."""
+    current, rows = effective(directory, data)
+    return bool(rows and current.get('native_session_id') is None
+                and rows[-1].get('kind') == 'fresh-start' and rows[-1]['to'] is None
+                and current.get('native_session_transition') == rows[-1]['id'])
+
+
 def _recorded_provider(data):
     value = data.get('native_session_provider')
     if value is None:

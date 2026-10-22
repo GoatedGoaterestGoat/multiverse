@@ -6,7 +6,7 @@ import stat
 
 from ..harnesses.types import SessionHandle
 from ..universe import storage as records
-from ..universe import records as agent_records
+from ..universe import records as agent_records, sessions
 from .native import adapter_hook
 
 
@@ -198,17 +198,20 @@ def discover(adapter, properties, previous, directory, ambient, backend, *, reco
     # A complete global environment distinguishes unset from unknown. An absent
     # server supplies no candidate, while an unreadable server prevents proof.
     problems = []
-    try:
-        values = {key: backend.environment(key) for key in (*keys, 'HOME')}
-        if any(value is not None and not isinstance(value, str) for value in values.values()):
-            raise ValueError('terminal server did not return its environment')
-        candidates.append(('terminal server', values, properties['workspace']))
-    except Exception as error:
-        reason = str(error)
-        if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):
-            problems.append('cannot read the recorded terminal server environment: ' + reason)
+    if backend is not None:
+        try:
+            values = {key: backend.environment(key) for key in (*keys, 'HOME')}
+            if any(value is not None and not isinstance(value, str) for value in values.values()):
+                raise ValueError('terminal server did not return its environment')
+            candidates.append(('terminal server', values, properties['workspace']))
+        except Exception as error:
+            reason = str(error)
+            if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):
+                problems.append('cannot read the recorded terminal server environment: ' + reason)
     candidates.append(('calling shell', _environment(ambient, keys), Path.cwd()))
     session = SessionHandle.from_records(properties, previous, directory)
+    unbound = (require_absent and getattr(adapter, 'session_mode', None) == 'reported'
+               and sessions.unbound_fresh(directory, properties))
     hook = adapter_hook(adapter, 'session_storage_evidence')
     homes = {}
     caller = None
@@ -225,24 +228,31 @@ def discover(adapter, properties, previous, directory, ambient, backend, *, reco
                 caller = (home, selected)
             if home in homes:
                 continue
-            result = hook(session, home) if hook else None
-            present = result.value.get('present') if result and isinstance(result.value, dict) else None
-            if result is None or result.state != 'ok' or type(present) is not bool:
-                problems.append(f'{home}: {result.reason if result else "no storage evidence hook"}')
-                present = None
+            if unbound:
+                # No UUID was bound after this retirement. The lineage proves
+                # absence of a current conversation; a finder cannot query None.
+                present = False
+            else:
+                result = hook(session, home) if hook else None
+                present = result.value.get('present') if result and isinstance(result.value, dict) else None
+                if result is None or result.state != 'ok' or type(present) is not bool:
+                    problems.append(f'{home}: {result.reason if result else "no storage evidence hook"}')
+                    present = None
             homes[home] = (present, selected)
         except Exception as error:
             problems.append(f'{label}: {type(error).__name__}: {error}')
     found = [home for home, (present, _) in homes.items() if present is True]
     if require_absent:
         if not problems and not found and homes and caller and all(value[0] is False for value in homes.values()):
-            return Adoption(caller[1], f'Conversation is absent from every candidate storage; starting fresh in '
+            reason = ('No conversation was bound since the last fresh start' if unbound
+                      else 'Conversation is absent from every candidate storage')
+            return Adoption(caller[1], f'{reason}; starting fresh in '
                                       f'{caller[0]!r} with a new conversation', True)
         choices = ', '.join(f'{home!r} ({"present" if present is True else "absent" if present is False else "unknown"})'
                             for home, (present, _) in homes.items()) or 'no identifiable home'
         raise ValueError(f'Cannot start fresh: every candidate conversation storage must be readable and absent. '
-                         f'Candidates: {choices}. ' + '; '.join(problems) +
-                         ' Restore access or resume the existing conversation; no records were changed')
+                         f'Candidates: {choices}. ' + ('; '.join(problems).rstrip('.') + '. ' if problems else '') +
+                         'Restore access or resume the existing conversation; no records were changed')
     if (not problems and not found and homes and caller and all(value[0] is False for value in homes.values())
             and _never_started(adapter, properties, previous, directory)):
         return Adoption(caller[1],

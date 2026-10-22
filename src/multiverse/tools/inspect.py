@@ -72,7 +72,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
         if row.get('runtime', {}).get('auto_recovery'):
             result['recovery'] = row['runtime']['auto_recovery']
         return result
-    head = f'{row["name"]} · {label(row)} · {state(row)}'
+    description = 'leftover folder' if damage and damage.get('recover') == 'remove' else label(row)
+    head = f'{row["name"]} · {description} · {state(row)}'
     reported = " — ".join(part for part in (row.get("phase"), " ".join(row.get("summary", "").split())) if part)
     out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error_text(error, tail=5)}"] if error else []) \
         + ([f"Note: {fallback}"] if fallback else [])
