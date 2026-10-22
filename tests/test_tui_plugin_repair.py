@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Static
 from multiverse import plugins
 from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
-from multiverse.ui.plugins_screen import PluginsScreen
+from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen
 
 BROKEN = '''
 from multiverse.plugins import api
@@ -36,6 +36,12 @@ def register(mv):
     mv.dashboard.action("Recovered", lambda context: "recovered")
 '''
 SCHEMA = {"type": "object", "properties": {"count": {"type": "integer"}}}
+OWN_FIELDS = '''
+from multiverse.plugins import api
+
+def register(mv):
+    mv.dashboard.settings(fields=[api.Field("count", "Count", "int")])
+'''
 OWN = '''
 def register(mv):
     mv.dashboard.settings(screen="screens:Settings")
@@ -135,19 +141,25 @@ class RepairTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertIn("it works now", d.status)
                 self.assertEqual(plugins.settings_of(self.root, "badfield")[0]["count"], 4)
 
-    async def test_enter_on_a_plugin_with_its_own_settings_screen_opens_it_where_it_is_off_and_says_why_when_it_cannot(self):
-        """Enter on a plugin whose settings are edited on its own screen opens that screen while the plugin is off
-        here, and names why when the plugin cannot load, never 'no schema'; fragile because the screen's class is known
-        only by loading the plugin, which an off or failed one used to skip, and the person who pressed Enter for
-        Space got a message about a schema the plugin never had."""
+    async def test_enter_on_a_plugin_with_its_own_settings_view_opens_it_where_it_is_off_and_says_why_when_it_cannot(self):
+        """Enter on a plugin whose settings are edited on its own screen, or in fields it declares, opens them while
+        the plugin is off here, and names why when the plugin cannot load, never 'no schema'; fragile because the screen
+        and the fields are known only by loading the plugin, which an off or failed one used to skip, and the person
+        who pressed Enter for Space got a message about a schema the plugin never had."""
         manifest = {"module": "plugin", "settings": {"version": 1}, "extends": ["dashboard.settings"]}
         self.write_plugin("owner", manifest, {"plugin.py": OWN, "screens.py": OWN_SCREENS})  # off here: never enabled
         self.write_plugin("rotten", manifest, {"plugin.py": RAISING, "screens.py": OWN_SCREENS})
+        self.write_plugin("fielder", manifest, {"plugin.py": OWN_FIELDS})  # off here, fields and no screen or schema
         self.enable("rotten")
         async with self.dashboard() as d:
             with self.subTest("a plugin that is off here"):
                 screen = await d.open_settings("owner")
                 self.assertIn("my own settings", str(screen.query_one("#own").render()))
+                await d.close_screen()
+            with self.subTest("a plugin that is off here and declares fields, not a screen"):
+                screen = await d.open_settings("fielder")
+                self.assertIsInstance(screen, PluginSettingsScreen)
+                self.assertEqual(list(screen.widgets), ["count"])
                 await d.close_screen()
             with self.subTest("a plugin that fails to load"):
                 with self.assertRaises(AssertionError) as shown:
