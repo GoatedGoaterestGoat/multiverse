@@ -419,7 +419,7 @@ class InboxDeliveryTest(DeliveryFixture):
     def test_check_confirms_without_resending(self):
         """deliver --check scopes old acceptances to available same-session evidence, treats a still-queued native entry as
         accepted, reports failed messages, and never resends; fragile because check and retry share code paths, and
-        a resend duplicates a prompt in the conversation (d292f88)."""
+        a resend duplicates a prompt in the conversation, and a weak queued-receipt scope silently polls another session (d292f88)."""
         with self.subTest('an uncertain submission is confirmed'):
             self.behavior = TimeoutError('lost response')
             message = self.send()
@@ -478,6 +478,39 @@ class InboxDeliveryTest(DeliveryFixture):
                                          {'transcript_confirmed': True})
             self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+        for scope, eligible in (('matching', True), ('unbound', False), ('earlier-target', False), ('different-attempt', False)):
+            with self.subTest(older_codex_queue_scope=scope):
+                self.recipient(harness='codex', native_session_home=str(self.work))
+                earlier = str(uuid4())
+                saved = None if scope == 'unbound' else self.native_id
+                target = earlier if scope == 'earlier-target' else saved
+                attempted = earlier if scope == 'different-attempt' else saved
+                properties = read(self.directory / 'properties.json')
+                write(self.directory / 'properties.json', {**properties, 'native_session_id': saved})
+                if scope == 'earlier-target':
+                    # A valid earlier owned conversation must not qualify just
+                    # because its receipt contains a native queue item ID.
+                    (self.directory / 'sessions.jsonl').write_text(json.dumps({
+                        'schema': 1, 'id': str(uuid4()), 'at': now(), 'harness': 'codex',
+                        'launch': self.launch, 'reason': 'clear', 'home': str(self.work),
+                        'from': earlier, 'to': saved}) + '\n')
+                    self.assertTrue(native._session_changes(self.directory,
+                                    read(self.directory / 'properties.json'), target))
+                message = append_message(self.directory, 'queued before resume', {}, 'follow-up', target_session=target)
+                update_message(self.directory, message['id'], submission_state='accepted', delivery_method='native',
+                    native_receipt={'queued_submission_id': 'old-queue-item'},
+                    attempts=[{'state': 'native_queued', 'launch_id': str(uuid4()), 'native_session_id': attempted}])
+                adapter = harnesses.load(self.root, 'codex')
+                self.assertIsNone(native.adapter_hook(adapter, 'accepted_message_evidence'))
+                with patch.object(adapter, 'get_delivery', return_value=NativeResult('native_queued', 'Paused',
+                        {'queued_submission_id': 'old-queue-item', 'paused': True})) as checked:
+                    for _ in range(2):
+                        result = deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertEqual(len(result['messages']), int(eligible))
+                        if eligible:
+                            self.assertTrue(result['messages'][0]['paused'])
+                    self.assertEqual(checked.call_count, 2 if eligible else 0)
+                self.assertEqual(self.calls, [], 'Receipt checks never submit or restart the queue')
         for outside_state in ('accepted', 'failed', 'unknown', 'pending'):
             with self.subTest(outside_lineage_state=outside_state):
                 self.recipient()
