@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -76,7 +77,8 @@ class HarnessContracts(unittest.TestCase):
 
     def test_resume_targets_the_recorded_native_session_for_every_adapter(self):
         """Resume through lifecycle.start targets the recorded session for Codex (id), Claude (id) and Pi (session
-        file), never the latest or the template's, and refuses when it cannot be exact; fragile because each adapter
+        file), never the latest or the template's, and refuses when it cannot be exact, naming the file or the way out
+        (Pi: --start-fresh, a damaged header's file; qa PR #26); fragile because each adapter
         builds resume differently, and a wrong target silently resumes another conversation."""
         for harness in ('codex', 'claude', 'pi'):
             with self.subTest('through lifecycle.start', harness=harness):
@@ -128,6 +130,31 @@ class HarnessContracts(unittest.TestCase):
                 missing = replace(session, session_file=None) if name == 'pi' else replace(session, native_id=None)
                 with self.assertRaisesRegex(ValueError, 'native session ID|session file is missing'):
                     adapter.resume(missing, LaunchContext('resume', values))
+            if name == 'pi':
+                with self.subTest('a missing Pi session file names the way to start fresh'):
+                    gone = replace(session, session_file=str(self.work / 'gone.jsonl'))
+                    with self.assertRaisesRegex(ValueError, 'mv2 resume literal --start-fresh'):
+                        adapter.resume(gone, LaunchContext('resume', values))
+                for number, (label, first_line) in enumerate((
+                        ('no id', json.dumps({'type': 'session'})), ('an id that is not text', json.dumps({'type': 'session', 'id': 7})),
+                        ('an id that is not a UUID', json.dumps({'type': 'session', 'id': 'x'})),
+                        ('another type', json.dumps({'type': 'message', 'id': values['session_id']})),
+                        ('a list', json.dumps(['session'])), ('no JSON', 'not json'))):
+                    with self.subTest('a damaged Pi session header names its file', header=label):
+                        damaged = self.work / f'damaged-{number}.jsonl'
+                        damaged.write_text(first_line + '\n')
+                        with self.assertRaisesRegex(ValueError, 'Pi session file ' + re.escape(json.dumps(str(damaged)))):
+                            adapter.resume(replace(session, session_file=str(damaged)), LaunchContext('resume', values))
+                alias = self.work / 'pi-alias'
+                alias.symlink_to(self.work, target_is_directory=True)
+                for recorded, shell, notice in (
+                        ('/pi/a', '/pi/b', 'Kept its recorded PI_CODING_AGENT_DIR "/pi/a"; ignored PI_CODING_AGENT_DIR="/pi/b".'),
+                        (None, '/pi/b', 'Kept its recorded PI_CODING_AGENT_DIR unset; ignored PI_CODING_AGENT_DIR="/pi/b".'),
+                        ('/pi/a', '/pi/a', None), (str(self.work), str(alias), None), ('/pi/a', None, None), ('/pi/a', '', None)):
+                    with self.subTest('Pi names a shell PI_CODING_AGENT_DIR it ignored', recorded=recorded, shell=shell):
+                        caller = {} if shell is None else {'PI_CODING_AGENT_DIR': shell}
+                        effective = {} if recorded is None else {'PI_CODING_AGENT_DIR': recorded}
+                        self.assertEqual(adapter.resume_notice(session, caller, effective), notice)
             if name in ('codex', 'claude'):
                 with self.subTest('a saved id that is not a lowercase UUID', name=name):
                     context = LaunchContext('resume', values)

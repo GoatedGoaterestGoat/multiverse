@@ -755,7 +755,8 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_a_pi_harness_setting_its_agent_directory_is_what_spawn_records(self):
         """A Pi harness's settings.env can set PI_CODING_AGENT_DIR (Pi never reads it to find sessions): spawn records
         and runs with that value over the caller's and the tmux server's, and resume keeps it after the setting
-        changes, saying it ignored the new setting, while --start-fresh takes the current setting; a break goes unnoticed because Pi still starts, in another directory
+        changes, saying it ignored the new setting or a different shell value, while --start-fresh takes the current
+        setting; a break goes unnoticed because Pi still starts, in another directory
         with other settings and auth (Shao #26)."""
         executable = self.work / 'pi-stand-in'
         executable.write_text(f'#!{sys.executable}\n')
@@ -775,6 +776,7 @@ class LaunchIsolationTest(unittest.TestCase):
             (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
             for mode, expected in (('spawn', str(self.work / 'pi-from-settings')),
                                    ('resume', str(self.work / 'pi-from-settings')),
+                                   ('shell', str(self.work / 'pi-from-settings')),
                                    ('fresh', str(self.work / 'pi-fresh-setting'))):
                 if mode == 'resume':
                     definition['settings']['env'] = {'PI_CODING_AGENT_DIR': str(self.work / 'pi-setting-changed')}
@@ -782,13 +784,22 @@ class LaunchIsolationTest(unittest.TestCase):
                     result = lifecycle.start(self.root, resume=result['id'])
                     self.assertIn(f'ignored its harness setting PI_CODING_AGENT_DIR="{self.work / "pi-setting-changed"}"',
                                   ' '.join(result.get('notices', [])))
+                    self.assertIn(f'ignored PI_CODING_AGENT_DIR="{self.work / "pi-from-caller"}"', ' '.join(result.get('notices', [])))
+                elif mode == 'shell':
+                    # The harness setting is gone and the shell names another directory: still kept, and said.
+                    definition['settings'].pop('env')
+                    write(manifest, definition)
+                    os.environ['PI_CODING_AGENT_DIR'] = str(self.work / 'pi-shell-changed')
+                    result = lifecycle.start(self.root, resume=result['id'])
+                    self.assertIn(f'Kept its recorded PI_CODING_AGENT_DIR "{expected}"; '
+                                  f'ignored PI_CODING_AGENT_DIR="{self.work / "pi-shell-changed"}".', result.get('notices', []))
                 elif mode == 'fresh':
                     # An explicit fresh start is a new conversation: it takes the setting as a spawn does.
                     (directory / 'session.jsonl').unlink()
                     definition['settings']['env'] = {'PI_CODING_AGENT_DIR': expected}
                     write(manifest, definition)
                     result = lifecycle.start(self.root, resume=result['id'], start_fresh=True)
-                    self.assertNotIn('ignored its harness setting', ' '.join(result.get('notices', [])))
+                    self.assertNotIn('ignored', ' '.join(result.get('notices', [])))
                 request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
                 with patch.dict(os.environ, {'PI_CODING_AGENT_DIR': str(self.work / 'pi-from-server')}):
                     environment = runner.launch_environment(request)

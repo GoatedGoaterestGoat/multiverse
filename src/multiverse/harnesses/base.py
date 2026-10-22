@@ -173,7 +173,11 @@ class ConfiguredAdapter:
         native_id = normalize_session_id(session.native_id) if session.native_id is not None else ''
         if any('{session_file}' in arg for arg in self.spec['resume']):
             if not session.session_file or not Path(session.session_file).is_file():
-                raise ValueError('Native session file is missing; refusing to create a fresh session on resume')
+                # A file-mode agent whose file is gone can be kept with a new conversation (lifecycle's --start-fresh).
+                agent = context.values.get('name') or session.agent_id
+                way_out = (f'. If the conversation is gone, use mv2 resume {agent} --start-fresh to keep this agent '
+                           'with a new conversation' if self.session_mode == 'file' else '')
+                raise ValueError('Native session file is missing; refusing to create a fresh session on resume' + way_out)
         values = {**context.values, 'agent_id': session.agent_id,
                   'session_id': native_id, 'session_file': session.session_file or '',
                   'workspace': session.workspace}
