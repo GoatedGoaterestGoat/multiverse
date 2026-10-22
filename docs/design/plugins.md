@@ -407,16 +407,16 @@ caller can forget one:
 | `agent.created` | `lifecycle.start`, once a new record is published | harness, model |
 | `agent.launched` | `lifecycle.start`, after request.json is written and before the runner is released (so `ready` and `exited` never come first) | mode (`spawn`, `resume` or `wake`), native mode, plugins loaded |
 | `agent.ready` | `lifecycle.note_ready`, called by the runner after its startup check and by startup delivery once done; it uses `wait_ready`'s own predicate and a per-launch marker, so it is once per launch | none |
-| `agent.status` | `update_runtime`, when `status` changes (after its lock) | from, to |
-| `agent.exited` | the runner, once, where the process's end is known | state (`stopped`/`failed`), exit code, reason |
+| `agent.status` | `mutate_runtime` (which `update_runtime` uses), when `status` changes (after its lock) | from, to |
+| `agent.exited` | the runner, once: where the process's end is known, or where the runner itself fails first (exit code `null`) | state (`stopped`/`failed`), exit code, reason |
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
-| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`) or a session pointer is recovered, for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
+| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`), a session pointer is recovered, or `--start-fresh` retires a conversation that is gone (`sessions.retire`, reason `missing-conversation`), for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
 | `message.delivered` | `mailbox.update_message`, once per stage: `accepted`, then `confirmed` when the transcript confirms it | message id, stage |
-| `message.failed` | `mailbox.update_message`, on a definite failure only (unknown and submitting are not failures) | message id, reason |
+| `message.failed` | `mailbox.update_message`, once each: when the message definitely failed, and when a delivery check proves it was lost when the agent stopped (it is then `cancelled`; see [messaging](../cli/messaging.md)). Unknown and submitting are not failures | message id, reason; `lost_when_stopped: true` for a proven loss |
 | `message.read` | `mailbox.inbox`, after a successful read moved the cursor (never peek, history or a failed print) | count of inbox-only messages read |
 | `universe.created` | `templates.create`, in its own journal and its parent's | name, path, template |
 | `refresh.applied` | `templates.refresh_apply`, after the manifest is written | files written |
