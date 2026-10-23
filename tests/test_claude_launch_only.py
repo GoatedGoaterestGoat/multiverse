@@ -432,6 +432,27 @@ class ClaudeUnreadableStorageTest(BaseTest):
                     found = evidence(str(self.storage))
                 self.assertEqual(found.state, 'unknown', found.value)
                 self.assertIn(str(self.project), found.reason)
+                # A folder listed but gone before its type was looked up (no type from the listing): both DirEntry
+                # checks then answer False, which must not read as a folder that holds nothing.
+                moved.rename(self.project)  # the real folder, listed
+                self.assertEqual(evidence(str(self.storage)).value, {'present': True})
+                real_scandir = os.scandir
+                class Untyped:
+                    def __init__(self, entry):
+                        self.name, self.path = entry.name, entry.path
+                    def is_dir(self):
+                        return os.path.isdir(self.path)
+                    def is_symlink(self):
+                        return os.path.islink(self.path)
+                def gone_before_typed(path):
+                    entries = [Untyped(entry) for entry in real_scandir(path)]
+                    if Path(path) == self.storage / 'projects':
+                        self.project.unlink() if self.project.is_symlink() else self.project.rename(hidden)
+                    return entries
+                with patch('os.scandir', side_effect=gone_before_typed):
+                    found = evidence(str(self.storage))
+                self.assertEqual(found.state, 'unknown', found.value)
+                self.assertIn(str(self.project), found.reason)
             finally:
                 restore()
             self.assertEqual(evidence(str(self.storage)).value, {'present': True})

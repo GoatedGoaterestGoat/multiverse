@@ -134,9 +134,12 @@ def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
         candidate = Path(entry.path) / f'{native_id}.jsonl'
         holds = could_hold(entry.name, workspaces)
         try:
-            if not entry.is_dir():
-                if holds and entry.is_symlink():
-                    os.stat(entry.path)  # a dangling or looping link where the session could be proves nothing
+            if holds:
+                # Resolved now, through any link, never from the listing's type: a dangling or looping link, or a
+                # folder gone since the listing, proves nothing; a link to a real folder is searched through it.
+                if not stat.S_ISDIR(os.stat(entry.path).st_mode):
+                    continue
+            elif not entry.is_dir():
                 continue
             # `links` finds a link (even a dangling one) where a transcript should be, for readers that refuse it.
             status = candidate.lstat() if links else candidate.stat()
