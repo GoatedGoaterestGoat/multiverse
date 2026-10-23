@@ -61,10 +61,13 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         """A native launch failure keeps its terminal output as the reason by exit code, timing and kill, for
         list, inspect and doctor; fragile because the output is captured through tmux after the pane died, and a
         break shows only when a real failure has no reason."""
+        # This checks exit evidence, not startup speed. Leave scheduling room under suite load;
+        # the release file still guarantees that the later exits happen only after readiness.
+        readiness_timeout = 25
         self.failing_harness()
         with self.subTest(exit='failure during startup'):
             result = lifecycle.start(self.root, 'bad-session', harness='fake', socket_path=self.socket,
-                                     wait=True, wait_timeout=5)
+                                     wait=True, wait_timeout=readiness_timeout)
             self.assertFalse(result['ready'], result)
             self.assertIn(ERROR, result['error'])
             directory = agents.directory(self.root, result['id'])
@@ -87,7 +90,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         self.failing_harness(code=0)
         with self.subTest(exit='clean exit during startup'):
             ended = lifecycle.start(self.root, 'early', harness='fake', socket_path=self.socket,
-                                    wait=True, wait_timeout=5)
+                                    wait=True, wait_timeout=readiness_timeout)
             self.assertFalse(ended['ready'])
             self.assertEqual(ended['runtime']['state'], 'stopped')
             self.assertIn('code 0', ended['error'])
@@ -99,7 +102,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
             self.failing_harness(code=code, release=release)
             with self.subTest(exit='after the launch was ready', code=code):
                 result = lifecycle.start(self.root, f'later-{code}', harness='fake', socket_path=self.socket,
-                                         wait=True, wait_timeout=5)
+                                         wait=True, wait_timeout=readiness_timeout)
                 self.assertTrue(result['ready'], result)
                 release.touch()
                 directory = agents.directory(self.root, result['id'])
@@ -115,7 +118,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         self.failing_harness(release=self.work / 'never')
         with self.subTest(exit='explicit kill'):
             live = lifecycle.start(self.root, 'normal', harness='fake', socket_path=self.socket,
-                                   wait=True, wait_timeout=5)
+                                   wait=True, wait_timeout=readiness_timeout)
             self.assertTrue(live['ready'], live)
             lifecycle.kill(self.root, live['id'])
             self.assertNotIn('output_tail_file', agents.runtime(agents.directory(self.root, live['id'])))
