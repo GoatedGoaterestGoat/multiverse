@@ -476,6 +476,21 @@ class ClaudeUnreadableStorageTest(BaseTest):
                     self.assertIn(str(transcript), found.reason)
                     transcript.rmdir() if transcript.is_dir() and not transcript.is_symlink() else transcript.unlink()
                     transcript.write_bytes(saved)
+        with self.subTest('a scan resolves the workspace once, not once per folder'):
+            # The listing runs two of these scans per Claude agent over a shared store; resolving the same workspace
+            # for every project folder multiplies its filesystem calls unnoticed (reviewer, b7fe21a).
+            from multiverse.harnesses.claude import context_reading, measured_usage
+            store = self.work / 'many-projects'
+            def resolutions(count):
+                for number in range(count):
+                    (store / 'projects' / f'-unrelated-{number}').mkdir(parents=True, exist_ok=True)
+                with patch('os.path.realpath', wraps=os.path.realpath) as resolved:
+                    measured_usage(self.native, (str(self.work),), {'CLAUDE_CONFIG_DIR': str(store)})
+                    context_reading(self.native, (str(self.work),), {'CLAUDE_CONFIG_DIR': str(store)})
+                return resolved.call_count
+            one = resolutions(1)
+            self.assertEqual(resolutions(128), one)
+            self.assertLessEqual(one, 2)
         with self.subTest("another workspace's unreadable folder"):
             # Another tester's scratch folder, or a root-owned one a `sudo claude` left, is no place Claude files this
             # agent's sessions, so it must not stop this agent's lookups.

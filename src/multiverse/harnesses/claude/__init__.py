@@ -101,9 +101,19 @@ def could_hold(name, workspaces):
     starts with it plus '-' (Claude's own worktrees under the workspace, and the hashed form past 200 units).
     With no absolute workspace to go by, any folder could.
     """
-    keys = {project_key(form)[:PROJECT_KEY_LENGTH].casefold()
+    return holds_name(name, project_keys(workspaces))
+
+
+def project_keys(workspaces):
+    """The folder keys of `workspaces` (each absolute one as recorded and as its real path), for holds_name; resolved
+    once per scan, since the listing scans a shared store per agent."""
+    return {project_key(form)[:PROJECT_KEY_LENGTH].casefold()
             for workspace in workspaces if isinstance(workspace, str) and os.path.isabs(workspace)
             for form in (workspace, os.path.realpath(workspace))}
+
+
+def holds_name(name, keys):
+    """could_hold, from the keys project_keys gave; no keys means any folder could."""
     folded = name.casefold()
     return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
 
@@ -129,10 +139,10 @@ def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
         return [], False
     except OSError as error:
         raise Unreadable(projects) from error
-    found, files = [], set()
+    found, files, keys = [], set(), project_keys(workspaces)
     for entry in entries:
         candidate = Path(entry.path) / f'{native_id}.jsonl'
-        holds = could_hold(entry.name, workspaces)
+        holds = holds_name(entry.name, keys)
         try:
             if holds:
                 # Resolved now, through any link, never from the listing's type: a dangling or looping link, or a
