@@ -13,7 +13,7 @@ from multiverse.harnesses.types import SessionHandle
 
 class CodexStorageTest(unittest.TestCase):
     def test_rollout_proof_distinguishes_absence_from_uncertain_storage(self):
-        """Legacy home adoption must validate bounded native metadata; false absence or filename-only proof can silently strand the conversation in another home."""
+        """Legacy adoption validates bounded native metadata and read stores; treating missing stores or incomplete scans as proven absence silently strands conversations."""
         adapter = CodexAdapter.configured('codex', {})
         fixture = (Path(__file__).parent / 'fixtures/codex/rollout-session-meta.jsonl').read_bytes()
         row = json.loads(fixture)
@@ -30,6 +30,7 @@ class CodexStorageTest(unittest.TestCase):
         for case, expected in (('missing', False), ('empty-sessions', False), ('other-id', False),
                                ('captured', True), ('later-damaged-row', True), ('legacy-id-only', True),
                                ('reverted', True), ('archived', True), ('archived-reverted', True), ('fork-root', True),
+                               ('archive-only', True), ('archive-only-empty', False), ('unreadable-archive', None),
                                ('compressed', None), ('compressed-with-plain', True),
                                ('foreign-header', None), ('invalid-root-id', None), ('duplicate-id', None), ('damaged', None),
                                ('incomplete', None), ('directory', None), ('symlink', None),
@@ -79,6 +80,15 @@ class CodexStorageTest(unittest.TestCase):
                     archive = home / 'archived_sessions'
                     archive.mkdir()
                     path.rename(archive / path.name)
+                if case in ('archive-only', 'archive-only-empty', 'unreadable-archive'):
+                    archive = home / 'archived_sessions'
+                    archive.mkdir()
+                    if case == 'archive-only':
+                        path.rename(archive / path.name)
+                    else:
+                        path.unlink()
+                    if case.startswith('archive-only'):
+                        (home / 'sessions').rename(home / 'not-a-native-store')
                 if case in ('compressed', 'compressed-with-plain'):
                     compressed = path.with_suffix('.jsonl.zst')
                     compressed.write_bytes(b'unsupported compressed data')
@@ -90,7 +100,10 @@ class CodexStorageTest(unittest.TestCase):
                 if expected is None:
                     self.assertIn(str(home), result.reason)
                 else:
-                    self.assertEqual(result.value, {'present': expected})
+                    proof = {'present': expected}
+                    if not expected:
+                        proof['store_read'] = case not in ('missing', 'archive-only-empty')
+                    self.assertEqual(result.value, proof)
         for candidate, target in (('relative', session), ('/candidate', replace(session, native_id=None))):
             with self.subTest(candidate=candidate, native_id=target.native_id):
                 self.assertEqual(adapter.session_storage_evidence(target, candidate).state, 'unknown')
@@ -98,6 +111,14 @@ class CodexStorageTest(unittest.TestCase):
     def _patch_case(self, case):
         if case == 'unreadable':
             return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=PermissionError('denied'))
+        if case == 'unreadable-archive':
+            from multiverse.harnesses.codex.storage import os
+            scandir = os.scandir
+            def read_directory(path):
+                if Path(path).name == 'archived_sessions':
+                    raise PermissionError('archive denied')
+                return scandir(path)
+            return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=read_directory)
         if case == 'scan-budget':
             return patch('multiverse.harnesses.codex.storage.MAX_ENTRIES', 1)
         if case == 'header-budget':

@@ -72,6 +72,9 @@ def session_storage_evidence(session, home):
         return _unknown(path, 'the candidate home must be absolute')
     roots = (path / 'sessions', path / 'archived_sessions')
     pending, scanned = list(reversed(roots)), 0
+    # Recorded absence needs the primary store read. Missing archives remain
+    # optional; every archive that exists must finish this same bounded scan.
+    store_read = False
     uuid = r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}'
     filename = re.compile(r'rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-' + native_id
                           + r'(?:_' + uuid + r')?\.jsonl(?:\.zst)?')
@@ -109,4 +112,6 @@ def session_storage_evidence(session, home):
                         pending.append(candidate)
         except OSError as error:
             return _unknown(directory, str(error))
-    return NativeResult('ok', value={'present': False})
+        if directory == roots[0]:
+            store_read = True
+    return NativeResult('ok', value={'present': False, 'store_read': store_read})
