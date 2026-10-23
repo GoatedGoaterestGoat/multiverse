@@ -195,7 +195,10 @@ are published with complete minimal properties and a starting runtime record,
 including during concurrent spawns. While the publishing process holds its launch
 lock, list shows `starting`; it is not a damaged record. Doctor also accepts the
 full starting record while that same launch is still preparing its terminal
-under the lock. Once the lock is released, unexplained unknown state is reported. If preparation is
+under the lock. If a newer launch request appears after a listing read the
+runtime record, list re-reads that same launch and observes its current terminal
+before reporting missing authority. Unchanged or still-damaged records remain
+errors; listing never repairs them. Once the lock is released, unexplained unknown state is reported. If preparation is
 interrupted before any native startup, doctor reports the failed preparation and
 the record can be resumed or removed. Unknown child evidence still requires
 repair of the runtime record rather than assuming the process stopped.

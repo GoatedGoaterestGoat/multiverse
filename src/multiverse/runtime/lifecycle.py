@@ -81,6 +81,28 @@ def _listing_observation(properties, facts, snapshots):
     return facts, observation
 
 
+def _listing_runtime(directory, facts, *, prepare=False):
+    """A newer launch sidecar cannot condemn an older runtime snapshot.
+
+    Re-read once on damage, only for the same launch, then validate again.
+    Control paths keep their original authority checks; this never repairs disk.
+    """
+    for retry in (True, False):
+        try:
+            checked = agents.preparation_snapshot(directory, facts) if prepare else facts
+            if error := missing_runtime.damage(directory, checked):
+                raise error
+            return checked
+        except records.RecordError:
+            if not retry:
+                raise
+            current = records.runtime(directory / 'runtime.json')
+            if (not facts.get('launch_id') or current.get('launch_id') != facts['launch_id']
+                    or current == facts):
+                raise
+            facts = current
+
+
 def listing(root, recursive=False, only=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
@@ -103,9 +125,7 @@ def listing(root, recursive=False, only=None):
                 continue
             try:
                 facts = records.runtime(path.parent / "runtime.json")
-                facts = agents.preparation_snapshot(path.parent, facts)
-                if error := missing_runtime.damage(path.parent, facts):
-                    raise error
+                facts = _listing_runtime(path.parent, facts, prepare=True)
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
                 continue
@@ -121,8 +141,7 @@ def listing(root, recursive=False, only=None):
                 except Exception as error:
                     identity_problem = str(error)
                     facts = records.runtime(path.parent / "runtime.json")
-                if error := missing_runtime.damage(path.parent, facts):
-                    raise error
+                facts = _listing_runtime(path.parent, facts)
                 if preparing_launch and facts.get('launch_id') == preparing_launch and facts.get('state') == 'starting':
                     facts = {**facts, 'preparing': True}  # Reconciliation may reread the same launch without this display hint.
                 if observation_key(properties, facts) != observed_key:
