@@ -276,6 +276,11 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
                 if result is None or result.state != 'ok' or type(present) is not bool:
                     problems.append(f'{home}: {result.reason if result else "no storage evidence hook"}')
                     present = None
+                elif require_absent and label != 'calling shell' and present is False and result.value.get('store_read') is not True:
+                    reason = result.reason or f'{home}: recorded conversation store was not read'
+                    problems.append(f'{reason}; restore the conversation store if moved or unmounted, '
+                                    'or create it to confirm the conversation is absent')
+                    present = None
             homes[home] = (present, selected)
         except Exception as error:
             problems.append(f'{label}: {type(error).__name__}: {error}')

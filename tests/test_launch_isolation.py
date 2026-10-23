@@ -230,7 +230,7 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
         """Legacy adoption must find the exact conversation or prove no child ever started; otherwise storage can strand history, bridge preparation can reject HOME as a storage key or erase unknown keys, and two independent fresh-start decisions can repeat their notice."""
         from multiverse.harnesses.claude import project_key
-        cases = ('server', 'caller', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
+        cases = ('server', 'caller', 'caller-missing-other-stores', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
             if family == 'claude' and found in ('restored-spelling', 'scope-spelling', 'default-server-bridge', 'default-server-auto'):
                 continue
@@ -283,9 +283,11 @@ class LaunchIsolationTest(unittest.TestCase):
                 else:
                     write(request_path, request)
                 for source, home in homes.items():
+                    if found == 'caller-missing-other-stores' and source != 'caller':
+                        continue  # Ordinary adoption can still find the conversation in the caller's home.
                     folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
                     folder.mkdir(parents=True)
-                    if found in (source, 'multiple') or (found == 'unreadable' and source == 'caller') or (found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
+                    if found in (source, 'multiple') or (found in ('unreadable', 'caller-missing-other-stores') and source == 'caller') or (found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
                         identifier = properties['native_session_id']
                         if family == 'claude':
                             (folder / (identifier + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': identifier}) + '\n')
@@ -326,7 +328,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
-                        chosen = homes['caller' if fresh else 'server' if found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
+                        chosen = homes['caller' if fresh or found == 'caller-missing-other-stores' else 'server' if found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
                         result = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(result['native_session_home'], str(chosen.resolve()))
                         if found in ('default-server-bridge', 'default-server-auto'):
@@ -452,7 +454,8 @@ class LaunchIsolationTest(unittest.TestCase):
                              'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service',
                              'caller-home-missing-runtime', 'caller-home-damaged-runtime',
                              'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation',
-                             'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'root-recorded-caller', 'caller-root-missing'):
+                             'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'root-recorded-caller', 'caller-root-missing',
+                             'store-missing', 'store-dangling', 'store-recorded-caller', 'store-unproven', 'store-invalid-proof', 'store-empty', 'caller-store-missing'):
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
@@ -466,7 +469,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 if unknown_server and family != 'claude':
                     continue
                 server_home = evidence.startswith('server-')
-                if (server_home or 'root-' in evidence) and family == 'pi':
+                if (server_home or 'root-' in evidence or 'store-' in evidence) and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -575,6 +578,13 @@ class LaunchIsolationTest(unittest.TestCase):
                                 caller = old_home
                             if evidence == 'root-dangling':
                                 gone.symlink_to(gone.with_name('unmounted'), target_is_directory=True)
+                    if evidence in ('store-missing', 'store-dangling', 'store-recorded-caller', 'caller-store-missing'):
+                        gone = (caller if evidence == 'caller-store-missing' else old_home) / ('projects' if family == 'claude' else 'sessions')
+                        gone.rmdir()
+                        if evidence == 'store-recorded-caller':
+                            caller = old_home
+                        if evidence == 'store-dangling':
+                            gone.symlink_to(gone.with_name('unmounted'), target_is_directory=True)
                     before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
                     backend = Mock()
                     backend.snapshot.return_value = ({}, None)
@@ -588,6 +598,22 @@ class LaunchIsolationTest(unittest.TestCase):
                     def terminal(socket=None):
                         servers.append(socket)
                         return backend
+                    from multiverse.runtime import storage_adoption
+                    original_hook = storage_adoption.adapter_hook
+                    def evidence_hook(adapter, name):
+                        hook = original_hook(adapter, name)
+                        if name != 'session_storage_evidence' or evidence not in ('store-unproven', 'store-invalid-proof'):
+                            return hook
+                        def incomplete(session, home):
+                            result = hook(session, home)
+                            if result.state == 'ok' and result.value.get('present') is False:
+                                value = dict(result.value)
+                                value.pop('store_read', None)
+                                if evidence == 'store-invalid-proof':
+                                    value['store_read'] = 1
+                                return replace(result, value=value)
+                            return result
+                        return incomplete
                     original_lstat = Path.lstat
                     original_read = Path.read_bytes
                     def read_bytes(path):
@@ -603,18 +629,20 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
                             patch.object(Path, 'read_bytes', read_bytes), \
+                            patch.object(storage_adoption, 'adapter_hook', side_effect=evidence_hook), \
                             patch.dict(os.environ, {key: str(caller), **({'HOME': str(caller)} if unknown_server else {})}):
                         if unknown_server:
                             os.environ.pop(key)
-                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing') and not unknown_server:
+                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing', 'store-empty', 'caller-store-missing') and not unknown_server:
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable') as refused:
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
                             if evidence in ('present', 'duplicate', 'unreadable') and family != 'pi':
                                 self.assertNotIn('  Restore', str(refused.exception))
                                 self.assertIn('. Restore access', str(refused.exception))
-                            if evidence.startswith('root-'):
+                            if evidence.startswith(('root-', 'store-')):
                                 self.assertIn('unknown', str(refused.exception))
-                                self.assertIn('create it to confirm', str(refused.exception))
+                                if not (family == 'codex' and evidence == 'store-dangling'):
+                                    self.assertIn('create it to confirm', str(refused.exception))
                             self.assertEqual({path: original_read(path) for path in before}, before)
                             self.assertFalse((directory / 'sessions.jsonl').exists())
                             backend.create.assert_not_called()

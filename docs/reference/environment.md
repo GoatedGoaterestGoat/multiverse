@@ -111,7 +111,12 @@ records name. Missing
 or damaged runtime authority does not discard this storage evidence or restore
 permission to control an old process. An unreadable or damaged retained request
 blocks adoption and `--start-fresh`; recovery requires readable absence in every
-candidate, even when the latest launch failed before publishing its request. A missing recorded storage root is unknown for `--start-fresh`, since its volume may be unmounted or its folder renamed. Restore the root, or create it to confirm that its conversation is absent. Only a caller-selected root that no retained candidate names may be absent.
+candidate, even when the latest launch failed before publishing its request.
+
+A missing recorded storage root or conversation store is unknown for `--start-fresh`, since its volume may be unmounted or its folder renamed. The recorded home must have a readable `projects/` store for Claude or `sessions/` store for Codex. Codex also reads `archived_sessions/` when it exists.
+
+Restore the missing folder, or create it to confirm that its conversation is absent. An existing empty store counts as absent. Only a caller-selected destination that no retained candidate names may lack these folders.
+
 An old request recording neither a storage location nor `HOME` adds no location
 of its own; mv2 still checks the calling shell and the terminal servers.
 Those are the server in `runtime.json` or one you select explicitly, and every
