@@ -40,11 +40,18 @@ _UNSET = object()
 
 
 @contextmanager
-def _connections_lock(launch):
-    # Create only the lock file, never a removed launch/agent directory. This
-    # also supports older launches whose journal lock did not exist yet.
-    with (launch / '.connections.lock').open('a') as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+def _connections_lock(launch, *, create=True):
+    # Writers create their lock before any connection record. Readers use it
+    # when present, but must not add evidence to an abandoned or legacy launch.
+    try:
+        stream = (launch / '.connections.lock').open('a' if create else 'r')
+    except FileNotFoundError:
+        if create:
+            raise
+        yield
+        return
+    with stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX if create else fcntl.LOCK_SH)
         try:
             yield
         finally:
@@ -227,10 +234,15 @@ def _blocked(label, path, pid, started, observations):
     snapshot = observations.get(pid, (False, None))[1] if valid_pid else None
     current = snapshot[0] if snapshot else 'unknown (process inspection unavailable)'
     command = _command(pid, current) if snapshot else process_command(pid) or 'unknown'
+    timestamp = _start_time(current)
+    started_text = (datetime.fromtimestamp(timestamp, timezone.utc).strftime('started %a %b %d %H:%M:%S %Y UTC')
+                    if timestamp is not None else 'start time unavailable')
     why = ('its recorded process identity is still live' if started and started == current else
            'mv2 cannot prove that this process is unrelated to the old launch')
-    return (f'The previous terminal is still closing its {label}: PID {pid}, command {command}, '
-            f'started {current}; {why}. Record: {path}. '
+    if not snapshot:
+        why = 'process inspection unavailable; ' + why
+    return (f'The previous terminal is still closing its {label}: PID {pid}, command {command}, {started_text}; '
+            f'{why}. Record: {path}. '
             'Inspect that PID and the record; wait for the verified old process to exit, then retry. '
             'If the identity is unavailable or the record is damaged, restore process inspection or repair '
             'the record only after verifying the old process has exited. Back up the named record, then remove '
@@ -317,7 +329,7 @@ def problem(directory, facts):
         if runner['pid'] and facts.get('pid') and not gone(facts, exit_at):
             return _blocked('older child (no cleanup record)', directory / 'runtime.json', facts['pid'], facts.get('pid_started'), observations)
     try:
-        with _connections_lock(launch):
+        with _connections_lock(launch, create=False):
             for path in (launch / 'roles').glob('*.json'):
                 try:
                     role = read(path)

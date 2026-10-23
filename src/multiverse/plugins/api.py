@@ -59,8 +59,34 @@ def _call(function, *args, **kwargs):
         raise
     except agent_files.Gone as error:
         raise _gone(error) from error
-    except (OSError, ValueError, KeyError, RuntimeError) as error:
+    except OSError as error:
+        raise _os_error(error) from error
+    except (ValueError, KeyError, RuntimeError) as error:
         raise Error(str(error)) from error
+
+
+_OS_ERRORS = {}  # an OSError class -> the api.Error that is also it
+
+
+def _os_error(error):
+    """The api.Error for a filesystem or system failure, which is also the OSError it was (its class, errno and
+    file names): what state_dir and agent_state_dir raised in 1.9, so a plugin's except OSError still catches it."""
+    kind = type(error)
+    twin = _OS_ERRORS.get(kind)
+    if twin is None:
+        try:
+            twin = type(kind.__name__, (kind, Error), {"__module__": __name__})  # OSError first: it parses errno
+        except TypeError:  # an OSError class that cannot be combined: the plain one
+            twin = _OS_ERRORS.get(OSError) or type("OSError", (OSError, Error), {"__module__": __name__})
+            _OS_ERRORS[OSError] = twin
+        twin = _OS_ERRORS.setdefault(kind, twin)
+    try:
+        if error.errno is not None:
+            return twin(error.errno, error.strerror, error.filename, None, error.filename2)
+        return twin(*error.args)
+    except Exception:  # a class with a constructor of its own
+        plain = _os_error(OSError(error.errno, error.strerror)) if error.errno is not None else None
+        return plain if plain is not None else Error(str(error))
 
 
 def _gone(error):
@@ -515,11 +541,119 @@ class HarnessInfo:
     settings: dict       # harness.json's settings, as written
     home: Path | None = None  # the harness's own data directory, where mv2 knows it (API 1.7):
                               # Claude's CLAUDE_CONFIG_DIR or ~/.claude, Codex's CODEX_HOME or ~/.codex,
-                              # Pi's PI_CODING_AGENT_DIR when set; None otherwise
+                              # Pi's PI_CODING_AGENT_DIR when set; None otherwise. As this process's
+                              # environment names it, or, asked for an agent (1.12), as its launches do
+    storage: dict | None = None  # asked for an agent (1.12): its recorded storage variables for this harness,
+                                 # each name to its value, or to None where the launch had it unset; None when
+                                 # not asked for an agent, never launched, or not proven
+
+
+def _agent_storage(agent, harness, family, keys):
+    """(home, storage) of an agent's harness as its launches use them, from its records only.
+
+    storage: the environment that selects the same store as the agent's launches: its storage variables (`keys`)
+    as the shared evidence records them (universe.storage: the storage map, or the legacy launch evidence a resume
+    adopts), each to its value or to None where the launch had it unset, with what resolves them (see
+    _replayable); None when that isn't proven. A value and an absence stay apart even where they name one
+    directory: an explicit CLAUDE_CONFIG_DIR moves Claude's login and global config.
+
+    home: the session home core recorded, else
+    the storage its next resume would replay (universe.storage, which lifecycle shares: the storage map, or the
+    legacy launch evidence a resume adopts; a variable recorded as unset is its default under the launch's HOME,
+    which must be recorded too). None (unknown) when a launched agent has no such proof, or a record can't be
+    read. Only an agent that was never launched (no launch evidence of any kind: see _never_launched), so
+    nothing of it in any store yet, gets this process's environment."""
+    if not isinstance(agent, Agent):
+        hint = f"mv.universe(universe).agent({agent!r})" if isinstance(agent, str) else "mv.universe(universe).agent(NAME)"
+        raise Error(f"agent must be an Agent, not {type(agent).__name__}: pass {hint}")
+    if agent.harness != harness:
+        raise Error(f"{agent.name} runs harness {agent.harness!r}, not {harness!r}")
+    from ..store import read
+    try:
+        properties = read(agent.directory / "properties.json")
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(properties, dict):
+        return None, None
+    from ..universe import storage
+    recorded = storage.recorded_environment(agent.directory, properties, family, keys)
+    values = (_replayable(family, recorded, keys, properties.get("workspace"))
+              if recorded is not None and keys and all(key in recorded for key in keys) else None)
+    home = properties.get("native_session_home")
+    if isinstance(home, str) and home:
+        return Path(home), values
+    if recorded is not None:
+        if values is None:
+            return None, None  # a value whose context isn't recorded: its home isn't known either
+        return _recorded_home(family, {key: value for key, value in values.items() if value}), values
+    if _never_launched(agent.directory, properties):
+        return _harness_home(family), None  # nothing of it in any store yet: where this process's would put it
+    return None, None
+
+
+_HOME_VARIABLES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex"),
+                   "pi": ("PI_CODING_AGENT_DIR", None)}
+
+
+def _replayable(family, recorded, keys, workspace):
+    """The storage variables `keys` from `recorded`, as an environment that selects the same store wherever it is
+    replayed, or None when what resolves them isn't recorded. A relative value is joined, lexically as Claude's
+    path.resolve does (no symlink resolution), to the directory it was set from: the agent's recorded workspace,
+    where its launches start. An unset (None) or empty home variable stays as recorded and brings the launch's
+    proven HOME, under which its default lies. Unset, empty and set stay apart."""
+    variable = _HOME_VARIABLES.get(family, (None, None))[0]
+    result = {}
+    for key in keys:
+        value = recorded[key]
+        if isinstance(value, str) and value and not os.path.isabs(value):
+            if not (isinstance(workspace, str) and os.path.isabs(workspace)):
+                return None
+            value = os.path.normpath(os.path.join(workspace, value))
+        result[key] = value
+    if variable in result and not result[variable]:
+        if not recorded.get("HOME"):
+            return None
+        result["HOME"] = recorded["HOME"]
+    return result
+
+
+def _recorded_home(family, recorded):
+    """A family's home from recorded launch values alone: its variable, else its default under the recorded
+    launch HOME; None when neither is recorded (never this process's HOME or ~)."""
+    variable, default = _HOME_VARIABLES.get(family, (None, None))
+    if variable and recorded.get(variable):
+        return Path(recorded[variable])
+    if default and recorded.get("HOME"):
+        return Path(recorded["HOME"]) / default
+    return None
+
+
+_LAUNCH_PROPERTIES = ("native_session_id", "native_session_home", "native_storage_environment",
+                      "native_service_identity", "native_environment")
+
+
+def _never_launched(directory, properties):
+    """Whether an agent has no launch evidence of any kind: none of the launch properties, a runtime record that
+    is missing or empty, no session journal, and no launch records. An older plain launch may have records but no
+    bound session, and a damaged runtime is still a launch, so no one of these alone decides it."""
+    if any(properties.get(key) not in (None, "", {}) for key in _LAUNCH_PROPERTIES):
+        return False
+    from ..store import read
+    directory = Path(directory)
+    try:
+        runtime = directory / "runtime.json"
+        if runtime.exists() and read(runtime) != {}:
+            return False
+        if (directory / "sessions.jsonl").exists():
+            return False
+        launches = directory / "launches"
+        return not launches.exists() or (launches.is_dir() and not any(launches.iterdir()))
+    except (OSError, ValueError):
+        return False
 
 
 def _harness_home(family, environment=None):
-    """A harness family's data directory as this process's environment names it, or None."""
+    """A harness family's data directory as this process's environment names it (or `environment`), or None."""
     source = os.environ if environment is None else environment
     if family == "claude":
         from ..harnesses.claude import claude_home
@@ -632,8 +766,10 @@ class Plugin:
         identity = os.environ.get("MV2_AGENT_ID")
         return self.universe().agent(identity) if identity else None
 
-    def harness_info(self, universe, harness):
-        """HarnessInfo for a harness configured in a universe (its harnesses/NAME/harness.json)."""
+    def harness_info(self, universe, harness, agent=None):
+        """HarnessInfo for a harness configured in a universe (its harnesses/NAME/harness.json). With `agent`
+        (an Agent of that harness; 1.12), `home` is the one that agent's launches use, from its records, not
+        this process's environment, which a dashboard or the plugin host may not share with it."""
         from .. import harnesses
         root = _root(universe)
         adapter = _call(harnesses.load, root, harness)
@@ -641,8 +777,10 @@ class Plugin:
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
         family = getattr(adapter, "family", "") or ""
+        home, recorded = ((_harness_home(family), None) if agent is None
+                          else _agent_storage(agent, harness, family, tuple(getattr(adapter, "storage_env", ()))))
         return HarnessInfo(harness, family, executable, tuple(spec.get("unset_env", ())),
-                           bool(settings.get("inbox_bridge")), dict(settings), _harness_home(family))
+                           bool(settings.get("inbox_bridge")), dict(settings), home, recorded)
 
     def state_dir(self, universe=None):
         """state/plugins/NAME/ of a universe, made on first use while the universe exists; UniverseGone once it

@@ -297,8 +297,16 @@ class RunnerTest(unittest.TestCase):
                    "DEPLOY_KEY": "planted-key", "NPM_AUTH": "planted-auth", "MYSQL_PWD": "planted-pwd",
                    "GIT_ASKPASS": "/planted/askpass", "VSCODE_GIT_ASKPASS_MAIN": "/planted/vscode-askpass",
                    "SSH_AUTH_SOCK": "/planted/agent.sock", "HTTP_AUTHORIZATION": "Bearer planted-header",
-                   "SERVICE_AUTHORIZATION": "planted-service"}
-        kept = {"GIT_AUTHOR_NAME": "not a credential", "GIT_AUTHOR_EMAIL": "t@example.invalid"}  # git's identity
+                   "SERVICE_AUTHORIZATION": "planted-service", "AUTHORIZATION": "Bearer planted-bare",
+                   "VSCODE_GIT_IPC_HANDLE": "/planted/vscode-git.sock", "STRIPE_APIKEY": "planted-apikey",
+                   "DATABASE_URL": "postgres://user:planted@db/x", "PGPASSFILE": "/planted/pgpass",
+                   "NETRC": "/planted/netrc", "DOCKER_CONFIG": "/planted/docker", "KUBECONFIG": "/planted/kube",
+                   "VSCODE_IPC_HOOK_CLI": "/planted/vscode-ipc.sock"}
+        # Not credentials, and near the names above: git's identity, which tests need, and ordinary settings a
+        # too-broad pattern (DOCKER_*, *CONFIG*, UV_*, VSCODE_*) would take away.
+        kept = {"GIT_AUTHOR_NAME": "not a credential", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "DOCKER_HOST": "unix:///planted/docker.sock", "XDG_CONFIG_HOME": "/planted/config",
+                "UV_CACHE_DIR": "/planted/uv-cache", "VSCODE_PID": "4242"}
         elsewhere = {"MV2_CLI": "/another/checkout/bin/mv2", "MV2_PYTHON": "/another/checkout/.venv/bin/python"}
         own = {"MV2_CLI": str(RUNNER.parents[1] / "bin" / "mv2"), "MV2_PYTHON": os.path.normpath(sys.executable)}
         self.module("test_secrets", f"""

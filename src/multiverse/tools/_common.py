@@ -32,14 +32,15 @@ def callback(root, agent, *, agent_scoped=False):
         from ..universe import records
         records.properties(directory / 'properties.json', harness_optional=True)
     from ..runtime.agent_identity import actor
-    caller = actor()
+    caller = actor(data=agent_scoped)
     if caller is not None:
         if not agent_scoped:
             raise ValueError('This integration callback requires the exact terminal launch; agent identity cannot authorize it')
         if caller.directory.resolve() != directory.resolve():
             raise ValueError('Agent identity cannot report or read another agent\'s inbox')
         return root, directory, None
-    if agent_scoped:
+    launch_id = os.environ.get('MV2_LAUNCH_ID')
+    if agent_scoped and launch_id and launch_id != agents.runtime(directory).get('launch_id'):
         from .. import harnesses
         from ..runtime.native import adapter_hook
         from ..harnesses.types import SessionHandle
@@ -53,7 +54,6 @@ def callback(root, agent, *, agent_scoped=False):
             problem = None
         if problem:
             raise ValueError(problem)
-    launch_id = os.environ.get("MV2_LAUNCH_ID")
     if launch_id and agents.runtime(directory).get("launch_id") != launch_id:
         raise ValueError("Outdated launch")
     return root, directory, launch_id

@@ -203,8 +203,16 @@ class SharedIdentityTest(unittest.TestCase):
             'params': {'config': config or {}}})
 
     def test_tool_shell_identity_is_stable_and_never_per_launch(self):
-        """Codex tools keep stable identity and every frontend selects the same canonical storage; drift can silently authorize the wrong launch or open another home."""
+        """Codex tools keep stable identity and storage, including another harness's values or absence; drift can silently authorize the wrong launch or open another home."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+        for selection, permitted in ((None, False), ({}, False), ({'mode': 'plain'}, False),
+                                     ({'mode': 'unknown'}, False), (['bridge'], False),
+                                     ({'policy': 'auto', 'mode': 'bridge'}, True),
+                                     ({'policy': 'required', 'mode': 'bridge'}, True)):
+            with self.subTest(source='recorded launch opt-in', selection=selection):
+                session = SessionHandle('agent', 'codex', '/workspace', native_mode=selection)
+                hook = getattr(adapter, 'allow_recorded_launch', lambda session: False)
+                self.assertIs(hook(session), permitted)
         with self.subTest(source='two launches'):
             a, b = (adapter.spawn(self.context(launch)) for launch in ('old', 'new'))
             self.assertNotEqual(a.rpc_proxy.socket_path, b.rpc_proxy.socket_path)
@@ -235,6 +243,8 @@ class SharedIdentityTest(unittest.TestCase):
             self.assertEqual(values['MV2_MY_PLUGIN_SETTING'], 'plugin-value')
         for storage, expected in (
                 ({}, {'CODEX_HOME': '/launch/home/.codex'}),
+                ({'CODEX_HOME': ''}, {'CODEX_HOME': '/launch/home/.codex'}),
+                ({'CODEX_SQLITE_HOME': ''}, {'CODEX_HOME': '/launch/home/.codex'}),
                 ({'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'},
                  {'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'}),
                 ({'CODEX_HOME': 'relative-home', 'CODEX_SQLITE_HOME': 'relative-database'},
@@ -253,14 +263,61 @@ class SharedIdentityTest(unittest.TestCase):
                         session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
                         command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
                         if command.shared_service:
+                            self.assertEqual(command.agent_identity, adapter.agent_identity_policy())
                             self.assertEqual(command.shared_service.environment, expected)
                             stable = command.rpc_proxy.settings['agent_environment']
                             self.assertEqual({key: stable[key] for key in adapter.storage_env if key in stable}, expected)
                         plain = command.fallback if command.shared_service else command
                         if plain is not None:
+                            self.assertIsNone(plain.agent_identity)
                             self.assertEqual({key: plain.environment[key] for key in adapter.storage_env
                                               if key in plain.environment}, expected)
                             self.assertEqual(plain.environment['DEBUG'], 'keep')
+        foreign_keys = ('CLAUDE_CONFIG_DIR', 'PI_CODING_AGENT_DIR')
+        for foreign_key in foreign_keys:
+            for foreign_home in (None, '', '/launch/foreign-home'):
+                for proven in (None, (), (foreign_key,)):
+                    for mode in ('spawn', 'resume', 'fork'):
+                        with self.subTest(foreign_key=foreign_key, foreign_home=foreign_home, proven=proven, mode=mode):
+                            context = self.context('foreign-storage')
+                            environment = dict(context.environment)
+                            if foreign_home is not None:
+                                environment[foreign_key] = foreign_home
+                            context = replace(context, mode='resume' if mode == 'resume' else 'spawn',
+                                              environment=environment, storage_keys=proven)
+                            adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+                            session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
+                            command = adapter.resume(session, context) if mode == 'resume' else adapter.spawn(context)
+                            native_values = {key: '/native/' + key for key in foreign_keys}
+                            native = {'shell_environment_policy': {'set': {
+                                **native_values, 'KEEP_SETTING': 'keep'}, 'exclude': ['AWS_*']}}
+                            original = deepcopy(native)
+                            protocol = LaunchProtocol(json.loads(json.dumps(command.rpc_proxy.settings)))
+                            method = 'thread/start' if mode == 'spawn' else 'thread/resume'
+                            params = {'threadId': session.native_id, 'config': native}
+                            if mode == 'fork':
+                                protocol.native_id, protocol.bound = session.native_id, True
+                                protocol = protocol.for_connection('storage-test', lambda: True)
+                                protocol.version = (0, 163, 0)
+                                method = 'thread/fork'
+                                params.update(ephemeral=True, excludeTurns=True)
+                            request = protocol.outgoing({'id': 1, 'method': method, 'params': params})
+                            policy = request['params']['config']['shell_environment_policy']
+                            controlled = foreign_keys if proven is None else proven
+                            for key in foreign_keys:
+                                if key not in controlled:
+                                    self.assertEqual(policy['set'].get(key), native_values[key])
+                                    self.assertNotIn(key, command.rpc_proxy.settings['agent_environment'])
+                                elif key not in environment:
+                                    self.assertNotIn(key, policy['set'])
+                                else:
+                                    self.assertEqual(policy['set'][key], environment[key])
+                            self.assertEqual(set(policy['exclude']),
+                                {'AWS_*', 'MV2_*', 'CODEX_HOME', 'CODEX_SQLITE_HOME', *controlled})
+                            self.assertEqual(policy['set']['KEEP_SETTING'], 'keep')
+                            self.assertEqual(policy['set']['CODEX_HOME'], '/native/home')
+                            self.assertEqual(policy['set']['MV2_AGENT_ID'], 'agent')
+                            self.assertEqual(native, original)
         with tempfile.TemporaryDirectory(prefix='mv2-codex-storage-alias-') as temporary:
             for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
                 with self.subTest(retargeted_storage=key):

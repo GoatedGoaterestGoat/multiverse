@@ -60,12 +60,14 @@ class CodexSideTest(unittest.TestCase):
                 'MV2_AGENT_ID': 'primary', 'MV2_UNIVERSE': '/fixture/universe', 'MV2_AGENT_DIR': '/fixture/agent'}
             request = self.fork(config={'shell_environment_policy': {
                 'set': {'MV2_LAUNCH_ID': 'old', 'MV2_CONTROL_SOCKET': '/old', 'MV2_AGENT_ID': 'wrong',
-                        'USER_SETTING': 'keep'}, 'exclude': ['AWS_*']}})
+                        'CLAUDE_CONFIG_DIR': '/daemon/claude-home',
+                        'PI_CODING_AGENT_DIR': '/daemon/pi-home', 'USER_SETTING': 'keep'}, 'exclude': ['AWS_*']}})
             original = deepcopy(request)
             forwarded = self.view.outgoing(request)
             policy = forwarded['params']['config']['shell_environment_policy']
             self.assertEqual(policy['set'], {**self.protocol.settings['agent_environment'], 'USER_SETTING': 'keep'})
-            self.assertEqual(policy['exclude'], ['AWS_*', 'MV2_*'])
+            self.assertEqual(set(policy['exclude']),
+                {'AWS_*', 'MV2_*', 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'CLAUDE_CONFIG_DIR', 'PI_CODING_AGENT_DIR'})
             self.assertEqual(request, original, 'The caller frame is not mutated')
             self.view.incoming(self.forked())
         for identifier, method in enumerate(('thread/inject_items', 'turn/start', 'turn/interrupt'), 20):

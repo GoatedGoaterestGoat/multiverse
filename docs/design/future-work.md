@@ -20,7 +20,7 @@ The transcript protocols (reading rows by cursor, labels, turns, model metadata,
 - **Native compaction trigger:** ask the harness to compact now, where it supports it.
 - **Fork:** start a new agent from another agent's conversation so far.
 - **Live rename,** and switching model or effort mid-session.
-- **Normalized conversation entries** (API 1.12 in the transcript design): a harness-neutral view of rows, plus cross-harness conversion.
+- **Normalized conversation entries** (the transcript design's third step): a harness-neutral view of rows, plus cross-harness conversion.
 
 ## Harnesses
 

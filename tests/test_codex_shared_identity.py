@@ -152,8 +152,7 @@ pathlib.Path(OUTPUT).write_text(json.dumps(result))
                     environment['MV2_LAUNCH_ID'] = '00000000-0000-0000-0000-000000000000'
                 for operation, call in calls:
                     with self.subTest(proof=name, operation=operation), patch.dict(os.environ, environment, clear=True):
-                        with self.assertRaisesRegex(ValueError, 'with no other client attached'
-                                                    if name == 'old-perlaunch' else ''):
+                        with self.assertRaisesRegex(ValueError, 'identity'):
                             call()
 
         try:

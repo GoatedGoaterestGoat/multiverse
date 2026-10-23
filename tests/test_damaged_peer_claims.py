@@ -59,8 +59,17 @@ class DamagedPeerClaimsTest(BaseTest):
         for raw in ('{"name": "reserved"', '{"name": "\\u0072eserved"'):
             with self.subTest(name_in=raw):
                 path.write_text(raw)
-                with self.assertRaisesRegex(ValueError, self.peer.name):
+                with self.assertRaisesRegex(ValueError, self.peer.name) as caught:
                     agents.check_available_name(self.root, 'reserved')
+                self.assertEqual(caught.exception.file, path)
+                self.assertTrue(str(caught.exception).startswith('properties.json:'))
+                self.assertNotIn('mv2 remove', str(caught.exception))
+        with self.subTest('a missing identity still offers removal of the leftover folder'):
+            path.unlink()
+            write(self.peer / 'runtime.json', {'name': 'reserved', 'state': 'failed'})
+            with self.assertRaisesRegex(ValueError, 'mv2 remove ' + self.peer.name):
+                agents.check_available_name(self.root, 'reserved')
+            (self.peer / 'runtime.json').unlink()
         for raw, journal in (('{"native_session_id": "' + self.native, None),
                              ('{"name": [], "native_session_id": "' + encoded_id + '"}', None),
                              ('{"native_session_id": "' + encoded_id, None),
@@ -101,6 +110,13 @@ class DamagedPeerClaimsTest(BaseTest):
                 journal.write_text(original + suffix)
                 with self.assertRaisesRegex(ValueError, 'session journal'):
                     agents.session_properties(self.root, agent)
+                from multiverse.tools import resume
+                with patch.object(resume, 'run', side_effect=lambda *args, **kwargs: agents.session_properties(self.root, agent)), \
+                        self.assertRaises(ValueError) as refused:
+                    resume.cli_run(self.root, agent=agent.name)
+                self.assertIn(str(journal), str(refused.exception))
+                self.assertIn('repair', str(refused.exception).lower())
+                self.assertEqual(journal.read_text(), original + suffix)
         journal.write_text(original)
         peer, previous = self.pi_agent('damaged-peer')
         later, torn = str(uuid4()), str(uuid4())
@@ -178,8 +194,7 @@ class DamagedPeerClaimsTest(BaseTest):
                 try:
                     with self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
                         claim()
-                    with self.assertRaisesRegex(records.RecordError, orphan.name):
-                        agents.check_available_name(self.root, 'unreserved')
+                    agents.check_available_name(self.root, 'unreserved')
                 finally:
                     evidence.unlink()
         stat, runtime = Path.stat, orphan / 'runtime.json'
@@ -208,3 +223,17 @@ class DamagedPeerClaimsTest(BaseTest):
         with self.subTest('a missing properties file cannot claim an unrelated runtime-only session'):
             write(orphan / 'runtime.json', {'state': 'failed', 'native_session_id': str(uuid4())})
             claim()
+            agents.check_available_name(self.root, 'unreserved')
+        with self.subTest('a non-directory launch entry cannot hold a launch request'):
+            (orphan / 'launches' / str(uuid4())).write_text('leftover')
+            claim()
+        with self.subTest('a regular launches file cannot hold a name or session claim'):
+            import shutil
+            shutil.rmtree(orphan / 'launches')
+            (orphan / 'launches').write_text('leftover')
+            claim()  # The unrelated runtime above must not make this file unreadable authority.
+            agents.check_available_name(self.root, 'unreserved')
+            (orphan / 'runtime.json').unlink()
+            self.assertTrue(agents.orphaned(orphan))
+            claim()
+            agents.check_available_name(self.root, 'unreserved')

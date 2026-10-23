@@ -1,6 +1,7 @@
 """Pi interactive lifecycle with an opt-in, source-owned extension."""
 from pathlib import Path
 import json
+import os
 from dataclasses import replace
 
 from ...plugins import harness
@@ -19,23 +20,53 @@ class PiAdapter(ConfiguredAdapter):
     supports_bridge = True
     family = 'pi'
     resume_prompt_args = ('--', '{task}')
+    # Pi's agent directory (settings, auth, extensions). Core records it at spawn, value or absence, and
+    # replays it on resume, so a Pi child never takes the tmux server's. mv2 finds Pi's session by its file,
+    # never through this directory, so settings.env may set it: spawn then records that value.
+    storage_env = ('PI_CODING_AGENT_DIR',)
+    settings_storage = True
 
     def spawn(self, context):
         return self._with_extension(super().spawn(context), context)
 
     def resume(self, session, context):
         command = super().resume(session, context)
-        with Path(session.session_file).open() as handle:
-            try:
-                header = json.loads(handle.readline(65536))
-                if header.get('type') != 'session':
-                    raise ValueError('Missing Pi session header')
-                native = normalize_session_id(header['id'])
-                if session.native_id is not None and normalize_session_id(session.native_id) != native:
-                    raise ValueError('Pi session file belongs to a different native session')
-            except (ValueError, KeyError, AttributeError) as error:
-                raise ValueError(f'Invalid Pi resume target: {error}') from error
+        where = f'Pi session file {json.dumps(str(session.session_file))}'
+        try:
+            with Path(session.session_file).open() as handle:
+                line = handle.readline(65536)
+        except OSError as error:
+            raise ValueError(f'Cannot read the {where}: {error.strerror or error}; restore read access before resuming') from None
+        except ValueError:
+            line = ''  # not text
+        try:
+            header = json.loads(line)
+        except ValueError:
+            header = None
+        if not isinstance(header, dict) or header.get('type') != 'session':
+            raise ValueError(f'The {where} does not start with a Pi session header; restore the file before resuming')
+        try:
+            native = normalize_session_id(header.get('id'))
+        except ValueError:
+            raise ValueError(f'The {where} has no valid session id in its header; restore the file before resuming') from None
+        if session.native_id is not None and normalize_session_id(session.native_id) != native:
+            raise ValueError(f"The {where} belongs to a different native session; restore this agent's own session file")
         return self._with_extension(command, context)
+
+    def resume_notice(self, session, caller_environment, effective_environment):
+        """A shell PI_CODING_AGENT_DIR the resume replaced with the recorded value, named as Claude and Codex name
+        theirs; None when the shell sets none or the same directory."""
+        key = self.storage_env[0]
+        requested = (caller_environment or {}).get(key)
+        if not isinstance(requested, str) or not requested:
+            return None
+        recorded = (effective_environment or {}).get(key)
+        if isinstance(recorded, str) and (requested == recorded or recorded and os.path.isabs(requested)
+                                          and os.path.isabs(recorded)
+                                          and os.path.realpath(requested) == os.path.realpath(recorded)):
+            return None
+        kept = json.dumps(recorded) if isinstance(recorded, str) else 'unset'
+        return f'Kept its recorded {key} {kept}; ignored {key}={json.dumps(requested)}.'
 
     def _with_extension(self, command, context):
         bridge = bool(self.settings.get('inbox_bridge'))

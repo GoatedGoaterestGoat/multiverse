@@ -15,6 +15,18 @@ ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 # mv2 sets PATH for every launch, always removes the parent markers, and resolves
 # native storage from HOME; a harness cannot replace them (nor any MV2_* name).
 RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
+# What a parent Claude Code session leaves in its subprocesses' environment, and so in a tmux server first started
+# from one: its identity, which a Claude reads at startup (CLAUDECODE, the child-session marker that turns
+# transcript saving off, the session, attended and bridge IDs, the entry point and worktree), its IDE port and inbox,
+# and its tool shells' own values. Claude Code removes the same identity when it starts a fresh Claude itself
+# (2.1.303). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
+# CLAUDE_CODE_TMPDIR: Claude sets it only for a sandboxed shell, and its errors tell users to set it themselves.
+PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
+                 'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
+                 'CLAUDE_CODE_HOST_WORKTREE_FENCE', 'CLAUDE_CODE_EVAL_INTERVIEW_SESSION',
+                 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
+                 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH',
+                 'CLAUDE_CODE_INVOKED_SKILLS')
 
 
 def arguments(value, label, required=False):
@@ -38,8 +50,15 @@ class ConfiguredAdapter:
     # The built-in adapter a harness uses ('codex', 'claude', 'pi'); '' for a local definition.
     family = ''
     resume_prompt_args = None
-    # Variables mv2 itself reads to find this harness's native sessions; they come from mv2's environment.
+    # The harness's storage: core records each one's value or absence at spawn and replays it on resume.
     storage_env = ()
+    # Whether settings.env may set them. Not where mv2 finds sessions through them (Claude, Codex): their
+    # values must come from mv2's environment. Where it doesn't (Pi), spawn records the harness's value.
+    settings_storage = False
+
+    def allow_recorded_launch(self, session):
+        """Opt in to core's historical-launch proof for data callbacks only."""
+        return False
 
     @classmethod
     def configured(cls, name, settings):
@@ -105,7 +124,7 @@ class ConfiguredAdapter:
         managed = sorted(key for key in env if key.startswith('MV2_') or key in RESERVED_ENV)
         if managed:
             raise ValueError(f'env cannot set {", ".join(managed)}: mv2 manages these for every launch')
-        storage = sorted(key for key in env if key in self.storage_env)
+        storage = sorted(key for key in env if key in self.storage_env and not self.settings_storage)
         if storage:
             raise ValueError(f'env cannot set {", ".join(storage)}: mv2 reads these to find this harness\'s '
                              'sessions, so set them in the environment mv2 runs in')
@@ -137,9 +156,7 @@ class ConfiguredAdapter:
         # Scrubbing parent identity is a core invariant, including legacy definitions, and so is Claude's
         # child-session marker, which turns transcript saving off, and a parent Claude's IDE port and inbox path
         # and secret (an agent spawned from inside Claude inherits them): a harness replacing unset_env keeps them.
-        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION',
-                                     'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
-                                     *self.spec.get('unset_env', [])]))
+        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', *PARENT_CLAUDE, *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 
     def spawn(self, context: LaunchContext) -> CommandSpec:
@@ -156,7 +173,11 @@ class ConfiguredAdapter:
         native_id = normalize_session_id(session.native_id) if session.native_id is not None else ''
         if any('{session_file}' in arg for arg in self.spec['resume']):
             if not session.session_file or not Path(session.session_file).is_file():
-                raise ValueError('Native session file is missing; refusing to create a fresh session on resume')
+                # A file-mode agent whose file is gone can be kept with a new conversation (lifecycle's --start-fresh).
+                agent = context.values.get('name') or session.agent_id
+                way_out = (f'. If the conversation is gone, use mv2 resume {agent} --start-fresh to keep this agent '
+                           'with a new conversation' if self.session_mode == 'file' else '')
+                raise ValueError('Native session file is missing; refusing to create a fresh session on resume' + way_out)
         values = {**context.values, 'agent_id': session.agent_id,
                   'session_id': native_id, 'session_file': session.session_file or '',
                   'workspace': session.workspace}
@@ -174,6 +195,10 @@ class ConfiguredAdapter:
     def session_home(self, environment) -> str | None:
         """Optional native storage root, resolved from the launch's environment."""
         return None
+
+    def session_storage_evidence(self, session, home) -> NativeResult:
+        """Read-only exact conversation evidence in an explicit absolute storage root."""
+        return NativeResult('unknown', 'This harness cannot verify a legacy conversation storage location')
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = {name: Capability('unavailable', 'No native implementation',

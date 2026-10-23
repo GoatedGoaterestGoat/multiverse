@@ -250,8 +250,8 @@ class LaunchRefusalTest(BaseTest):
 
     def test_observation_window_against_the_default_wait(self):
         """The 55 s observation window ends before the default wait, expiry and refusal are atomic, and agent.ready
-        fires once, after startup delivery; an explicit short wait settles only ready processes, and a late frame
-        cannot reverse that result; these interacting deadlines otherwise silently report a healthy launch as failed (668eca3, 858e2be)."""
+        fires once, after startup delivery; a short caller wait preserves later refusal observation, since coupling
+        the deadlines otherwise silently drops failures or reports healthy launches as failed (668eca3, 858e2be)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         default_timeout = python_inspect.signature(lifecycle.start).parameters['wait_timeout'].default
         refused = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
@@ -362,7 +362,7 @@ class LaunchRefusalTest(BaseTest):
                 lifecycle.note_ready(self.root, self.directory, self.launch)
             self.assertEqual(len([call for call in announced.call_args_list if call.args[1] == 'agent.ready']), 1)
         self.fresh()
-        with self.subTest('expiry and a native refusal are atomic, including an explicit short wait'):
+        with self.subTest('screen expiry is final but a short caller wait keeps observing'):
             agents.update_runtime(self.directory, self.launch, state='running', pid=123, startup_checked=True,
                                   startup_delivery=None, attachment={'readiness': 'process'},
                                   native_startup_observation={'state': 'pending'})
@@ -383,11 +383,11 @@ class LaunchRefusalTest(BaseTest):
             self.assertTrue(result['ok'])
             self.assertNotIn('timed_out', result)
             self.assertEqual(elapsed[0], 1)
-            self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'unverified')
+            self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'pending')
             self.assertIn('could not be confirmed', result['notices'][0])
             with patch.object(refusal.time, 'monotonic', return_value=2):
-                self.assertIsNone(refusal.record(self.directory, self.launch, self.evidence, observation_deadline=55))
-            self.assertNotIn('native_refusal', agents.runtime(self.directory))
+                self.assertIsNotNone(refusal.record(self.directory, self.launch, self.evidence, observation_deadline=55))
+            self.assertEqual(agents.runtime(self.directory)['reason'], self.evidence['message'])
         self.fresh()
         with self.subTest('a frame completed after the observation deadline cannot refuse startup'):
             elapsed = [0.]

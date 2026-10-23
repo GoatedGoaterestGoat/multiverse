@@ -140,7 +140,7 @@ def delivery_problem(agent_dir, name, *, is_final=None):
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir)
         failed = {identifier for identifier, state in states.items()
-                  if state.get('submission_state') == 'failed'}
+                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at')}
         if not failed:
             return None
         _, _, messages = _messages(agent_dir)
@@ -267,6 +267,48 @@ def message_record(agent_dir, message_id):
         return message, _states(agent_dir).get(message_id, {})
 
 
+def acceptance_contexts(agent_dir, native_id, home, body, *, current_launch):
+    """Snapshot acceptances and their exact receipts together before matching transcript rows."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        cohort = []
+        _, _, messages = _messages(agent_dir)
+        bodies = {message['id']: message.get('text') for _, message in messages}
+        states = _states(agent_dir)
+        for identifier, state in states.items():
+            attempts = state.get('attempts') or []
+            if (state.get('submission_state') != 'accepted'
+                    and not any(attempt.get('state') in ('ok', 'native_queued') for attempt in attempts)):
+                continue
+            saved = state.get('delivery_context')
+            target = (saved.get('native_id') if isinstance(saved, dict) else state.get('target_session')
+                      or next((attempt.get('native_session_id') for attempt in reversed(attempts)
+                               if attempt.get('state') in ('ok', 'native_queued')), None))
+            if target is not None and target != native_id:
+                continue
+            if target is None or not isinstance(saved, dict) or not all(isinstance(saved.get(key), str)
+                                                      for key in ('home', 'text', 'since')):
+                other_body = bodies.get(identifier)
+                if isinstance(other_body, str) and other_body.strip() != body.strip():
+                    continue  # Equal framed text requires equal bodies even before snapshots existed.
+                cohort.append((identifier, None, ''))  # Unknown framing blocks text proof, never exact-ID proof.
+                continue
+            if saved['home'] == home:
+                cohort.append((identifier, saved['text'], saved['since']))
+        receipts = {identifier: receipt for identifier, _, _ in cohort
+                    if isinstance(receipt := states[identifier].get('native_receipt'), dict)
+                    and receipt.get('transcript_confirmed') is True}
+        active = []
+        for identifier, _, _ in cohort:
+            state = states[identifier]
+            saved = state.get('delivery_context')
+            if (isinstance(saved, dict) and saved.get('launch_id') == current_launch
+                    or any(attempt.get('launch_id') == current_launch and attempt.get('state') in ('ok', 'native_queued')
+                           for attempt in state.get('attempts') or [])):
+                active.append(identifier)
+        return tuple(cohort), receipts, tuple(active)
+
+
 def update_message(agent_dir, message_id, **changes):
     """Merge delivery evidence under the recipient inbox lock."""
     agent_dir = Path(agent_dir)
@@ -297,7 +339,36 @@ def update_message(agent_dir, message_id, **changes):
         attempts = after.get('attempts') or [{}]
         reason = attempts[-1].get('reason') if isinstance(attempts[-1], dict) else None
         _event(agent_dir, "message.failed", {"id": message_id, "reason": reason})
+    if after.get('final_reason') == 'lost' and before.get('final_reason') != 'lost':
+        _event(agent_dir, "message.failed", {"id": message_id,
+               "reason": (after.get('last_receipt') or {}).get('reason'), "lost_when_stopped": True})
     return after
+
+
+def claim_cancelled_report(agent_dir, message_id):
+    """Claim one final cancellation report even when checkers read the same snapshot."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if current.get('submission_state') != 'cancelled' or current.get('cancelled_reported_at'):
+            return None
+        states[message_id] = claimed = {**current, 'cancelled_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return claimed
+
+
+def claim_uncheckable_report(agent_dir, message_id):
+    """Claim a diagnostic once without turning uncertain delivery into failure."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if current.get('uncheckable_reported_at'):
+            return None
+        states[message_id] = claimed = {**current, 'uncheckable_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return claimed
 
 
 def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False, prompt_context=None):

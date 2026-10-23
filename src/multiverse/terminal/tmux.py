@@ -37,6 +37,27 @@ class Tmux:
             raise RuntimeError(result.stderr.strip() or "tmux command failed")
         return result.stdout.rstrip("\n")
 
+    def environment(self, name):
+        """One global value, preserving embedded/trailing newlines and explicit empty."""
+        result = subprocess.run([*self.prefix, 'show-environment', '-g', name], stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=10)
+        if (result.returncode == 1 and not result.stdout
+                and result.stderr == ('unknown variable: ' + name + '\n').encode()):
+            return None
+        if result.returncode or result.stderr.startswith(b'error '):
+            raise RuntimeError(result.stderr.decode(errors='replace').strip() or 'tmux command failed')
+        output = result.stdout.decode()  # No universal-newline conversion or trailing-value trimming.
+        if output == '-' + name + '\n':
+            return None
+        if not output.startswith(name + '=') or not output.endswith('\n') or '\0' in output:
+            raise ValueError(f'tmux returned an unreadable environment value for {name}')
+        value = output[len(name) + 1:-1]  # Remove exactly the producer's single final newline.
+        if '\\' in value:
+            # Some tmux versions escape controls, others emit them literally.
+            # Do not confuse an escape with a real path that has no transcript.
+            raise ValueError(f'tmux returned ambiguous escaped output for {name}')
+        return value
+
     def snapshot(self):
         try:
             output = self.run("list-panes", "-a", "-F", "\t".join("#{" + field + "}" for field in FIELDS))

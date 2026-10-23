@@ -137,9 +137,11 @@ class SessionDeliveryTest(DeliveryFixture):
         with self.subTest('a foreign conversation or another home'):
             message = append_message(self.directory, 'foreign', {}, delivery='steer', target_session=str(uuid4()))
             self.clear()
-            for check in (False, True):
-                with self.assertRaisesRegex(ValueError, 'different native session'):
-                    native.deliver(self.root, self.agent, message['id'], retry=not check, check=check)
+            with self.assertRaisesRegex(ValueError, 'different native session'):
+                native.deliver(self.root, self.agent, message['id'], retry=True)
+            result = native.deliver(self.root, self.agent, message['id'], check=True)
+            self.assertFalse(result['ok'])
+            self.assertTrue(result['value']['outside_lineage'])
             historical = append_message(self.directory, 'wrong scope', {}, delivery='steer',
                                         target_session=self.native_id)
             props = read(self.directory / 'properties.json')

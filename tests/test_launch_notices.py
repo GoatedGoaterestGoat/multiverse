@@ -27,25 +27,37 @@ class LaunchNoticeCliTest(TerminalBase):
         config = read(self.root / 'harnesses/codex/harness.json')
         config['settings'].update(executable=str(executable), inbox_bridge=False)
         write(self.root / 'harnesses/codex/harness.json', config)
-        directory, properties, _, _ = lifecycle._record(self.root, 'notice-worker', '', 'codex', None, None)
-        saved = self.work / 'saved-home'
-        saved.mkdir()
-        saved_environment = {'CODEX_HOME': str(saved), 'CODEX_SQLITE_HOME': str(self.work / 'saved-database')}
-        properties.update(native_session_id=str(uuid4()), native_session_provider='codex',
-                          workspace=str(self.work), native_environment=saved_environment)
-        write(directory / 'properties.json', properties)
-        requested = {key: str(self.work / ('requested-' + key)) for key in saved_environment}
-        environment = {**os.environ, **requested, 'MV2_TMUX_SOCKET': self.socket, 'PYTHONPATH': str(ROOT / 'src')}
-        process = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
-                                  'resume', properties['id'], '--wait', '--json'], env=environment,
-                                 capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
-        self.assertEqual(process.returncode, 0, process.stderr)
-        result = json.loads(process.stdout)
-        self.assertEqual(result['native_session_id'], properties['native_session_id'])
-        notice = next((notice for notice in result['notices'] if requested['CODEX_HOME'] in notice), '')
-        for key in saved_environment:
-            self.assertIn(json.dumps(saved_environment[key]), notice)
-            self.assertIn(f'{key}={json.dumps(requested[key])}', notice)
-        until(lambda: (directory / 'seen.json').exists())
-        self.assertEqual(read(directory / 'seen.json'), saved_environment)
-        self.assertEqual(read(directory / 'properties.json')['native_environment'], saved_environment)
+        for explicit_database in (True, False):
+            with self.subTest(explicit_database=explicit_database):
+                directory, properties, _, _ = lifecycle._record(
+                    self.root, 'notice-worker-' + str(explicit_database).lower(), '', 'codex', None, None)
+                saved = self.work / ('saved-home-' + str(explicit_database).lower())
+                saved.mkdir()
+                saved_environment = {'CODEX_HOME': str(saved)}
+                if explicit_database:
+                    saved_environment['CODEX_SQLITE_HOME'] = str(self.work / 'saved-database')
+                properties.update(native_session_id=str(uuid4()), native_session_provider='codex',
+                                  workspace=str(self.work), native_environment=saved_environment,
+                                  native_storage_environment={**saved_environment,
+                                      'CODEX_SQLITE_HOME': saved_environment.get('CODEX_SQLITE_HOME')})
+                write(directory / 'properties.json', properties)
+                requested = {key: str(self.work / ('requested-' + key))
+                             for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME')}
+                environment = {**os.environ, **requested, 'MV2_TMUX_SOCKET': self.socket, 'PYTHONPATH': str(ROOT / 'src')}
+                process = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
+                                          'resume', properties['id'], '--wait', '--json'], env=environment,
+                                         capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+                self.assertEqual(process.returncode, 0, process.stderr)
+                result = json.loads(process.stdout)
+                self.assertEqual(result['native_session_id'], properties['native_session_id'])
+                for key in requested:
+                    notice = next((notice for notice in result['notices'] if f'{key}=' in notice), '')
+                    self.assertIn(f'{key}={json.dumps(requested[key])}', notice)
+                    if key in saved_environment:
+                        self.assertIn(json.dumps(saved_environment[key]), notice)
+                    else:
+                        self.assertIn('unset', notice)
+                until(lambda: (directory / 'seen.json').exists())
+                self.assertEqual(read(directory / 'seen.json'),
+                    {key: saved_environment.get(key) for key in requested})
+                self.assertEqual(read(directory / 'properties.json')['native_environment'], saved_environment)

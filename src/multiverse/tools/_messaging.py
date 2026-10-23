@@ -4,7 +4,7 @@ import json
 from ..display import clean
 
 
-def failure_reason(reason, text=''):
+def failure_reason(reason, text='', *, preserve_details=False):
     reason = str(reason or 'the session could not accept the message')
     if text:
         # Replace whole reflected values once. Short conversational tokens are
@@ -14,6 +14,10 @@ def failure_reason(reason, text=''):
         if pieces:
             pattern = r'(?<!\w)(?:' + '|'.join(re.escape(piece) for piece in sorted(pieces, key=len, reverse=True)) + r')(?!\w)'
             reason = re.sub(pattern, 'the message', reason)
+    if preserve_details:
+        # Wake refusals carry actionable record paths and recovery instructions.
+        # Keep them whole, while still removing reflected message bodies above.
+        return clean(reason)
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'
@@ -39,18 +43,36 @@ def failure_reason(reason, text=''):
     return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
 
 
-def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text='', running=False):
+def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, retry=False, accepted=False, text='', running=False):
     state = receipt.get('state')
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    if value.get('outside_lineage') is True:
+        if value.get('retired_by_fresh_start') is True:
+            return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
+                    'Send a new message if you still want it delivered.')
+        if value.get('final') is True or retry:
+            return (f'{name}: cannot retry saved message {json.dumps(clean(text), ensure_ascii=False)}: '
+                    'its conversation is outside the recorded lineage. Verify the original conversation, '
+                    'then send a new message if you still want it delivered.')
+        return (f'{name}: cannot check message {json.dumps(clean(text), ensure_ascii=False)}: '
+                'its conversation is outside the recorded lineage. Inspect the original conversation. Do not resend without verifying it.')
+    if state == 'cancelled' and value.get('lost_when_stopped') is True:
+        return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} not delivered: lost when the agent stopped. '
+                'If the harness restored a draft, it has not been submitted. '
+                'Send a new message if you still want it delivered.')
     if state == 'cancelled':
         return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
     if value.get('paused') is True:
         return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
+        if value.get('repair_journal'):
+            return (f'{name}: could not {"check delivery" if check else "retry saved message"}: {clean(reason)}. '
+                    f'Saved; after repairing the journal, run mv2 deliver {name} --{"check" if check else "retry"}.')
         # A file path is actionable evidence, not an opaque native identifier.
-        why = clean(reason) if value.get('pre_submission_failure') is True else failure_reason(reason, text)
+        why = (clean(reason) if value.get('pre_submission_failure') is True else
+               failure_reason(reason, text, preserve_details=value.get('wake_refused') is True or value.get('check_error') is True))
         if value.get('launch_only') is True and value.get('final') is False:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason and resume with a working bridge, "
                     f"then mv2 deliver {name} --retry.")

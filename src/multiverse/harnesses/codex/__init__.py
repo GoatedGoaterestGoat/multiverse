@@ -23,9 +23,20 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
+    def session_home(self, environment):
+        from .storage import session_home
+        return session_home(environment)
+
+    def session_storage_evidence(self, session, home):
+        from .storage import session_storage_evidence
+        return session_storage_evidence(session, home)
+
     def agent_identity_policy(self):
         from .identity import POLICY
         return POLICY
+
+    def allow_recorded_launch(self, session):
+        return isinstance(session.native_mode, Mapping) and session.native_mode.get('mode') == 'bridge'
 
     def resume_notice(self, session, caller_environment, effective_environment):
         from .identity import resume_notice
@@ -35,8 +46,9 @@ class CodexAdapter(ConfiguredAdapter):
         if (environment.get('MV2_IDENTITY_MODE') is None and environment.get('MV2_LAUNCH_ID')
                 and environment.get('CODEX_THREAD_ID') and environment.get('MV2_AGENT_ID') == session.agent_id
                 and (session.native_mode or {}).get('mode') == 'bridge'):
-            return ('This Codex conversation still has values from before the update: restart the agent '
-                    '(mv2 kill, then mv2 resume) with no other client attached.')
+            return ('This Codex conversation has an unverified cached tool identity. Use the current mv2 '
+                    "installation and inspect this agent's saved launch records. Codex can retain an idle "
+                    'conversation for up to 30 minutes after its last client leaves.')
         return None
 
     def supports_launch_refusal(self, cli_version):
@@ -67,8 +79,9 @@ class CodexAdapter(ConfiguredAdapter):
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
         version = codex_version(command.argv[0], context.values['workspace'])
-        if version is not None and version < CHECKED_VERSION:
-            note = (f'Codex {version_text(version)} is older than the checked release {version_text(CHECKED_VERSION)}; '
+        if version is not None and version != CHECKED_VERSION:
+            relation = 'older' if version < CHECKED_VERSION else 'newer'
+            note = (f'Codex {version_text(version)} is {relation} than the checked release {version_text(CHECKED_VERSION)}; '
                     'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
             command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
@@ -86,7 +99,8 @@ class CodexAdapter(ConfiguredAdapter):
                 retry_argv = additions.apply(replace(command, argv=tuple(argv))).argv
                 retry = StartupRetrySpec(retry_argv, (*plain_command.notices,
                     f"Codex runs this folder read-only, so {name}'s agent folder ({directory}) is not writable; "
-                    "session-bind, report and inbox need approval. To allow it, give the harness --sandbox workspace-write."))
+                    "session-bind, report and inbox need approval to write there; with approval policy never, they fail. "
+                    "To allow it, give the harness --sandbox workspace-write."))
             plain = replace(plain_command, startup_retry=retry,
                             environment={**plain_command.environment, **storage_environment(context)},
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
@@ -126,7 +140,8 @@ class CodexAdapter(ConfiguredAdapter):
                 reason = f'Cannot isolate shared native session environment: {observed.reason}'
                 if ('failed to resolve feature override precedence' in observed.reason
                         and 'No such file or directory' in observed.reason):
-                    home = str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())
+                    from .identity import storage_environment
+                    home = storage_environment(context)['CODEX_HOME']
                     executable = self.spec['spawn'][0]
                     if '/' in executable and not Path(executable).is_absolute():
                         executable = str((Path(context.values['workspace']) / executable).resolve())
@@ -195,6 +210,7 @@ class CodexAdapter(ConfiguredAdapter):
                                 'resume_permissions': permissions,
                                 'plugin_config': session_config,
                                 'agent_environment': stable,
+                                'storage_keys': context.storage_keys,
                                 'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},

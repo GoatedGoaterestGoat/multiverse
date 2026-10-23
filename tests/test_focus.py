@@ -438,7 +438,8 @@ class FocusCommandTest(BaseTest):
         self.output('send', 'asker', '--text', 'before')
         mailbox.update_message(self.directories['asker'], self.history('asker')[0]['id'], submission_state='failed')
         self.output('focus', 'asker', '--for', '1h')
-        self.assertEqual(self.output('deliver', 'asker', '--retry', code=1), '')
+        with patch.object(native, 'finalize_launch_only', side_effect=AssertionError('up-front focus must avoid delivery work')):
+            self.assertEqual(self.output('deliver', 'asker', '--retry', code=1), '')
         self.assertTrue(self.stderr.startswith('Not retried: asker is focused until '), self.stderr)
         self.assertEqual(len(self.calls), 1)
         # --check is not held back: it reports the definite failure (exit 1) instead of the focus.

@@ -263,10 +263,10 @@ def listing(root, wait=loader.REFRESH_WAIT):
     [{name, on, state, source, version, description, problem, errors, permissions,
       commands, settings: {path, source, problem, schema} or None, shadowed}]
 
-    It never waits out a slow register(): a plugin whose load is still running is `loading`, and its own
-    settings screen is offered once it has loaded (loader.generation() rises then). A plugin with settings is
-    loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings check refuses
-    reads `unusable` here as it does in doctor."""
+    It never waits out a slow register(): a plugin whose load is still running is `loading`. A plugin that is on
+    and has settings is loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings
+    check refuses reads `unusable` here as it does in doctor. A plugin that is off is never imported here; its
+    own settings screen or fields (settings `own_view`) come from settings_view(), on request."""
     from . import host
     current = entries(root)
     checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
@@ -312,13 +312,15 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 schema, schema_problem = settings_files.schema_of(manifest), None
             except ValueError as error:
                 schema, schema_problem = None, str(error)
+            registered = found.loaded.registrations if isinstance(found.loaded, loader.Loaded) else None
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
-                                or schema_problem, "schema": schema,
+                                or schema_problem, "schema": schema,  # the settings file's problem, nothing else
+                                "own_view": "dashboard.settings" in manifest.extends,
                                 "values": {} if waiting else current.values,
-                                "screen": _settings_screen(found),
-                                "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
-                                           if found.loaded and found.loaded.registrations.settings_fields else None)}
+                                "screen": registered.settings_screen if registered else None,
+                                "fields": ([asdict(item) for item in registered.settings_fields]
+                                           if registered and registered.settings_fields else None)}
         result.append(item)
     return result
 
@@ -877,17 +879,30 @@ def anchor_events(root, name, again=False):
         pass
 
 
-def _settings_screen(found):
-    """A plugin's own settings screen ("module:Class"), loading it to learn it when needed: its screen is where
-    unusable settings are fixed, so it is offered whether or not this process has loaded the plugin yet."""
-    loaded = found.loaded
-    if loaded is None and found.on and found.state in ("on", "unusable") and found.manifest is not None \
-            and "dashboard.settings" in found.manifest.extends:
+def settings_view(root, name, wait=loader.REFRESH_WAIT):
+    """A plugin's own settings view, for the Plugins screen's Enter: {"screen": "module:Class" or None,
+    "fields": [field dicts] or None, "problem": why it can't be had, or None, "loading": whether that is only
+    because its load is still running (try again), not because it failed}.
+
+    It loads the plugin, also where it is off, as `mv2 plugins settings` edits there: its screen or fields are
+    where settings are edited and unusable ones fixed. The only caller that imports a plugin for this, and only
+    when a person asks; listing() never does. "problem" is the load's (still loading, untrusted, safe mode, a
+    failed import), never the settings file's."""
+    found = entry(Path(root), name)
+    if found.manifest is None or "dashboard.settings" not in found.manifest.extends:
+        return {"screen": None, "fields": None, "problem": f"{name} has no settings view of its own", "loading": False}
+    loaded = found.loaded if isinstance(found.loaded, loader.Loaded) else None
+    if loaded is None:
         try:
-            loaded = loader.load(found, wait=loader.REFRESH_WAIT)  # still loading: offered once it has
-        except PluginError:
-            return None
-    return loaded.registrations.settings_screen if loaded is not None else None
+            loaded = loader.load(found, off=not found.on, wait=wait)
+        except loader.StillLoading:
+            return {"screen": None, "fields": None, "problem": f"{name} is still loading", "loading": True}
+        except PluginError as error:
+            return {"screen": None, "fields": None, "problem": str(error), "loading": False}
+    registered = loaded.registrations
+    return {"screen": registered.settings_screen,
+            "fields": [asdict(item) for item in registered.settings_fields] if registered.settings_fields else None,
+            "problem": None, "loading": False}
 
 
 def settings_checked(root, name, wait=None):

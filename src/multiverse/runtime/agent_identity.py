@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 
-from ..harnesses.types import AgentIdentitySpec, normalize_session_id
+from ..harnesses.types import AgentIdentitySpec, SessionHandle, normalize_session_id
 from ..store import read
 
 
@@ -28,7 +28,7 @@ def environment(target, spec, saved=None):
     values = {key: target[key] for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
                                           'MV2_CLI', 'MV2_PYTHON', 'PATH')}
     # Request the launching installation's tools each time. A shared native
-    # conversation may retain its previous environment until an exclusive reload;
+    # conversation may retain its previous environment after a frontend restart;
     # saved paths are diagnostics, not authority and never override this request.
     return {**values, 'MV2_IDENTITY_MODE': spec.mode}
 
@@ -65,7 +65,7 @@ def sender_actor(environment=None, *, acting="send"):
     `acting` names what the caller does as this agent, for the refusals.
     """
     env = os.environ if environment is None else environment
-    caller = actor(env)
+    caller = actor(env, data=True)
     if caller is not None:
         return caller
     if not any(env.get(key) for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')):
@@ -122,16 +122,43 @@ def calling_socket(environment=None):
     return socket
 
 
-def actor(environment=None):
-    """Validate explicit stable mode. Old launch contexts are never adopted.
+def _recorded_launch(env, root, directory, properties, spec):
+    """An opted-in bridge's own retained request can explain a missing mode marker."""
+    from .. import harnesses
+    from ..universe import records
+    from .native import adapter_hook
+
+    launch_id = normalize_session_id(env.get('MV2_LAUNCH_ID'))
+    if launch_id != env.get('MV2_LAUNCH_ID'):
+        raise ValueError('Recorded launch identity requires its full canonical ID')
+    adapter = harnesses.load(root, properties['harness'])
+    allow = adapter_hook(adapter, 'allow_recorded_launch')
+    policy = adapter_hook(adapter, 'agent_identity_policy')
+    session = SessionHandle.from_records(properties, records.runtime(directory / 'runtime.json'), directory)
+    if allow is None or allow(session) is not True or policy is None or policy() != spec:
+        raise ValueError('Outdated launch; this adapter does not authorize its recorded conversation identity')
+    path = directory / 'launches' / launch_id / 'request.json'
+    request = records._object(path)
+    saved = request.get('env')
+    keys = ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')
+    if not isinstance(saved, dict) or any(not env.get(key) or saved.get(key) != env[key] for key in keys):
+        raise ValueError(f'{path}: recorded launch does not identify this universe and agent')
+    mode, relay = request.get('native_mode'), request.get('rpc_proxy')
+    if (request.get('shared_service') is not True or not isinstance(mode, dict) or mode.get('mode') != 'bridge'
+            or not isinstance(relay, dict) or relay.get('binds_session') is not True):
+        raise ValueError(f'{path}: recorded launch is not a session-binding shared bridge')
+
+
+def actor(environment=None, *, data=False):
+    """Validate stable proof; only data routes can also prove a retained bridge launch.
 
     An unscoped human CLI remains an operator. A declared but incomplete agent
     context can never fall through to that case.
     """
     env = os.environ if environment is None else environment
     mode = env.get('MV2_IDENTITY_MODE')
-    if mode is None and env.get('MV2_LAUNCH_ID'):
-        return None  # Existing launch-strict callbacks; never agent authority.
+    if mode is None and env.get('MV2_LAUNCH_ID') and not data:
+        return None  # Runner/control and child-spawn routes keep their generation guards.
     unfenced = bool(not env.get('MV2_LAUNCH_ID') and (env.get('MV2_AGENT_ID') or env.get('MV2_AGENT_DIR')))
     policy = None
     directory = None
@@ -142,19 +169,26 @@ def actor(environment=None):
             if identity != env['MV2_AGENT_ID']:
                 raise ValueError('Agent identity requires its full canonical ID')
             directory = root / 'state' / 'agents' / identity
-            properties = read(directory / 'properties.json')
+            from ..universe import records
+            properties = records.properties(directory / 'properties.json', harness_optional=True)
             policy = properties.get('agent_identity')
     except (OSError, ValueError, KeyError):
         if mode is not None or unfenced:
-            raise ValueError('Agent identity could not be verified; restart this agent') from None
+            raise ValueError('Agent identity could not be verified; inspect its saved records') from None
         return None  # Non-adopted launches keep their existing generation guards.
     if mode is None and policy is None and not unfenced:
         return None
     try:
+        if (mode is None and env.get('MV2_LAUNCH_ID')
+                and records.runtime(directory / 'runtime.json').get('launch_id') == env['MV2_LAUNCH_ID']):
+            return None  # The existing exact-current-launch path needs no compatibility authority.
         if not isinstance(policy, dict) or policy.get('schema') != 1:
             raise ValueError('No saved agent identity policy')
-        spec = specification(AgentIdentitySpec(**policy['spec']))
-        if mode != spec.mode:
+        spec = specification(AgentIdentitySpec(**{**policy['spec'],
+            'storage_env': tuple(policy['spec'].get('storage_env', ()))}))
+        if mode is None and data and env.get('MV2_LAUNCH_ID'):
+            _recorded_launch(env, root, directory, properties, spec)
+        elif mode != spec.mode:
             raise ValueError('Missing or incorrect agent identity mode')
         if not env.get('MV2_AGENT_DIR') or Path(env['MV2_AGENT_DIR']).resolve() != directory.resolve():
             raise ValueError('Agent directory does not match the declared identity')

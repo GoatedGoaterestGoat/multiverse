@@ -1,5 +1,12 @@
 # Troubleshooting
 
+You can still use `inbox --agent NAME` and `report --agent NAME` as the operator
+when an agent's runtime record is damaged. These commands do not repair that
+record; callbacks from an agent still require their verified identity.
+
+A leftover folder with damaged records may conservatively reserve a name when
+that text appears in a surviving record. Repair the named damaged file. If `properties.json` is missing, list, inspect and doctor offer `mv2 remove UUID` even when other records survive. Removal checks those records and the agent's processes before moving the leftover folder to the trash; a live or unprovable process still blocks it. A present but damaged properties file must be repaired instead: list, inspect, doctor and a refused remove show its full path and advise repairing it from a backup or restoring an intact copy. They never offer removal for that file.
+
 Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
 
 ## Start here
@@ -95,9 +102,9 @@ env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 i
 
 `Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.
 
-Connected Codex tools do not carry a launch ID. Their `report`, `inbox` and message sender use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
+Current launches omit the launch ID from connected Codex tools; older loaded conversations can retain it. Their data callbacks use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
 
-If a connected Codex conversation says it still has values from before the update, restart it as described in [updating](updating.md). No other client should be attached during that restart. Do not work around the error by copying identity values into the old conversation.
+Use the current mv2 installation for an older connected Codex conversation. Its own retained bridge request and current conversation proof can authorize data callbacks without replacing cached tool settings. Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves; restarting the frontend does not guarantee fresh settings. A separate old checkout still runs old code. If the current installation refuses the identity, inspect the saved records; do not copy identity values into the conversation. See [the upgrade rules](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### A name is taken or ambiguous
 
@@ -142,6 +149,7 @@ Every message is saved before delivery, so nothing is lost. What to do depends o
 | `Launched without compaction: compaction.json has not been converted: ...` | This is not launch-only. The connection works, but an old `compaction.json` hasn't been converted yet. Run `mv2 plugins migrate --apply`, then kill and resume the agent. |
 | `plugin compaction was left out: its settings cannot be used: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable, so Claude's own `/compact` applies. `mv2 doctor` names the problem, so fix it and relaunch. |
 | `Claude has no saved conversation for this session: the agent was stopped before its first message, ...` | This is not launch-only. There was nothing to resume, so the agent started fresh under the same session ID. `mv2 resume` prints the same line. |
+| `Cannot prove unique conversation storage` | Resume from the shell whose storage variable points at the real conversation. If every known candidate is readable and the conversation is absent everywhere, use `mv2 resume NAME --start-fresh` to keep the agent and inbox with a new conversation. This never discards readable history. |
 | `Claude's saved conversation for this session is missing (Claude deletes conversations older than its cleanupPeriodDays setting): ...` | This is not launch-only. The agent had a conversation, but Claude's file for it is gone, so it started fresh without its earlier context. `mv2 resume` prints the same line. mv2 tells the two cases apart from its delivery receipts, the context the agent last reported, and Claude's prompt history. To keep conversations, set a large `cleanupPeriodDays` in Claude's settings. |
 
 Sometimes a connected launch never becomes ready: `--wait` times out, and sends report `messaging is not connected for this session`. The launch may be waiting at a Claude login or workspace trust prompt. Attach and answer it.
@@ -162,14 +170,11 @@ mv2 deliver NAME --retry
 
 If the reason says `Kill this unbound launch and spawn again.`, the launch never recorded a session. Kill it, remove it and spawn again. mv2 never restarts the shared daemon. It also never replays a message that may have arrived.
 
-### Codex: "restart the agent (mv2 kill, then mv2 resume) with no other client attached"
+### Codex callbacks retain an old launch identity
 
-`mv2 report` and `mv2 inbox` print this for a Codex agent whose conversation still holds environment values from an older mv2. Close any other client that has the conversation open, such as a `codex resume` window, so Codex reloads the conversation. Then run:
+Run the callback through the current mv2 installation. It accepts an older bridge conversation when the retained launch request and current thread, storage and agent records all match. If it refuses, inspect the named identity or request record; a different thread, changed storage or missing proof remains refused.
 
-```sh
-mv2 kill NAME
-mv2 resume NAME
-```
+Codex can retain an idle conversation's tool settings for up to 30 minutes after its last client leaves by default. Stopping and resuming the frontend does not guarantee that those settings reload. If `MV2_CLI` points at a separate older checkout, that checkout still runs its old checks; use the current installation. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### Codex: "This conversation is open in another app"
 
@@ -184,7 +189,7 @@ mv2 resume NAME
 
 A launch error or `Note:` reads `Cannot isolate shared native session environment: ... failed to resolve feature override precedence: No such file or directory`. The shared Codex daemon was started from a directory that has since been deleted, such as a removed worktree. With `inbox_bridge` unset, the agent runs plain. With `true`, the launch fails.
 
-The message ends with a restart command for your Codex home, like `cd /home/me && CODEX_HOME=/home/me/.codex codex app-server daemon restart`. Restarting interrupts every Codex session on that daemon. Run the command exactly as printed, and only when no other Codex work is running. Then resume the agent, killing it first if it is running plain. mv2 never restarts the daemon itself.
+The message ends with a restart command for the agent's selected Codex home, like `cd /home/me && CODEX_HOME=/home/me/.codex codex app-server daemon restart`. It uses the launch's `HOME` when `CODEX_HOME` is unset or empty, including a home retained during legacy adoption. Restarting interrupts every Codex session on that daemon. Run the command exactly as printed, and only when no other Codex work is running. Then resume the agent, killing it first if it is running plain. mv2 never restarts the daemon itself.
 
 ## Environment
 

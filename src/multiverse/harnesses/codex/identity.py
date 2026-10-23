@@ -20,7 +20,12 @@ def resume_notice(caller_environment, effective_environment):
     notices = []
     for key, label in (('CODEX_HOME', 'Codex home'), ('CODEX_SQLITE_HOME', 'Codex database home')):
         requested, saved = caller_environment.get(key), effective_environment.get(key)
-        if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+        if not isinstance(requested, str) or not requested:
+            continue
+        if key == 'CODEX_SQLITE_HOME' and saved is None:
+            notices.append(f'Kept its saved Codex database home unset; ignored {key}={json.dumps(requested)}.')
+            continue
+        if not isinstance(saved, str) or not saved:
             continue
         try:
             kept = Path(saved).expanduser().resolve()
@@ -33,10 +38,34 @@ def resume_notice(caller_environment, effective_environment):
 
 
 def storage_environment(context):
-    storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
+    from .storage import session_home
+    # Core supplies HOME. Keep rendering partial contexts and relative explicit
+    # paths compatible; candidate proof never falls back to this process's HOME.
+    home = session_home(context.environment)
+    if home is None:
+        home = str(Path(context.environment.get('CODEX_HOME') or '~/.codex').expanduser().resolve())
+    storage = {'CODEX_HOME': home}
     if context.environment.get('CODEX_SQLITE_HOME'):
         storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
     return storage
+
+
+def _storage_keys():
+    # Resolve after adapter imports finish; keep the same source-owned union as
+    # core's launch snapshot without treating foreign storage as Codex authority.
+    from .. import BUILTINS
+    return tuple(dict.fromkeys(key for adapter in BUILTINS.values()
+                               for key in getattr(adapter, 'storage_env', ())))
+
+
+def _session_storage_keys(selected):
+    declared = _storage_keys()
+    if selected is None:
+        return declared  # Existing callers describe a complete selection.
+    if not isinstance(selected, (tuple, list)) or any(key not in declared for key in selected):
+        raise ValueError('Native storage keys must name declared harness storage variables')
+    # Foreign-key uncertainty never weakens this conversation's own identity.
+    return tuple(dict.fromkeys([*POLICY.storage_env, *selected]))
 
 
 def tool_environment(context):
@@ -45,11 +74,13 @@ def tool_environment(context):
     env = {key: value for key, value in context.agent_environment.items() if key in STABLE}
     # Even an incomplete caller-supplied context must not look like an operator.
     env['MV2_IDENTITY_MODE'] = POLICY.mode
+    env.update({key: context.environment[key] for key in _session_storage_keys(context.storage_keys)
+                if key not in POLICY.storage_env and key in context.environment})
     env.update(storage_environment(context))
     return env
 
 
-def session_environment(config, stable):
+def session_environment(config, stable, storage_keys=None):
     """Native/user defaults cannot put launch identity back into shared tools."""
     policy = config.setdefault('shell_environment_policy', {})
     if not isinstance(policy, dict) or not isinstance(policy.get('set', {}), dict):
@@ -58,9 +89,10 @@ def session_environment(config, stable):
     if not isinstance(excludes, list) or any(not isinstance(key, str) for key in excludes):
         raise ValueError('Native shell environment exclusions must be an array of strings')
     values = dict(policy.get('set') or {})
-    for key in (*VOLATILE, *STABLE, 'CODEX_HOME', 'CODEX_SQLITE_HOME', 'CODEX_THREAD_ID'):
+    storage = _session_storage_keys(storage_keys)
+    for key in (*VOLATILE, *STABLE, *storage, 'CODEX_THREAD_ID'):
         values.pop(key, None)
     values.update(stable)
     policy['set'] = values
-    policy['exclude'] = list(dict.fromkeys([*excludes, 'MV2_*']))
+    policy['exclude'] = list(dict.fromkeys([*excludes, 'MV2_*', *storage]))
     return config

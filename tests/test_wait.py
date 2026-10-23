@@ -75,7 +75,7 @@ class WaitTest(BaseTest):
                 result = self.wait(.01)
                 self.assertEqual(result['ready'], ready)
                 if ready:
-                    self.assertEqual(result['runtime']['native_startup_observation']['state'], 'unverified')
+                    self.assertEqual(result['runtime']['native_startup_observation']['state'], 'pending')
                     self.assertTrue(result['notices'])
                 else:
                     self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'pending')

@@ -61,7 +61,19 @@ mv2 resume worker --model opus --wait
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
-Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, start time and record path. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
+If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
+agent's folder, name and inbox and starts a new conversation in the calling
+shell's storage, except that Pi's current harness setting for `PI_CODING_AGENT_DIR` takes precedence over the shell. It requires a stopped agent and proof that the old conversation
+is absent from every candidate storage home (or the harness's session file).
+Present, duplicate, unreadable or unknown evidence refuses without changing the
+records. The result announces the fresh start. The old ID stays retired in the
+session journal; it is not reused for the new conversation, and old messages are
+not moved into it. This flag does not reset a readable conversation.
+If a replacement Codex conversation stops before any native ID was bound,
+the matching fresh-start journal proves there is no bound conversation to
+protect, so another `--start-fresh` is allowed. A missing ID alone is not proof.
+
+Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 
 Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.
 
@@ -109,7 +121,9 @@ An old agent folder containing only plugin leftovers, with no `properties.json`,
 conversation. It does not block spawns, session claims or resumes elsewhere.
 This includes abandoned launch folders containing only bootstrap or task files,
 with no request, ready marker, registration, cleanup or connection records.
-List and doctor identify the leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
+A regular file named `launches` cannot hold launch records either; it stays with
+the leftovers instead of blocking unrelated names or conversations.
+List, inspect and doctor identify it as a leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
 checks that no terminal is tagged for that agent on the current servers before
 moving the folder and its plugin leftovers to trash; unreadable servers or new
 core records refuse the move. A refusal names any tagged pane that must be verified and closed first.
@@ -128,6 +142,10 @@ reports the damage as a problem and exits nonzero. Use the damaged row's UUID
 when its name cannot be recovered. A folder with surviving core records still reserves its
 UUID when properties.json is missing. Commands that would act on damaged
 identity refuse until it is repaired; listing does not rewrite or reset it.
+A missing properties file reserves only names still mentioned by surviving
+records. A runtime-only folder does not block unrelated spawns. You can remove
+such a folder by its full UUID: mv2 checks tagged terminals, saved process
+identities and launch cleanup records first, then preserves its files in trash.
 
 A missing runtime.json, or damaged launch authority inside it (such as an invalid
 launch UUID or terminal socket, pane or session identity), is reported even though
@@ -158,8 +176,14 @@ check tags and retained process records before treating readable malformed bytes
 as lost authority; they preserve those bytes in the moved record. A file that
 cannot be read because of permissions must be made readable first. Recovery
 rechecks the record before acting, so a concurrent repair is never overwritten.
+If `properties.json` is missing, kill can still close the exact tagged terminal
+using the folder's agent and universe IDs. It preserves recorded process evidence
+for cleanup and reports native cancellation as unconfirmed; it does not guess a
+harness or conversation to cancel.
 Discovery skips an earlier launch whose request was never written; a malformed
 or unreadable request still refuses recovery with its path and repair advice.
+Repair that request or restore it from a verified backup before retrying; editing
+runtime.json cannot replace the request's missing terminal-server evidence.
 It never guesses a child PID or contacts a shared server from the conversation
 UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other
@@ -171,7 +195,10 @@ are published with complete minimal properties and a starting runtime record,
 including during concurrent spawns. While the publishing process holds its launch
 lock, list shows `starting`; it is not a damaged record. Doctor also accepts the
 full starting record while that same launch is still preparing its terminal
-under the lock. Once the lock is released, unexplained unknown state is reported. If preparation is
+under the lock. If a newer launch request appears after a listing read the
+runtime record, list re-reads that same launch and observes its current terminal
+before reporting missing authority. Unchanged or still-damaged records remain
+errors; listing never repairs them. Once the lock is released, unexplained unknown state is reported. If preparation is
 interrupted before any native startup, doctor reports the failed preparation and
 the record can be resumed or removed. Unknown child evidence still requires
 repair of the runtime record rather than assuming the process stopped.

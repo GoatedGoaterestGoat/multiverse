@@ -4,7 +4,7 @@ import time
 from unittest.mock import patch
 
 from multiverse import display
-from multiverse.runtime import lifecycle, native
+from multiverse.runtime import lifecycle, native, missing_runtime
 from multiverse.store import lock, read, uid, write
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import list_agents
@@ -54,6 +54,41 @@ class LaunchDisplayFollowupTest(BaseTest):
                 patch.object(native, 'session_snapshot', side_effect=ValueError('identity updating')):
             row = lifecycle.listing(self.root)[0]
             self.assertEqual(display.live_label(row), 'starting', row)
+
+        for boundary in ('initial', 'after reconciliation'):
+            for publication in ('terminal', 'still missing', 'changed but damaged', 'different launch'):
+                with self.subTest(boundary=boundary, publication=publication):
+                    directory, stale, pane = self.record(1, terminal=False)
+                    latest = dict(stale)
+                    if publication in ('terminal', 'different launch'):
+                        latest['tmux'] = {'socket': self.socket, 'pane': '%1', 'session': '$1'}
+                    if publication == 'changed but damaged':
+                        latest['status'] = 'working'
+                    if publication == 'different launch':
+                        latest['launch_id'] = uid()
+                    calls = []
+                    original_damage = missing_runtime.damage
+
+                    def publish_before_damage(agent_dir, facts):
+                        calls.append(dict(facts))
+                        if len(calls) == (1 if boundary == 'initial' else 2):
+                            # The reader has the old runtime; publication completes before
+                            # its sidecar probe. Both writes follow the real launch order.
+                            write(directory / 'runtime.json', latest)
+                            write(directory / 'launches' / stale['launch_id'] / 'request.json', {})
+                        return original_damage(agent_dir, facts)
+
+                    with patch.object(missing_runtime, 'damage', side_effect=publish_before_damage), \
+                            patch.object(native, 'session_snapshot', side_effect=lambda root, directory, props, facts: (props, facts)), \
+                            patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)):
+                        row = lifecycle.listing(self.root)[0]
+                    if publication == 'terminal':
+                        self.assertNotIn('damaged', row)
+                        self.assertEqual(row['live'], 'alive', row)
+                        self.assertEqual(row['runtime']['tmux'], latest['tmux'])
+                    else:
+                        self.assertIn('tmux terminal identity is missing', row['damaged']['reason'])
+                    self.assertEqual(read(directory / 'runtime.json'), latest, 'Listing must not repair authority')
 
         directory, _, _ = self.record(1)
         with self.subTest(stage='unknown server, then an abandoned publisher'):

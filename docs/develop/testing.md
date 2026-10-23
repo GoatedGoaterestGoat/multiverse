@@ -14,11 +14,31 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 - **Concurrent runs share the machine.** Runs started at the same time take turns for its CPU slots instead of overloading it. A waiting run says which runs hold the slots, and again every 30 seconds while it waits: each run's agent, or `not an agent`, with its PID and directory, as in `Waiting for a slot: held by plugins (4 slots, pid 85884, /tmp/…)`. Ask that agent rather than stopping its run.
 - **Stopping is clean.** A unit past `--timeout` (20 minutes), or a run stopped with Ctrl-C or SIGTERM, fails the running test and still runs its cleanups: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running. A unit still running 30 seconds after the stop is killed. If the runner itself dies, each unit's watchdog process stops the unit the same way, with the same 30 seconds. Either way, what the unit's tests named with `track` (below) is ended afterwards. Never stop a run by pattern-killing processes.
 - **Real mv2 state is guarded.** A test that writes the real `~/.multiverse`, or the `.multiverse` of the checkout the tests run from (in the live checkout, the universe agents run in), fails the run.
-- **No credentials reach the tests.** Before it imports or starts anything, the runner drops every variable that looks like a credential or leads to one: tokens, secrets, passwords, keys (`*_KEY*`), `*_PWD`, `*_AUTH*` (such as `SSH_AUTH_SOCK` and `HTTP_AUTHORIZATION`, but not git's `GIT_AUTHOR_*`), askpass helpers (`GIT_ASKPASS`, `VSCODE_GIT_ASKPASS_*`), and `GH_*`, `GITHUB_*`, `AWS_*`, `ANTHROPIC_*`, `OPENAI_*`. No module, test or process a test starts sees one, so no failing assertion can print one. It also points `MV2_CLI` and `MV2_PYTHON` at this checkout's `bin/mv2` and the running interpreter, so a worktree's tests never run the live checkout's mv2.
+- **No credentials reach the tests.** Before it imports or starts anything, the runner drops every variable that looks like a credential or leads to one: tokens, secrets, passwords, keys (`*_KEY*`, `*APIKEY*`), `*_PWD`, `*_AUTH*` and `AUTHORIZATION` (such as `SSH_AUTH_SOCK` and `HTTP_AUTHORIZATION`, but not git's `GIT_AUTHOR_*`), askpass helpers and VS Code's helpers (`GIT_ASKPASS`, `VSCODE_GIT_*`, `VSCODE_IPC_*`), what points at credentials (`DATABASE_URL`, `PGPASSFILE`, `NETRC`, `DOCKER_CONFIG`, `KUBECONFIG`), and `GH_*`, `GITHUB_*`, `AWS_*`, `ANTHROPIC_*`, `OPENAI_*`. No module, test or process a test starts sees one, so no failing assertion can print one. It also points `MV2_CLI` and `MV2_PYTHON` at this checkout's `bin/mv2` and the running interpreter, so a worktree's tests never run the live checkout's mv2.
 - **Use `$MV2_PYTHON`**, the checkout's `.venv/bin/python` (`scripts/dev-env.sh` sets it). System Python lacks Textual, and the environment has no pytest.
 - **Pin `PYTHONPATH` in a worktree.** `uv sync` installs mv2 into `.venv` in editable mode, pointing at the checkout that created it. Run `PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" tests/run.py` so the tests, and the runners and helpers they start, import your worktree's code.
 
 The live Codex and Pi modules depend on the installed versions and on timing. They can fail on a machine for reasons unrelated to your change. Before blaming a change, run the same module on `main` in another worktree and compare.
+
+## Run them on Linux
+
+```sh
+scripts/linux-tests.sh                                  # the whole suite, on this checkout's working tree
+scripts/linux-tests.sh test_run test_native_processes   # some modules
+scripts/linux-tests.sh --commit HEAD --python 3.11      # a commit, as committed, on Python 3.11
+```
+
+`scripts/linux-tests.sh` runs `tests/run.py` in Docker:
+- **The image:** Ubuntu 24.04 with tmux, git and a system `python3`, and Python 3.11 or 3.13 (the default) from uv. The tests run as a user who isn't root. The first run builds the image, in about a minute, and later runs reuse it.
+- **The copy:** a clean copy of the checkout's working tree, uncommitted changes included, or of a commit with `--commit`. Submodules come too.
+- **What stays out:** nothing git ignores goes in, so no `.venv` and never the checkout's `.multiverse`. No `MV2_*` variable goes in either.
+- **The result:** its exit code is the suite's.
+
+Run it:
+- before landing a change to anything that differs on Linux: reading `/proc`, boot IDs, `sys.platform` branches, process identity, or the runner's process tracking;
+- once for the whole suite before a branch is pushed, next to the full `tests/run.py` run on macOS.
+
+It can't run native Claude, Codex or Pi: none is installed there, so their live tests skip, as on CI. `test_pi_bridge` skips too, without Node. On a Mac, Docker runs aarch64 Linux, while CI runs x86-64.
 
 ## What deserves a test
 

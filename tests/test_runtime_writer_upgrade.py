@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from multiverse import harnesses
+from multiverse.harnesses.claude import project_key
 from multiverse.runtime import attachments, lifecycle, missing_runtime, native
 from multiverse.store import read, write
 from multiverse.universe import relocate
@@ -97,9 +98,8 @@ class RuntimeWriterUpgradeTest(BaseTest):
         self.assertEqual(len(profiles), 9)
 
     def test_live_records_refuse_duplicates_and_ended_records_reach_resume_preparation(self):
-        """On real writer records, resume refuses live ones as duplicates and takes ended ones to terminal creation for
-        each real adapter; fragile because resume reads adapter fields older writers lack, exercised only after an
-        upgrade."""
+        """Real writer records refuse duplicate launches and resume with exact conversation proof; native stand-ins
+        omit transcript files, so upgrades can otherwise silently adopt the wrong inherited home."""
         # Process/IPC observations describe the recorded stage. This exercises
         # the real resume entry point and each real adapter, up to (but never
         # through) creating a new terminal. The capture generator separately
@@ -122,8 +122,22 @@ class RuntimeWriterUpgradeTest(BaseTest):
                         path.write_text(json.dumps({'type': 'session', 'id': props['id']}) + '\n')
                     backend = Mock()
                     backend.create.side_effect = ReachedTerminal('upgrade reached terminal creation')
-                    environment = {'CODEX_HOME': str(self.work / 'codex'),
+                    environment = {'HOME': str(self.work / 'home'), 'CODEX_HOME': str(self.work / 'codex'),
                                    'CLAUDE_CONFIG_DIR': str(self.work / 'claude')}
+                    # The real writers used private stand-ins that bound IDs but
+                    # wrote no provider history. Supply that external native evidence,
+                    # leaving every captured properties/runtime/sidecar byte intact.
+                    if props.get('native_session_id') and row['label'] not in ('failed-before-terminal', 'failed-after-terminal'):
+                        identifier = props['native_session_id']
+                        if adapter.family == 'claude':
+                            path = self.work / 'claude/projects' / project_key(str(self.work)) / (identifier + '.jsonl')
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(json.dumps({'type': 'user', 'sessionId': identifier, 'message': {'content': 'writer fixture conversation'}}) + '\n')
+                        elif adapter.family == 'codex':
+                            path = self.work / 'codex/sessions' / ('rollout-2026-10-18T00-00-00-' + identifier + '.jsonl')
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n')
+                    backend.environment.side_effect = environment.get
                     with patch.dict(os.environ, environment), \
                          patch.object(lifecycle, 'Tmux', return_value=backend), \
                          patch.object(lifecycle, 'observe', return_value={'live': live}), \

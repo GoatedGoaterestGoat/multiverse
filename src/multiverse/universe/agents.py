@@ -4,6 +4,7 @@ from ..store import existing_lock, lock, now, read, write
 from . import focus, sessions, records
 import fcntl
 import re
+import stat
 
 
 def record_paths(root):
@@ -28,16 +29,34 @@ def orphaned(directory):
             continue
         return False
     try:
-        launches = list((directory / 'launches').iterdir())
+        folder = directory / 'launches'
+        if stat.S_ISREG(folder.stat().st_mode):
+            return True  # A regular file cannot contain launch or session evidence.
+        launches = list(folder.iterdir())
     except FileNotFoundError:
         return True
     for launch in launches:
         if not launch.is_dir():
             return False
         # Unknown evidence stays conservative, including registration and roles.
-        if any(path.name not in ('bootstrap.md', 'task.md') for path in launch.iterdir()):
+        for path in launch.iterdir():
+            if path.name in ('bootstrap.md', 'task.md'):
+                continue
+            if path.name == '.connections.lock':
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                    continue  # Older cleanup scans could leave this empty lock.
             return False
     return True
+
+
+def properties_missing(directory):
+    """Only proven absence permits removal using the folder's recovery identity."""
+    try:
+        (directory / 'properties.json').stat()
+    except FileNotFoundError:
+        return True
+    return False
 
 
 class AgentNotFound(ValueError):
@@ -96,15 +115,18 @@ def name_matches(path, name):
         try:
             if orphaned(path.parent):
                 return False  # No current or historical record can reserve a name.
-            mentioned = (error.data or {}).get('name') == name or records.mentions(path, name)
+            mentioned = (error.data or {}).get('name') == name or sessions.damaged_mentions(path.parent, name)
         except (OSError, ValueError) as unreadable:
             remedy = ('restore or remove the record' if isinstance(unreadable, FileNotFoundError)
                       else 'fix its permissions or repair the record')
             raise records.RecordError(path, f'Cannot check {owner}: cannot read safely ({unreadable}); '
                                       f'{remedy} before retrying') from error
         if mentioned:
-            raise records.RecordError(path, f'Cannot check {owner}: damaged record mentions name {name!r}; '
-                                      'repair it before retrying') from error
+            remedy = (f'Repair the records, or use mv2 remove {path.parent.name} to move this leftover folder '
+                      'to the trash before retrying' if properties_missing(path.parent) else
+                      'Repair this damaged properties file before retrying')
+            raise records.RecordError(path, f'Cannot check {owner}: a surviving damaged record contains '
+                                      f'{name!r}, so mv2 cannot prove the name is free. {remedy}') from error
         return False
 
 
@@ -259,10 +281,14 @@ def _bind_session_locked(root, agent_dir, session_id, launch_id):
             raise ValueError("Outdated launch")
         data, _ = sessions.recover(agent_dir, read(agent_dir / "properties.json"))
         session_id = normalize_session_id(session_id)
+        sessions.require_unretired(agent_dir, session_id)
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
         sessions.claim(root, agent_dir, data, session_id, operation="bind")
+        sessions.record_initial_binding(agent_dir, data, session_id, launch_id)
         data.update(native_session_id=session_id, updated_at=now())
+        if data.get('native_fresh_pending'):
+            data['native_fresh_pending'] = False
         if data.get('agent_identity'):
             data['agent_identity'] = {**data['agent_identity'], 'native_id': session_id}
         write(agent_dir / "properties.json", data)

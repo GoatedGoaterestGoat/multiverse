@@ -266,15 +266,28 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
   if (removed.some(Boolean)) void report($)
 }
 
-// Steers rewritten in session.receive and not yet stored, by text: their IDs.
-const queued = new Map<string, string | undefined>()
+// Steers rewritten in session.receive and not yet stored: their IDs by text, oldest first.
+const queued = new Map<string, (string | undefined)[]>()
 
-// Texts submitted as the person's words and not yet stored, by text: their IDs.
-const submitted = new Map<string, string | undefined>()
+// Texts submitted as the person's words and not yet stored: their IDs by text, oldest first.
+const submitted = new Map<string, (string | undefined)[]>()
+
+// Messages with the same text are stored once each; each stored copy belongs to
+// the oldest one still waiting, so every message gets its own receipt.
+function hold(waiting: Map<string, (string | undefined)[]>, text: string, id: string | undefined) {
+  waiting.set(text, [...(waiting.get(text) ?? []), id])
+}
+
+function take(waiting: Map<string, (string | undefined)[]>, text: string): string | undefined {
+  const [id, ...rest] = waiting.get(text) ?? []
+  if (rest.length > 0) waiting.set(text, rest)
+  else waiting.delete(text)
+  return id
+}
 
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
-  submitted.set(message.text, message.id)
+  hold(submitted, message.text, message.id)
   // A hook must not wait for its own submit, so leave the hook first.
   $.clock.after(0, () => {
     $.prompt.submit({ text: message.text, asUser: true }).catch(
@@ -430,7 +443,7 @@ export const register: Register = (on) => {
       return { consumed: "Multiverse message submitted by the multiverse plugin" }
     }
     // Queued at `next` without its tags: it merges at the next tool result.
-    queued.set(message.text, message.id)
+    hold(queued, message.text, message.id)
     return next({ ...e, text: message.text })
   })
 
@@ -438,10 +451,9 @@ export const register: Register = (on) => {
     const stored = text(e.message.content)
     if (e.origin.kind === "peer" && e.message.name === "queued_command") {
       // Claude's recorded rendering: its peer wrapper around our text.
-      const known = [...queued].find(([queuedText]) => stored.includes(queuedText))
-      const message = known ? { text: known[0], id: known[1] } : tagged(stored)
+      const known = [...queued.keys()].find((queuedText) => stored.includes(queuedText))
+      const message = known !== undefined ? { text: known, id: take(queued, known) } : tagged(stored)
       if (message === undefined) return next(e)
-      queued.delete(message.text)
       const first = e.message.content.findIndex((block) => block.type === "text")
       const reminder = stored.trimStart().startsWith("<system-reminder>")
       const content = e.message.content.flatMap((block, index) => block.type !== "text" ? [block]
@@ -452,8 +464,7 @@ export const register: Register = (on) => {
       return result
     }
     if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && submitted.has(stored)) {
-      const id = submitted.get(stored)
-      submitted.delete(stored)
+      const id = take(submitted, stored)
       const result = await next(e)
       await receipt($, id, "prompt")
       return result
@@ -471,9 +482,8 @@ export const register: Register = (on) => {
   on("prompt.submit", { origin: { kind: "peer" } }, async ($, e, next) => {
     if (e.turnId !== undefined) return next(e)
     const message: Message | undefined = queued.has(e.text)
-      ? { text: e.text, mode: "steer", id: queued.get(e.text) } : tagged(e.text)
+      ? { text: e.text, mode: "steer", id: take(queued, e.text) } : tagged(e.text)
     if (message === undefined) return next(e)
-    queued.delete(message.text)
     submit($, message)
     return { drop: "Multiverse message submitted by the multiverse plugin" }
   })

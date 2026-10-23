@@ -4,10 +4,10 @@ import os
 import sys
 from unittest.mock import Mock, patch
 from multiverse.harnesses.claude import project_key
-from multiverse.runtime import runner
+from multiverse.runtime import lifecycle, native, runner
 from multiverse.store import read, uid, write
 from multiverse.tools import deliver
-from multiverse.universe import mailbox
+from multiverse.universe import agents, mailbox
 from test_multiverse import BaseTest
 
 
@@ -25,6 +25,9 @@ class FailedWakeTest(BaseTest):
         self.env = {'MV2_UNIVERSE': str(self.root), 'CLAUDE_CONFIG_DIR': str(self.work / 'private-config')}
 
     def reset(self):
+        # Each table row starts a new attempt, including any once-only final report.
+        write(self.directory / 'inbox-state.json', {})
+        (self.directory / 'sessions.jsonl').unlink(missing_ok=True)
         mailbox.update_message(self.directory, self.message['id'], submission_state='submitting',
             wake_launch_id=self.launch.name, delivery_method='resume_prompt', wake_prompt_context=None,
             transcript_confirmed_at=None, attempts=[{'state': 'pending'}])
@@ -72,6 +75,7 @@ class FailedWakeTest(BaseTest):
         transcript = project / (properties['native_session_id'] + '.jsonl')
         prompt = (self.launch / 'task.md').read_text()
         cases = [('saved', False), ('saved', True), ('replaced', False), ('replaced', True),
+                 ('outside lineage', False), ('outside lineage', True),
                  ('legacy', False), ('legacy', True), ('legacy replaced', None), ('live', None),
                  ('wrong request', None), ('missing task', None), ('damaged context', None), ('unfinished', None)]
         for case, consumed in cases:
@@ -85,24 +89,34 @@ class FailedWakeTest(BaseTest):
                 transcript.write_text(json.dumps({'type': 'user', 'timestamp': facts['started_at'],
                     'message': {'content': prompt}}) + '\n' if consumed else '')
                 project.chmod(0)
-                runner.finish_failed_wake(self.launch, request, self.env,
-                                         Mock(poll=Mock(return_value=2)), 'unknown option')
-                self.assertEqual(mailbox.message_record(self.directory, self.message['id'])[1]['submission_state'], 'unknown')
-                lines = []
-                self.assertFalse(deliver.run(self.root, agent='wake', check=True, _present=lines.append)['ok'])
-                self.assertIn('--check', lines[-1])
-                self.assertIn(str(project), lines[-1])
-                self.assertIn('restore read access', lines[-1])
-                project.chmod(0o700)
+                try:
+                    runner.finish_failed_wake(self.launch, request, self.env,
+                                             Mock(poll=Mock(return_value=2)), 'unknown option')
+                    self.assertEqual(mailbox.message_record(self.directory, self.message['id'])[1]['submission_state'], 'unknown')
+                    lines = []
+                    self.assertFalse(deliver.run(self.root, agent='wake', check=True, _present=lines.append)['ok'])
+                    self.assertIn('--check', lines[-1])
+                    self.assertIn(str(project), lines[-1])
+                    self.assertIn('restore read access', lines[-1])
+                    with patch.object(native, 'send_or_wake', side_effect=AssertionError('unreadable evidence cannot replay')):
+                        deliver.run(self.root, agent='wake', retry=True)
+                finally:
+                    project.chmod(0o700)
                 if case in ('legacy', 'legacy replaced', 'live', 'wrong request', 'missing task'):
                     mailbox.update_message(self.directory, self.message['id'], wake_prompt_context=None)
                     # Old launch requests did not retain ambient HOME or CLAUDE_CONFIG_DIR.
                     write(self.launch / 'request.json', {**request, 'env': {
                         key: value for key, value in self.env.items() if key not in ('HOME', 'CLAUDE_CONFIG_DIR')}})
-                if 'replaced' in case:
+                if 'replaced' in case or case == 'outside lineage':
+                    replacement = uid()
+                    if case == 'replaced':
+                        # A retry may follow a recorded /clear, never an unrelated replacement.
+                        agents.rebind_session(self.root, 'wake', properties['native_session_id'], replacement,
+                                              'clear', self.launch.name, home=str(config))
+                    else:
+                        write(self.directory / 'properties.json', {**properties, 'native_session_id': replacement,
+                            'native_session_home': str(self.work / 'another-home')})
                     write(self.directory / 'runtime.json', {**facts, 'launch_id': uid(), 'started_at': '2099-01-01T00:00:00+00:00'})
-                    write(self.directory / 'properties.json', {**properties, 'native_session_id': uid(),
-                        'native_session_home': str(self.work / 'another-home')})
                     (self.launch / 'task.md').write_text('a different prompt')
                 elif case == 'live':
                     write(self.directory / 'runtime.json', {**facts, 'state': 'running', 'exit_code': None,
@@ -126,9 +140,31 @@ class FailedWakeTest(BaseTest):
                 self.assertEqual(tracking['submission_state'], 'unknown' if consumed is None else 'accepted' if consumed else 'failed')
                 self.assertEqual(result['ok'], consumed is True)
                 self.assertIs(tracking['native_receipt']['transcript_confirmed'], consumed)
-                with patch('multiverse.runtime.native.send_or_wake', return_value={'state': 'pending', 'ok': True}) as resend:
-                    deliver.run(self.root, agent='wake', retry=True)
-                self.assertEqual(resend.call_count, 1 if consumed is False else 0)
+                if case == 'outside lineage' and consumed is False:
+                    with self.assertRaisesRegex(ValueError, 'outside.*lineage'):
+                        lifecycle._wake_prompt(self.root, self.directory,
+                                               read(self.directory / 'properties.json'), self.message['id'])
+                def retry_prompt(root, reference, message_id, *, retry):
+                    self.assertTrue(retry)
+                    # Exercise the real wake eligibility/retarget boundary; only the launch is fake.
+                    text, selected = lifecycle._wake_prompt(root, self.directory,
+                                                           read(self.directory / 'properties.json'), message_id)
+                    self.assertIn(self.message['text'], text)
+                    self.assertEqual(selected['target_session'], read(self.directory / 'properties.json')['native_session_id'])
+                    receipt = {'state': 'ok', 'ok': True, 'value': {'transcript_confirmed': True}}
+                    mailbox.update_message(self.directory, message_id, submission_state='accepted',
+                                           attempts=[receipt], native_receipt=receipt['value'])
+                    return receipt
+                with patch.object(native, 'send_or_wake', side_effect=retry_prompt) as resend:
+                    retried = deliver.run(self.root, agent='wake', retry=True)
+                    repeated = deliver.run(self.root, agent='wake', retry=True)
+                self.assertEqual(resend.call_count, 1 if consumed is False and case != 'outside lineage' else 0)
+                if case == 'outside lineage' and consumed is False:
+                    self.assertTrue(retried['ok'])
+                    self.assertEqual(retried['finalized'], 1)
+                    self.assertIn('outside', retried['messages'][0]['reason'])
+                    self.assertTrue(repeated['ok'])
+                    self.assertEqual(repeated['finalized'], 1)
                 if consumed is True:
                     self.assertIn('confirmed', lines[-1])
                 elif consumed is False:

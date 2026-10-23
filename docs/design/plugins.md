@@ -407,16 +407,16 @@ caller can forget one:
 | `agent.created` | `lifecycle.start`, once a new record is published | harness, model |
 | `agent.launched` | `lifecycle.start`, after request.json is written and before the runner is released (so `ready` and `exited` never come first) | mode (`spawn`, `resume` or `wake`), native mode, plugins loaded |
 | `agent.ready` | `lifecycle.note_ready`, called by the runner after its startup check and by startup delivery once done; it uses `wait_ready`'s own predicate and a per-launch marker, so it is once per launch | none |
-| `agent.status` | `update_runtime`, when `status` changes (after its lock) | from, to |
-| `agent.exited` | the runner, once, where the process's end is known | state (`stopped`/`failed`), exit code, reason |
+| `agent.status` | `mutate_runtime` (which `update_runtime` uses), when `status` changes (after its lock) | from, to |
+| `agent.exited` | the runner, once: where the process's end is known, or where the runner itself fails first (exit code `null`) | state (`stopped`/`failed`), exit code, reason |
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
-| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`) or a session pointer is recovered, for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
+| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`), a session pointer is recovered, or `--start-fresh` retires a conversation that is gone (`sessions.retire`, reason `missing-conversation`), for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
 | `message.delivered` | `mailbox.update_message`, once per stage: `accepted`, then `confirmed` when the transcript confirms it | message id, stage |
-| `message.failed` | `mailbox.update_message`, on a definite failure only (unknown and submitting are not failures) | message id, reason |
+| `message.failed` | `mailbox.update_message`, once each: when the message definitely failed, and when a delivery check proves it was lost when the agent stopped (it is then `cancelled`; see [messaging](../cli/messaging.md)). Unknown and submitting are not failures | message id, reason; `lost_when_stopped: true` for a proven loss |
 | `message.read` | `mailbox.inbox`, after a successful read moved the cursor (never peek, history or a failed print) | count of inbox-only messages read |
 | `universe.created` | `templates.create`, in its own journal and its parent's | name, path, template |
 | `refresh.applied` | `templates.refresh_apply`, after the manifest is written | files written |
@@ -555,7 +555,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 11)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 12)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -634,11 +634,23 @@ Plugin utilities:
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage
   contributions receive (native ID, launch, state, native mode, the launch's
-  plugins record).
+  plugins record, and the agent's recorded `workspace` (1.11)).
 - `mv.harness_info(universe, harness)` gives a harness's family, executable,
   `unset_env`, whether its bridge is on, its settings, and `home`: its own data
-  directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
-  Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
+  directory as this process's environment names it (Claude's
+  `CLAUDE_CONFIG_DIR` or `~/.claude`, Codex's `CODEX_HOME` or `~/.codex`, Pi's
+  `PI_CODING_AGENT_DIR` when set).
+- `mv.harness_info(universe, harness, agent=AGENT)` (1.12) answers for that
+  agent's launches instead, from its records only, because the dashboard or the
+  plugin host may run with another environment. `home` is the recorded session
+  home, else the storage a resume would replay (the storage map, or the legacy
+  launch evidence resume adopts, read through `universe.storage`, which core
+  shares). `storage` is the environment that selects that store wherever it is
+  replayed: each storage variable's value or `None` for one the launch had
+  unset, a relative value made absolute against the agent's workspace, and the
+  launch's `HOME` with an unset or empty home variable. Both are `None` when the
+  records don't prove them. Only an agent never launched gets this process's
+  environment.
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
   processes), `ensure_dir` (1.10) and `now`.
 - `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
@@ -930,10 +942,10 @@ launch.
     applies them; rejoining a native thread that is subscribed or active may
     keep its old config, and mv2 never forces an unload or restart to change
     that. Bridge tool identity is per agent, through the session RPC: the same shared
-    conversation is one agent. Restart running Codex bridge agents once after
-    updating: `mv2 kill NAME`, then `mv2 resume NAME`, with no other client
-    attached so Codex can reload the conversation environment. There is no
-    automatic adoption or update hook.
+    conversation is one agent. A frontend restart does not guarantee new tool
+    settings. Current mv2 can validate a retained bridge launch for data callbacks;
+    it does not rewrite the native environment. See
+    [upgrade identity proof](shared-conversations.md#upgrade-running-codex-bridge-agents).
   - **Sharing and refusals:** same-server sharing that Codex accepts is
     normal. A separate-writer native refusal is retained as the launch's
     primary error, even if native retry later succeeds; only a successful new

@@ -1,6 +1,7 @@
 """An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
 from contextlib import contextmanager
+import inspect
 import json
 import math
 import os
@@ -16,10 +17,10 @@ from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
-from ..universe import agents, catalog, focus, mailbox, records
+from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native, attachments, agent_identity, registration, missing_runtime
+from . import native, attachments, agent_identity, registration, missing_runtime, storage_adoption
 
 TEARDOWN_TIMEOUT = 10
 
@@ -31,20 +32,24 @@ def damaged_row(scope, error, properties=None):
     """
     known = properties if properties is not None else (error.data if isinstance(error.data, dict) else {})
     text = lambda key: known[key] if isinstance(known.get(key), str) else ""
-    agent_dir = error.file if error.file.suffix != ".json" else error.file.parent
+    agent_dir = error.file.parent if error.file.suffix in ('.json', '.jsonl') else error.file
     try:
         shown = str(error.file.relative_to(scope))
     except ValueError:
         shown = str(error.file)
-    label = error.file.name if error.file.suffix == ".json" else shown
+    label = error.file.name if error.file.suffix in ('.json', '.jsonl') else shown
     reason, summary = error.reason, f"damaged: {label}: {error.reason}"
     recover = {'recover': 'kill'} if getattr(error, 'recover', None) == 'kill' else {}
     try:
-        if error.file.name == 'properties.json' and agents.orphaned(agent_dir):
+        if error.file.name == 'properties.json' and agents.properties_missing(agent_dir):
             recover = {'recover': 'remove'}
-            shown = str(Path(shown).parent)
-            reason = summary = (f'leftover folder with no agent records; '
-                                f'mv2 remove {agent_dir.name} moves it to the trash')
+            reason = (f'{error.reason}; mv2 remove {agent_dir.name} checks the surviving process evidence '
+                      'before moving this leftover folder to the trash')
+            summary = f'damaged: {label}: {reason}'
+            if agents.orphaned(agent_dir):
+                shown = str(Path(shown).parent)
+                reason = summary = (f'leftover folder with no agent records; '
+                                    f'mv2 remove {agent_dir.name} moves it to the trash')
     except OSError:
         pass  # Unreadable authority is not an orphan-removal hint.
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
@@ -76,6 +81,28 @@ def _listing_observation(properties, facts, snapshots):
     return facts, observation
 
 
+def _listing_runtime(directory, facts, *, prepare=False):
+    """A newer launch sidecar cannot condemn an older runtime snapshot.
+
+    Re-read once on damage, only for the same launch, then validate again.
+    Control paths keep their original authority checks; this never repairs disk.
+    """
+    for retry in (True, False):
+        try:
+            checked = agents.preparation_snapshot(directory, facts) if prepare else facts
+            if error := missing_runtime.damage(directory, checked):
+                raise error
+            return checked
+        except records.RecordError:
+            if not retry:
+                raise
+            current = records.runtime(directory / 'runtime.json')
+            if (not facts.get('launch_id') or current.get('launch_id') != facts['launch_id']
+                    or current == facts):
+                raise
+            facts = current
+
+
 def listing(root, recursive=False, only=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
@@ -98,9 +125,7 @@ def listing(root, recursive=False, only=None):
                 continue
             try:
                 facts = records.runtime(path.parent / "runtime.json")
-                facts = agents.preparation_snapshot(path.parent, facts)
-                if error := missing_runtime.damage(path.parent, facts):
-                    raise error
+                facts = _listing_runtime(path.parent, facts, prepare=True)
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
                 continue
@@ -116,8 +141,7 @@ def listing(root, recursive=False, only=None):
                 except Exception as error:
                     identity_problem = str(error)
                     facts = records.runtime(path.parent / "runtime.json")
-                if error := missing_runtime.damage(path.parent, facts):
-                    raise error
+                facts = _listing_runtime(path.parent, facts)
                 if preparing_launch and facts.get('launch_id') == preparing_launch and facts.get('state') == 'starting':
                     facts = {**facts, 'preparing': True}  # Reconciliation may reread the same launch without this display hint.
                 if observation_key(properties, facts) != observed_key:
@@ -182,7 +206,9 @@ def plain_fallback(command, error):
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
-          _queue_wake=False, _restart_queue=False):
+          _queue_wake=False, _restart_queue=False, start_fresh=False):
+    if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
+        raise ValueError('--start-fresh requires an explicit resume without a wake prompt')
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
     if (resume_prompt is not None or resume_message_id is not None) and not resume:
@@ -300,11 +326,28 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
         environment = {**ambient, **saved, **target}
-        storage = _storage_environment(adapter, properties, environment, ambient, resume)
+        storage_notices = []
+        retired_id = properties.get('native_session_id')
+        fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
+        if start_fresh:
+            storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
+                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path, adapter.storage_env)))
+            # Preparation is still read-only. The old binding is retired only
+            # once the replacement command is valid and ready to be published.
+            for key in agents.sessions.FRESH_FIELDS:
+                properties.pop(key, None)
+            properties['native_session_id'] = uid() if session_mode == 'assigned' else None
+            saved = {}
+            environment = {**ambient, **target}
+        if fresh:
+            mode, session = 'spawn', None
+            values['session_id'] = properties.get('native_session_id') or ''
+        storage = _storage_environment(adapter, properties, environment, ambient, resume and not start_fresh, agent_dir, previous,
+                                       storage_notices, socket_path=socket_path)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
-                                agent_environment=agent_environment)
+                                agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
@@ -319,18 +362,30 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
-        notices = display.notice_lines(missing_notices,
-                    _resume_notices(adapter, session, ambient, context.environment) if resume else [])
-        command = adapter.resume(session, context) if resume else adapter.spawn(context)
+        # A harness setting for its storage applies at spawn, and so to a fresh start; a resume keeps the
+        # recorded value, and says so.
+        from_settings = getattr(adapter, 'environment', None) if getattr(adapter, 'settings_storage', False) else None
+        from_settings = from_settings if isinstance(from_settings, dict) else {}
+        ignored_settings = [f'Kept its recorded {key} {"unset" if storage.get(key) is None else json.dumps(storage[key])}; '
+                            f'ignored its harness setting {key}={json.dumps(value)}.'
+                            for key, value in from_settings.items()
+                            if resume and not start_fresh and key in storage and not _same_directory(storage[key], value)]
+        notices = display.notice_lines(missing_notices, ignored_settings, [item.notice for item in storage_notices],
+                    _resume_notices(adapter, session, ambient, context.environment, storage,
+                                    fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
+        command = adapter.resume(session, context) if resume and not fresh else adapter.spawn(context)
         # An adapter may resolve a saved path through a changed symlink. Compare
         # its effective selection with recorded strings, never re-resolve history.
         selected_storage = dict(storage)
         for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
-            selected_storage.update({key: selected[key] for key in storage if key in selected})
-        if resume:
-            recorded_storage = {**saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
+            selected_storage.update({key: selected[key] for key in storage
+                                     if key in selected and not (resume and not start_fresh and key in from_settings)})
+        if resume and not start_fresh:
+            recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
                                 **(properties.get('native_storage_environment') or {})}
             for key, value in selected_storage.items():
+                if key not in getattr(adapter, 'storage_env', ()):
+                    continue  # Other harnesses' settings are inherited by future children, not this conversation.
                 recorded = recorded_storage.get(key)
                 if recorded not in (None, '') and recorded != value:
                     raise _storage_difference(recorded, value, variable=key)
@@ -341,7 +396,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             command = replace(command, fallback=None)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
-            if resume and properties.get('native_service_identity') not in (None, identity):
+            if resume and not start_fresh and properties.get('native_service_identity') not in (None, identity):
                 raise ValueError('Native service storage/account scope differs from the saved session; '
                                  'resume with the original native storage settings or spawn a new agent')
             properties['native_service_identity'] = identity
@@ -370,7 +425,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env.update(command.shared_service.environment)
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
-        if resume:
+        if start_fresh:
+            properties, retirement = agents.sessions.retire(root, agent_dir, retired_id, properties, launch_id,
+                                                            previous_launch=previous.get('launch_id'))
+            agents._session_event(agent_dir, retirement)
+        elif resume:
             with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
                 current = read(agent_dir / 'properties.json')
                 current.update({key: properties[key] for key in ('model', 'workspace', 'native_environment',
@@ -390,7 +449,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
-              _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
+              _initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery))
+        if fresh:
+            # The replacement launch has now been published. If retirement
+            # crashed earlier, its next resume used spawn preparation above.
+            with lock(agent_dir / '.properties.lock'):
+                properties = read(agent_dir / 'properties.json')
+                properties['native_fresh_pending'] = False
+                write(agent_dir / 'properties.json', properties)
         backend = Tmux(socket_path)
         terminal = None
         progress = None
@@ -441,10 +507,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 progress.mark('preparing native attachment')
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
-                                    agent_environment=agent_environment)
+                                    agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
             if command.shared_service:
                 try:
-                    command = _storage_command(adapter.resume(session, context) if resume else adapter.spawn(context), storage)
+                    command = _storage_command(adapter.resume(session, context) if resume and not fresh else adapter.spawn(context), storage)
                     if _recovery:
                         native.validate_recovery_command(command, session)
                         command = replace(command, fallback=None)
@@ -549,17 +615,26 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     return {**result, 'notices': notices} if notices else result
 
 
-def _resume_notices(adapter, session, caller_environment, effective_environment):
+def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None, *, fresh_start=True):
     """Optional presentation only; never changes the storage or launch decision."""
     hook = native.adapter_hook(adapter, 'resume_notice')
-    if hook is None:
-        return []
+    notices = []
     try:
-        notice = hook(session, dict(caller_environment), dict(effective_environment))
+        options = ({'fresh_start': False}
+                   if not fresh_start and hook and 'fresh_start' in inspect.signature(hook).parameters else {})
+        notice = hook(session, dict(caller_environment), dict(effective_environment), **options) if hook else None
     except Exception:
-        return []
+        notice = None
     notice = display.clean(notice).strip() if isinstance(notice, str) else ''
-    return [notice] if notice else []
+    if notice:
+        notices.append(notice)
+    for key, value in (storage or {}).items():
+        requested = caller_environment.get(key)
+        if key in getattr(adapter, 'storage_env', ()) or requested is None or requested == value:
+            continue
+        kept = 'unset' if value is None else json.dumps(value)
+        notices.append(f'Kept its recorded {key} {kept}; ignored {key}={json.dumps(requested)}.')
+    return notices
 
 
 
@@ -698,21 +773,104 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_environment(adapter, properties, environment, ambient, resume):
+def _storage_terminals(previous, directory, socket_path=None, keys=()):
+    """Storage discovery may inspect a recorded or explicitly selected server, never guess the default.
+
+    Retained requests identify inherited storage; an explicit request value or
+    absence takes precedence. A caller-selected server has caller origin.
+    """
+    recorded = storage_adoption.inherited_terminals(directory, previous, keys)
+    backends = [('recorded terminal server', Tmux(saved), overrides) for saved, overrides in recorded]
+    if socket_path and not any(saved == socket_path for saved, _ in recorded):
+        backends.append(('caller-selected terminal server', Tmux(socket_path), {}))
+    return backends
+
+
+def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices, *, socket_path=None):
     """Replay storage values and explicit absence before the adapter computes home."""
-    keys = getattr(adapter, 'storage_env', ())
+    own_keys = getattr(adapter, 'storage_env', ())
+    keys = tuple(dict.fromkeys([*own_keys, *(key for cls in harnesses.BUILTINS.values()
+                                           for key in getattr(cls, 'storage_env', ()))]))
     saved = properties.get('native_storage_environment') if resume else None
+    if saved is not None and (not isinstance(saved, dict) or any(
+            value is not None and (not isinstance(value, str) or '\0' in value) for value in saved.values())):
+        raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
+    request = storage_records.launch_request(directory, previous) if resume else {}
+    historical = storage_records.request_environment(request, keys)
     scope = (properties.get('native_service_identity') or {}).get('scope', {}) if resume else {}
-    for key in keys:
+    for key in own_keys:
         if scope and key not in scope and ambient.get(key):
             raise ValueError(f'Cannot add {key}={ambient[key]!r} to this saved native storage scope; '
                              f'unset {key} to resume, or spawn a new agent for that storage')
-    if saved is None:
+    if not resume:
         return {key: environment.get(key) for key in keys}
-    if (not isinstance(saved, dict) or any(value is not None and (not isinstance(value, str) or '\0' in value)
-                                          for value in saved.values())):
-        raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
-    return {key: saved.get(key) for key in keys}
+    family = getattr(adapter, 'family', None)
+    proof = {**historical, **properties.get('native_environment', {}), **scope}
+    unproven_alias = (family == 'codex' and saved is not None and not properties.get('native_session_home')
+        and any(isinstance(saved.get(key), str) and saved[key] and os.path.isabs(saved[key])
+                and proof.get(key) in (None, saved[key])
+                and os.path.realpath(saved[key]) != saved[key] for key in own_keys))
+    if saved is not None and not unproven_alias:
+        # A hand-restored alternate spelling may be normalized only against an
+        # independent saved canonical path, never by resolving history anew.
+        normalized = dict(saved)
+        if own_keys and properties.get('native_session_home'):
+            proof[own_keys[0]] = properties['native_session_home']
+        # Claude's literal variable selects login/settings as well as history;
+        # its separately recorded canonical session home guards later alias changes.
+        for key in own_keys if family != 'claude' else ():
+            value, canonical = saved.get(key), proof.get(key)
+            if isinstance(value, str) and value and isinstance(canonical, str) and canonical and value != canonical:
+                if os.path.realpath(value) == canonical:
+                    normalized[key] = canonical
+        properties['native_storage_environment'] = normalized
+        return storage_records.snapshot_environment(properties, request, keys)
+    candidate_recorded = saved
+    if family == 'codex' and saved is None and properties.get('native_session_id'):
+        adopted = storage_records.legacy_codex_environment(properties, request)
+        if adopted is not None and all(not value or os.path.realpath(value) == value for value in adopted.values()):
+            return {**historical, **adopted}
+        candidate_recorded = adopted
+    if family in ('claude', 'codex') and properties.get('native_session_id'):
+        adoption = storage_adoption.discover(adapter, properties, previous, directory, ambient,
+                                            _storage_terminals(previous, directory, socket_path, own_keys), recorded=candidate_recorded)
+        adopted = dict(adoption.environment)
+        if own_keys and adopted.get(own_keys[0]):
+            # An explicit storage root does not depend on the candidate user's
+            # HOME. Only adoption of its default storage must pin that HOME.
+            adopted.pop('HOME', None)
+        if family == 'codex':
+            # The finder proved this first home's conversation. Save its canonical
+            # scope now; later resumes compare these strings without re-resolving history.
+            adopted = {key: os.path.realpath(value) if key in own_keys and value else value
+                       for key, value in adopted.items()}
+            properties['native_storage_environment'] = {**historical, **(saved or {}), **adopted}
+            if isinstance(properties.get('native_environment'), dict):
+                properties['native_environment'] = {**properties['native_environment'],
+                    **{key: adopted[key] for key in own_keys if key in properties['native_environment'] and key in adopted}}
+            if isinstance(properties.get('native_service_identity'), dict):
+                identity = properties['native_service_identity']
+                properties['native_service_identity'] = {**identity, 'scope': {
+                    key: adopted.get(key, value) for key, value in identity.get('scope', {}).items()}}
+        if adopted.get('HOME'):
+            environment['HOME'] = adopted['HOME']
+        notices.append(adoption)
+        return {**{key: value for key, value in {**historical, **(saved or {})}.items() if key not in own_keys},
+                **{key: adopted[key] for key in own_keys if key in adopted},
+                **({'HOME': adopted['HOME']} if adopted.get('HOME') else {})}
+    return {**historical, **{key: environment.get(key) for key in own_keys}}
+
+
+def _same_directory(recorded, value):
+    """Whether a recorded storage path and a setting reach one directory, so keeping one ignores nothing."""
+    if recorded == value:
+        return True
+    if not (isinstance(recorded, str) and isinstance(value, str) and os.path.isabs(recorded) and os.path.isabs(value)):
+        return False
+    try:
+        return os.path.realpath(recorded) == os.path.realpath(value)
+    except (OSError, ValueError):
+        return False
 
 
 def _storage_command(command, storage):
@@ -830,6 +988,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     exit_deadline = None
     screen_deadline = None
     screen_expired = False
+    caller_unverified = False
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
@@ -848,7 +1007,12 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
                 refusal.settle_startup(agent_dir, launch_id, 'unverified')
                 continue  # Re-read refusal/generation/state after atomic settlement.
         live = observe(result, facts)['live']
-        if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
+        # A caller deadline changes only this answer. The runner keeps its own
+        # observation/retry window, and a re-read catches a refusal or retry claim.
+        unverified = (caller_unverified and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
+                      and (facts.get('attachment') or {}).get('readiness') == 'process')
+        ready_facts = {**facts, 'native_startup_observation': None} if unverified else facts
+        if launch_ready(adapter, result, ready_facts, agent_dir, request, live, include_delivery=include_delivery):
             if screen_expired and launch_ready(adapter, result, facts, agent_dir, request, live):
                 try:
                     from ..plugins import events
@@ -856,7 +1020,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
                         _record_ready(agent_dir, launch_id, result)
                 except Exception:
                     pass  # Optional events never hold up readiness.
-            if (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
+            if unverified or (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
                 result = {**result, 'notices': [*result.get('notices', []),
                     'Startup could not be confirmed from the native screen; continuing with process readiness.']}
             return {**result, 'ok': True, 'ready': True}
@@ -882,14 +1046,13 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            if (settle_on_timeout and not screen_expired
+            if (settle_on_timeout and not caller_unverified and not screen_expired
                     and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
                     and (facts.get('attachment') or {}).get('readiness') == 'process'
                     and launch_ready(adapter, result, {**facts, 'native_startup_observation': None},
                                      agent_dir, request, live, include_delivery=include_delivery)):
-                screen_expired = True
-                refusal.settle_startup(agent_dir, launch_id, 'unverified', require_process_ready=True)
-                continue  # A concurrent refusal or retry claim must win over this old snapshot.
+                caller_unverified = True
+                continue  # Re-read without settling the runner's observation.
             return {**result, 'ok': False, 'ready': False, 'timed_out': True,
                     'error': f'Timed out after {timeout:g}s waiting for launch readiness; '
                              'the launch was not stopped. Inspect its runtime or terminal before retrying.'}
@@ -913,6 +1076,8 @@ def terminal_action(root, reference, action):
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference, allow_damaged=True)
+    if agents.properties_missing(agent_dir):
+        return missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
     records.properties(agent_dir / 'properties.json')
     initial, malformed = missing_runtime.recovery_snapshot(agent_dir)
     initial_observation = None

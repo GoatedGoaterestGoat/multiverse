@@ -5,11 +5,12 @@ import json
 import sys
 from unittest.mock import patch
 from uuid import uuid4
+from types import SimpleNamespace
 
 from test_multiverse import BaseTest
 from multiverse import cli, harnesses, store
 from multiverse.universe import mailbox
-from multiverse.runtime import lifecycle, native
+from multiverse.runtime import lifecycle, native, storage_adoption
 from multiverse.harnesses.types import NativeResult
 from multiverse.tools import list_agents, send
 from multiverse.tools._messaging import failure_reason
@@ -116,7 +117,7 @@ class MessagingCliTest(BaseTest):
     def test_failure_reasons_hide_message_text_and_ids_without_mangling_words(self):
         """Native failure reasons are shown with the message text and ids removed and every other word intact; fragile
         because redaction substitutes arbitrary user substrings like a or is inside native text, and the garbled
-        result still reads as a sentence (the messthe bug)."""
+        result still reads as a sentence, while a truncated or redacted wake refusal can hide the exact file and remedy."""
         secret = '多行 PRIVATE BODY\nquotes $(false) `false`'
         output = self.output('send', self.directories['first'].name, '--text', secret)
         for value in (secret, self.directories['first'].name, 'native_queued', 'secret-turn', 'secret-message'):
@@ -144,6 +145,31 @@ class MessagingCliTest(BaseTest):
         result = failure_reason('Rejected ' + body + '; more detail', body)
         self.assertEqual(result, 'Rejected the message')
         self.assertNotIn('messthe', result)
+        with self.subTest('wake adoption refusal keeps its complete path and remedy'):
+            directory = self.directories['third']
+            environment = {'HOME': str(self.work), 'CLAUDE_CONFIG_DIR': str(self.work / 'missing-claude-storage')}
+            backend = SimpleNamespace(environment=lambda key: environment.get(key))
+            try:
+                storage_adoption.discover(LOAD(self.root, 'claude'), store.read(directory / 'properties.json'),
+                    store.read(directory / 'runtime.json'), directory, environment, [('recorded terminal server', backend, {})])
+            except ValueError as error:
+                reason = str(error)
+            else:
+                self.fail('The missing legacy conversation should refuse adoption')
+            self.assertGreater(len(reason), 220)
+            def refuse(root, reference, message_id, **kwargs):
+                return native._wake_failure(directory, message_id, ValueError(reason + '; reflected input: ' + secret))
+            with patch.object(native, 'send_or_wake', side_effect=refuse):
+                self.output('send', 'third', '--text', secret, code=1)
+            for text in (str(directory / 'properties.json'), reason,
+                         'mv2 resume ' + directory.name + ' --start-fresh',
+                         'to keep this agent with a new conversation'):
+                self.assertIn(text, self.stderr)
+            self.assertNotIn(secret, self.stderr)
+            self.assertEqual(self.history('third')[-1]['tracking']['submission_state'], 'failed')
+            with patch.object(native, 'finalize_launch_only', return_value=None):
+                self.output('deliver', 'third', '--check', code=1)
+            self.assertIn(reason, self.stderr)
 
     def test_advice_follows_the_agents_state(self):
         """Delivery advice follows state: live and broken gets kill then resume, stopped gets resume without kill,

@@ -31,7 +31,7 @@ def check(root, notes=None):
                         orphan = agents.orphaned(directory)
                     except OSError:
                         orphan = False  # Keep the named unreadable-record diagnostic.
-                    problem = (f"{scope}: {item['name']}: orphan agent folder {directory}; no core records remain; "
+                    problem = (f"{scope}: {item['name']}: leftover folder {directory}; no core records remain; "
                                f"remove it with mv2 remove {item['id']}" if orphan else
                                f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}")
                     found.append((problem, problem))

@@ -39,6 +39,8 @@ Agents are told to send `inbox-only` by default, so progress notes and FYIs wait
 
 Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. The one exception is a `steer` or `follow-up` message to a [focused](#focus-an-agent) agent, which is refused and not saved. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
+If a wake is refused, `send` and `deliver --check` show the complete reason, including the exact record paths and recovery instructions. Reflected message text remains hidden.
+
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
 
@@ -76,8 +78,18 @@ mv2 deliver worker --check    # settle uncertain deliveries, record confirmation
 mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
+`--check` reports a cancellation once as not delivered and exits nonzero, with
+advice to send a new message if you still want it delivered. Later checks omit
+that cancellation, including concurrent checks. It stays in history; neither
+`--check` nor `--retry` resends it.
+
+A message outside the recorded conversation lineage is also reported only once
+by `--check` or `--retry`. Its saved delivery evidence remains unchanged, but it is final for
+retry and no longer counts as a delivery problem in list, inspect or doctor.
+`--retry` counts these messages with earlier final refusals, including on their first report, and exits successfully unless another retry fails. It says they cannot be retried. For a conversation retired by `--start-fresh`, the one report says the message never reached the new conversation and advises sending a new message. For other out-of-lineage messages, verify the original conversation before sending a new one.
+
 `--check` also reports definite failures and exits nonzero while any checked
-message failed. It does not resend them. List, inspect and doctor show how many
+message failed. A damaged session journal or unloadable harness gives each affected message its own error; the remaining messages are still checked. Record errors name their file. Back up and repair a damaged `sessions.jsonl`, or restore an intact copy, before retrying. A submission needs its authoritative journal even when the saved message targets the current session; mv2 cannot assume that a torn transition left that pointer current. Reading an already saved failure does not need that transition proof. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.
 
 Older definite refusals receive the same classification when list, inspect and
@@ -107,7 +119,25 @@ setting; accepted and uncertain deliveries are never reopened.
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
 until its message is confirmed in the conversation. The check reports an entry
 that is still queued without resending it. `--retry` selects definite failures;
-it never resends an accepted or uncertain submission.
+it never resends an accepted or uncertain submission. Checks normally cover the
+current launch. Across a resume, Codex keeps checking saved queue receipts for
+the same conversation; it does not search for other older acceptances. Harnesses
+with transcript evidence, including Claude, keep older same-session acceptances
+visible. Once the accepting process is
+proved gone and the same conversation is ready and idle again, a check can use
+its transcript to confirm delivery or prove that the message was lost when the
+agent stopped. Unreadable or incomplete evidence stays uncertain. A proved loss
+is reported once with the message text and advice to send a new message deliberately;
+`--retry` does not resend it. If the harness restored a draft, it has not been
+submitted. A proven loss emits `message.failed` for plugins. The final result
+remains in inbox history. A message aimed outside the agent's recorded session
+lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
+An accepted command-line wake prompt has no correlatable native receipt and is
+excluded from recurring checks. An uncertain or failed wake keeps its existing
+evidence check and is never resent automatically.
+Identical accepted messages need separate stored copies: each text row confirms
+at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
+an exact message-ID receipt confirms only that message.
 
 ## Focus an agent
 

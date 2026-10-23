@@ -498,7 +498,19 @@ def _session_changes(directory, properties, target):
     # Returning to an earlier owned conversation can repeat an ID. Use its
     # latest departure, not an earlier lap through the lineage.
     starts = [index for index, row in enumerate(rows) if row['from'] == target]
-    return rows[starts[-1]:] if starts else None
+    changes = rows[starts[-1]:] if starts else None
+    # Missing-conversation recovery retires a lineage rather than moving its
+    # input to an unrelated fresh conversation.
+    return changes if changes and not any(row.get('kind') == 'fresh-start' for row in changes) else None
+
+
+def _retired_session(directory, properties, target):
+    """Whether a validated fresh start ended the message target’s conversation lineage."""
+    effective, rows = agents.sessions.effective(directory, properties)
+    if effective != properties:
+        return False
+    departures = [index for index, row in enumerate(rows) if row['from'] == target]
+    return bool(departures and any(row.get('kind') == 'fresh-start' for row in rows[departures[-1]:]))
 
 
 def retarget_message(directory, properties, message, tracking):
@@ -628,12 +640,20 @@ def reopen_launch_only(root, directory, message_id):
         return True
 
 
+def _final_lineage_receipt(message_id):
+    return {'state': 'unavailable', 'ok': False, 'message_id': message_id, 'reused': True,
+            'reason': 'This saved message cannot be retried: its conversation is outside the recorded lineage',
+            'value': {'outside_lineage': True, 'final': True}}
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('uncheckable_reported_at'):
+            return _final_lineage_receipt(message_id)
         if (check and tracking.get('delivery_method') == 'resume_prompt'
                 and tracking.get('submission_state') in ('submitting', 'unknown', 'accepted')):
             from . import wake
@@ -642,7 +662,9 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
         except Exception as error:
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
-                       'reason': f'Cannot load recipient adapter: {error}', 'at': now()}
+                       'reason': f'Cannot load recipient adapter: {error}', 'at': now(),
+                       'value': {**({'check_error': True} if check else {}),
+                                 **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
             if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
                 update_message(directory, message_id, submission_state='failed',
                                attempts=[*tracking.get('attempts', []), receipt])
@@ -662,16 +684,27 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             elif check:
                 return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         if check:
-            if tracking.get('submission_state') == 'failed':
-                return {**tracking['attempts'][-1], 'ok': False}
             target = tracking.get('target_session') or message.get('target_session')
             receipt_session = session
             if target and target != session.native_id:
                 if not _session_changes(directory, executor.properties, target):
-                    raise ValueError('Message targets a different native session; refusing reconciliation')
+                    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                            'reason': 'Message targets a conversation outside this agent\'s recorded lineage; delivery cannot be checked',
+                            'value': {'outside_lineage': True,
+                                      'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
                 receipt_session = replace(session, native_id=target)
+            if tracking.get('submission_state') == 'failed':
+                return {**tracking['attempts'][-1], 'ok': False}
             try:
                 result = adapter.get_delivery(receipt_session, message_id, executor)
+                if not (isinstance(result.value, dict) and result.value.get('transcript_confirmed') is True):
+                    from . import delivery_evidence
+                    result = delivery_evidence.check(directory, adapter, session, executor, message, tracking) or result
+                if isinstance(result.value, dict) and result.value.get('lost_when_stopped') is True:
+                    receipt = {**result.to_dict(), 'state': 'cancelled', 'ok': False, 'message_id': message_id}
+                    update_message(directory, message_id, submission_state='cancelled', final_reason='lost',
+                                   last_receipt=receipt, native_receipt=result.value, cancelled_at=now())
+                    return receipt
                 if result.state == 'native_queued':
                     changes = {'submission_state': 'accepted', 'native_receipt': result.value}
                     if (result.value or {}).get('transcript_confirmed'):
@@ -723,11 +756,14 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         attempt = {'state': 'unknown', 'reason': 'Submission in progress', 'message_id': message_id,
                    'native_session_id': session.native_id, 'mode': selected_mode, 'agent_id': session.agent_id,
                    'launch_id': session.launch_id, 'at': now()}
+        framed = framed_text(root, message)
+        delivery_context = {'launch_id': session.launch_id, 'native_id': session.native_id,
+                            'home': session.home, 'workspace': session.workspace, 'text': framed, 'since': attempt['at']}
         # Persist BEFORE the native call: a crash cannot turn uncertain submission
         # into pending and silently replay it on restart.
         update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
                        delivery_method='native', attempts=[*previous, attempt], restart_on_delivery=False,
-                       last_receipt=None, final_reason=None)
+                       last_receipt=None, final_reason=None, delivery_context=delivery_context)
         try:
             if not session.native_id:
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
@@ -737,7 +773,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                     from .queue_continuation import claim_restart
                     session = claim_restart(directory, session, message_id)
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      delivery=selected_mode, framed=framed_text(root, message)), executor)
+                                      delivery=selected_mode, framed=framed), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
@@ -761,6 +797,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('uncheckable_reported_at'):
+            return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)
         properties = records.properties(directory / 'properties.json')
         observation = None

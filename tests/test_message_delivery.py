@@ -1,14 +1,19 @@
 """Durable delivery evidence and automatic inbox read positions."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+import contextlib
 import json
+import threading
 from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse import harnesses
-from multiverse.runtime import native
+from multiverse.runtime import native, attachments
 from multiverse.harnesses.types import NativeResult
+from multiverse.harnesses.claude import ClaudeAdapter
 from multiverse.universe.mailbox import append_message, inbox, message_record, update_message
-from multiverse.store import read, write
+from multiverse.store import read, write, now
 from multiverse.tools import send, deliver
 from multiverse.tools import inbox as inbox_tool
 from test_multiverse import BaseTest
@@ -117,8 +122,8 @@ class InboxDeliveryTest(DeliveryFixture):
 
     def test_check_and_retry_select_eligible_messages_across_the_whole_history(self):
         """deliver --check selects accepted, unknown and pending messages and --retry only definite failures, across
-        the whole history, not the first page of 50; fragile because selection reads paged history, and the
-        first-page bug was silent."""
+        the whole history, and concurrent checks claim one final cancellation report; fragile because stale
+        snapshots can double-report work that kill deliberately cancelled."""
         accepted = self.send()
         self.behavior = NativeResult('error', 'definite failure')
         failed = self.send()
@@ -155,11 +160,266 @@ class InboxDeliveryTest(DeliveryFixture):
         self.assertTrue(result['ok'])
         self.assertEqual(len(result['messages']), 55)
         self.assertEqual(len(self.calls), before + 1 + 55)
+        for staged in (False, True):
+            with self.subTest(cancelled_startup=staged):
+                self.recipient()
+                message = append_message(self.directory, 'cancel me', {}, delivery='follow-up')
+                if staged:
+                    update_message(self.directory, message['id'], submission_state='pending',
+                                   deferred_launch_id=self.launch)
+                adapter = harnesses.load(self.root, 'claude')
+                with patch.object(adapter, 'stop', create=True, return_value=NativeResult('ok', value={
+                        'cancelled_message_ids': [] if staged else [message['id']]})):
+                    native.stop(self.root, self.agent)
+                before = message_record(self.directory, message['id'])[1]
+                lines = []
+                # Final cancellation remains reportable even if the harness can no longer load.
+                with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
+                    snapshot, barrier = deliver.mailbox.inbox, threading.Barrier(2)
+                    def simultaneous_snapshot(*args, **kwargs):
+                        result = snapshot(*args, **kwargs)
+                        barrier.wait(timeout=5)
+                        return result
+                    with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous_snapshot), \
+                            ThreadPoolExecutor(max_workers=2) as pool:
+                        results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                                check=True, _present=lines.append), range(2)))
+                    self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
+                    checked = next(result for result in results if result['messages'])
+                    self.assertFalse(checked['ok'], checked)
+                    self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
+                    self.assertEqual(sum('Send a new message' in line for line in lines), 1)
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                after = message_record(self.directory, message['id'])[1]
+                self.assertEqual(after['submission_state'], 'cancelled')
+                self.assertEqual(after.get('attempts'), before.get('attempts'))
+                self.assertEqual(self.calls, [])
+
+    def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
+        """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can
+        invite a duplicate resend; receipts that publish late, copied histories and final acceptances must share row counts or silently confirm a lost identical message (LC-30)."""
+        cases = ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'current-launch',
+                 'working', 'unready', 'other-session', 'other-home', 'no-cleanup', 'live-child',
+                 'unknown-process', 'legacy-no-home', 'legacy-unreadable', 'concurrent-checks', 'identical-acceptances',
+                 'identical-receipt', 'identical-ledger-receipt', 'identical-final-receipt',
+                 'identical-damaged-receipt', 'identical-copy', 'identical-alias', 'identical-no-row-id',
+                 'identical-late-publication', 'identical-active-ended')
+        for case in cases:
+            with self.subTest(case=case):
+                self.recipient(native_session_home=str(self.work / 'claude-home'))
+                old = self.launch
+                message = self.send('a message accepted before stopping', sender={'name': 'old-name'})
+                _, tracking = message_record(self.directory, message['id'])
+                context = tracking.get('delivery_context')
+                if case in ('lost', 'confirmed'):
+                    self.assertEqual(context['text'], self.calls[0][1].framed)
+                identical = case.startswith('identical-')
+                active_peer = case in ('identical-late-publication', 'identical-active-ended')
+                current = old if case == 'current-launch' else str(uuid4())
+                if identical:
+                    if active_peer:
+                        facts = read(self.directory / 'runtime.json')
+                        write(self.directory / 'runtime.json', {**facts, 'launch_id': current})
+                    self.send(message['text'], sender={'name': 'old-name'})
+                    second = {'id': self.calls[-1][1].id}
+                    self.assertNotEqual(second['id'], message['id'])
+                    older_peer = self.send('a different legacy body', sender={'name': 'old-name'})
+                    update_message(self.directory, older_peer['id'], delivery_context=None)
+                    from multiverse.harnesses.claude import project_key
+                    transcript = Path(context['home']) / 'projects' / project_key(str(self.work)) / (self.native_id + '.jsonl')
+                    transcript.parent.mkdir(parents=True, exist_ok=True)
+                    timestamp = now()
+                    row = {'type': 'user', 'uuid': str(uuid4()), 'sessionId': self.native_id,
+                           'timestamp': timestamp, 'message': {'content': context['text']}}
+                    if case == 'identical-no-row-id':
+                        row.pop('uuid')
+                    transcript.write_text(json.dumps(row) + '\n')
+                    if case == 'identical-copy':
+                        copy = transcript.parent.with_name('copied-history') / transcript.name
+                        copy.parent.mkdir(exist_ok=True)
+                        copy.write_bytes(transcript.read_bytes())
+                    if case == 'identical-alias':
+                        transcript.parent.with_name('same-project-alias').symlink_to(transcript.parent, target_is_directory=True)
+                    if 'receipt' in case:
+                        at = int(datetime.fromisoformat(timestamp).timestamp() * 1000) + 1
+                        receipt = {'transcript_confirmed': True, 'route': 'prompt', 'delivered_at_ms': at}
+                        if case == 'identical-receipt':
+                            write(self.directory / 'claude-receipts' / (second['id'] + '.json'),
+                                  {'id': second['id'], 'route': 'prompt', 'at': at})
+                        else:
+                            if case == 'identical-damaged-receipt':
+                                receipt.pop('route')
+                            update_message(self.directory, second['id'], native_receipt=receipt, transcript_confirmed_at=timestamp)
+                            if case == 'identical-final-receipt':
+                                update_message(self.directory, second['id'], submission_state='cancelled',
+                                               final_reason='cancelled', cancelled_reported_at=timestamp)
+                legacy = case.startswith('legacy-')
+                if legacy:
+                    update_message(self.directory, message['id'], delivery_context=None)
+                home = str(self.work / 'claude-home')
+                write(self.directory / 'launches' / old / 'request.json', {
+                    'env': {'CLAUDE_CONFIG_DIR': home, 'HOME': str(self.work)},
+                    'unset_env': []})
+                cleanup = self.directory / 'launches' / old / 'cleanup.json'
+                write(cleanup, {'schema': 1, 'launch_id': old, 'state': 'complete',
+                               'pid': 990001, 'child_pid': 990002, 'at': now()})
+                if case == 'no-cleanup':
+                    cleanup.unlink()
+                if case == 'legacy-no-home':
+                    write(self.directory / 'launches' / old / 'request.json',
+                          {'env': {}, 'unset_env': ['CLAUDE_CONFIG_DIR']})
+                write(self.directory / 'runtime.json', {'launch_id': current, 'state': 'running',
+                    'status': 'working' if case == 'working' else 'idle', 'pid': 990003,
+                    'startup_checked': case != 'unready', 'tmux': self.terminal})
+                if case in ('other-session', 'other-home'):
+                    properties = read(self.directory / 'properties.json')
+                    properties['native_session_id' if case == 'other-session' else 'native_session_home'] = (
+                        str(uuid4()) if case == 'other-session' else str(self.work / 'elsewhere'))
+                    write(self.directory / 'properties.json', properties)
+                    if case == 'other-session':
+                        # An authorized lineage change still cannot prove loss from another session.
+                        self.enterContext(patch.object(native, '_session_changes', return_value=True))
+                answer = (NativeResult('unknown', 'storage unreadable') if case in ('unknown', 'legacy-match', 'legacy-unreadable')
+                          else NativeResult('ok', value={'delivered': case == 'confirmed'}))
+                adapter = harnesses.load(self.root, 'claude')
+                adapter.storage_env = ('CLAUDE_CONFIG_DIR',)
+                self.behavior = NativeResult('unknown', 'No receipt yet')
+                observations = ((False, ('Sun Oct 18 23:07:11 2026', 'S')) if case == 'live-child'
+                                else (False, None) if case == 'unknown-process' else (True, None))
+                lines = []
+                actual = (ClaudeAdapter.configured('claude', {}).accepted_message_evidence
+                          if case in ('lost', 'legacy-lost', 'legacy-unreadable') or identical else None)
+                blocked = Path(home) / 'projects' / 'unrelated-project' / (self.native_id + '.jsonl')
+                if case == 'legacy-unreadable':
+                    blocked.parent.mkdir(parents=True, exist_ok=True)
+                original_stat = Path.stat
+                def stat(path, *args, **kwargs):
+                    if case == 'legacy-unreadable' and path == blocked:
+                        raise PermissionError('legacy workspace unknown; this folder may hold the transcript')
+                    return original_stat(path, *args, **kwargs)
+                from multiverse.harnesses import claude
+                original_receipt = claude._receipt
+                publications = []
+                def receipt_after_negative(directory, receipts, identifier):
+                    value = original_receipt(directory, receipts, identifier)
+                    if case == 'identical-late-publication' and identifier == second['id'] and value is None:
+                        at = int(datetime.fromisoformat(now()).timestamp() * 1000) + 1
+                        write(self.directory / 'claude-receipts' / (identifier + '.json'),
+                              {'id': identifier, 'route': 'prompt', 'at': at})
+                        publications.append(identifier)
+                    return value
+                with patch.object(adapter, 'accepted_message_evidence', return_value=answer,
+                                  side_effect=actual, create=True) as evidence, \
+                        patch.object(adapter, 'session_home', side_effect=lambda env: env.get('CLAUDE_CONFIG_DIR'), create=True), \
+                        patch.object(attachments, '_observation', return_value=observations), patch.object(Path, 'stat', stat), \
+                        patch.object(claude, '_receipt', side_effect=receipt_after_negative), \
+                        patch.object(adapter, 'get_delivery', side_effect=(ClaudeAdapter.configured('claude', {}).get_delivery
+                            if case == 'identical-late-publication' else lambda *args: self.behavior)), \
+                        patch.object(deliver.mailbox, '_event') as event:
+                    if case == 'concurrent-checks':
+                        snapshot = deliver.mailbox.inbox
+                        barrier = threading.Barrier(2)
+                        def simultaneous(*args, **kwargs):
+                            result = snapshot(*args, **kwargs)
+                            barrier.wait(timeout=5)
+                            return result
+                        with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous), ThreadPoolExecutor(2) as pool:
+                            results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                                    check=True, _present=lines.append), range(2)))
+                        self.assertEqual(sorted(len(item['messages']) for item in results), [0, 1])
+                        checked = next(item for item in results if item['messages'])
+                    else:
+                        checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                    if identical:
+                        first_state = message_record(self.directory, message['id'])[1]
+                        second_state = message_record(self.directory, second['id'])[1]
+                        if active_peer:
+                            self.assertEqual(first_state['submission_state'], 'accepted')
+                            self.assertIsNot(first_state['native_receipt'].get('transcript_confirmed'), True)
+                            if case == 'identical-late-publication':
+                                self.assertEqual(publications, [second['id']])
+                                self.assertTrue(second_state['native_receipt']['transcript_confirmed'])
+                                deliver.run(self.root, agent=self.agent, check=True)
+                                self.assertIsNot(message_record(self.directory, message['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                                # Receipt now known: a separate, later stored occurrence can confirm A.
+                                receipt = read(self.directory / 'claude-receipts' / (second['id'] + '.json'))
+                                later = datetime.fromtimestamp((receipt['at'] + 1) / 1000, timezone.utc).isoformat()
+                                with transcript.open('a') as out:
+                                    out.write(json.dumps({**row, 'uuid': str(uuid4()),
+                                        'timestamp': later}) + '\n')
+                            else:
+                                self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                                write(self.directory / 'launches' / current / 'cleanup.json', {
+                                    'schema': 1, 'launch_id': current, 'state': 'complete', 'pid': 990004, 'child_pid': 990005})
+                                facts = read(self.directory / 'runtime.json')
+                                write(self.directory / 'runtime.json', {**facts, 'launch_id': str(uuid4())})
+                            deliver.run(self.root, agent=self.agent, check=True)
+                            self.assertIs(message_record(self.directory, message['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                            if case == 'identical-active-ended':
+                                self.assertIsNot(message_record(self.directory, second['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                            self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                            self.assertEqual(len(self.calls), 3, 'Checking a receipt race never resends')
+                            continue
+                        if 'receipt' in case or case == 'identical-no-row-id':
+                            self.assertEqual(first_state['submission_state'], 'accepted')
+                            self.assertIsNot(first_state['native_receipt'].get('transcript_confirmed'), True)
+                            if 'receipt' in case:
+                                self.assertTrue(second_state['native_receipt']['transcript_confirmed'])
+                            else:
+                                self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                            deliver.run(self.root, agent=self.agent, check=True)
+                            self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                            self.assertEqual(len(self.calls), 3, 'A check cannot resend an unconfirmed acceptance')
+                            continue
+                        self.assertIs(first_state['native_receipt'].get('transcript_confirmed'), True)
+                        self.assertEqual(second_state['submission_state'], 'accepted')
+                        self.assertIsNot(second_state['native_receipt'].get('transcript_confirmed'), True)
+                        self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
+                        self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                        # A legacy same-body acceptance cannot consume an exact-ID receipt.
+                        update_message(self.directory, message['id'], delivery_context=None, target_session=None,
+                            attempts=[{key: value for key, value in attempt.items() if key != 'native_session_id'}
+                                      for attempt in first_state['attempts']])
+                        deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertIsNot(message_record(self.directory, second['id'])[1]['native_receipt'].get('transcript_confirmed'), True)
+                        with transcript.open('a') as out:
+                            out.write(json.dumps({'type': 'attachment', 'attachment': {'type': 'queued_command',
+                                'origin': {'msg_id': second['id']}, 'prompt': context['text']}}) + '\n')
+                        deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertTrue(message_record(self.directory, second['id'])[1]['native_receipt']['transcript_confirmed'])
+                        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                        self.assertEqual(len(self.calls), 3, 'Checks never submit or reuse a consumed transcript row')
+                        continue
+                    queried = case in ('lost', 'confirmed', 'unknown', 'legacy-lost', 'legacy-match', 'legacy-unreadable', 'concurrent-checks')
+                    self.assertEqual(evidence.call_count, int(queried))
+                    if queried:
+                        self.assertEqual(evidence.call_args.kwargs['framed'], not legacy)
+                        args = evidence.call_args.args
+                        self.assertEqual((args[0].native_id, args[0].workspace, args[1], args[4]),
+                                         (self.native_id, '' if legacy else str(self.work), message['id'], home))
+                        self.assertEqual(args[2], message['text'] if legacy else self.calls[0][1].framed)
+                    final = case in ('lost', 'legacy-lost', 'concurrent-checks')
+                    self.assertEqual(checked['ok'], not final)
+                    state = message_record(self.directory, message['id'])[1]
+                    self.assertEqual(state['submission_state'], 'cancelled' if final else 'accepted')
+                    if final:
+                        self.assertEqual(state['final_reason'], 'lost')
+                        self.assertTrue(any('lost when' in line and 'draft' in line and message['text'] in line for line in lines))
+                        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                        failures = [call.args[2] for call in event.call_args_list if call.args[1] == 'message.failed']
+                        self.assertEqual(len(failures), 1)
+                        self.assertEqual(failures[0]['id'], message['id'])
+                        self.assertTrue(failures[0]['lost_when_stopped'])
+                    elif case == 'confirmed':
+                        self.assertTrue(state['native_receipt']['transcript_confirmed'])
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+                self.assertEqual(len(self.calls), 1, 'No reconciliation or retry can replay an accepted message')
 
     def test_check_confirms_without_resending(self):
-        """deliver --check records confirmation only for the current launch, treats a still-queued native entry as
+        """deliver --check scopes old acceptances to available same-session evidence, treats a still-queued native entry as
         accepted, reports failed messages, and never resends; fragile because check and retry share code paths, and
-        a resend duplicates a prompt in the conversation (d292f88)."""
+        a resend duplicates a prompt in the conversation, and a weak queued-receipt scope silently polls another session (d292f88)."""
         with self.subTest('an uncertain submission is confirmed'):
             self.behavior = TimeoutError('lost response')
             message = self.send()
@@ -172,31 +432,33 @@ class InboxDeliveryTest(DeliveryFixture):
             self.assertNotIn('acknowledged_at', state)
             self.assertEqual(native.deliver(self.root, self.agent, message['id'], retry=True)['state'], 'native_queued')
             self.assertEqual(len(self.calls), 1)
-        with self.subTest('only the current launch is checked'):
-            self.recipient()
-            self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
-            older = self.send()
-            update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
-            current = self.send()
-            missing = self.send()
-            checked = []
-            def check(session, message_id, executor):
-                checked.append(message_id)
-                if message_id == missing['id']:
-                    return NativeResult('unknown', 'No receipt yet')
-                return NativeResult('native_queued', value={'transcript_confirmed': True})
-            adapter = harnesses.load(self.root, 'claude')
-            with patch.object(adapter, 'get_delivery', side_effect=check):
-                first = deliver.run(self.root, agent=self.agent, check=True)
-                second = deliver.run(self.root, agent=self.agent, check=True)
-            # Missing evidence for an accepted message is not a failure, and is asked again.
-            self.assertTrue(first['ok'] and second['ok'])
-            self.assertEqual(checked, [current['id'], missing['id'], missing['id']])
-            tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
-            confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
-            self.assertTrue(confirmed[current['id']])
-            self.assertIsNone(confirmed[older['id']])
-            self.assertEqual(len(self.calls), 3)
+        for retained in (False, True):
+            with self.subTest(older_acceptance_hook=retained):
+                self.recipient()
+                self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
+                older = self.send()
+                update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+                current = self.send()
+                missing = self.send()
+                checked = []
+                def check(session, message_id, executor):
+                    checked.append(message_id)
+                    if message_id == missing['id']:
+                        return NativeResult('unknown', 'No receipt yet')
+                    return NativeResult('native_queued', value={'transcript_confirmed': True})
+                adapter = harnesses.load(self.root, 'claude')
+                proof = patch.object(adapter, 'accepted_message_evidence', lambda *a, **kw: None, create=True)
+                with proof if retained else contextlib.nullcontext(), patch.object(adapter, 'get_delivery', side_effect=check):
+                    first = deliver.run(self.root, agent=self.agent, check=True)
+                    second = deliver.run(self.root, agent=self.agent, check=True)
+                # Missing evidence for an accepted message is not a failure, and is asked again.
+                self.assertTrue(first['ok'] and second['ok'])
+                self.assertEqual(checked, ([older['id']] if retained else []) + [current['id'], missing['id'], missing['id']])
+                tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
+                confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
+                self.assertTrue(confirmed[current['id']])
+                self.assertEqual(bool(confirmed[older['id']]), retained)
+                self.assertEqual(len(self.calls), 3)
         with self.subTest('an entry still waiting in the native queue'):
             self.recipient()
             self.behavior = NativeResult('native_queued', 'Accepted by native after-turn queue',
@@ -216,6 +478,183 @@ class InboxDeliveryTest(DeliveryFixture):
                                          {'transcript_confirmed': True})
             self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+        for scope, eligible in (('matching', True), ('unbound', False), ('earlier-target', False), ('different-attempt', False)):
+            with self.subTest(older_codex_queue_scope=scope):
+                self.recipient(harness='codex', native_session_home=str(self.work))
+                earlier = str(uuid4())
+                saved = None if scope == 'unbound' else self.native_id
+                target = earlier if scope == 'earlier-target' else saved
+                attempted = earlier if scope == 'different-attempt' else saved
+                properties = read(self.directory / 'properties.json')
+                write(self.directory / 'properties.json', {**properties, 'native_session_id': saved})
+                if scope == 'earlier-target':
+                    # A valid earlier owned conversation must not qualify just
+                    # because its receipt contains a native queue item ID.
+                    (self.directory / 'sessions.jsonl').write_text(json.dumps({
+                        'schema': 1, 'id': str(uuid4()), 'at': now(), 'harness': 'codex',
+                        'launch': self.launch, 'reason': 'clear', 'home': str(self.work),
+                        'from': earlier, 'to': saved}) + '\n')
+                    self.assertTrue(native._session_changes(self.directory,
+                                    read(self.directory / 'properties.json'), target))
+                message = append_message(self.directory, 'queued before resume', {}, 'follow-up', target_session=target)
+                update_message(self.directory, message['id'], submission_state='accepted', delivery_method='native',
+                    native_receipt={'queued_submission_id': 'old-queue-item'},
+                    attempts=[{'state': 'native_queued', 'launch_id': str(uuid4()), 'native_session_id': attempted}])
+                adapter = harnesses.load(self.root, 'codex')
+                self.assertIsNone(native.adapter_hook(adapter, 'accepted_message_evidence'))
+                with patch.object(adapter, 'get_delivery', return_value=NativeResult('native_queued', 'Paused',
+                        {'queued_submission_id': 'old-queue-item', 'paused': True})) as checked:
+                    for _ in range(2):
+                        result = deliver.run(self.root, agent=self.agent, check=True)
+                        self.assertEqual(len(result['messages']), int(eligible))
+                        if eligible:
+                            self.assertTrue(result['messages'][0]['paused'])
+                    self.assertEqual(checked.call_count, 2 if eligible else 0)
+                self.assertEqual(self.calls, [], 'Receipt checks never submit or restart the queue')
+        for outside_state in ('accepted', 'failed', 'unknown', 'pending'):
+            with self.subTest(outside_lineage_state=outside_state):
+                self.recipient()
+                message = self.send('uncheckable old conversation')
+                update_message(self.directory, message['id'], submission_state=outside_state)
+                properties = read(self.directory / 'properties.json')
+                write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+                lines = []
+                adapter = harnesses.load(self.root, 'claude')
+                with patch.object(adapter, 'get_delivery', side_effect=AssertionError('foreign conversation must not be queried')):
+                    snapshot = deliver.mailbox.inbox
+                    barrier = threading.Barrier(2)
+                    def simultaneous(*args, **kwargs):
+                        result = snapshot(*args, **kwargs)
+                        barrier.wait(timeout=5)
+                        return result
+                    with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous), ThreadPoolExecutor(2) as pool:
+                        results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                                check=True, _present=lines.append), range(2)))
+                    self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
+                    first = next(result for result in results if result['messages'])
+                    self.assertFalse(first['ok'])
+                    self.assertEqual(len(first['messages']), 1)
+                    self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+                self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], outside_state)
+                self.assertTrue(any(message['text'] in line and 'Do not resend' in line for line in lines), lines)
+                self.assertEqual(len(self.calls), 1)
+                retry_lines = []
+                with patch.object(native, 'send_or_wake', side_effect=AssertionError('final lineage report must not retry')):
+                    retried = deliver.run(self.root, agent=self.agent, retry=True, _present=retry_lines.append)
+                self.assertTrue(retried['ok'])
+                self.assertEqual(retried['messages'], [])
+                self.assertEqual(retried['finalized'], 1)
+                self.assertTrue(any('1 earlier message is final' in line for line in retry_lines), retry_lines)
+                self.assertIsNone(deliver.mailbox.delivery_problem(self.directory, self.agent))
+        with self.subTest('five old acceptances stay final after a fresh start and repeated retries'):
+            from multiverse.universe import sessions
+            self.recipient(native_session_home=str(self.work))
+            older = [self.send(f'old acceptance {index}') for index in range(5)]
+            properties = read(self.directory / 'properties.json')
+            replacement = {**properties, 'native_session_id': str(uuid4()), 'native_storage_environment': {}}
+            next_launch = str(uuid4())
+            sessions.retire(self.root, self.directory, self.native_id, replacement, next_launch,
+                            previous_launch=self.launch)
+            write(self.directory / 'runtime.json', {'launch_id': next_launch, 'state': 'running', 'tmux': self.terminal})
+            self.behavior = NativeResult('error', 'refused before submission')
+            current = self.send('new conversation input')
+            self.behavior = NativeResult('native_queued')
+            lines = []
+            adapter = harnesses.load(self.root, 'claude')
+            with patch.object(adapter, 'get_delivery', side_effect=AssertionError('retired conversation must not be queried')):
+                checked = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+            self.assertTrue(checked['ok'], checked)
+            self.assertEqual(checked['finalized'], 5)
+            self.assertEqual(len(checked['messages']), 6)
+            self.assertEqual(sum('never reached the new conversation' in line and 'Send a new message' in line for line in lines), 5)
+            self.assertFalse(any('cannot check' in line for line in lines), lines)
+            for repeat in range(3):
+                lines = []
+                retried = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+                self.assertTrue(retried['ok'])
+                self.assertEqual(retried['messages'], [])
+                self.assertEqual(retried['finalized'], 5)
+                self.assertTrue(any('5 earlier messages are final' in line for line in lines), lines)
+            self.assertEqual(len(self.calls), 7)  # Five old accepts, one refusal, one retry.
+            update_message(self.directory, current['id'], native_receipt={'transcript_confirmed': True})
+            self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+            self.assertTrue(all(message_record(self.directory, item['id'])[1]['submission_state'] == 'accepted' for item in older))
+        for damage in ('journal', 'harness'):
+            with self.subTest(per_message_error=damage):
+                self.recipient(native_session_home=str(self.work))
+                messages = [self.send(f'error input {index}') for index in range(2)]
+                for item in messages:
+                    update_message(self.directory, item['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+                properties = read(self.directory / 'properties.json')
+                if damage == 'journal':
+                    write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+                    (self.directory / 'sessions.jsonl').write_text('{')
+                lines = []
+                manager = patch.object(harnesses, 'load', side_effect=ValueError('fixture harness cannot load')) if damage == 'harness' else contextlib.nullcontext()
+                with manager:
+                    result = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+                self.assertFalse(result['ok'])
+                self.assertEqual(len(result['messages']), 2)
+                self.assertEqual(len(lines), 2)
+                reason = str(self.directory / 'sessions.jsonl') if damage == 'journal' else 'fixture harness cannot load'
+                self.assertTrue(all(reason in line for line in lines), lines)
+                self.assertEqual(len(self.calls), 2)
+                if damage == 'journal':
+                    self.assertTrue(all('repair' in line.lower() and 'resume it' not in line for line in lines), lines)
+                    from multiverse.runtime import lifecycle
+                    from multiverse.universe import sessions
+                    try:
+                        sessions.journal(self.directory)
+                    except sessions.JournalError as error:
+                        row = lifecycle.damaged_row(self.root, error)
+                    self.assertEqual(row['id'], self.agent)
+                    self.assertIn('sessions.jsonl', row['damaged']['file'])
+                    for item in messages:
+                        update_message(self.directory, item['id'], submission_state='failed')
+                    # A submission needs an intact journal, even for the saved current pointer.
+                    # Reading its saved failure does not: only the other target needs lineage proof.
+                    update_message(self.directory, messages[1]['id'], target_session=read(self.directory / 'properties.json')['native_session_id'])
+                    checked = deliver.run(self.root, agent=self.agent, check=True)
+                    self.assertEqual(len(checked['messages']), 2)
+                    self.assertNotIn('session journal', checked['messages'][1]['reason'])
+                    lines = []
+                    retried = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+                    self.assertEqual(len(retried['messages']), 2)
+                    self.assertTrue(all(reason in line and 'repair' in line.lower() and 'resume it' not in line for line in lines), lines)
+                    self.assertEqual(len(self.calls), 2, 'Damaged authority never authorizes another submission')
+        with self.subTest('an older acceptance in an earlier owned conversation stays out of checks'):
+            from multiverse.universe import agents
+            self.recipient(native_session_home=str(self.work))
+            message = self.send('older owned conversation')
+            target = str(uuid4())
+            agents.rebind_session(self.root, self.agent, self.native_id, target, 'clear', self.launch, home=str(self.work))
+            write(self.directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running', 'tmux': self.terminal})
+            adapter = harnesses.load(self.root, 'claude')
+            with patch.object(adapter, 'get_delivery', side_effect=AssertionError('older conversation must not be queried')), \
+                    patch.object(adapter, 'accepted_message_evidence', side_effect=AssertionError('older conversation has no applicable evidence'), create=True):
+                self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+            self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], 'accepted')
+        with self.subTest('retry reports an outside-lineage failure once without needing check first'):
+            self.recipient()
+            self.behavior = NativeResult('error', 'failed before submission')
+            message = self.send('failed in an unrelated conversation')
+            properties = read(self.directory / 'properties.json')
+            write(self.directory / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+            with patch.object(native, 'send_or_wake', side_effect=AssertionError('outside lineage must not retry')):
+                lines = []
+                first = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+                second = deliver.run(self.root, agent=self.agent, retry=True)
+                third = deliver.run(self.root, agent=self.agent, check=True)
+            self.assertTrue(first['ok'], first)
+            self.assertEqual(first['finalized'], 1)
+            self.assertIn('outside', first['messages'][0]['reason'])
+            self.assertTrue(any('cannot retry' in line for line in lines), lines)
+            self.assertFalse(any('then mv2 deliver' in line for line in lines), lines)
+            self.assertTrue(second['ok'])
+            self.assertEqual(second['finalized'], 1)
+            self.assertEqual(second['messages'], [])
+            self.assertEqual(third['messages'], [])
+            self.assertIsNone(deliver.mailbox.delivery_problem(self.directory, self.agent))
         with self.subTest('a failed message is reported, never reconciled or resent'):
             self.recipient()
             message = append_message(self.directory, 'refused', {}, delivery='steer')

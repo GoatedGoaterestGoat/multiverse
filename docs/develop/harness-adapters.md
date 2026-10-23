@@ -31,21 +31,29 @@ Core also looks for these optional methods and attributes:
 | Method or attribute | Used for |
 | --- | --- |
 | `family` | Which status line defaults apply: `claude`, `codex`, `pi` or `''` |
+| `session_home(environment)` | Resolve an explicit candidate storage home; return `None` when its supplied environment cannot identify one. |
+| `session_storage_evidence(session, home)` | Read-only proof that this exact conversation exists under an absolute candidate home: `ok` with `value.present` true or false, or `unknown` with a reason for incomplete evidence. An absent answer adds `value.store_read`: exactly true proves the primary conversation store existed and was read completely (including other existing stores the finder checks); false means it was missing. Recorded candidates require this proof for `--start-fresh`; normal adoption and caller-only destinations do not. A reason may name the missing store. |
+| `resume_notice(session, caller_environment, effective_environment)` | A notice about the selected storage or conversation. If it accepts the optional keyword `fresh_start`, core passes false after announcing its own proven fresh start; other notices still apply. |
+| `allow_recorded_launch(session)` | Explicitly allow core to verify retained bridge-launch identity for data callbacks; exactly `True` opts in, absent/default is false. The current adapter policy must equal the saved policy; this never grants control authority. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
 | `status_watch(session)` | A passive status stream the runner follows |
 | `attachment_recovery(session)` | A read-only check that an idle terminal can be reconnected |
 | `retained_usage(session, runtime)` | The last usage reading, kept across resume |
 
+Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Unreadable or malformed metadata, compressed-only or linked storage, entries that disappear during traversal and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
+
 ### Types
 
 | Type | Fields you use |
 | --- | --- |
-| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `environment`, `endpoint`, `executor`, `resume_prompt` |
+| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
 | `SessionHandle` | `agent_id`, `harness`, `workspace`, `launch_id`, `native_id`, `session_file`, `state`, `endpoint`, `bridge`, `native_mode` |
 | `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment` |
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
 | `Capability` | `state` (`supported`, `unavailable`, `error`), `reason`, `mechanism`, `required` |
+
+For legacy storage adoption, `LaunchContext.storage_keys` lists proven harness storage variables, never `HOME`. A default-storage adoption can retain `HOME` in the launch environment without adding it to this mask. `None` keeps the complete selection used by existing callers; an empty tuple proves none. A listed key absent from `environment` is known unset; an omitted key is unknown and retains native inheritance. Adapters still enforce their own conversation's identity requirements.
 
 ### Rules
 
@@ -73,7 +81,7 @@ A `reported` harness binds its ID in one of two ways:
 
 An adapter can report a verified native session change, such as Claude's `/clear`, without replacing the mv2 agent. Core records the change in the agent's session lineage, keeps the earlier conversations owned by that agent, and follows the current one for delivery, usage and resume. An adapter that reports no changes keeps exact-session behavior. See [session lineage](../design/session-lineage.md).
 
-A bridged Codex conversation can have several clients at once. Its shell holds only agent-stable values, so `report` and `inbox` work from any client, while runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
+A bridged Codex conversation can have several clients at once. Its tool configuration requests agent-stable values, so `report` and `inbox` work from any client. An adapter can opt into proof from a retained bridge request when an older loaded conversation lacks the mode marker. Runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
 
 ## Bridge and plain
 
@@ -140,7 +148,7 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `unavailable` or `error` | `failed` | Definitely not delivered; `mv2 deliver NAME --retry` may resend |
 | `unknown`, or an exception | `unknown` | May have arrived; never resent automatically |
 
-A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages the current launch accepted without a receipt. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
+A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages any launch accepted without transcript confirmation. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
 
 | Harness | Receipt |
 | --- | --- |
@@ -149,6 +157,25 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 | Pi | The extension answers from its transcript metadata and in-process records |
 
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
+
+An optional `accepted_message_evidence(session, message_id, text, since, home,
+framed=True, cohort=(), receipts=None, active_acceptances=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a
+named reason. Core calls it only after proving the accepting runner and child
+have exited and a newer ready, idle launch uses the same session and storage.
+The hook reads the accepting workspace and exact saved framing. `cohort` is a
+snapshot of `(message_id, framed_text, accepted_at)` for the conversation's
+acceptances, including already confirmed or final entries, read under the inbox
+lock before calling the adapter. `receipts` maps those IDs to their saved, transcript-confirmed native receipt values from the same snapshot. The adapter also checks its own receipt files, which may not have reached the ledger. Exact prompt receipts reserve their stored occurrences before identical text consumes remaining rows oldest acceptance first. One row cannot confirm two messages, including copies of that row in another file. Exact attachment-ID rows belong only to that ID and consume no anonymous prompt occurrence. Missing row identity or ambiguous reservations keep text evidence unknown. An older same-body
+acceptance with unrecorded framing has a `None` text in the cohort: text evidence
+stays unknown, while exact-ID evidence may still confirm. Different bodies cannot
+share a framed text row. `active_acceptances` lists cohort IDs accepted by the current live launch, from the same locked snapshot. An identical active acceptance without an exact receipt or attachment-ID row blocks anonymous text allocation: an idle status and a negative receipt read cannot exclude later publication. A later check can allocate again after that launch ends or its exact receipt is available. For older records,
+`framed=False` supplies only the body, and an unknown workspace is an empty string
+so every storage folder remains a candidate. Absence can prove loss, but a body match
+cannot confirm delivery without an exact message ID. Unreadable or unfinished
+transcripts must not become a negative answer; missing launch or process facts
+prevent core from calling the hook. A proved loss is retained
+as a final cancelled record with `final_reason: lost`, reported once by `--check`,
+and never retried automatically.
 
 ## Command harnesses
 

@@ -177,6 +177,11 @@ def _start_idle_submission(session, item, receipt):
     """A new message may unpause the queue once, never by receipt replay."""
     from .queue_events import restart_claimed
     if not restart_claimed(session, item['clientUserMessageId']):
+        state = session.queue_state
+        if (isinstance(state, dict) and state.get('native_session_id') == session.native_id
+                and state.get('state') == 'paused'):
+            return NativeResult('native_queued', 'Accepted; message remains paused in native queue',
+                                {**receipt.value, 'paused': True})
         return receipt
     try:
         queued = yield from _queue_head(session)

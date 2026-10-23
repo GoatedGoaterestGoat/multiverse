@@ -20,8 +20,8 @@ def configure(parser):
 def caller():
     """The verified agent running this command, or None for the person; an agent that can't be verified is refused.
 
-    The same check as `send`: a stable identity, or the exact current launch of the agent the
-    environment names, in its own universe and directory.
+    The same check as `send`: stable agent proof, opted-in retained bridge proof,
+    or the exact current launch, in the agent's own universe and directory.
     """
     from ..runtime.agent_identity import sender_actor
     return sender_actor(acting="change focus")

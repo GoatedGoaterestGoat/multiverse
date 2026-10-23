@@ -70,7 +70,20 @@ appending another row. A torn, malformed or conflicting journal is an error;
 core never guesses a replacement ID from it. Transcript readers can use each
 row's `from`, `home`, `at` and `reason` to locate earlier generations. No transcript
 path or cursor is stored. Returning to an earlier session owned by this same
-agent is allowed.
+agent is allowed, except for an ID explicitly retired by missing-conversation recovery.
+
+`resume --start-fresh` is a separate, explicit boundary. Only after every
+candidate was readable and the old conversation absent, core appends a schema-2
+`fresh-start` row with reason `missing-conversation`. Its `home` and `from` retain
+the old claim; `replacement` records the new storage selection and pointer before
+the properties pointer changes. Before that append, the properties record's
+`native_session_homes` includes both the old and replacement scopes, so a crash
+cannot let a peer skip the new journal as unrelated storage. An assigned harness
+gets a new UUID. A reported or file-based
+harness has `to: null` until its new conversation binds, when a schema-2 `bind`
+row completes the pointer. Append-first recovery uses this saved replacement,
+never the recovering shell's environment. Retired IDs remain owned and cannot be
+bound again. Delivery never follows a transition across this retirement boundary.
 
 Ownership claims are serialized across the containing universe tree. The key is
 the provider, canonical storage home and native ID. Earlier generations remain
@@ -84,7 +97,7 @@ readable bytes mention the requested ID, including a torn row. Unrelated damage
 does not block new agents. A journal that cannot be read or safely inspected
 still refuses a potentially overlapping or unknown namespace, naming the agent
 and file to repair. Explicitly different providers, or the same known provider
-with different recorded storage homes, are excluded before reading journals.
+with disjoint recorded storage homes (including any retired scopes), are excluded before reading journals.
 Missing or malformed scope is never proof of separation. Historical storage
 homes keep the absolute scope recorded at the transition; reading history never
 follows a parent directory that became a symlink later.

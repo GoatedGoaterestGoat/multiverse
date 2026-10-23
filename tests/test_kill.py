@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.universe import agents, records, relocate, templates
-from multiverse.runtime import lifecycle
+from multiverse.runtime import attachments, lifecycle
 from multiverse.runtime import native
 from multiverse.store import read
 from multiverse.terminal.tmux import Tmux
@@ -184,6 +184,8 @@ class KillTest(TerminalBase):
                     lifecycle.terminal_action(self.root, launched['id'], 'stop')
                 self.assertIn(pane, self.backend.snapshot()[0])
                 self.backend.run('kill-pane', '-t', pane)
+                # tmux returns before SIGHUP cleanup and the runner's exit.
+                until(lambda: attachments.recorded_process_problem(directory, agents.runtime(directory)) is None)
                 result = lifecycle.terminal_action(self.root, launched['id'], 'stop')
             signal_child.assert_not_called()
             self.assertEqual(result['state'], 'dormant')
@@ -218,6 +220,7 @@ class KillTest(TerminalBase):
             self.assertIn(pane, self.backend.snapshot()[0])
         with self.subTest('a dormant agent'):
             self.backend.run('kill-pane', '-t', pane)
+            until(lambda: attachments.recorded_process_problem(directory, agents.runtime(directory)) is None)
             with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')):
                 result = lifecycle.kill(self.root, launched['id'])
             self.assertEqual(result['native_cancellation']['state'], 'unknown')

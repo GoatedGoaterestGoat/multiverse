@@ -48,7 +48,23 @@ reading use `session.home` the same way, so a dashboard or CLI running with
 another `CLAUDE_CONFIG_DIR` still reads the launch's own transcripts. After a None, core asks the
 optional `startup_prompt_evidence_reason` with the same arguments: one line naming
 the folder or transcript that can't be read, or the damaged row, and what to fix,
-without the command, which core adds. Missing reason hooks default to no additional
+without the command, which core adds. Claude keeps an accepted message only in its in-memory prompt queue until
+it reaches the conversation, so one still queued when the process dies is gone. Once
+that launch has exited and a later one on the same session has come up idle, core asks
+`accepted_message_evidence(session, message_id, text, since, home)`: delivered when the
+transcript holds the `queued_command` row carrying the message ID (a mid-turn steer) or
+a user row with the text from the accept time on (a follow-up or idle steer), lost only
+when every transcript that could hold it was read whole without either, else unknown.
+For an older record that kept only the body, a body match stays unknown. It never confirms
+falsely: each stored copy of a text counts once (by its row uuid, across copies of the
+transcript, and once however many paths reach a file), and among the session's acceptances of
+the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt
+receipt the copy stored just before it, a mid-turn receipt none. The remaining copies go to the
+others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
+a copy left to another identical message makes the answer unknown. So does an identical message the
+current live launch accepted that has no receipt yet, since it may still write one for a copy, and
+copies of one row uuid that disagree on anything allocation reads (its type, its raw text or
+message ID, or its time, an attachment's own when the row has none), whatever order they're read in. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
 Core retains the failed launch's exact prompt, start time, conversation identity
@@ -69,9 +85,17 @@ first 200 plus `-` and a hash). So an unreadable folder blocks when its name,
 ignoring case, is the key of the handle's workspace (as recorded or as its real
 path) or starts with that key plus `-`, which covers Claude's own worktrees under
 the workspace and the hashed long form. Another workspace's unreadable folder is
-skipped; with no absolute workspace, every unreadable folder blocks. The handle's
+skipped; with no absolute workspace, every unreadable folder blocks. A dangling
+link in such a folder's place, or a folder gone before it was searched, counts as
+unreadable, while a link to a real folder is searched through it. The handle's
 workspace is the launch's own, so a recheck of a failed wake reads that launch's
-folder even after the agent moved on. GOAT applies the same rule to its search.
+folder even after the agent moved on. GOAT applies the same rule to its search. The
+same scan answers core's `session_storage_evidence(session, home)` for each
+candidate home of an agent with no recorded storage: present, absent only when
+every folder that could hold the transcript was read, or unknown. An absent answer
+says `store_read`: false, with a reason naming it, when the conversation store
+(`projects/`) doesn't exist, so core counts absence in a recorded home only where
+the store was read.
 When part of the storage that could hold the session can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as
 proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
@@ -1013,11 +1037,11 @@ New bridge bootstrap does not ask the model to bind a session. In stable agent
 mode, `session-bind` can only verify the identical already-bound native UUID,
 without changing properties, timestamps, runtime or events. It cannot establish
 or replace a binding. Plain-mode registration retains its existing strict
-launch callback. Restart running Codex bridge agents once after updating:
-`mv2 kill NAME`, then `mv2 resume NAME`, with no other client attached so Codex
-releases and reloads the conversation with clean stable values. An old
-conversation environment is refused with this restart guidance; there is no
-automatic adoption, legacy authority bypass or redirect of old relay sockets.
+launch callback. An adapter's optional `allow_recorded_launch(session)` hook
+can permit core's retained bridge proof for data callbacks when the mode marker
+is absent. It defaults false and must return exactly true; the current adapter
+policy must match the saved policy. Core never substitutes a current launch ID
+or redirects an old relay. See [upgrade identity proof](shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 A native competing writer is different from same-server sharing. Codex 0.163.0
 can return `-32600` with `already has an active writer`; plain TUI shows
@@ -1420,7 +1444,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.303; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.309; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

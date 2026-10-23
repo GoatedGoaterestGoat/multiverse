@@ -63,20 +63,39 @@ def properties(path, *, harness_optional=False):
     Own report/callback paths do not interpret the harness; harness_optional
     lets them report even when only that configuration field is damaged.
     """
-    data = _object(path)
-    for key in TEXT_FIELDS:
-        if harness_optional and key == 'harness':
-            continue  # Agent data callbacks do not interpret the harness configuration.
-        if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
-            raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
-    return data
+    path = Path(path)
+    try:
+        data = _object(path)
+        for key in TEXT_FIELDS:
+            if harness_optional and key == 'harness':
+                continue  # Agent data callbacks do not interpret the harness configuration.
+            if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
+                raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
+        return data
+    except RecordError as error:
+        if path.name != 'properties.json':
+            raise
+        try:
+            path.lstat()
+        except OSError:
+            raise error from None  # A missing record has a separate guarded removal path.
+        raise RecordError(path, f'{error.reason}; {path}: repair it from a backup, or restore an intact copy',
+                          error.data) from None
 
 
 def runtime(path):
     """An agent's `runtime.json` as a dict, {} when the agent never launched; RecordError when it cannot be used."""
     if not Path(path).exists():
         return {}
-    return _object(path)
+    try:
+        return _object(path)
+    except RecordError as error:
+        path = Path(path)
+        if path.name != 'runtime.json':
+            raise
+        raise RecordError(path, f'{error.reason}; restore read access or restore {path} from a verified backup. '
+            f'To close a surviving tagged terminal, use mv2 kill {path.parent.name}; only after verifying '
+            'its terminal, runner and child have exited, remove this runtime.json and resume', error.data) from None
 
 
 def mentions(path, value):

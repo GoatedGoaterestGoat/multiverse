@@ -1,5 +1,6 @@
 """The plugin core: manifests, discovery, trust, plugins.json, settings, loading and the API."""
 import contextlib
+import errno
 import io
 import json
 import threading
@@ -262,9 +263,11 @@ class SettingsTest(PluginTestCase):
 
     def test_settings_edit_writes_only_valid_named_changes(self):
         """A settings edit changes only named keys, DELETE removes one, a schema refusal or the plugin's own check
-        (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, and
-        enabling twice never reinstalls defaults; fragile because the check needs the plugin's code even where it
-        is off (COMPACTION-2), and a break quietly writes a bad file."""
+        (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, a plugin's
+        own settings screen is had where it is off too (or why not), on request and never by listing it, and
+        enabling twice never reinstalls defaults; fragile because the check and the screen need the plugin's code
+        even where it is off (COMPACTION-2), and a break quietly writes a bad file, says "no schema" on the Plugins
+        screen, or imports off plugins on every mv2 plugins."""
         with self.subTest("only the named keys"):
             manifest_ = self.greeter("greeter")
             path = settings.path(self.root, "greeter")
@@ -351,6 +354,27 @@ class SettingsTest(PluginTestCase):
             self.assertEqual(code, 0, err)
             self.assertEqual(json.loads(out), {"ran": True})
             self.assertIn("plugin screened: its settings cannot be used: level must be 1 or 2", err)
+        with self.subTest("off here: listed without importing it; its own screen comes on request, or why not"):
+            settings.path(self.root, "screened").write_text('{"schema": 1, "level": 1}')
+            self.enable("screened", on=False)
+            loader.reset()  # a fresh process: nothing loaded yet
+            item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
+            self.assertNotIn("screened", {Path(key).name for key in loader._loaded})  # off: never imported here
+            self.assertEqual((item["state"], item["settings"]["own_view"], item["settings"]["problem"]),
+                             ("off", True, None))  # the file is fine: no load problem in its place
+            self.assertEqual(plugins.settings_view(self.root, "screened"),
+                             {"screen": "screens:Settings", "fields": None, "problem": None, "loading": False})
+            loader.reset()  # a fresh process whose load is still running: not failed, so no schema fallback
+            with mock.patch.object(loader, "load", side_effect=loader.StillLoading("slow")):
+                view = plugins.settings_view(self.root, "screened")
+            self.assertEqual((view["loading"], view["problem"]), (True, "screened is still loading"))
+            loader.reset()
+            with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
+                item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
+                view = plugins.settings_view(self.root, "screened")
+            self.assertIsNone(item["settings"]["problem"])
+            self.assertEqual((view["screen"], view["fields"]), (None, None))
+            self.assertIn("MV2_PLUGINS=off", view["problem"])
 
 
 class LoadingTest(PluginTestCase):
@@ -426,6 +450,115 @@ class ApiTest(PluginTestCase):
             self.assertEqual([agent.name for agent in plugins.panel_context(found["boards"], self.root, {}, rows,
                                                                             set()).agents], ["worker"])
             self.assertEqual(plugins.panel_context(found["blind"], self.root, {}, rows, set()).agents, ())
+
+    def test_an_agents_harness_home_is_its_recorded_storage(self):
+        """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
+        storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown
+        (None) for a launched agent with no proof, and this process's environment only for one never launched; and
+        its recorded storage values, an explicit value kept apart from a recorded absence even where both name one
+        directory, completed with what resolves it (the launch HOME for an unset or empty home variable, the
+        workspace for a relative value) or None without it; a break goes unnoticed because tests run every process
+        with one environment and directory, while the dashboard or the host may run with another and then read
+        another store, or run Claude under another config."""
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("reader")
+        mv = api.Plugin(loader.load(self.entry("reader")))
+        mine = Path(os.environ["CLAUDE_CONFIG_DIR"])  # this process's Claude home
+        recorded = self.work / "launch-claude"
+        launch_home = self.work / "launch-home"  # the HOME a launch's request recorded
+        rows = {  # name: (properties, the last launch's request env and unset_env or None, expected home)
+            "session-home": ({"native_session_home": str(recorded)}, None, recorded),
+            "storage": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": str(recorded)}}, None, recorded),
+            "storage-unset-without-launch-home": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": None}},
+                                                  None, None),
+            "storage-unset-with-launch-home": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": None}},
+                                               ({"HOME": str(launch_home)}, []), launch_home / ".claude"),
+            "launched-without-proof": ({}, None, None),
+            "never-launched": ({}, "no launch at all", mine),
+            "damaged-runtime-is-a-launch": ({}, "runtime without its launch id", None),
+            "a-session-journal-is-a-launch": ({}, "a session journal only", None),
+            "native-session-without-proof": ({"native_session_id": "c1"}, None, None),
+            "damaged": ({"native_storage_environment": ["not", "a", "record"]}, None, None),
+            "explicit-default-directory": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": str(
+                Path(os.environ["HOME"]) / ".claude")}}, None, Path(os.environ["HOME"]) / ".claude"),
+            "empty-with-launch-home": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": ""}},
+                                       ({"HOME": str(launch_home)}, []), launch_home / ".claude"),
+            "relative-to-the-workspace": ({"native_storage_environment": {"CLAUDE_CONFIG_DIR": "relative-config"}},
+                                          None, self.work / "project" / "relative-config"),
+            "relative-without-an-absolute-workspace": ({"workspace": "somewhere", "native_storage_environment": {
+                "CLAUDE_CONFIG_DIR": "relative-config"}}, None, None)}
+        old_codex = str(self.work / "proven-old-home")
+        codex_rows = {  # agents from before storage was recorded: what a resume adopts, never the reader's
+            "legacy-codex": ({"native_session_id": "x1", "native_service_identity": {
+                "provider": "codex", "scope": {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}},
+                "native_environment": {"CODEX_HOME": old_codex}}, None, Path(old_codex)),
+            "unbound-but-launched-codex": ({}, ({"CODEX_HOME": old_codex}, ["CODEX_SQLITE_HOME"]), Path(old_codex)),
+            "legacy-scope-without-a-runtime": ({"native_service_identity": {
+                "provider": "codex", "scope": {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}}},
+                "no launch at all", Path(old_codex)),
+            "codex-without-proof": ({"native_session_id": "x2"}, None, None)}
+        old_codex_storage = {"CODEX_HOME": old_codex, "CODEX_SQLITE_HOME": None}
+        storage_rows = {  # the environment that selects the same store, where proven (every other row: None)
+            "storage": {"CLAUDE_CONFIG_DIR": str(recorded)},
+            "storage-unset-with-launch-home": {"CLAUDE_CONFIG_DIR": None, "HOME": str(launch_home)},
+            "empty-with-launch-home": {"CLAUDE_CONFIG_DIR": "", "HOME": str(launch_home)},
+            "relative-to-the-workspace": {"CLAUDE_CONFIG_DIR": str(self.work / "project" / "relative-config")},
+            "explicit-default-directory": {"CLAUDE_CONFIG_DIR": str(Path(os.environ["HOME"]) / ".claude")},
+            "legacy-codex": old_codex_storage, "unbound-but-launched-codex": old_codex_storage,
+            "legacy-scope-without-a-runtime": old_codex_storage}
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.work / "reader-home")}):
+            for harness_name, table in (("claude", rows), ("codex", codex_rows)):
+                for name, (properties, request, expected) in table.items():
+                    with self.subTest(name):
+                        directory = self.agent(name, harness=harness_name, **properties)
+                        if request == "no launch at all":
+                            (directory / "runtime.json").unlink()
+                        elif request == "runtime without its launch id":
+                            (directory / "runtime.json").write_text('{"state": "running"}')
+                        elif request == "a session journal only":
+                            (directory / "runtime.json").unlink()
+                            (directory / "sessions.jsonl").write_text("{}\n")
+                        elif request is not None:
+                            launch = json.loads((directory / "runtime.json").read_text())["launch_id"]
+                            (directory / "launches" / launch).mkdir(parents=True)
+                            (directory / "launches" / launch / "request.json").write_text(json.dumps(
+                                {"argv": ["x"], "env": request[0], "unset_env": request[1]}))
+                        agent = mv.universe(self.root).agent(name)
+                        info = mv.harness_info(self.root, harness_name, agent=agent)
+                        self.assertEqual((info.home, info.storage), (expected, storage_rows.get(name)))
+        with self.subTest("without an agent: this process's environment, as before"):
+            self.assertEqual((mv.harness_info(self.root, "claude").home, mv.harness_info(self.root, "claude").storage),
+                             (mine, None))
+        with self.subTest("an agent of another harness is refused"):
+            self.agent("coder", harness="codex")
+            with self.assertRaisesRegex(api.Error, "coder runs harness 'codex', not 'claude'"):
+                mv.harness_info(self.root, "claude", agent=mv.universe(self.root).agent("coder"))
+            with self.assertRaisesRegex(api.Error, r"pass mv\.universe\(universe\)\.agent\('storage'\)"):
+                mv.harness_info(self.root, "claude", agent="storage")  # a name is refused, saying what to pass
+
+    def test_a_filesystem_failure_is_an_oserror_too(self):
+        """A filesystem failure in an API call (EACCES, ENOSPC) is an api.Error and also the OSError it was, errno
+        kept, as state_dir and agent_state_dir raised in 1.9; a break goes unnoticed because tests rarely fill a
+        disk, and a 1.9 plugin's except OSError then crashes on the first full one."""
+        self.write_plugin("keeper", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("keeper")
+        mv = api.Plugin(loader.load(self.entry("keeper")))
+        self.agent("worker")
+        worker = mv.universe(self.root).agent("worker")
+        for failure, kind in ((PermissionError(errno.EACCES, "Permission denied"), PermissionError),
+                              (OSError(errno.ENOSPC, "No space left on device"), OSError)):
+            for name, call in (("state_dir", lambda: mv.state_dir(self.root)),
+                               ("agent_state_dir", lambda: mv.agent_state_dir(worker)),
+                               ("files.ensure_dir", lambda: api.files.ensure_dir(self.work / "elsewhere" / "a"))):
+                with self.subTest(name, errno=errno.errorcode[failure.errno]), \
+                        mock.patch.object(Path, "mkdir", side_effect=failure):
+                    with self.assertRaises(api.Error) as caught:
+                        call()
+                    self.assertIsInstance(caught.exception, kind)
+                    self.assertEqual(caught.exception.errno, failure.errno)
+                    self.assertIn(failure.strerror, str(caught.exception))
 
 
 HELPERS = """
