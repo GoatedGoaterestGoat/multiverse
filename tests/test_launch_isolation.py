@@ -271,6 +271,8 @@ class LaunchIsolationTest(unittest.TestCase):
                         properties['native_service_identity'] = {'provider': 'codex', 'scope': {'CODEX_HOME': str(homes['server'])}}
                     write(directory / 'properties.json', properties)
                 request = {'env': {} if found == 'restored-spelling' else {key: str(homes['request'])}, 'unset_env': []}
+                if found in ('server', 'unreadable', 'same-home-alias', 'server-spelling') or found.startswith('default-server'):
+                    request['env'] = {}  # This launch actually inherited the server's storage.
                 request_path = directory / 'launches' / launch / 'request.json'
                 if found.startswith('empty-'):
                     facts = {'launch_id': launch, 'state': 'failed', 'error': 'terminal creation failed'}
@@ -456,7 +458,9 @@ class LaunchIsolationTest(unittest.TestCase):
                              'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation',
                              'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'root-recorded-caller', 'caller-root-missing',
                              'store-missing', 'store-dangling', 'store-recorded-caller', 'store-unproven', 'store-invalid-proof', 'store-empty', 'caller-store-missing',
-                             'project-dangling'):
+                             'project-dangling', 'server-overridden-value', 'server-overridden-unset', 'server-overridden-partial', 'server-caller-origin'):
+                if evidence == 'server-overridden-partial' and family != 'codex':
+                    continue
                 if evidence == 'project-dangling' and family != 'claude':
                     continue
                 if family != 'codex' and evidence == 'scope-present':
@@ -471,8 +475,10 @@ class LaunchIsolationTest(unittest.TestCase):
                 unknown_server = evidence.startswith('caller-home-')
                 if unknown_server and family != 'claude':
                     continue
-                server_home = evidence.startswith('server-')
-                if (server_home or 'root-' in evidence or 'store-' in evidence) and family == 'pi':
+                server_override = evidence.startswith('server-overridden-')
+                caller_server = evidence == 'server-caller-origin'
+                server_home = evidence.startswith('server-') and not server_override and not caller_server
+                if (server_home or server_override or caller_server or 'root-' in evidence or 'store-' in evidence) and family == 'pi':
                     continue
                 with self.subTest(family=family, evidence=evidence):
                     key = {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME', 'pi': 'PI_CODING_AGENT_DIR'}[family]
@@ -487,6 +493,8 @@ class LaunchIsolationTest(unittest.TestCase):
                     directory, properties, _, _ = lifecycle._record(self.root, family + '-fresh-' + evidence, '', family, None, None)
                     old = str(uuid4())
                     old_home, caller = (self.work / family / evidence / part for part in ('old', 'caller'))
+                    if evidence == 'server-overridden-unset':
+                        old_home /= '.claude' if family == 'claude' else '.codex'
                     for home in (old_home, caller):
                         (home / 'projects').mkdir(parents=True)
                         (home / 'sessions').mkdir()
@@ -512,6 +520,19 @@ class LaunchIsolationTest(unittest.TestCase):
                             write(directory / 'runtime.json', {'launch_id': launch if evidence == 'history-damaged-runtime' else str(uuid4()),
                                   'state': 'invalid' if evidence == 'history-damaged-runtime' else 'failed'})
                     old_request = directory / 'launches' / launch / 'request.json'
+                    if server_override:
+                        saved = {'MV2_TMUX_SOCKET': str(self.work / 'fresh-old.sock'), 'HOME': str(old_home.parent)}
+                        if evidence != 'server-overridden-unset':
+                            saved[key] = str(old_home)
+                        unset = ([key] if evidence == 'server-overridden-unset' else []) + (['CODEX_SQLITE_HOME'] if family == 'codex' and evidence != 'server-overridden-partial' else [])
+                        write(old_request, {'env': saved, 'unset_env': unset})
+                    if evidence == 'unreadable' and family != 'pi':
+                        write(old_request, {'env': {'HOME': str(self.work)}, 'unset_env': []})
+                    if caller_server:
+                        write(directory / 'runtime.json', {'launch_id': launch, 'state': 'dormant'})
+                        (caller / 'projects').rmdir()
+                        (caller / 'sessions').rmdir()
+                        caller.rmdir()
                     if unknown_server:
                         properties.pop('native_session_home')
                         properties.pop('native_storage_environment')
@@ -599,6 +620,10 @@ class LaunchIsolationTest(unittest.TestCase):
                     backend = Mock()
                     backend.snapshot.return_value = ({}, None)
                     backend.environment.side_effect = PermissionError('unreadable server') if evidence == 'unreadable' else {key: str(caller if historical or evidence == 'scope-present' else old_home), 'HOME': str(self.work)}.get
+                    if server_override:
+                        backend.environment.side_effect = {'HOME': str(self.work / 'server-with-no-native-store')}.get
+                    if caller_server:
+                        backend.environment.side_effect = {key: str(caller), 'HOME': str(self.work)}.get
                     if unknown_server:
                         backend.environment.side_effect = {'HOME': str(account)}.get
                     if server_home:
@@ -643,7 +668,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch.dict(os.environ, {key: str(caller), **({'HOME': str(caller)} if unknown_server else {})}):
                         if unknown_server:
                             os.environ.pop(key)
-                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing', 'store-empty', 'caller-store-missing') and not unknown_server:
+                        if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing', 'store-empty', 'caller-store-missing') and not unknown_server and not server_override and not caller_server:
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable') as refused:
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
                             if evidence in ('present', 'duplicate', 'unreadable') and family != 'pi':
@@ -668,7 +693,12 @@ class LaunchIsolationTest(unittest.TestCase):
                                 self.assertEqual(resumed['native_session_id'], old)
                                 self.assertEqual(resumed['native_session_home'], str(old_home))
                             continue
-                        result = lifecycle.start(self.root, resume=directory.name, start_fresh=True)
+                        result = lifecycle.start(self.root, resume=directory.name, start_fresh=True,
+                                                 socket_path=str(self.work / 'caller-selected.sock') if caller_server else None)
+                        if evidence == 'server-overridden-partial':
+                            backend.environment.assert_called_once_with('CODEX_SQLITE_HOME')
+                        elif server_override:
+                            backend.environment.assert_not_called()
                     self.assertEqual(result['id'], properties['id'])
                     self.assertEqual(result['name'], properties['name'])
                     self.assertEqual((directory / 'inbox.jsonl').read_bytes(), before[directory / 'inbox.jsonl'])

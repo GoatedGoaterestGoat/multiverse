@@ -144,33 +144,46 @@ def _launch_requests(directory):
     return requests
 
 
-def recorded_sockets(directory):
-    """The terminal servers retained requests ran under. A legacy launch's storage came from its server."""
-    sockets = []
+def _request_environment(path, request, keys):
+    env, unset = request.get('env', {}), request.get('unset_env', [])
+    if (not isinstance(env, dict) or not isinstance(unset, list)
+            or any(not isinstance(key, str) or '\0' in key for key in unset)
+            or any(key in env and (not isinstance(env[key], str) or '\0' in env[key]) for key in (*keys, 'HOME'))):
+        raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
+    return records.request_environment(request, (*keys, 'HOME'))
+
+
+def inherited_terminals(directory, previous, keys):
+    """Servers can supply only storage a retained launch actually inherited.
+
+    Each value or explicit absence in the request overrides that variable
+    on the server; only the remaining storage variables are inherited. The current runtime's socket fills only its own request's
+    missing socket; it cannot identify the server of an unrelated old launch.
+    """
+    candidates = []
+    current_socket = (previous.get('tmux') or {}).get('socket')
+    current_request = False
     for path, request in _launch_requests(directory):
+        selected = _request_environment(path, request, keys)
         env = request.get('env', {})
-        if not isinstance(env, dict):
-            raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
-        if 'MV2_TMUX_SOCKET' not in env:
-            continue
-        saved = env['MV2_TMUX_SOCKET']
-        if not isinstance(saved, str) or not saved or '\0' in saved or not Path(saved).is_absolute():
+        saved = env.get('MV2_TMUX_SOCKET')
+        if 'MV2_TMUX_SOCKET' in env and (not isinstance(saved, str) or not saved or '\0' in saved or not Path(saved).is_absolute()):
             raise ValueError(f'Cannot verify conversation storage: repair the recorded terminal socket in {path}')
-        if saved not in sockets:
-            sockets.append(saved)
-    return sockets
+        if path.parent.name == previous.get('launch_id'):
+            current_request = True
+            saved = saved or current_socket
+        if saved and any(key not in selected for key in keys) and (saved, selected) not in candidates:
+            candidates.append((saved, selected))
+    if current_socket and not current_request:
+        candidates.append((current_socket, {}))
+    return candidates
 
 
 def _launch_environments(directory, keys):
     """Read storage evidence from every retained request, without granting launch authority."""
     environments = []
     for path, request in _launch_requests(directory):
-        env, unset = request.get('env', {}), request.get('unset_env', [])
-        if (not isinstance(env, dict) or not isinstance(unset, list)
-                or any(not isinstance(key, str) or '\0' in key for key in unset)
-                or any(key in env and (not isinstance(env[key], str) or '\0' in env[key]) for key in (*keys, 'HOME'))):
-            raise ValueError(f'Cannot verify conversation storage: repair the launch environment in {path}')
-        selected = records.request_environment(request, (*keys, 'HOME'))
+        selected = _request_environment(path, request, keys)
         if selected:
             environments.append((f'launch request {path}', selected))
     return environments
@@ -214,7 +227,8 @@ def prove_missing(adapter, properties, previous, directory, ambient, backends):
 def discover(adapter, properties, previous, directory, ambient, backends, *, recorded=None, require_absent=False):
     """Adopt exactly one proven candidate, with absence proved in every other home.
 
-    `backends` are the terminal servers records name; each one running is a candidate.
+    `backends` carries (origin, server, request overrides); caller-selected
+    servers do not become recorded storage evidence merely by being queried.
     """
     keys = tuple(getattr(adapter, 'storage_env', ()))
     candidates = []
@@ -225,16 +239,16 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
     # A complete global environment distinguishes unset from unknown. An absent
     # server supplies no candidate, while an unreadable server prevents proof.
     problems = []
-    for backend in backends:
+    for origin, backend, overrides in backends:
         try:
-            values = {key: backend.environment(key) for key in (*keys, 'HOME')}
+            values = {key: backend.environment(key) for key in (*keys, 'HOME') if key not in overrides}
             if any(value is not None and not isinstance(value, str) for value in values.values()):
                 raise ValueError('terminal server did not return its environment')
-            candidates.append(('terminal server', values, properties['workspace']))
+            candidates.append((origin, {**values, **overrides}, properties['workspace']))
         except Exception as error:
             reason = str(error)
             if not ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason):
-                problems.append('cannot read the recorded terminal server environment: ' + reason)
+                problems.append(f'cannot read the {origin} environment: ' + reason)
     candidates.append(('calling shell', _environment(ambient, keys), Path.cwd()))
     session = SessionHandle.from_records(properties, previous, directory)
     unbound = (require_absent and getattr(adapter, 'session_mode', None) == 'reported'
@@ -255,7 +269,8 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
                 caller = (home, selected)
             if home in homes:
                 continue
-            if require_absent and label != 'calling shell':
+            recorded_origin = label not in ('calling shell', 'caller-selected terminal server')
+            if require_absent and recorded_origin:
                 try:
                     if not stat.S_ISDIR(Path(home).stat().st_mode):
                         raise ValueError('the recorded storage root is not a directory')
@@ -276,7 +291,7 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
                 if result is None or result.state != 'ok' or type(present) is not bool:
                     problems.append(f'{home}: {result.reason if result else "no storage evidence hook"}')
                     present = None
-                elif require_absent and label != 'calling shell' and present is False and result.value.get('store_read') is not True:
+                elif require_absent and recorded_origin and present is False and result.value.get('store_read') is not True:
                     reason = result.reason or f'{home}: recorded conversation store was not read'
                     problems.append(f'{reason}; restore the conversation store if moved or unmounted, '
                                     'or create it to confirm the conversation is absent')

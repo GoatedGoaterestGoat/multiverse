@@ -43,7 +43,7 @@ def failure_reason(reason, text='', *, preserve_details=False):
     return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
 
 
-def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text='', running=False):
+def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, retry=False, accepted=False, text='', running=False):
     state = receipt.get('state')
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
@@ -52,7 +52,7 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
         if value.get('retired_by_fresh_start') is True:
             return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
                     'Send a new message if you still want it delivered.')
-        if value.get('final') is True:
+        if value.get('final') is True or retry:
             return (f'{name}: cannot retry saved message {json.dumps(clean(text), ensure_ascii=False)}: '
                     'its conversation is outside the recorded lineage. Verify the original conversation, '
                     'then send a new message if you still want it delivered.')
@@ -67,6 +67,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     if value.get('paused') is True:
         return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
+        if value.get('repair_journal'):
+            return (f'{name}: could not {"check delivery" if check else "retry saved message"}: {clean(reason)}. '
+                    f'Saved; after repairing the journal, run mv2 deliver {name} --{"check" if check else "retry"}.')
         # A file path is actionable evidence, not an opaque native identifier.
         why = (clean(reason) if value.get('pre_submission_failure') is True else
                failure_reason(reason, text, preserve_details=value.get('wake_refused') is True or value.get('check_error') is True))

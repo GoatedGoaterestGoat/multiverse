@@ -14,6 +14,18 @@ class SessionConflict(ValueError):
     """A native conversation already belongs to a different agent."""
 
 
+class JournalError(records.RecordError):
+    """Keep the authoritative journal and its repair advice through CLI error wrapping."""
+
+    def __init__(self, directory, reason):
+        super().__init__(Path(directory) / 'sessions.jsonl',
+                         f'Invalid session journal: {reason}. Back up and repair this journal, '
+                         'or restore an intact copy, before retrying')
+
+    def __str__(self):
+        return f'{self.file}: {self.reason}'
+
+
 def top(root):
     root = Path(root).resolve()
     while (above := parent(root)) is not None:
@@ -142,8 +154,8 @@ def journal(directory):
                     raise ValueError('storage changes without retirement')
                 identities.add(row['id'])
                 rows.append(row)
-    except (ValueError, TypeError, KeyError) as error:
-        raise ValueError(f'Invalid session journal {path}: {error}') from error
+    except (OSError, ValueError, TypeError, KeyError) as error:
+        raise JournalError(directory, f'cannot read ({error})' if isinstance(error, OSError) else str(error)) from error
     return rows
 
 
@@ -153,16 +165,16 @@ def effective(directory, data):
     if rows:
         last = rows[-1]
         if any(row['harness'] != data.get('harness') for row in rows):
-            raise ValueError('Invalid session journal: provider changes within a lineage')
+            raise JournalError(directory, 'provider changes within a lineage')
         if data.get('native_session_id') not in (last['from'], last['to']):
-            raise ValueError('Invalid session journal: pointer conflicts with its latest transition')
+            raise JournalError(directory, 'pointer conflicts with its latest transition')
         if (last.get('kind') == 'fresh-start' and data.get('native_session_transition') != last['id']
                 and data.get('native_session_id') == last['from']):
             # Append-before-pointer recovery also clears the old account and
             # stable identity. Never reconstruct a new scope from today's shell.
             data = {**data, **last['replacement'], 'native_session_transition': last['id']}
         if data.get('native_session_home') not in (None, _next_home(last)):
-            raise ValueError('Invalid session journal: storage conflicts with its latest transition')
+            raise JournalError(directory, 'storage conflicts with its latest transition')
         data = {**data, 'native_session_id': last['to'], 'native_session_home': _next_home(last)}
         if last.get('kind') == 'bind':
             data['native_fresh_pending'] = False

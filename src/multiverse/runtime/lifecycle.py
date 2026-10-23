@@ -32,20 +32,24 @@ def damaged_row(scope, error, properties=None):
     """
     known = properties if properties is not None else (error.data if isinstance(error.data, dict) else {})
     text = lambda key: known[key] if isinstance(known.get(key), str) else ""
-    agent_dir = error.file if error.file.suffix != ".json" else error.file.parent
+    agent_dir = error.file.parent if error.file.suffix in ('.json', '.jsonl') else error.file
     try:
         shown = str(error.file.relative_to(scope))
     except ValueError:
         shown = str(error.file)
-    label = error.file.name if error.file.suffix == ".json" else shown
+    label = error.file.name if error.file.suffix in ('.json', '.jsonl') else shown
     reason, summary = error.reason, f"damaged: {label}: {error.reason}"
     recover = {'recover': 'kill'} if getattr(error, 'recover', None) == 'kill' else {}
     try:
-        if error.file.name == 'properties.json' and agents.orphaned(agent_dir):
+        if error.file.name == 'properties.json' and agents.properties_missing(agent_dir):
             recover = {'recover': 'remove'}
-            shown = str(Path(shown).parent)
-            reason = summary = (f'leftover folder with no agent records; '
-                                f'mv2 remove {agent_dir.name} moves it to the trash')
+            reason = (f'{error.reason}; mv2 remove {agent_dir.name} checks the surviving process evidence '
+                      'before moving this leftover folder to the trash')
+            summary = f'damaged: {label}: {reason}'
+            if agents.orphaned(agent_dir):
+                shown = str(Path(shown).parent)
+                reason = summary = (f'leftover folder with no agent records; '
+                                    f'mv2 remove {agent_dir.name} moves it to the trash')
     except OSError:
         pass  # Unreadable authority is not an orphan-removal hint.
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
@@ -308,7 +312,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
         if start_fresh:
             storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
-                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path)))
+                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path, adapter.storage_env)))
             # Preparation is still read-only. The old binding is retired only
             # once the replacement command is valid and ready to be published.
             for key in agents.sessions.FRESH_FIELDS:
@@ -750,17 +754,17 @@ def _storage_difference(recorded, selected, *, variable=None):
                       'or spawn a new agent for the requested storage')
 
 
-def _storage_terminals(previous, directory, socket_path=None):
+def _storage_terminals(previous, directory, socket_path=None, keys=()):
     """Storage discovery may inspect a recorded or explicitly selected server, never guess the default.
 
-    Every retained launch request names the server it ran under. A legacy launch inherited its storage
-    variable from that server alone, so it stays evidence when runtime.json is lost or a later launch
-    failed before it had a terminal.
+    Retained requests identify inherited storage; an explicit request value or
+    absence takes precedence. A caller-selected server has caller origin.
     """
-    socket = (previous.get('tmux') or {}).get('socket') or socket_path
-    sockets = [socket] if socket else []
-    sockets += [saved for saved in storage_adoption.recorded_sockets(directory) if saved not in sockets]
-    return [Tmux(saved) for saved in sockets]
+    recorded = storage_adoption.inherited_terminals(directory, previous, keys)
+    backends = [('recorded terminal server', Tmux(saved), overrides) for saved, overrides in recorded]
+    if socket_path and not any(saved == socket_path for saved, _ in recorded):
+        backends.append(('caller-selected terminal server', Tmux(socket_path), {}))
+    return backends
 
 
 def _storage_environment(adapter, properties, environment, ambient, resume, directory, previous, notices, *, socket_path=None):
@@ -810,7 +814,7 @@ def _storage_environment(adapter, properties, environment, ambient, resume, dire
         candidate_recorded = adopted
     if family in ('claude', 'codex') and properties.get('native_session_id'):
         adoption = storage_adoption.discover(adapter, properties, previous, directory, ambient,
-                                            _storage_terminals(previous, directory, socket_path), recorded=candidate_recorded)
+                                            _storage_terminals(previous, directory, socket_path, own_keys), recorded=candidate_recorded)
         adopted = dict(adoption.environment)
         if own_keys and adopted.get(own_keys[0]):
             # An explicit storage root does not depend on the candidate user's

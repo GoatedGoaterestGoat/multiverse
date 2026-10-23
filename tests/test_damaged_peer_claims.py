@@ -110,6 +110,13 @@ class DamagedPeerClaimsTest(BaseTest):
                 journal.write_text(original + suffix)
                 with self.assertRaisesRegex(ValueError, 'session journal'):
                     agents.session_properties(self.root, agent)
+                from multiverse.tools import resume
+                with patch.object(resume, 'run', side_effect=lambda *args, **kwargs: agents.session_properties(self.root, agent)), \
+                        self.assertRaises(ValueError) as refused:
+                    resume.cli_run(self.root, agent=agent.name)
+                self.assertIn(str(journal), str(refused.exception))
+                self.assertIn('repair', str(refused.exception).lower())
+                self.assertEqual(journal.read_text(), original + suffix)
         journal.write_text(original)
         peer, previous = self.pi_agent('damaged-peer')
         later, torn = str(uuid4()), str(uuid4())

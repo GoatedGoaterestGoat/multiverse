@@ -55,7 +55,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             evidence = tracking.get('native_receipt')
             confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True
             target = tracking.get('target_session') or message.get('target_session')
-            outside_lineage = bool((check or retry and state in ('failed', 'launch-only')) and state != 'cancelled' and target and target != native_id
+            outside_lineage = bool(state != 'cancelled' and not confirmed and target and target != native_id
                                    and not native._session_changes(directory, properties, target))
             accepted = check and state == 'accepted' and not confirmed and tracking.get('delivery_method') != 'resume_prompt'
             if accepted:
@@ -66,7 +66,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                     adapter = harnesses.load(root, properties['harness'])
                     old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
                 accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
-            if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+            if not outside_lineage and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
                 continue
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
             if final is not None and retry:
@@ -104,7 +104,8 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             else:
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
         except (OSError, ValueError, RuntimeError) as error:
-            receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True}}
+            receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True,
+                       **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
         if check and state != 'cancelled' and receipt.get('state') == 'cancelled':
             # Another checker may have selected the same still-accepted snapshot.
             if mailbox.claim_cancelled_report(directory, message['id']) is None:
@@ -113,6 +114,11 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if uncheckable and mailbox.claim_uncheckable_report(directory, message['id']) is None:
             continue
         summary = delivery_summary(receipt)
+        if retry and uncheckable:
+            # Reporting a final is not a failed submission. Keep its original
+            # delivery evidence, but count it with previously reported finals.
+            finalized += 1
+            summary['ok'] = True
         notices = display.notice_lines(receipt.get('notices'))
         if notices:
             summary['notices'] = notices
@@ -123,7 +129,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if _present:
             _, current = mailbox.message_record(directory, message['id'])
             present = _present_error if summary.get('ok') is False and _present_error else _present
-            present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
+            present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
     if _present and finalized:
         _present(f'{name}: {finalized} earlier {"message is" if finalized == 1 else "messages are"} final' +

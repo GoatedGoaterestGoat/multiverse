@@ -663,7 +663,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         except Exception as error:
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
                        'reason': f'Cannot load recipient adapter: {error}', 'at': now(),
-                       **({'value': {'check_error': True}} if check else {})}
+                       'value': {**({'check_error': True} if check else {}),
+                                 **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
             if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
                 update_message(directory, message_id, submission_state='failed',
                                attempts=[*tracking.get('attempts', []), receipt])

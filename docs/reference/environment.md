@@ -106,8 +106,9 @@ Older Claude and Codex agents may lack a storage snapshot. Existing proven
 Codex service scopes or explicit launch requests remain usable. Otherwise mv2
 looks for that exact conversation in candidate homes from every retained launch
 request, the saved storage map, session home and service scope, the calling shell
-(or its harness default), and the global environment of each tmux server the
-records name. Missing
+(or its harness default), and inherited values from tmux servers the
+records name. A request's value or explicit absence overrides that server's
+value for the same variable; a server cannot add a different home for it. Missing
 or damaged runtime authority does not discard this storage evidence or restore
 permission to control an old process. An unreadable or damaged retained request
 blocks adoption and `--start-fresh`; recovery requires readable absence in every
@@ -119,11 +120,12 @@ Restore the missing folder, or create it to confirm that its conversation is abs
 
 An old request recording neither a storage location nor `HOME` adds no location
 of its own; mv2 still checks the calling shell and the terminal servers.
-Those are the server in `runtime.json` or one you select explicitly, and every
-server a retained request names in `MV2_TMUX_SOCKET`: an older launch inherited
-its storage variable from that server, so it stays evidence when `runtime.json`
-is lost or a later launch failed before it had a terminal. A server no record
-names is never queried; the caller's harness default uses the caller's `HOME`,
+Those are the server in `runtime.json` and every server a retained request
+names in `MV2_TMUX_SOCKET`, only for storage variables that launch inherited
+rather than recorded. They stay evidence when `runtime.json` is lost or a later
+launch failed before it had a terminal. A server you explicitly select also
+supplies caller-origin candidates, which need no existing store unless retained
+evidence names the same home. No other server is queried; the caller's harness default uses the caller's `HOME`,
 alongside retained storage evidence.
 Each terminal variable is read whole, including embedded
 newlines and trailing whitespace; unreadable or ambiguous escaped output blocks adoption. The adapter

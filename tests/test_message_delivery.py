@@ -556,13 +556,18 @@ class InboxDeliveryTest(DeliveryFixture):
             sessions.retire(self.root, self.directory, self.native_id, replacement, next_launch,
                             previous_launch=self.launch)
             write(self.directory / 'runtime.json', {'launch_id': next_launch, 'state': 'running', 'tmux': self.terminal})
+            self.behavior = NativeResult('error', 'refused before submission')
+            current = self.send('new conversation input')
+            self.behavior = NativeResult('native_queued')
             lines = []
             adapter = harnesses.load(self.root, 'claude')
             with patch.object(adapter, 'get_delivery', side_effect=AssertionError('retired conversation must not be queried')):
-                checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
-            self.assertFalse(checked['ok'])
-            self.assertEqual(len(checked['messages']), 5)
-            self.assertTrue(all('never reached the new conversation' in line and 'Send a new message' in line for line in lines), lines)
+                checked = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+            self.assertTrue(checked['ok'], checked)
+            self.assertEqual(checked['finalized'], 5)
+            self.assertEqual(len(checked['messages']), 6)
+            self.assertEqual(sum('never reached the new conversation' in line and 'Send a new message' in line for line in lines), 5)
+            self.assertFalse(any('cannot check' in line for line in lines), lines)
             for repeat in range(3):
                 lines = []
                 retried = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
@@ -570,13 +575,6 @@ class InboxDeliveryTest(DeliveryFixture):
                 self.assertEqual(retried['messages'], [])
                 self.assertEqual(retried['finalized'], 5)
                 self.assertTrue(any('5 earlier messages are final' in line for line in lines), lines)
-            self.behavior = NativeResult('error', 'refused before submission')
-            current = self.send('new conversation input')
-            self.behavior = NativeResult('native_queued')
-            retried = deliver.run(self.root, agent=self.agent, retry=True)
-            self.assertTrue(retried['ok'])
-            self.assertEqual(retried['finalized'], 5)
-            self.assertEqual(len(retried['messages']), 1)
             self.assertEqual(len(self.calls), 7)  # Five old accepts, one refusal, one retry.
             update_message(self.directory, current['id'], native_receipt={'transcript_confirmed': True})
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
@@ -601,6 +599,29 @@ class InboxDeliveryTest(DeliveryFixture):
                 reason = str(self.directory / 'sessions.jsonl') if damage == 'journal' else 'fixture harness cannot load'
                 self.assertTrue(all(reason in line for line in lines), lines)
                 self.assertEqual(len(self.calls), 2)
+                if damage == 'journal':
+                    self.assertTrue(all('repair' in line.lower() and 'resume it' not in line for line in lines), lines)
+                    from multiverse.runtime import lifecycle
+                    from multiverse.universe import sessions
+                    try:
+                        sessions.journal(self.directory)
+                    except sessions.JournalError as error:
+                        row = lifecycle.damaged_row(self.root, error)
+                    self.assertEqual(row['id'], self.agent)
+                    self.assertIn('sessions.jsonl', row['damaged']['file'])
+                    for item in messages:
+                        update_message(self.directory, item['id'], submission_state='failed')
+                    # A submission needs an intact journal, even for the saved current pointer.
+                    # Reading its saved failure does not: only the other target needs lineage proof.
+                    update_message(self.directory, messages[1]['id'], target_session=read(self.directory / 'properties.json')['native_session_id'])
+                    checked = deliver.run(self.root, agent=self.agent, check=True)
+                    self.assertEqual(len(checked['messages']), 2)
+                    self.assertNotIn('session journal', checked['messages'][1]['reason'])
+                    lines = []
+                    retried = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+                    self.assertEqual(len(retried['messages']), 2)
+                    self.assertTrue(all(reason in line and 'repair' in line.lower() and 'resume it' not in line for line in lines), lines)
+                    self.assertEqual(len(self.calls), 2, 'Damaged authority never authorizes another submission')
         with self.subTest('an older acceptance in an earlier owned conversation stays out of checks'):
             from multiverse.universe import agents
             self.recipient(native_session_home=str(self.work))
@@ -624,9 +645,10 @@ class InboxDeliveryTest(DeliveryFixture):
                 first = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
                 second = deliver.run(self.root, agent=self.agent, retry=True)
                 third = deliver.run(self.root, agent=self.agent, check=True)
-            self.assertFalse(first['ok'])
+            self.assertTrue(first['ok'], first)
+            self.assertEqual(first['finalized'], 1)
             self.assertIn('outside', first['messages'][0]['reason'])
-            self.assertTrue(any('Inspect the original conversation' in line for line in lines), lines)
+            self.assertTrue(any('cannot retry' in line for line in lines), lines)
             self.assertFalse(any('then mv2 deliver' in line for line in lines), lines)
             self.assertTrue(second['ok'])
             self.assertEqual(second['finalized'], 1)

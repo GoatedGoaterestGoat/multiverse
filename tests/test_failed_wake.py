@@ -160,7 +160,8 @@ class FailedWakeTest(BaseTest):
                     repeated = deliver.run(self.root, agent='wake', retry=True)
                 self.assertEqual(resend.call_count, 1 if consumed is False and case != 'outside lineage' else 0)
                 if case == 'outside lineage' and consumed is False:
-                    self.assertFalse(retried['ok'])
+                    self.assertTrue(retried['ok'])
+                    self.assertEqual(retried['finalized'], 1)
                     self.assertIn('outside', retried['messages'][0]['reason'])
                     self.assertTrue(repeated['ok'])
                     self.assertEqual(repeated['finalized'], 1)

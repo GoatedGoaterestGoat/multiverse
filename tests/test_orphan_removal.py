@@ -20,7 +20,7 @@ class OrphanRemovalTest(BaseTest):
 
     def test_an_orphan_folder_is_removed_only_with_independent_proof(self):
         """A record-free agent folder goes to trash intact only when no exact-tagged terminal or unreadable server
-        suggests a live launch, and surviving core evidence never gets the remove hint; fragile because the folder has
+        suggests a live launch, and a missing properties file keeps its guarded remove hint with surviving evidence; fragile because the folder has
         no record to prove absence, and a wrong removal trashes a running agent; a torn runtime must not hide the
         only surviving process proof in its cleanup journal, and cleanup inspection must not manufacture evidence that
         removes the orphan hint on the next listing (bd3d410)."""
@@ -46,7 +46,12 @@ class OrphanRemovalTest(BaseTest):
                 path.write_text('{}\n')
                 try:
                     row = lifecycle.listing(self.root)[0]
-                    self.assertNotEqual(row['damaged'].get('recover'), 'remove')
+                    self.assertEqual(row['damaged'].get('recover'), 'remove')
+                    for output in (list_agents.run(self.root, wide=True),
+                                   inspect.cli_run(self.root, agent=self.directory.name),
+                                   '\n'.join(problem for problem, _ in doctor.check(self.root))):
+                        self.assertIn('properties.json', output)
+                        self.assertIn(f'mv2 remove {self.directory.name}', output)
                     with patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)), \
                             self.assertRaises(records.RecordError):
                         relocate.remove_agent(self.root, self.directory.name)
@@ -104,6 +109,17 @@ class OrphanRemovalTest(BaseTest):
             self.assertFalse(self.directory.exists())
             self.assertEqual(removed['id'], self.directory.name)
             self.assertEqual(read(Path(removed['trash']) / 'compaction/note.json'), {'leftover': True})
+        with self.subTest('present damaged properties must be repaired, not offered removal'):
+            write(self.note, {'leftover': True})
+            damaged = self.directory / 'properties.json'
+            damaged.write_text('{')
+            try:
+                for output in (list_agents.run(self.root, wide=True), inspect.cli_run(self.root, agent=self.directory.name),
+                               '\n'.join(problem for problem, _ in doctor.check(self.root))):
+                    self.assertIn('properties.json', output)
+                    self.assertNotIn(f'mv2 remove {self.directory.name}', output)
+            finally:
+                damaged.unlink()
         with self.subTest('runtime-only leftovers retain process proof before removal'):
             write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'failed', 'pid': 12345})
             original = (self.directory / 'runtime.json').read_bytes()
