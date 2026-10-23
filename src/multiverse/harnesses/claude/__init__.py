@@ -111,7 +111,8 @@ def could_hold(name, workspaces):
 def session_transcripts(native_id, environment=None, workspaces=(), links=False):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
 
-    Raises Unreadable when a folder can't be listed or searched and could hold the session: Claude files it
+    Raises Unreadable when a folder can't be listed or searched and could hold the session (a dangling link, or a
+    folder gone before it was searched, counts as one that can't be searched): Claude files it
     under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
     folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
     that finds nothing would otherwise read as proof the transcript is absent.
@@ -131,8 +132,11 @@ def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
     found, files = [], set()
     for entry in entries:
         candidate = Path(entry.path) / f'{native_id}.jsonl'
+        holds = could_hold(entry.name, workspaces)
         try:
             if not entry.is_dir():
+                if holds and entry.is_symlink():
+                    os.stat(entry.path)  # a dangling or looping link where the session could be proves nothing
                 continue
             # `links` finds a link (even a dangling one) where a transcript should be, for readers that refuse it.
             status = candidate.lstat() if links else candidate.stat()
@@ -140,10 +144,12 @@ def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
                 continue  # the same file through another path (a linked project folder): read it once
             files.add((status.st_dev, status.st_ino))
             found.append((status.st_mtime, candidate))
-        except FileNotFoundError:
+        except FileNotFoundError as error:
+            if holds and not os.path.isdir(entry.path):  # the folder itself is gone: a dangling link, or removed mid-scan
+                raise Unreadable(entry.path) from error
             continue
         except OSError as error:
-            if could_hold(entry.name, workspaces):  # a project folder that can't be searched could hold it
+            if holds:  # a project folder that can't be searched could hold it
                 raise Unreadable(entry.path) from error
     return [path for _, path in sorted(found)], True
 

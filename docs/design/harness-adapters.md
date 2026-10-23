@@ -85,7 +85,9 @@ first 200 plus `-` and a hash). So an unreadable folder blocks when its name,
 ignoring case, is the key of the handle's workspace (as recorded or as its real
 path) or starts with that key plus `-`, which covers Claude's own worktrees under
 the workspace and the hashed long form. Another workspace's unreadable folder is
-skipped; with no absolute workspace, every unreadable folder blocks. The handle's
+skipped; with no absolute workspace, every unreadable folder blocks. A dangling
+link in such a folder's place, or a folder gone before it was searched, counts as
+unreadable, while a link to a real folder is searched through it. The handle's
 workspace is the launch's own, so a recheck of a failed wake reads that launch's
 folder even after the agent moved on. GOAT applies the same rule to its search. The
 same scan answers core's `session_storage_evidence(session, home)` for each

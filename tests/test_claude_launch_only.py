@@ -402,6 +402,39 @@ class ClaudeUnreadableStorageTest(BaseTest):
             self.project.chmod(0o700)
             self.assertEqual(found.state, 'unknown')
             self.assertIn(str(self.project), found.reason)
+            # Every project folder that could hold the session must be read, one level down from the store too: a
+            # dangling link (a renamed target or an unmounted volume) or a folder gone mid-scan proves nothing, while a
+            # healthy linked folder is read through its link (reviewer, 9dd66d8).
+            moved = self.work / 'moved-project'
+            hidden = self.work / 'offline-project'
+            def restore():  # put the real folder back whatever a row did, so a failure doesn't cascade
+                if self.project.is_symlink():
+                    self.project.unlink()
+                for place in (moved, hidden):
+                    if place.is_dir():
+                        place.rename(self.project)
+            try:
+                self.project.rename(moved)
+                self.project.symlink_to(moved, target_is_directory=True)
+                self.assertEqual((evidence(str(self.storage)).state, evidence(str(self.storage)).value), ('ok', {'present': True}))
+                moved.rename(hidden)  # the link now dangles, and the transcript behind it still exists
+                found = evidence(str(self.storage))
+                self.assertEqual(found.state, 'unknown', found.value)
+                self.assertIn(str(self.project), found.reason)
+                hidden.rename(moved)
+                def gone_mid_scan(real):
+                    def look(path, *args, **kwargs):
+                        if path == self.project / f'{self.native}.jsonl' and self.project.is_symlink():
+                            self.project.unlink()  # the listed folder disappears before it is searched
+                        return real(path, *args, **kwargs)
+                    return look
+                with patch.object(Path, 'stat', gone_mid_scan(Path.stat)), patch.object(Path, 'lstat', gone_mid_scan(Path.lstat)):
+                    found = evidence(str(self.storage))
+                self.assertEqual(found.state, 'unknown', found.value)
+                self.assertIn(str(self.project), found.reason)
+            finally:
+                restore()
+            self.assertEqual(evidence(str(self.storage)).value, {'present': True})
             for home, handle in (('relative/claude', session), (str(self.storage), replace(session, native_id=None))):
                 with self.subTest(home=home, native=handle.native_id):
                     self.assertEqual(evidence(home, handle).state, 'unknown')
