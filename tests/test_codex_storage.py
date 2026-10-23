@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +36,10 @@ class CodexStorageTest(unittest.TestCase):
                                ('foreign-header', None), ('invalid-root-id', None), ('duplicate-id', None), ('damaged', None),
                                ('incomplete', None), ('directory', None), ('symlink', None),
                                ('linked-sessions-root', None), ('linked-dated-folder', None),
+                               ('dangling-dated-folder', None), ('dangling-archive-folder', None),
+                               ('linked-archive-folder', None),
+                               ('unreadable-dated-folder', None), ('unreadable-archive-folder', None),
+                               ('vanished-dated-folder', None), ('vanished-archive-folder', None),
                                ('unreadable', None), ('scan-budget', None), ('header-budget', None)):
             with self.subTest(case=case), tempfile.TemporaryDirectory(prefix='mv2-codex-proof-') as temporary:
                 home = Path(temporary).resolve()
@@ -94,7 +99,17 @@ class CodexStorageTest(unittest.TestCase):
                     compressed.write_bytes(b'unsupported compressed data')
                     if case == 'compressed':
                         path.unlink()
-                with self._patch_case(case):
+                if case.endswith('-archive-folder'):
+                    archive = home / 'archived_sessions'
+                    archive.mkdir()
+                    (home / 'sessions/2026').rename(archive / '2026')
+                if case.startswith('dangling-') or case == 'linked-archive-folder':
+                    source = home / ('archived_sessions/2026' if case.endswith('-archive-folder') else 'sessions/2026')
+                    target = home / 'linked-target'
+                    source.rename(target)
+                    source.symlink_to(target if case == 'linked-archive-folder' else home / 'missing-target',
+                                      target_is_directory=True)
+                with self._patch_case(case, home):
                     result = adapter.session_storage_evidence(session, str(home))
                 self.assertEqual(result.state, 'unknown' if expected is None else 'ok', result)
                 if expected is None:
@@ -108,7 +123,7 @@ class CodexStorageTest(unittest.TestCase):
             with self.subTest(candidate=candidate, native_id=target.native_id):
                 self.assertEqual(adapter.session_storage_evidence(target, candidate).state, 'unknown')
 
-    def _patch_case(self, case):
+    def _patch_case(self, case, home):
         if case == 'unreadable':
             return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=PermissionError('denied'))
         if case == 'unreadable-archive':
@@ -118,6 +133,33 @@ class CodexStorageTest(unittest.TestCase):
                 if Path(path).name == 'archived_sessions':
                     raise PermissionError('archive denied')
                 return scandir(path)
+            return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=read_directory)
+        if case.startswith(('unreadable-', 'vanished-')) and case.endswith('-folder'):
+            from multiverse.harnesses.codex.storage import os
+            scandir = os.scandir
+            target = home / ('archived_sessions/2026' if case.endswith('-archive-folder') else 'sessions/2026')
+            def read_directory(directory):
+                if Path(directory) == target and case.startswith('unreadable-'):
+                    raise PermissionError('dated folder denied')
+                entries = scandir(directory)
+                class ObservedEntries:
+                    def __enter__(self):
+                        entries.__enter__()
+                        return self
+                    def __exit__(self, *args):
+                        return entries.__exit__(*args)
+                    def __iter__(self):
+                        for entry in entries:
+                            if Path(entry.path) == target and case.startswith('vanished-'):
+                                target.rename(home / 'vanished-target')
+                                # DT_UNKNOWN filesystems resolve type on demand;
+                                # DirEntry predicates suppress ENOENT as False.
+                                candidate = Path(entry.path)
+                                entry = SimpleNamespace(name=entry.name, path=entry.path,
+                                    is_symlink=candidate.is_symlink,
+                                    is_dir=lambda **kwargs: candidate.is_dir())
+                            yield entry
+                return ObservedEntries()
             return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=read_directory)
         if case == 'scan-budget':
             return patch('multiverse.harnesses.codex.storage.MAX_ENTRIES', 1)

@@ -106,9 +106,12 @@ def session_storage_evidence(session, home):
                         return _header(candidate, native_id)
                     if entry.name.startswith('rollout-') and native_id in entry.name:
                         return _unknown(candidate, 'unsupported matching rollout filename')
-                    if entry.is_symlink():
+                    # DirEntry predicates can hide ENOENT or cached types;
+                    # absence needs a current, non-following metadata read.
+                    mode = candidate.lstat().st_mode
+                    if stat.S_ISLNK(mode):
                         return _unknown(candidate, 'a linked entry cannot establish absence')
-                    if entry.is_dir(follow_symlinks=False):
+                    if stat.S_ISDIR(mode):
                         pending.append(candidate)
         except OSError as error:
             return _unknown(directory, str(error))
