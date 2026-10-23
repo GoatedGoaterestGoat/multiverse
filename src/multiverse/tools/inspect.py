@@ -75,7 +75,7 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     description = 'leftover folder' if damage and damage.get('recover') == 'remove' else label(row)
     head = f'{row["name"]} · {description} · {state(row)}'
     reported = " — ".join(part for part in (row.get("phase"), " ".join(row.get("summary", "").split())) if part)
-    out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error_text(error, tail=5)}"] if error else []) \
+    out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error if damage else error_text(error, tail=5)}"] if error else []) \
         + ([f"Note: {fallback}"] if fallback else [])
     out.extend('Note: ' + notice for notice in notices)
     if row.get('delivery_problem'):

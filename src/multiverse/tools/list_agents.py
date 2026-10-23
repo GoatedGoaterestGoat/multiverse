@@ -44,7 +44,7 @@ def run(root=None, *, recursive=False, json=False, wide=False):
         damage = row.get('damaged')
         error = (f"{damage['file']}: {damage['reason']}" if damage else None) or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
         if error:
-            lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide else error_text(error)))
+            lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide or damage else error_text(error)))
         if row.get('delivery_problem'):
             lines.append('  ! ' + row['delivery_problem'])
         if row.get('recovery_note'):

@@ -6,7 +6,7 @@ from multiverse.runtime import lifecycle
 from multiverse.runtime import attachments, missing_runtime
 from multiverse.store import read, uid, write
 from multiverse.terminal.tmux import Tmux
-from multiverse.tools import list_agents, doctor, inspect
+from multiverse.tools import list_agents, doctor, inspect, remove
 from multiverse.universe import records, relocate
 from test_multiverse import BaseTest
 
@@ -23,7 +23,8 @@ class OrphanRemovalTest(BaseTest):
         suggests a live launch, and a missing properties file keeps its guarded remove hint with surviving evidence; fragile because the folder has
         no record to prove absence, and a wrong removal trashes a running agent; a torn runtime must not hide the
         only surviving process proof in its cleanup journal, and cleanup inspection must not manufacture evidence that
-        removes the orphan hint on the next listing (bd3d410)."""
+        removes the orphan hint on the next listing (bd3d410). A corrupt properties file must name its repair path,
+        or a refused removal leaves no actionable recovery."""
         pane = {'pane_id': '%1', 'session_id': '$1', 'pane_pid': '123', 'pane_dead': '0',
                 '@mv2_agent_id': self.directory.name,
                 '@mv2_universe_id': read(self.root / 'universe.json')['id'], '@mv2_launch_id': uid()}
@@ -109,17 +110,24 @@ class OrphanRemovalTest(BaseTest):
             self.assertFalse(self.directory.exists())
             self.assertEqual(removed['id'], self.directory.name)
             self.assertEqual(read(Path(removed['trash']) / 'compaction/note.json'), {'leftover': True})
-        with self.subTest('present damaged properties must be repaired, not offered removal'):
-            write(self.note, {'leftover': True})
-            damaged = self.directory / 'properties.json'
-            damaged.write_text('{')
-            try:
-                for output in (list_agents.run(self.root, wide=True), inspect.cli_run(self.root, agent=self.directory.name),
-                               '\n'.join(problem for problem, _ in doctor.check(self.root))):
-                    self.assertIn('properties.json', output)
-                    self.assertNotIn(f'mv2 remove {self.directory.name}', output)
-            finally:
-                damaged.unlink()
+        for contents in ('{', '[]'):
+            with self.subTest(damaged_properties=contents):
+                write(self.note, {'leftover': True})
+                damaged = self.directory / 'properties.json'
+                damaged.write_text(contents)
+                try:
+                    with self.assertRaises(records.RecordError) as refused:
+                        remove.cli_run(self.root, target=self.directory.name)
+                    for output in (str(refused.exception), list_agents.run(self.root),
+                                   inspect.cli_run(self.root, agent=self.directory.name).split('Last error: ', 1)[1],
+                                   '\n'.join(problem for problem, _ in doctor.check(self.root))):
+                        self.assertIn(str(damaged), output)
+                        self.assertIn('repair it from a backup, or restore an intact copy', output)
+                        self.assertNotIn(f'mv2 remove {self.directory.name}', output)
+                    self.assertEqual(damaged.read_text(), contents)
+                    self.assertEqual(read(self.note), {'leftover': True})
+                finally:
+                    damaged.unlink()
         with self.subTest('runtime-only leftovers retain process proof before removal'):
             write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'failed', 'pid': 12345})
             original = (self.directory / 'runtime.json').read_bytes()

@@ -186,7 +186,7 @@ class DamagedListingTests(PluginTestCase):
                 rows = self.rows()
                 self.assertEqual(len(rows), 3)
                 damaged = rows[self.victim.name]
-                self.assertEqual(damaged["damaged"]["reason"], f"{key} must be a string, not null")
+                self.assertEqual(damaged["damaged"]["reason"].split(';', 1)[0], f"{key} must be a string, not null")
                 self.assertIsInstance(damaged["name"], str)
                 self.assertIn("damaged: properties.json", list_agents.run(self.root))
 

@@ -63,13 +63,24 @@ def properties(path, *, harness_optional=False):
     Own report/callback paths do not interpret the harness; harness_optional
     lets them report even when only that configuration field is damaged.
     """
-    data = _object(path)
-    for key in TEXT_FIELDS:
-        if harness_optional and key == 'harness':
-            continue  # Agent data callbacks do not interpret the harness configuration.
-        if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
-            raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
-    return data
+    path = Path(path)
+    try:
+        data = _object(path)
+        for key in TEXT_FIELDS:
+            if harness_optional and key == 'harness':
+                continue  # Agent data callbacks do not interpret the harness configuration.
+            if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
+                raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
+        return data
+    except RecordError as error:
+        if path.name != 'properties.json':
+            raise
+        try:
+            path.lstat()
+        except OSError:
+            raise error from None  # A missing record has a separate guarded removal path.
+        raise RecordError(path, f'{error.reason}; {path}: repair it from a backup, or restore an intact copy',
+                          error.data) from None
 
 
 def runtime(path):
