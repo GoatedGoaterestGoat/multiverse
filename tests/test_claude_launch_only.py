@@ -381,6 +381,19 @@ class ClaudeUnreadableStorageTest(BaseTest):
                     found = evidence(str(home))
                     self.assertEqual((found.state, found.value), ('ok', {'present': False, 'store_read': False}))
                     self.assertIn(str(home / 'projects'), found.reason)
+            # store_read comes from this call's own listing, never a later look: a store created or remounted just
+            # after the listing found it missing was still not read.
+            remounted = self.work / 'remounted'
+            remounted.mkdir()
+            real_scandir = os.scandir
+            def missing_then_created(path):
+                if Path(path) == remounted / 'projects':
+                    (remounted / 'projects').mkdir()
+                    raise FileNotFoundError(path)
+                return real_scandir(path)
+            with patch('os.scandir', side_effect=missing_then_created):
+                found = evidence(str(remounted))
+            self.assertEqual((found.state, found.value), ('ok', {'present': False, 'store_read': False}))
             self.lock(empty / 'projects' / '-private-tmp-scratch')  # another workspace's folder proves nothing either way
             self.assertEqual(evidence(str(empty)).value, {'present': False, 'store_read': True})
             (empty / 'projects' / '-private-tmp-scratch').chmod(0o700)

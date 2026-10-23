@@ -116,11 +116,16 @@ def session_transcripts(native_id, environment=None, workspaces=(), links=False)
     folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
     that finds nothing would otherwise read as proof the transcript is absent.
     """
+    return _scan_transcripts(native_id, environment, workspaces, links)[0]
+
+
+def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
+    """session_transcripts, and whether this call listed the projects folder itself (False when it is missing)."""
     projects = claude_home(environment) / 'projects'
     try:
         entries = list(os.scandir(projects))
     except FileNotFoundError:
-        return []
+        return [], False
     except OSError as error:
         raise Unreadable(projects) from error
     found, files = [], set()
@@ -140,7 +145,7 @@ def session_transcripts(native_id, environment=None, workspaces=(), links=False)
         except OSError as error:
             if could_hold(entry.name, workspaces):  # a project folder that can't be searched could hold it
                 raise Unreadable(entry.path) from error
-    return [path for _, path in sorted(found)]
+    return [path for _, path in sorted(found)], True
 
 
 IDENTITY_BYTES = 1 << 20
@@ -1075,7 +1080,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not isinstance(home, str) or not os.path.isabs(home):
             return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
         try:
-            found = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,), links=True)
+            found, store_read = _scan_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home},
+                                                  (session.workspace,), links=True)
         except Unreadable as error:
             return NativeResult('unknown', f"Claude's storage folder {error.path} can't be read")
         for path in found:  # presence is the session's own rows in a regular file, never a name
@@ -1084,14 +1090,9 @@ class ClaudeAdapter(ConfiguredAdapter):
                 return NativeResult('unknown', problem)
         if found:
             return NativeResult('ok', value={'present': True})
-        store = Path(home) / 'projects'
-        try:
-            os.stat(store)
-        except FileNotFoundError:
-            return NativeResult('ok', f"Claude's conversation store {store} doesn't exist",
+        if not store_read:  # this call's own listing found no store; a later look would prove nothing
+            return NativeResult('ok', f"Claude's conversation store {Path(home) / 'projects'} doesn't exist",
                                 value={'present': False, 'store_read': False})
-        except OSError:
-            pass  # a store that exists but can't be read was already unknown
         return NativeResult('ok', value={'present': False, 'store_read': True})
 
     def observed_binding(self, session):
