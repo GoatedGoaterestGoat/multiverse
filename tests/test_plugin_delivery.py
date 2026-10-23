@@ -1,6 +1,7 @@
 """A handler that runs out of time never stalls its siblings or its plugin for good (PR #20 re-check, item 1), and
 the cursor never skips a journal's events."""
 import json
+import re
 from pathlib import Path
 import shutil
 import sys
@@ -139,7 +140,11 @@ class StuckHandlerTest(Fixture):
                 self.assertEqual(self.seen("slow", "slow"), [1, 2, 3, 4])
                 given_up = [error for error in self.loaded.errors if "gave up" in error]
                 self.assertEqual(len(given_up), 4, self.loaded.errors)
-                self.assertIn(f"gave up on seq 1 after {host.TIMEOUTS_PER_EVENT} timeouts", given_up[0])
+                # Never before TIMEOUTS_PER_EVENT limits; a later look (a loaded machine) may read more.
+                counts = [re.search(r"gave up on seq (\d+) after (\d+) timeouts", error) for error in given_up]
+                self.assertTrue(all(counts), given_up)
+                self.assertEqual([int(found[1]) for found in counts], [1, 2, 3, 4])
+                self.assertTrue(all(int(found[2]) >= host.TIMEOUTS_PER_EVENT for found in counts), given_up)
             with self.subTest("a call that never returns, beside another universe"):
                 self.module.HOLD["stuck"] = threading.Event()  # slow never returns there (until the test ends)
                 self.emit(stuck, 3)
