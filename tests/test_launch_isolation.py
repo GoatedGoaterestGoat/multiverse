@@ -455,7 +455,10 @@ class LaunchIsolationTest(unittest.TestCase):
                              'caller-home-missing-runtime', 'caller-home-damaged-runtime',
                              'server-missing-runtime', 'server-damaged-runtime', 'server-new-preparation',
                              'older-null-socket', 'root-missing', 'root-renamed', 'root-dangling', 'root-recorded-caller', 'caller-root-missing',
-                             'store-missing', 'store-dangling', 'store-recorded-caller', 'store-unproven', 'store-invalid-proof', 'store-empty', 'caller-store-missing'):
+                             'store-missing', 'store-dangling', 'store-recorded-caller', 'store-unproven', 'store-invalid-proof', 'store-empty', 'caller-store-missing',
+                             'project-dangling'):
+                if evidence == 'project-dangling' and family != 'claude':
+                    continue
                 if family != 'codex' and evidence == 'scope-present':
                     continue
                 historical = evidence.startswith('history-')
@@ -585,6 +588,13 @@ class LaunchIsolationTest(unittest.TestCase):
                             caller = old_home
                         if evidence == 'store-dangling':
                             gone.symlink_to(gone.with_name('unmounted'), target_is_directory=True)
+                    if evidence == 'project-dangling':
+                        # The transcript survives a renamed mount target; listing projects/ is not enough.
+                        target = old_home / 'mounted-project'
+                        target.mkdir()
+                        (target / (old + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': old}) + '\n')
+                        (old_home / 'projects' / project_key(str(self.work))).symlink_to(target, target_is_directory=True)
+                        target.rename(old_home / 'offline-project')
                     before = {path: path.read_bytes() for path in directory.rglob('*') if path.is_file()}
                     backend = Mock()
                     backend.snapshot.return_value = ({}, None)
@@ -646,6 +656,9 @@ class LaunchIsolationTest(unittest.TestCase):
                             self.assertEqual({path: original_read(path) for path in before}, before)
                             self.assertFalse((directory / 'sessions.jsonl').exists())
                             backend.create.assert_not_called()
+                            if evidence == 'project-dangling':
+                                self.assertIn('unknown', str(refused.exception))
+                                self.assertEqual(json.loads((old_home / 'offline-project' / (old + '.jsonl')).read_text())['sessionId'], old)
                             if server_home:
                                 # Found through the request's server, with runtime.json naming none.
                                 self.assertIn(str(self.work / 'fresh-old.sock'), servers)
