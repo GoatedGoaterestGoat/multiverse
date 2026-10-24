@@ -46,19 +46,20 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         self.assertEqual(output.read_text(), 'finished')
 
     def failing_harness(self, code=1, delay=.15, release=None):
-        """A fake harness that prints to its terminal, then ERROR, and exits with `code`: after `delay` seconds,
-        or once the test creates `release`."""
+        """A fake harness that prints ERROR and exits (or signals itself for a negative code), after `delay`
+        seconds or once the test creates `release`."""
         script = self.work / 'failure.py'
         wait = f'while not os.path.exists({str(release)!r}): time.sleep(.01)\n' if release else f'time.sleep({delay})\n'
+        terminate = f'os.kill(os.getpid(), {-code})' if code < 0 else f'sys.exit({code})'
         script.write_text('import os,sys,time\n'
                           'print("Native stdout is still a terminal: " + str(sys.stdout.isatty()), flush=True)\n'
                           f'{wait}print({ERROR!r}, file=sys.stderr, flush=True)\n'
-                          f'sys.exit({code})\n')
+                          f'{terminate}\n')
         write(self.root / 'harnesses/fake/harness.json', {'schema': 1,
             'spawn': [sys.executable, str(script)], 'resume': [sys.executable, str(script)]})
 
     def test_a_failed_launch_keeps_its_terminal_output_as_the_reason(self):
-        """A native launch failure keeps its terminal output as the reason by exit code, timing and kill, for
+        """A native launch failure keeps its terminal output as the reason by exit code, signal, timing and kill, for
         list, inspect and doctor; fragile because the output is captured through tmux after the pane died, and a
         break shows only when a real failure has no reason."""
         # This checks exit evidence, not startup speed. Leave scheduling room under suite load;
@@ -96,19 +97,20 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
             self.assertIn('code 0', ended['error'])
             self.assertIn(ERROR, ended['error'])
 
-        self.failing_harness(code=143)
-        with self.subTest(exit='SIGTERM during startup'):
-            stopped = lifecycle.start(self.root, 'terminated-early', harness='fake', socket_path=self.socket,
-                                      wait=True, wait_timeout=readiness_timeout)
-            directory = agents.directory(self.root, stopped['id'])
-            facts = agents.runtime(directory)
-            self.assertEqual(facts['exit_code'], 143)
-            self.assertEqual(facts['state'], 'stopped')
-            self.assertFalse(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
-            self.assertNotIn('terminated-early', '\n'.join(doctor.run(self.root)['problems']))
-            self.assertIn(ERROR, inspect.run(self.root, agent=directory.name))  # Native terminal text is untouched.
+        for code in (143, -15):
+            self.failing_harness(code=code)
+            with self.subTest(exit='SIGTERM during startup', code=code):
+                stopped = lifecycle.start(self.root, f'terminated-early-{code}', harness='fake', socket_path=self.socket,
+                                          wait=True, wait_timeout=readiness_timeout)
+                directory = agents.directory(self.root, stopped['id'])
+                facts = agents.runtime(directory)
+                self.assertEqual(facts['exit_code'], code)
+                self.assertEqual(facts['state'], 'stopped')
+                self.assertFalse(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
+                self.assertNotIn(f'terminated-early-{code}', '\n'.join(doctor.run(self.root)['problems']))
+                self.assertIn(ERROR, inspect.run(self.root, agent=directory.name))  # Native terminal text is untouched.
 
-        for code in (1, 0, 143):
+        for code in (1, 0, 143, -15, -9):
             # The harness exits just after the launch is ready, once this test releases it.
             release = self.work / f'release-{code}'
             self.failing_harness(code=code, release=release)
@@ -120,13 +122,15 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                 directory = agents.directory(self.root, result['id'])
                 until(lambda: 'exit_code' in agents.runtime(directory))
                 facts = agents.runtime(directory)
-                if code == 1:
+                if code in (1, -9):
                     self.assertIn(ERROR, facts['reason'])
                     self.assertNotIn('during startup', facts['reason'])
+                    self.assertTrue(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
+                    self.assertIn(f'later-{code}', '\n'.join(doctor.run(self.root)['problems']))
                 else:
                     self.assertNotIn('reason', facts)
                     self.assertNotIn('output_tail_file', facts)
-                if code == 143:
+                if code in (143, -15):
                     self.assertIn(facts['state'], ('stopped', 'dormant'))
                     until(lambda: agents.runtime(directory).get('wrapper_cleanup', {}).get('state') == 'done', seconds=readiness_timeout)
                     facts = agents.runtime(directory)
@@ -134,7 +138,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                     old = {**facts, 'state': 'failed', 'reason': ERROR}
                     write(directory / 'runtime.json', old)
                     self.assertFalse(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
-                    self.assertNotIn('later-143', '\n'.join(doctor.run(self.root)['problems']))
+                    self.assertNotIn(f'later-{code}', '\n'.join(doctor.run(self.root)['problems']))
                     self.assertEqual(read(directory / 'runtime.json'), old)
 
         self.failing_harness(release=self.work / 'never')

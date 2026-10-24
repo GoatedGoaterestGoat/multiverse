@@ -765,20 +765,20 @@ def main():
         ending = runtime(agent_dir).get('ending_at')
         remove_wrapper = not ending and (startup_checked or code in (-signal.SIGINT, 130))
         diagnostic = {}
-        if not ending and code != 143 and (code != 0 or not startup_checked):
+        if not ending and code not in (-signal.SIGTERM, 143) and (code != 0 or not startup_checked):
             reason = f'Native process exited with code {code}' + (' during startup.' if not startup_checked else '.')
             diagnostic = launch_diagnostic(agent_dir, launch.name, reason)
         if not startup_checked:
             finish_failed_wake(launch, request, env, process,
                                diagnostic.get('reason') or 'Runner ended before launch readiness')
         update_runtime(agent_dir, launch.name,
-                       state="stopped" if code in (0, 143) or ending else "failed",
+                       state="stopped" if code in (0, -signal.SIGTERM, 143) or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
         # Once, here, where the process's end is known; later cleanup writes record nothing.
         from multiverse.runtime.lifecycle import _event
         exited = True
         _event(agent_dir, 'agent.exited', launch.name, {
-            'state': "stopped" if code in (0, 143) or ending else "failed", 'exit_code': code,
+            'state': "stopped" if code in (0, -signal.SIGTERM, 143) or ending else "failed", 'exit_code': code,
             'reason': diagnostic.get('reason')})
         if watcher is not None:
             watcher.close()
