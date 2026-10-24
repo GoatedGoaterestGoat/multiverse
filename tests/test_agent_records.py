@@ -194,16 +194,17 @@ class DamagedListingTests(PluginTestCase):
 
     def test_list_columns_prints_what_was_asked_and_one_column_prints_only_values(self):
         """mv2 list --columns with one column prints one value per agent, a damaged one included, and nothing else,
-        while several columns keep the ! problem lines; fragile because scripts loop over the one-column form
-        ($(mv2 list --columns name)), so a padded value or a problem line read as an agent's name sends to an agent
-        that does not exist, and a problem line lost from the table hides it unnoticed."""
+        several columns keep the ! problem lines, and a list that names nothing, has an empty entry or names a column
+        twice is refused; fragile because scripts loop over the one-column form ($(mv2 list --columns name)), so a
+        padded value, a problem line or the whole table (from --columns "$EMPTY") read as agents' names sends to agents
+        that do not exist, and a problem line lost from the table hides it unnoticed."""
         (self.victim / "properties.json").write_text("[]")
         names = sorted(row["name"] for row in self.rows().values())
 
-        def listed(*args):  # what a script reads: mv2's own entry point and what it prints
+        def listed(*args, err=None):  # what a script reads: mv2's own entry point and what it prints
             out = io.StringIO()
             with mock.patch.object(sys, "argv", ["mv2", "-u", str(self.root), "list", *args]), \
-                    contextlib.redirect_stdout(out):
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err or io.StringIO()):
                 cli.main()
             return out.getvalue()
 
@@ -214,6 +215,15 @@ class DamagedListingTests(PluginTestCase):
             healthy = next(line for line in lines if "healthy" in line)
             self.assertEqual(healthy.split(), ["working", "healthy"])
             self.assertTrue(any(line.startswith("  ! ") and "properties.json" in line for line in lines), lines)
+        for args, said in ((["--columns="], "Name at least one column"), (["--columns", ""], "Name at least one column"),
+                           (["--columns", ","], "Name at least one column"), (["--columns", "name,,phase"], "empty"),
+                           (["--columns", "name,phase,name"], "name more than once")):
+            with self.subTest("refused", args=args):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit) as exited:
+                    listed(*args, err=err)
+                self.assertEqual(exited.exception.code, 1)
+                self.assertIn(said, err.getvalue())
 
     def test_a_damaged_agent_record_leaves_every_other_row_whole_and_names_the_file(self):
         """One damaged record, or one raising observer, is one marked row naming its file while every other row,

@@ -28,13 +28,18 @@ def configure(parser):
 
 
 def chosen(columns):
-    """The column names --columns asks for, in order; ValueError names the ones it can show."""
-    names = [name.strip() for name in columns.split(",") if name.strip()]
+    """The column names --columns asks for, in order; ValueError for anything else, naming what it can show."""
+    names = [name.strip() for name in columns.split(",")]
+    if not any(names):  # an empty --columns, as from --columns "$UNSET", must not fall back to the whole table
+        raise ValueError(f"Name at least one column: {', '.join(COLUMNS)}")
+    if not all(names):
+        raise ValueError(f"--columns {columns!r} has an empty entry: separate column names with single commas")
     unknown = [name for name in names if name not in COLUMNS]
     if unknown:
         raise ValueError(f"Unknown column {', '.join(unknown)}: choose from {', '.join(COLUMNS)}")
-    if not names:
-        raise ValueError(f"Name at least one column: {', '.join(COLUMNS)}")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"--columns names {', '.join(repeated)} more than once")
     return names
 
 
@@ -50,9 +55,9 @@ def place(row, root):
 
 
 def run(root=None, *, recursive=False, json=False, wide=False, columns=None):
-    if json and columns:
+    if json and columns is not None:
         raise ValueError("--columns shapes the text listing; --json always gives every field")
-    names = chosen(columns) if columns else DEFAULT_COLUMNS
+    names = chosen(columns) if columns is not None else DEFAULT_COLUMNS
     root = universe.resolve(root)
     rows = lifecycle.listing(root, recursive)
     if json:
@@ -69,7 +74,7 @@ def run(root=None, *, recursive=False, json=False, wide=False, columns=None):
     lines = []
     for row, values in zip(rows, table):
         line = "  ".join([f"{value:{width}}" for value, width in zip(values, widths)] + values[-1:])
-        where = None if columns else place(row, root)
+        where = None if columns is not None else place(row, root)
         lines.append((line + (f"  [{where}]" if where else "")).rstrip())
         lines.extend(problems(row, wide))
     return "\n".join(lines)
