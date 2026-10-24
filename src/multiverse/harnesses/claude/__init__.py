@@ -1026,12 +1026,15 @@ class ClaudeAdapter(ConfiguredAdapter):
                     # Every copy of a row, whatever it is, must agree on its session and what it proves (which
                     # tells its kind apart: only an attachment proves an ID), or the row proves nothing; so each
                     # copy is fingerprinted before anything is filtered out.
-                    proofs.setdefault(uuid, set()).add((json.dumps(row.get('sessionId')), seen))
+                    # A row with no sessionId field is taken as this session's; an explicit null names none.
+                    named = ('named', json.dumps(row['sessionId'])) if 'sessionId' in row else ('unnamed',)
+                    proofs.setdefault(uuid, set()).add((named, seen))
                 elif seen == ('id', message_id) and row.get('sessionId', session.native_id) == session.native_id:
                     found = True
         ours = ('id', message_id)
-        if found or any(len(copies) == 1 and next(iter(copies))[1] == ours
-                        and json.loads(next(iter(copies))[0]) in (None, session.native_id) for copies in proofs.values()):
+        this = {('unnamed',), ('named', json.dumps(session.native_id))}
+        if found or any(len(copies) == 1 and next(iter(copies))[1] == ours and next(iter(copies))[0] in this
+                        for copies in proofs.values()):
             return NativeResult('ok', value={'delivered': True})
         return NativeResult('unknown', 'No row of this session carries the message ID')
 

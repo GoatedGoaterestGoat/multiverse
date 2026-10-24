@@ -690,6 +690,11 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
             ("a copy of the row naming another session", [row(self.message, 'r-4'),
              {**row(self.message, 'r-4'), 'sessionId': str(uuid4())}], '', {}, ('unknown', None)),
             ('identical copies of the row', [row(self.message, 'r-5'), row(self.message, 'r-5')], '', {}, ('ok', True)),
+            # An explicit null names no session, so it isn't this one; only a row with no sessionId field at all is
+            # taken as this session's (recheck of 644e52f).
+            ('a row whose sessionId is null', [{**row(self.message, 'r-6'), 'sessionId': None}], '', {}, ('unknown', None)),
+            ('a row with no sessionId field', [row(self.message, 'r-7')], '', {}, ('ok', True)),
+            ('a row without a uuid whose sessionId is null', [{**self.steer(), 'sessionId': None}], '', {}, ('unknown', None)),
             ('a row naming another session', [{**self.steer(), 'sessionId': str(uuid4())}], '', {}, ('unknown', None)),
             ('a row naming this session', [{**self.steer(), 'sessionId': self.native}], '', {}, ('ok', True)),
             ('a relative home', [self.steer()], '', {'home': 'relative/claude'}, ('unknown', None)),
