@@ -112,6 +112,8 @@ On launch-only spawn and resume, including automatic fallback, mv2 requests an e
 
 Codex's public events report every aborted turn as interrupted, without its original cause. mv2 therefore labels these queues paused until a new primary turn starts. This label does not prevent Codex from continuing its own queue.
 
+**Message age.** When mv2 prepares a steer or follow-up more than 10 minutes after it was saved, its header includes the delay, for example `Message from reviewer (sent 25 min ago):`. This also applies to messages held for startup or retried after a definite failure. The age is computed when mv2 prepares the submission; a wake prompt is framed when its resume is prepared. A follow-up already accepted into Codex's queue keeps that text while it waits; checking its receipt or restarting the queue does not refresh the header or submit another copy.
+
 **Session binding.** With a live connection, mv2 records Codex's session ID automatically. A launch-only agent is asked to run `mv2 session-bind` at startup. If it never did, take the ID from Codex's `/status` and bind it with `mv2 session-bind --agent NAME --session-id UUID` before resuming.
 
 **Lost terminals.** If an agent's terminal loses its connection to the daemon, `STATUS` shows `disconnected`. New messages are then refused, but saved. If the session was idle, mv2 reconnects it in the same pane, at most twice in five minutes, and `mv2 list` notes `Reconnected automatically.` Unsent text in Codex's composer is lost. When mv2 doesn't reconnect it, kill and resume the agent, as [troubleshooting](troubleshooting.md#codex-shows-status-disconnected) describes.

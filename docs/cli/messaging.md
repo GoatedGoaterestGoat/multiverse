@@ -71,6 +71,13 @@ A delivered message has not necessarily been read or answered. Wait for a reply,
 Failed delivery and check lines go to stderr and exit nonzero; successful lines
 go to stdout. With `--json`, the result stays on stdout.
 
+A message prepared more than 10 minutes after it was sent adds its age to the
+sender line: `Message from lead (sent 25 min ago):`, or `Message from lead
+(in universe review) (sent 25 min ago):`. Whole minutes are shown below an hour,
+then hours, then days. Inbox reads, wake preparation and retries use the original
+send time. Missing or unusable timestamps add no age. The text of a message
+already accepted by a native queue is not rewritten by checking or retrying it.
+
 ## Check and retry deliveries
 
 ```sh

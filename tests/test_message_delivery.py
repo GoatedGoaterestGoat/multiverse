@@ -1,6 +1,6 @@
 """Durable delivery evidence and automatic inbox read positions."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import contextlib
 import json
@@ -88,6 +88,57 @@ class InboxDeliveryTest(DeliveryFixture):
             with self.subTest(sender_universe=str(scope)):
                 self.send('sender context', sender={'name': 'auditor', 'universe': str(scope)})
                 self.assertEqual(self.calls[-1][1].framed, f'Message from auditor{suffix}:\nsender context')
+
+    def test_message_age_uses_send_time_at_preparation_without_rewriting_acceptances(self):
+        """Delayed inbox, wake and retry frames must expose their age without re-adding an accepted native message."""
+        from multiverse.runtime import lifecycle
+        from multiverse.universe import mailbox
+        clock = datetime(2026, 10, 23, 20, 0, tzinfo=timezone.utc)
+        for seconds, label in ((0, ''), (600, ''), (601, '10 min'), (1500, '25 min'),
+                               (3600, '1 hour'), (7200, '2 hours'), (86400, '1 day'), (172800, '2 days')):
+            with self.subTest(seconds=seconds):
+                message = {'text': 'Keep the body unchanged.', 'from': {'name': 'lead'},
+                           'at': (clock - timedelta(seconds=seconds)).isoformat()}
+                suffix = f' (sent {label} ago)' if label else ''
+                self.assertEqual(native.framed_text(self.root, message, at=clock),
+                                 f'Message from lead{suffix}:\nKeep the body unchanged.')
+        for timestamp in (None, '', 'broken', '2026-10-22T12:00:00', 123, (clock + timedelta(days=1)).isoformat()):
+            with self.subTest(unproven_time=timestamp):
+                self.assertEqual(native.framed_text(self.root, {'text': 'body', 'at': timestamp}, at=clock),
+                                 'Message from user:\nbody')
+        sent_at = (clock - timedelta(minutes=25)).isoformat()
+        origin = self.work / 'age-origin'
+        write(origin / 'universe.json', {'name': 'review'})
+        self.assertEqual(native.framed_text(self.root, {'text': 'body', 'at': sent_at,
+                         'from': {'name': 'lead', 'universe': str(origin)}}, at=clock),
+                         'Message from lead (in universe review) (sent 25 min ago):\nbody')
+        with patch.object(mailbox, 'now', return_value=sent_at):
+            message = append_message(self.directory, 'held body', {'name': 'lead'}, delivery='follow-up',
+                                     target_session=self.native_id)
+        with patch.object(native, 'now', return_value=clock.isoformat()):
+            self.assertIn('(sent 25 min ago)', inbox_tool.readable(self.root, {'messages': [message]}))
+            prompt, _ = lifecycle._wake_prompt(self.root, self.directory, read(self.directory / 'properties.json'), message['id'])
+            self.assertEqual(prompt, 'Message from lead (sent 25 min ago):\nheld body')
+            # A starting bridge frames only when core flushes the held submission.
+            update_message(self.directory, message['id'], submission_state='pending', deferred_launch_id=self.launch)
+            native.flush_startup(self.root, self.directory, self.launch)
+            self.assertEqual(self.calls[-1][1].framed, prompt)
+            self.assertEqual(self.calls[-1][1].sent_at, sent_at)
+            with patch.object(mailbox, 'now', return_value=sent_at):
+                failed = append_message(self.directory, 'failed body', {'name': 'lead'}, delivery='steer',
+                                        target_session=self.native_id)
+            self.behavior = NativeResult('error', 'definitely not submitted')
+            native.deliver(self.root, self.agent, failed['id'])
+            self.behavior = NativeResult('native_queued')
+        saved = message_record(self.directory, message['id'])[1]['delivery_context']['text']
+        with patch.object(native, 'now', return_value=(clock + timedelta(days=1)).isoformat()):
+            native.deliver(self.root, self.agent, message['id'], retry=True)
+            self.assertEqual(len(self.calls), 2)
+            self.assertEqual(message_record(self.directory, message['id'])[1]['delivery_context']['text'], saved)
+            # A definite failed attempt may be framed again, preserving the original send time.
+            native.deliver(self.root, self.agent, failed['id'], retry=True)
+            self.assertIn('(sent 1 day ago)', self.calls[-1][1].framed)
+            self.assertEqual(self.calls[-1][1].sent_at, sent_at)
 
     def test_definite_failure_is_retryable_and_unknown_never_is(self):
         """A definite failure (rejected, or a harness load error) is saved and retryable, while unknown or submitting

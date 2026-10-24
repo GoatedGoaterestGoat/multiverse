@@ -3,6 +3,7 @@
 Durable message storage never depends on these best-effort operations.
 """
 from dataclasses import asdict, replace
+from datetime import datetime
 import json
 from pathlib import Path
 import stat
@@ -235,7 +236,7 @@ class NativeExecutor:
         return NativeResult('ok', 'Written to the inbox')
 
 
-def framed_text(root, message):
+def framed_text(root, message, *, at=None):
     """The recipient's text: who sent the message, then the message as written."""
     sender = message.get('from') or {}
     name = sender.get('name') or 'user'
@@ -251,7 +252,29 @@ def framed_text(root, message):
             origin = f' (in universe {read(Path(scope) / "universe.json")["name"]})'
         except (OSError, ValueError, KeyError):
             origin = f' (in universe {scope})'
-    return f'Message from {name}{origin}:\n{message["text"]}'
+    age = _message_age(message.get('at'), at=at)
+    return f'Message from {name}{origin}{" (" + age + ")" if age else ""}:\n{message["text"]}'
+
+
+def _message_age(sent_at, *, at=None):
+    """Only aware, trustworthy elapsed time can qualify a sender header."""
+    try:
+        sent = datetime.fromisoformat(sent_at)
+        current = at if at is not None else datetime.fromisoformat(now())
+        if sent.tzinfo is None or current.tzinfo is None:
+            return ''
+        seconds = (current - sent).total_seconds()
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return ''
+    if seconds <= 600:
+        return ''
+    if seconds < 3600:
+        amount, unit = int(seconds // 60), 'min'
+    elif seconds < 86400:
+        amount, unit = int(seconds // 3600), 'hour'
+    else:
+        amount, unit = int(seconds // 86400), 'day'
+    return f'sent {amount} {unit}{"s" if amount != 1 and unit != "min" else ""} ago'
 
 
 @contextmanager
@@ -785,7 +808,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                     from .queue_continuation import claim_restart
                     session = claim_restart(directory, session, message_id)
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      delivery=selected_mode, framed=framed), executor)
+                                      delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}

@@ -156,7 +156,7 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 | Codex | The adapter searches the thread's queue (100 entries) and recent turns (20) |
 | Pi | The extension answers from its transcript metadata and in-process records |
 
-`message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text.
+`message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text. Optional `message.sent_at` carries the original aware ISO send timestamp from the inbox row, never the retry or receipt time. Core frames age at submission preparation when it exceeds 10 minutes; older callers may leave this field `None`. A provider that updates the age when it stores the row must preserve the message body and account for that first-line change when reading delivery evidence.
 
 An optional `accepted_message_evidence(session, message_id, text, since, home,
 framed=True, cohort=(), receipts=None, active_acceptances=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a

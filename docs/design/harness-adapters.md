@@ -1315,6 +1315,15 @@ only on tagged text and shows the model the text alone:
   as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
   The terminal shows these as ordinary prompts; the transcript names the plugin.
 
+The tag also carries the message's send time (`sent=`, the inbox record's). If
+the message reaches the model more than ten minutes after it was sent, the mod
+gives the sender line its age, in core's wording (`Message from lead (sent 25 min
+ago):`), when Claude stores the row: after a tool result for a mid-turn steer,
+and when its own turn starts for the others, so a follow-up that waited behind a
+long turn says so. An age core already put in the frame for a wake or a retry is
+replaced, never doubled. Delivery evidence compares framed texts without that
+age, since the saved text and the stored copy can differ there.
+
 When a message's row enters the conversation, the mod writes
 `claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
 reads it: `mv2 deliver --check` then records the message as accepted and

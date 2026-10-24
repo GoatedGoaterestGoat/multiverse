@@ -686,6 +686,20 @@ def _receipt(directory, receipts, message_id):
     return value['route'], when
 
 
+# A late message's age at the end of its sender line ("Message from NAME (sent 25 min ago):", after any
+# "(in universe U)"): core ages the frame it prepares and the mod ages it again when the row is stored, so framed
+# texts are compared without it, and without anything else changed.
+AGED = re.compile(r' \(sent \d+ (?:min|hours?|days?) ago\)(?=:$)')
+SENDER = re.compile(r'^Message from .+:$')
+SENT = re.compile(r'[0-9][0-9T:.+\-Z]*')  # the send time the mod's tag pattern accepts
+
+
+def without_age(text):
+    """`text` with no age in its sender line, for comparing framed texts."""
+    first, newline, rest = text.partition('\n')
+    return AGED.sub('', first, count=1) + newline + rest if SENDER.match(first) else text
+
+
 def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=(),
                       directory=None, receipts=None, active=()):
     """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
@@ -705,7 +719,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     copies of one row uuid that disagree on its type, text or time make that row unknown, whatever order they're
     read in.
     """
-    start, needle = moment(since), (text or '').strip()
+    start, needle = moment(since), (without_age(text) if framed else text or '').strip()
     if not native_id or not needle or start is None or start.tzinfo is None or not environment:
         return None, None
     ours = _receipt(directory, receipts, message_id) if message_id else None
@@ -742,7 +756,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
                     conflicting.add(uuid)
             if seen and seen[0] == 'id':
                 versions.setdefault(uuid or object(), []).append(('id', seen[1], None, path))
-            elif seen and (seen[1].strip() == needle if framed else needle in seen[1]):
+            elif seen and (without_age(seen[1]).strip() == needle if framed else needle in seen[1]):
                 versions.setdefault(uuid or object(), []).append(('text', None, seen[2], path))
     copies = []
     for key, found in versions.items():
@@ -774,7 +788,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         if not (isinstance(entry, (tuple, list)) and len(entry) == 3 and all(isinstance(part, str) for part in entry)):
             return None, 'An earlier acceptance on this session has an incomplete record'
         other, other_text, other_since = entry
-        if other == message_id or other in ids or other_text.strip() != needle:
+        if other == message_id or other in ids or without_age(other_text).strip() != needle:
             continue
         accepted = moment(other_since)
         if accepted is None or accepted.tzinfo is None:
@@ -1267,8 +1281,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         if target is None:
             return NativeResult('unavailable', token)
         # Always `next`: the mod decides from the tag when a follow-up runs.
+        # When the sender sent it, for the age the mod adds once the model gets it; only a plain timestamp, so the
+        # attribute can never end the tag.
+        sent = f' sent={message.sent_at}' if isinstance(message.sent_at, str) and SENT.fullmatch(message.sent_at) else ''
         try:
-            opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}>>'
+            opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}{sent}>>'
         except ValueError:
             opening = f'<<MV2 {mode}>>'  # no receipt without a UUID
         frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': message.id,

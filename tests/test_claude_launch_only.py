@@ -714,6 +714,17 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
              ('unknown', None)),
             ('raw body absent', [self.prompt('something else')], '', {'text': 'Please rebase.', 'framed': False}, ('ok', False)),
             ('raw body with the id', [self.steer()], '', {'text': 'Please rebase.', 'framed': False}, ('ok', True)),
+            # The mod gives a late message's sender line its age when the row is stored, so the saved text and the
+            # stored copy differ there; reading that as absence would report a delivered message lost.
+            ('a copy the mod gave an age', [self.prompt('Message from lead (sent 25 min ago):\nPlease rebase.')], '', {},
+             ('ok', True)),
+            ('saved with an age, stored with a later one', [self.prompt('Message from lead (in universe review) (sent 3 hours ago):'
+             '\nPlease rebase.')], '', {'text': 'Message from lead (in universe review) (sent 2 hours ago):\nPlease rebase.'},
+             ('ok', True)),
+            ('an identical message aged differently is still the same text', [self.prompt()], '',
+             {'cohort': [(earlier[0], 'Message from lead (sent 11 min ago):\nPlease rebase.', earlier[2])]}, ('unknown', None)),
+            ('only the sender line\'s age is ignored', [self.prompt('Message from lead:\nPlease rebase (sent 25 min ago).')], '',
+             {}, ('ok', False)),
             ('a naive accept time', [self.prompt()], '', {'since': '2026-10-19T10:00:00'}, ('unknown', None)),
             ('no session ID', [self.prompt()], '', {'session': self.session(native=None)}, ('unknown', None)),
             ('a relative home', [self.prompt()], '', {'home': 'relative/claude'}, ('unknown', None)),
