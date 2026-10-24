@@ -28,7 +28,7 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
         with store.lock(directory / '.send.lock'), store.lock(directory / '.launch.lock'), store.lock(directory / '.delivery.lock'):
             dismissed = mailbox.dismiss_failures(directory)
         if _present:
-            _present(f'{name}: {len(dismissed)} delivery failures dismissed; kept in history. Nothing resent.'
+            _present(f'{name}: {len(dismissed)} delivery {"failure" if len(dismissed) == 1 else "failures"} dismissed; kept in history. Nothing resent.'
                      if dismissed else f'{name}: no delivery failures to dismiss.')
         return {'messages': [], 'dismissed': len(dismissed), 'ok': True}
     launch_id = agents.runtime(directory).get('launch_id')

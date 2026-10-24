@@ -71,6 +71,7 @@ class DeliveryProblemTest(BaseTest):
             result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
             self.assertTrue(result['ok'])
             self.assertEqual(result['dismissed'], 2)
+            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.'])
             self.assertIn('2 delivery failures dismissed', lines[0])
             self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
         self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
@@ -92,6 +93,10 @@ class DeliveryProblemTest(BaseTest):
             self.assertTrue(deliver.run(self.root, agent='recipient', retry=True)['ok'])
         for message in untouched:
             self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before[message['id']])
+        self.message('failed')
+        lines = []
+        self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)['dismissed'], 1)
+        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent.'])
 
     def test_launch_only_or_broken_connection_per_harness(self):
         """For each harness, mode and state an unavailable send or ask is classed launch-only (restarting cannot
