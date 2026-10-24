@@ -253,6 +253,11 @@ def discover(adapter, properties, previous, directory, ambient, backends, *, rec
     session = SessionHandle.from_records(properties, previous, directory)
     unbound = (require_absent and getattr(adapter, 'session_mode', None) == 'reported'
                and sessions.unbound_fresh(directory, properties))
+    if require_absent and getattr(adapter, 'session_mode', None) == 'reported' and not session.native_id and not unbound:
+        name = properties.get('name') or properties['id']
+        raise ValueError(f'No session is bound yet for {name}. Bind its conversation with '
+                         f'mv2 session-bind --agent {name} --session-id SESSION_ID, '
+                         f'or remove the agent with mv2 remove {name}')
     hook = adapter_hook(adapter, 'session_storage_evidence')
     homes = {}
     caller = None

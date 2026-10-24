@@ -76,6 +76,10 @@ not moved into it. This flag does not reset a readable conversation.
 If a replacement Codex conversation stops before any native ID was bound,
 the matching fresh-start journal proves there is no bound conversation to
 protect, so another `--start-fresh` is allowed. A missing ID alone is not proof.
+A plain Codex agent that has never bound a session must first bind its
+conversation with `mv2 session-bind --agent NAME --session-id SESSION_ID`, or
+be removed with `mv2 remove NAME`; `--start-fresh` cannot discover an unknown
+conversation by guessing an ID.
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 

@@ -451,7 +451,7 @@ class LaunchIsolationTest(unittest.TestCase):
         from multiverse.harnesses.claude import project_key
         from multiverse.universe import sessions
         for family in ('claude', 'codex', 'pi'):
-            for evidence in ('absent', 'absent-again', 'absent-again-unbound', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
+            for evidence in ('absent', 'absent-again', 'absent-again-unbound', 'never-bound', 'present', 'scope-present', 'duplicate', 'unreadable', 'live', 'unproven-pending',
                              'history-damaged-runtime', 'history-missing-runtime', 'history-new-preparation',
                              'older-damaged-request', 'older-unreadable-request', 'older-invalid-environment', 'malformed-service',
                              'caller-home-missing-runtime', 'caller-home-damaged-runtime',
@@ -470,7 +470,7 @@ class LaunchIsolationTest(unittest.TestCase):
                     continue
                 if evidence == 'malformed-service' and family == 'pi':
                     continue
-                if evidence == 'absent-again-unbound' and family != 'codex':
+                if evidence in ('absent-again-unbound', 'never-bound') and family != 'codex':
                     continue
                 unknown_server = evidence.startswith('caller-home-')
                 if unknown_server and family != 'claude':
@@ -502,6 +502,8 @@ class LaunchIsolationTest(unittest.TestCase):
                                       native_storage_environment={key: str(old_home)})
                     if evidence == 'unproven-pending':
                         properties['native_fresh_pending'] = True
+                    if evidence == 'never-bound':
+                        properties['native_session_id'] = None
                     if evidence == 'malformed-service':
                         properties['native_service_identity'] = []
                     write(directory / 'properties.json', properties)
@@ -671,6 +673,11 @@ class LaunchIsolationTest(unittest.TestCase):
                         if evidence not in ('absent', 'absent-again', 'absent-again-unbound', 'caller-root-missing', 'store-empty', 'caller-store-missing') and not unknown_server and not server_override and not caller_server:
                             with self.assertRaisesRegex(ValueError, 'running|storage|conversation|unreadable') as refused:
                                 lifecycle.start(self.root, resume=directory.name, start_fresh=evidence != 'unproven-pending')
+                            if evidence == 'never-bound':
+                                self.assertIn('No session is bound yet', str(refused.exception))
+                                self.assertIn('session-bind', str(refused.exception))
+                                self.assertIn(f'mv2 remove {properties["name"]}', str(refused.exception))
+                                self.assertNotIn('must be a UUID', str(refused.exception))
                             if evidence in ('present', 'duplicate', 'unreadable') and family != 'pi':
                                 self.assertNotIn('  Restore', str(refused.exception))
                                 self.assertIn('. Restore access', str(refused.exception))
