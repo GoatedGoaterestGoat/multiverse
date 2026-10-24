@@ -130,7 +130,8 @@ A plain launch caused by an automatic fallback is temporary: fix its cause, then
 resume with a working bridge and run `mv2 deliver NAME --retry`. The same applies
 after enabling messaging for an agent originally launched without it. Once the
 connection is ready, an explicit `--retry` rechecks even a refusal recorded as
-final. If delivery is still unavailable, the refusal stays final; `--check` and
+final. For Codex, that retry probes the resumed bridge's exact thread before
+reopening the refusal. If delivery is still unavailable, the refusal stays final; `--check` and
 ordinary reads never reopen it. Older refusals that lack explicit final evidence are classified by the current harness
 setting; accepted and uncertain deliveries are never reopened.
 

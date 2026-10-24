@@ -652,11 +652,11 @@ def reopen_launch_only(root, directory, message_id):
         value = previous.get('value')
         if not isinstance(value, dict) or value.get('launch_only') is not True or value.get('final') is not True:
             return False
-        _, adapter, session, _ = context(root, directory.name, reconcile=False)
+        _, adapter, session, executor = context(root, directory.name, reconcile=False)
         capabilities = getattr(adapter, 'capabilities', None)
         if capabilities is None:
             return False
-        capability = capabilities(session).get(
+        capability = capabilities(session, executor).get(
             'send_follow_up' if message.get('delivery') == 'follow-up' else 'send_steer')
         if capability is None or capability.state != 'supported':
             return False
