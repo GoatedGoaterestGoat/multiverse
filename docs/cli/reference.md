@@ -89,13 +89,14 @@ mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] [--json] name
 Read properties and observe matching tmux panes.
 
 ```sh
-mv2 list [--recursive] [--wide] [--json]
+mv2 list [--recursive] [--wide] [--columns COLUMNS] [--json]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `--recursive` |  |  |  |
 | `--wide` |  | Show full summaries and errors |  |
+| `--columns` | `COLUMNS` | Show these columns, comma-separated, in this order: name, status, phase, summary, harness, universe, id. One column prints one value per line and nothing else |  |
 | `--json` |  |  |  |
 
 ## catalog

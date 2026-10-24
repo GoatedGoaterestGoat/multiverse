@@ -6,12 +6,36 @@ from ..universe import focus
 from .. import universe
 
 NAME_WIDTH = 24
+# What --columns can show, in the text listing. `status` is what a live agent is doing, or why it is not live.
+COLUMNS = {
+    "name": lambda row, root, wide: row["name"],
+    "status": lambda row, root, wide: state(row),
+    "phase": lambda row, root, wide: row.get("phase") or "?",
+    "summary": lambda row, root, wide: " ".join((row.get("summary") or "").split()) if wide else shorten(row.get("summary", "")),
+    "harness": lambda row, root, wide: row.get("harness") or "?",
+    "universe": lambda row, root, wide: place(row, root) or ".",
+    "id": lambda row, root, wide: row.get("id") or "",
+}
+DEFAULT_COLUMNS = ("name", "status", "summary")
 
 
 def configure(parser):
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--wide", action="store_true", help="Show full summaries and errors")
+    parser.add_argument("--columns", help=f"Show these columns, comma-separated, in this order: {', '.join(COLUMNS)}. "
+                                          "One column prints one value per line and nothing else")
     parser.add_argument("--json", action="store_true")
+
+
+def chosen(columns):
+    """The column names --columns asks for, in order; ValueError names the ones it can show."""
+    names = [name.strip() for name in columns.split(",") if name.strip()]
+    unknown = [name for name in names if name not in COLUMNS]
+    if unknown:
+        raise ValueError(f"Unknown column {', '.join(unknown)}: choose from {', '.join(COLUMNS)}")
+    if not names:
+        raise ValueError(f"Name at least one column: {', '.join(COLUMNS)}")
+    return names
 
 
 def place(row, root):
@@ -25,39 +49,52 @@ def place(row, root):
         return str(path)
 
 
-def run(root=None, *, recursive=False, json=False, wide=False):
+def run(root=None, *, recursive=False, json=False, wide=False, columns=None):
+    if json and columns:
+        raise ValueError("--columns shapes the text listing; --json always gives every field")
+    names = chosen(columns) if columns else DEFAULT_COLUMNS
     root = universe.resolve(root)
     rows = lifecycle.listing(root, recursive)
     if json:
         return rows
+    if len(names) == 1:  # for scripts: one value per agent, and nothing that could be read as one
+        return "\n".join(COLUMNS[names[0]](row, root, wide) for row in rows)
     if not rows:
         return "No agents."
     # Agents that wait on a person come first; otherwise the order is the listing's.
     rows = sorted(rows, key=lambda row: row.get("status") != "waiting")
-    width = min(max(len(row["name"]) for row in rows), NAME_WIDTH)
+    table = [[COLUMNS[name](row, root, wide) for name in names] for row in rows]
+    widths = [max(len(values[index]) for values in table) for index in range(len(names) - 1)]
+    widths = [min(width, NAME_WIDTH) if name == "name" else width for name, width in zip(names, widths)]
     lines = []
-    for row in rows:
-        summary = " ".join(row.get("summary", "").split()) if wide else shorten(row.get("summary", ""))
-        where = place(row, root)
-        line = f'{row["name"]:{width}}  {state(row):8}  {row.get("phase", "?"):8}  {summary}'
+    for row, values in zip(rows, table):
+        line = "  ".join([f"{value:{width}}" for value, width in zip(values, widths)] + values[-1:])
+        where = None if columns else place(row, root)
         lines.append((line + (f"  [{where}]" if where else "")).rstrip())
-        damage = row.get('damaged')
-        error = (f"{damage['file']}: {damage['reason']}" if damage else None) or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
-        if error:
-            lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide or damage else error_text(error)))
-        if row.get('delivery_problem'):
-            lines.append('  ! ' + row['delivery_problem'])
-        if row.get('recovery_note'):
-            lines.append('  Note: Reconnected automatically.')
-        if row.get('focus'):
-            lines.append(f"  Focused {focus.ends(row['focus'])}: send it only --delivery inbox-only messages.")
+        lines.extend(problems(row, wide))
     return "\n".join(lines)
 
 
-def cli_run(root=None, *, recursive=False, json=False, wide=False):
-    result = run(root, recursive=recursive, json=json, wide=wide)
+def problems(row, wide):
+    """The lines under an agent's row that say what is wrong with it, or what to know first."""
+    lines = []
+    damage = row.get('damaged')
+    error = (f"{damage['file']}: {damage['reason']}" if damage else None) or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
+    if error:
+        lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide or damage else error_text(error)))
+    if row.get('delivery_problem'):
+        lines.append('  ! ' + row['delivery_problem'])
+    if row.get('recovery_note'):
+        lines.append('  Note: Reconnected automatically.')
+    if row.get('focus'):
+        lines.append(f"  Focused {focus.ends(row['focus'])}: send it only --delivery inbox-only messages.")
+    return lines
+
+
+def cli_run(root=None, *, recursive=False, json=False, wide=False, columns=None):
+    result = run(root, recursive=recursive, json=json, wide=wide, columns=columns)
     if not json:
-        return result
+        return result or None  # one column and no agents: print nothing, not an empty line
     # The dashboard uses run(json=True) and retains the core observation enum.
     return [{**row, 'live': live_label(row),
              **({'reason': 'Launch is being prepared'} if live_label(row) == 'starting' else {})}

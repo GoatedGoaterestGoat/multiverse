@@ -28,12 +28,16 @@ mv2 -u .multiverse/subverses/review spawn --name reviewer --task '...'
 ## Find and refer to agents
 
 ```sh
-mv2 list               # this universe
-mv2 list --recursive   # and every subverse
-mv2 list --wide        # full summaries and errors
+mv2 list                        # this universe
+mv2 list --recursive            # and every subverse
+mv2 list --wide                 # full summaries and errors
+mv2 list --columns name,phase   # only these columns, in this order
+mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, state, reported phase and summary. Agents waiting for you come first.
+Each line shows the agent's name, status and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+
+`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. `--json` always gives every field.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
