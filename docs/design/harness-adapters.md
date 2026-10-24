@@ -72,7 +72,8 @@ so `mv2 update`'s one-time pass asks `message_id_evidence(session, message_id, h
 instead: delivered only when a well-formed row of the session carries the exact
 message ID (a row naming another session doesn't count), and unknown otherwise, never lost. A message typed in as a prompt has
 no such row and stays unknown; damage elsewhere in the transcript doesn't cancel a
-found row, but copies of that row that disagree do.
+found row, but any copy of that row (by its uuid) that differs does: another kind
+of row, a malformed one, or one naming another session.
 
 Core retains the failed launch's exact prompt, start time, conversation identity
 and storage context after observing its process exit. `deliver --check` re-asks

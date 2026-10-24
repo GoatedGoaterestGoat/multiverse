@@ -998,14 +998,17 @@ class ClaudeAdapter(ConfiguredAdapter):
                     seen = _delivery_row(row)
                 except ValueError:
                     continue  # a damaged row elsewhere says nothing about this one
-                if seen and row.get('sessionId', session.native_id) != session.native_id:
-                    continue  # a row of another session proves nothing about this one
-                uuid = row.get('uuid') if seen and isinstance(row.get('uuid'), str) and row.get('uuid') else None
-                if uuid is not None:  # every copy of a row must agree on what it proves
-                    proofs.setdefault(uuid, set()).add(seen)
-                if seen and seen == ('id', message_id):
-                    found = found or uuid is None
-        if found or any(len(seen) == 1 and ('id', message_id) in seen for seen in proofs.values()):
+                uuid = row.get('uuid') if isinstance(row, dict) and isinstance(row.get('uuid'), str) and row['uuid'] else None
+                if uuid is not None:
+                    # Every copy of a row, whatever it is, must agree on its session and what it proves (which
+                    # tells its kind apart: only an attachment proves an ID), or the row proves nothing; so each
+                    # copy is fingerprinted before anything is filtered out.
+                    proofs.setdefault(uuid, set()).add((json.dumps(row.get('sessionId')), seen))
+                elif seen == ('id', message_id) and row.get('sessionId', session.native_id) == session.native_id:
+                    found = True
+        ours = ('id', message_id)
+        if found or any(len(copies) == 1 and next(iter(copies))[1] == ours
+                        and json.loads(next(iter(copies))[0]) in (None, session.native_id) for copies in proofs.values()):
             return NativeResult('ok', value={'delivered': True})
         return NativeResult('unknown', 'No row of this session carries the message ID')
 
