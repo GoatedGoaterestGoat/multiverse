@@ -203,7 +203,8 @@ async function report($: EngineInterface) {
     while (!registered || reported !== status()) {
       const value = status()
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
-      if (!registered) argv.push("--bridge", "claude-mod-v1")
+      // v2 reads a tag's send time; mv2 sends one only to a mod that registered it.
+      if (!registered) argv.push("--bridge", "claude-mod-v2")
       const result = await $.process.run(argv, { timeoutMs: 10000 })
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)

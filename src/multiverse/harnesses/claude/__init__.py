@@ -58,7 +58,10 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
-BRIDGE = 'claude-mod-v1'
+BRIDGE = 'claude-mod-v2'  # the mod that reads a tag's send time
+# A mod that registered before it could, until it reloads: still connected, and sent tags without a send time,
+# since it would miss a tag it can't parse and show the model raw tags with no receipt.
+BRIDGES = ('claude-mod-v1', BRIDGE)
 FUNCTION_HOOKS = 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'  # loads the mod: set for bridge launches only
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
@@ -896,7 +899,7 @@ def bridge_of(enabled, session):
     plain = launch.get('mode') == 'plain'
     launched = bool(enabled) and not plain
     registered = bool(launched and session.native_id and session.endpoint
-                      and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
+                      and session.endpoint.transport == 'unix-lines' and session.bridge in BRIDGES)
     ready = registered and session.state == 'running'
     # Launch-only: restarting as configured now can't connect it. The setting is off (final), or an auto launch
     # fell back because this Claude was too old (until it is updated). A launch made while the setting was off,
@@ -1283,7 +1286,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         # Always `next`: the mod decides from the tag when a follow-up runs.
         # When the sender sent it, for the age the mod adds once the model gets it; only a plain timestamp, so the
         # attribute can never end the tag.
-        sent = f' sent={message.sent_at}' if isinstance(message.sent_at, str) and SENT.fullmatch(message.sent_at) else ''
+        sent = (f' sent={message.sent_at}' if session.bridge == BRIDGE and isinstance(message.sent_at, str)
+                and SENT.fullmatch(message.sent_at) else '')
         try:
             opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}{sent}>>'
         except ValueError:

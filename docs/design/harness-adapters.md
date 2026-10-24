@@ -1260,7 +1260,7 @@ The pieces keep to their own side of the boundary:
 
 - **Adapter** (`harnesses/claude/__init__.py`): launch flags, the inbox socket,
   the peer-token format, the `<<MV2>>` tag, the registered bridge id (`BRIDGE`,
-  `claude-mod-v1`), receipts, `ask`, capabilities and readiness. Everything about
+  `claude-mod-v2`), receipts, `ask`, capabilities and readiness. Everything about
   a launch's bridge comes from one pure `Bridge` view (`launched`, `registered`,
   `ready`, `reason`), so capabilities, `send`, `ask` and readiness cannot disagree.
 - **Mod** (`mod/`): hooks inside Claude. It reports itself once running
@@ -1413,7 +1413,9 @@ read. The text is its first line, cleaned and shortened like a summary, and an
 empty or missing file shows nothing. A malformed record, a name that breaks the
 manifest rule or is a core name, and a repeated name declare nothing.
 
-The mod also registers the bridge (`BRIDGE`, `claude-mod-v1`) for its launch
+The mod also registers the bridge (`BRIDGE`, `claude-mod-v2`; the ID changes
+when the tag gains a part an older mod can't read: a mod still on `claude-mod-v1`
+until it reloads stays connected and gets tags without a send time) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents

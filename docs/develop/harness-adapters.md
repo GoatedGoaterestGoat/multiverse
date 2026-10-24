@@ -108,7 +108,7 @@ An optional relay view's `primary_event(direction, value)` describes exact-prima
 A bridged launch takes messages once it is ready. Until then, core holds them as `pending`, and the runner delivers them in order. Readiness comes from the integration registering itself, or from the relay validating the binding:
 
 ```sh
-"$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v1 --status idle
+"$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v2 --status idle
 "$MV2_PYTHON" -m multiverse.tools.runtime_update --usage-json '{"context": {"tokens": 82000, "window": 200000}}'
 ```
 
