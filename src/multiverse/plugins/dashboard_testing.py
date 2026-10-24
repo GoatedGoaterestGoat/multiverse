@@ -25,8 +25,10 @@ universe again) and the plugin host is never started.
 
 Promised from API 1.9, by adding only:
 
-- `await d.ready()` waits until the first refresh is drawn and the plugins' palette
-  entries are read. `async with` calls it. `d.until(check, what, timeout=8)` waits
+- `await d.ready()` waits until the first refresh is drawn and the palette is read once;
+  the dashboard waits only half a second for a plugin to import, so on a busy machine
+  a plugin's entries can come later: `d.until(...)` and `d.run_action(...)` read the palette
+  again as soon as a plugin has loaded. `async with` calls it. `d.until(check, what, timeout=8)` waits
   for `check()` to be true, failing the test with `what` after `timeout` seconds;
   prefer it to fixed pauses. `await d.press(*keys)` presses keys as a person
   would, `await d.settle()` waits for pending background work and `await
@@ -65,6 +67,7 @@ from types import SimpleNamespace
 from textual.pilot import WaitForScreenTimeout
 from textual.widgets import DataTable, Label, Markdown, Static
 
+from . import loader
 from ..ui.app import MultiverseApp
 from ..ui.backend import LocalBackend
 from ..ui.plugin_service import PluginService
@@ -121,6 +124,11 @@ class Dashboard:
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             await self.app.workers.wait_for_complete()
+            if loader.generation() != self.app.registry_generation:
+                # A plugin has finished loading since the palette was read, which waits for a plugin only briefly:
+                # read it again, as the dashboard does on its next refresh, which this driver does not schedule.
+                self.app.load_plugin_registry()
+                await self.app.workers.wait_for_complete()
             try:
                 if check():
                     return
@@ -231,10 +239,18 @@ class Dashboard:
         await self.until(lambda: self.app.screen is not before, "the screen to close")
         await self.settle()
 
+    def entry(self, title):
+        found = next((command for command in self.app.get_system_commands(self.app.screen) if command.title == title), None)
+        return found or next((SimpleNamespace(callback=callback) for name, _, callback in self.app.plugin_palette()
+                              if name == title), None)
+
     async def run_action(self, title):
-        entry = next((command for command in self.app.get_system_commands(self.app.screen) if command.title == title), None)
-        if entry is None:
-            entry = next((SimpleNamespace(callback=callback) for name, _, callback in self.app.plugin_palette() if name == title), None)
+        if self.entry(title) is None:  # a plugin still importing adds its entries once it has loaded
+            try:
+                await self.until(lambda: self.entry(title) is not None, f"the command palette to offer {title!r}")
+            except AssertionError:
+                pass
+        entry = self.entry(title)
         if entry is None:
             self.case.fail(f"the command palette has no {title!r}: {self.palette()}")
         before, opens = self.app.screen, title in {f"{plugin}: {name}" for plugin, name in self.app.plugin_screens}
