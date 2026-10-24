@@ -44,7 +44,7 @@ def check(root, notes=None):
                 if item.get('delivery_problem'):
                     problem = f"{item['name']}: {item['delivery_problem']}"
                     found.append((problem, problem))
-                failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
+                failed = bool(item.get("launch_error")) or (runtime.get("state") == "failed" and runtime.get("exit_code") != 143)
                 recovery = runtime.get('auto_recovery') or {}
                 connection_error = item.get('connection_error')
                 preparing = runtime.get('preparing') is True and runtime.get('state') == 'starting'

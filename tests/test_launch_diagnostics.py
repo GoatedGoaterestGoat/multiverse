@@ -96,7 +96,19 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
             self.assertIn('code 0', ended['error'])
             self.assertIn(ERROR, ended['error'])
 
-        for code in (1, 0):
+        self.failing_harness(code=143)
+        with self.subTest(exit='SIGTERM during startup'):
+            stopped = lifecycle.start(self.root, 'terminated-early', harness='fake', socket_path=self.socket,
+                                      wait=True, wait_timeout=readiness_timeout)
+            directory = agents.directory(self.root, stopped['id'])
+            facts = agents.runtime(directory)
+            self.assertEqual(facts['exit_code'], 143)
+            self.assertEqual(facts['state'], 'stopped')
+            self.assertFalse(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
+            self.assertNotIn('terminated-early', '\n'.join(doctor.run(self.root)['problems']))
+            self.assertIn(ERROR, inspect.run(self.root, agent=directory.name))  # Native terminal text is untouched.
+
+        for code in (1, 0, 143):
             # The harness exits just after the launch is ready, once this test releases it.
             release = self.work / f'release-{code}'
             self.failing_harness(code=code, release=release)
@@ -108,12 +120,22 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                 directory = agents.directory(self.root, result['id'])
                 until(lambda: 'exit_code' in agents.runtime(directory))
                 facts = agents.runtime(directory)
-                if code:
+                if code == 1:
                     self.assertIn(ERROR, facts['reason'])
                     self.assertNotIn('during startup', facts['reason'])
                 else:
                     self.assertNotIn('reason', facts)
                     self.assertNotIn('output_tail_file', facts)
+                if code == 143:
+                    self.assertIn(facts['state'], ('stopped', 'dormant'))
+                    until(lambda: agents.runtime(directory).get('wrapper_cleanup', {}).get('state') == 'done', seconds=readiness_timeout)
+                    facts = agents.runtime(directory)
+                    # Old runner records retain their bytes but no longer surface SIGTERM as a launch failure.
+                    old = {**facts, 'state': 'failed', 'reason': ERROR}
+                    write(directory / 'runtime.json', old)
+                    self.assertFalse(lifecycle.listing(self.root, only=directory.name)[0]['launch_error'])
+                    self.assertNotIn('later-143', '\n'.join(doctor.run(self.root)['problems']))
+                    self.assertEqual(read(directory / 'runtime.json'), old)
 
         self.failing_harness(release=self.work / 'never')
         with self.subTest(exit='explicit kill'):

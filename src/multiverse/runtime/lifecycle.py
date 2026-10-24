@@ -152,7 +152,8 @@ def listing(root, recursive=False, only=None):
                             native.usage_snapshot(scope, properties, facts, reconciled=True))
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
-                launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
+                launch_error = (None if facts.get('exit_code') == 143 else
+                                facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
                 try:
                     delivery_problem = mailbox.delivery_problem(path.parent, properties['name'],
                         is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
