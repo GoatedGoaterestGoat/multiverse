@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import threading
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -630,6 +631,43 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
                                                         **({'receipts': ledger} if ledger else {}),
                                                         **({'active_acceptances': active} if active else {}))
         return result.state, (result.value or {}).get('delivered')
+
+    def test_a_fifo_at_a_transcript_name_never_blocks_a_reader(self):
+        """Every transcript reader refuses anything but a regular file without waiting on it; fragile because opening a
+        FIFO for reading waits for a writer, so one stray FIFO would hang mv2 update's pass, deliver --check, wake
+        evidence and the dashboard's usage reads (behind a lock every agent's usage read takes) (reviewer, 6f0af4c)."""
+        from multiverse.harnesses.claude import _typed_prompt
+        environment = {'CLAUDE_CONFIG_DIR': str(self.storage)}
+        session = replace(self.session(), home=str(self.storage))
+        transcript = self.project / f'{self.native}.jsonl'
+        self.project.mkdir(parents=True)
+        os.mkfifo(transcript)
+        history = self.storage / 'history.jsonl'
+        os.mkfifo(history)
+        def release():  # a reader still waiting on a FIFO opens once a writer appears
+            for fifo in (transcript, history):
+                try:
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+        self.addCleanup(release)
+        readers = [
+            ('the exact-ID pass', lambda: self.adapter.message_id_evidence(session, self.message, str(self.storage)).state, 'unknown'),
+            ('deliver --check', lambda: self.adapter.accepted_message_evidence(session, self.message, self.TEXT, self.SINCE,
+                                                                                str(self.storage)).state, 'unknown'),
+            ('wake evidence', lambda: self.adapter.startup_prompt_evidence(session, 'Please rebase.', self.SINCE, environment), None),
+            ('storage adoption', lambda: self.adapter.session_storage_evidence(session, str(self.storage)).state, 'unknown'),
+            ('usage', lambda: self.adapter.get_usage(session).state, 'error'),
+            ("Claude's prompt history", lambda: _typed_prompt(self.native, environment), False),
+        ]
+        for name, read, expected in readers:
+            with self.subTest(name):
+                answer = []
+                worker = threading.Thread(target=lambda: answer.append(read()), daemon=True)
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), f'{name} waited on a FIFO')
+                self.assertEqual(answer, [expected])
 
     def test_an_old_acceptance_is_confirmed_only_by_its_exact_message_id(self):
         """mv2 update's one-time pass confirms messages accepted before the mod wrote receipts from their exact message

@@ -86,7 +86,9 @@ missing facts never authorize retry. A new wake clears the preceding snapshot.
 
 Every transcript lookup lists
 Claude's folders itself rather than with a glob, which skips unreadable folders
-silently. Only a folder that could hold the session counts: Claude names a project
+silently. Every reader opens a transcript (and Claude's prompt history)
+without waiting, and reads it only if the opened file is a regular file: a FIFO,
+device or directory at its name means can't tell, never an empty file. Only a folder that could hold the session counts: Claude names a project
 folder after the real path it was launched in, NFC-normalized, with every UTF-16
 code unit that isn't an ASCII letter or digit replaced by `-` (past 200 units, the
 first 200 plus `-` and a hash). So an unreadable folder blocks when its name,

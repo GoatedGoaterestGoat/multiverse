@@ -87,6 +87,27 @@ class Unreadable(Exception):
         self.path = str(path)
 
 
+def open_regular(path):
+    """`path` opened for reading, through any link, only when it is a regular file, and never waiting: a FIFO,
+    device or directory at a transcript's name raises Unreadable. The type is read from the opened descriptor, so a
+    file swapped in after a check can't slip past, and a FIFO with no writer can't hold the open (or a lock)."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise Unreadable(path)
+        os.set_blocking(descriptor, True)
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_regular(path):
+    """The whole of a regular file (open_regular)."""
+    with open_regular(path) as handle:
+        return handle.read()
+
+
 PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
 
 
@@ -182,8 +203,10 @@ def transcript_identity(path, native_id):
             return f'{path} is a link, not a transcript'
         if not stat.S_ISREG(path.lstat().st_mode):
             return f'{path} is not a regular file'
-        with open(path, 'rb') as handle:
+        with open_regular(path) as handle:
             head = handle.read(IDENTITY_BYTES)
+    except Unreadable:
+        return f'{path} is not a regular file'
     except OSError as error:
         return f"{path} can't be read ({error.strerror or error})"
     named = set()
@@ -347,7 +370,7 @@ class Transcript:
         status = self.path.stat()
         if status.st_ino != self.inode or status.st_size < self.offset:
             self.inode, self.offset, self.responses, self.last = status.st_ino, 0, {}, None
-        with self.path.open('rb') as handle:
+        with open_regular(self.path) as handle:
             handle.seek(self.offset)
             data = handle.read()
         end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
@@ -555,15 +578,15 @@ def _typed_prompt(native_id, environment):
     path = claude_home(environment) / 'history.jsonl'
     needle = f'"sessionId":"{native_id}"'.encode()
     try:
-        if not path.is_file():
+        if not path.exists():
             return False
-        with path.open('rb') as stream:
+        with open_regular(path) as stream:
             tail = b''
             while chunk := stream.read(1 << 20):
                 if needle in tail + chunk:
                     return True
                 tail = chunk[-len(needle):]
-    except OSError:
+    except (OSError, Unreadable):
         return False
     return False
 
@@ -602,8 +625,8 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     damaged = None
     for path in paths:
         try:
-            lines = path.read_bytes().split(b'\n')
-        except OSError:
+            lines = read_regular(path).split(b'\n')
+        except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
         for raw in lines:
             if not raw.strip():
@@ -737,8 +760,8 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     damaged, ids, versions, prints, conflicting = None, set(), {}, {}, set()
     for path in paths:
         try:
-            lines = path.read_bytes().split(b'\n')
-        except OSError:
+            lines = read_regular(path).split(b'\n')
+        except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
         for raw in lines:
             if not raw.strip():
@@ -989,8 +1012,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         proofs, found = {}, False
         for path in paths:
             try:
-                lines = path.read_bytes().split(b'\n')
-            except OSError:
+                lines = read_regular(path).split(b'\n')
+            except (OSError, Unreadable):
                 return NativeResult('unknown', f"Claude's transcript {path} can't be read: restore read access to it")
             for raw in lines:
                 try:
