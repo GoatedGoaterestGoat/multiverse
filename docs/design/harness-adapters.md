@@ -67,6 +67,13 @@ copies of one row uuid that disagree on anything allocation reads (its type, its
 message ID, or its time, an attachment's own when the row has none), whatever order they're read in. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
+Messages accepted before the mod wrote receipts have no saved frame to compare,
+so `mv2 update`'s one-time pass asks `message_id_evidence(session, message_id, home)`
+instead: delivered only when a well-formed row of the session carries the exact
+message ID (a row naming another session doesn't count), and unknown otherwise, never lost. A message typed in as a prompt has
+no such row and stays unknown; damage elsewhere in the transcript doesn't cancel a
+found row, but copies of that row that disagree do.
+
 Core retains the failed launch's exact prompt, start time, conversation identity
 and storage context after observing its process exit. `deliver --check` re-asks
 the evidence hook with that snapshot, even after another launch or conversation

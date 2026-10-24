@@ -345,6 +345,21 @@ def update_message(agent_dir, message_id, **changes):
     return after
 
 
+def confirm_message_id(agent_dir, message_id, expected):
+    """Commit a migration's exact-ID positive only if the saved acceptance has not changed."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock', create_parent=False):
+        states = _states(agent_dir)
+        current = states.get(message_id)
+        if current != expected or not isinstance(current, dict) or current.get('submission_state') != 'accepted':
+            return False
+        states[message_id] = {**current, 'native_receipt': {'transcript_confirmed': True, 'evidence': 'message-id'},
+                              'transcript_confirmed_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+    _event(agent_dir, 'message.delivered', {'id': message_id, 'stage': 'confirmed'})
+    return True
+
+
 def dismiss_failures(agent_dir):
     """Caller holds send, launch and delivery locks; preserve evidence while making failures final."""
     agent_dir = Path(agent_dir)

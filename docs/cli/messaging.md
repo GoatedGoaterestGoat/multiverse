@@ -159,6 +159,12 @@ Identical accepted messages need separate stored copies: each text row confirms
 at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
 an exact message-ID receipt confirms only that message.
 
+`mv2 update` makes a one-time pass over older acceptances without receipts.
+An exact stored message ID can confirm one; matching text alone cannot. Messages
+without that proof and accepted wake prompts keep their previous state. The
+pass never sends a message or reports one lost. See [updating](../use/updating.md)
+for running the same pass after a manual checkout update.
+
 ## Focus an agent
 
 An agent whose reply needs the user's answer focuses itself before it ends its turn. While it is focused, other agents' messages can't start new work and bury the question.

@@ -158,6 +158,16 @@ A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check
 
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text. Optional `message.sent_at` carries the original aware ISO send timestamp from the inbox row, never the retry or receipt time. Core frames age at submission preparation when it exceeds 10 minutes; older callers may leave this field `None`. A provider that updates the age when it stores the row must preserve the message body and account for that first-line change when reading delivery evidence.
 
+An optional `message_id_evidence(session, message_id, home)` hook supplies
+positive evidence for the once-only update migration. Return `ok` with
+`delivered: true` only for an exact message ID in that session's transcript under
+the supplied recorded home; otherwise return `unknown`. The base implementation
+returns unknown. Never match text or infer non-delivery. Core excludes accepted
+wake prompts and records with receipts, reads outside the inbox lock, then
+commits a confirmation only if the acceptance and saved session identity are
+unchanged. It does not connect to a native service or infer a home from the
+updating shell.
+
 An optional `accepted_message_evidence(session, message_id, text, since, home,
 framed=True, cohort=(), receipts=None, active_acceptances=())` hook returns `ok` with `delivered: true|false`, or `unknown` with a
 named reason. Core calls it only after proving the accepting runner and child

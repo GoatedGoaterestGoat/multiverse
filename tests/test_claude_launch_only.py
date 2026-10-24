@@ -631,6 +631,40 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
                                                         **({'active_acceptances': active} if active else {}))
         return result.state, (result.value or {}).get('delivered')
 
+    def test_an_old_acceptance_is_confirmed_only_by_its_exact_message_id(self):
+        """mv2 update's one-time pass confirms messages accepted before the mod wrote receipts from their exact message
+        ID alone; fragile because a text match or an absence read as proof would mark an old message delivered, or lost,
+        on evidence another message could have left."""
+        other = str(uuid4())
+        row = lambda message, uuid: {**self.steer(message=message), 'uuid': uuid}
+        rows = [
+            ('its queued_command row carries the ID', [self.steer()], '', {}, ('ok', True)),
+            ('typed in as a prompt: only the text is there', [self.prompt()], '', {}, ('unknown', None)),
+            ("another message's ID", [self.steer(message=other)], '', {}, ('unknown', None)),
+            ('nothing stored: never read as lost', [], '', {}, ('unknown', None)),
+            ('a damaged row elsewhere does not cancel the ID row', [self.steer()], '{"type":', {}, ('ok', True)),
+            ('copies of one row disagree on its ID', [row(self.message, 'r-1'), row(other, 'r-1')], '', {}, ('unknown', None)),
+            ('a row naming another session', [{**self.steer(), 'sessionId': str(uuid4())}], '', {}, ('unknown', None)),
+            ('a row naming this session', [{**self.steer(), 'sessionId': self.native}], '', {}, ('ok', True)),
+            ('a relative home', [self.steer()], '', {'home': 'relative/claude'}, ('unknown', None)),
+            ('no session ID', [self.steer()], '', {'session': self.session(native=None)}, ('unknown', None)),
+        ]
+        for case, written, raw, options, expected in rows:
+            with self.subTest(case):
+                self.transcript(*written, raw=raw)
+                found = self.adapter.message_id_evidence(options.get('session') or self.session(), self.message,
+                                                         options.get('home') or str(self.storage))
+                self.assertEqual((found.state, (found.value or {}).get('delivered')), expected)
+        with self.subTest('an unreadable folder that could hold the session'):
+            self.transcript(self.steer(message=other))
+            self.project.chmod(0)
+            try:
+                found = self.adapter.message_id_evidence(self.session(), self.message, str(self.storage))
+            finally:
+                self.project.chmod(0o700)
+            self.assertEqual(found.state, 'unknown')
+            self.assertIn(str(self.project), found.reason)
+
     def test_accepted_message_delivered_lost_or_unknown(self):
         """A message Claude accepted is delivered when the session's transcript holds it, in either stored form, lost
         only when every transcript that could hold it was read whole without it, and unknown otherwise; fragile because

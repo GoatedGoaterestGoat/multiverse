@@ -971,6 +971,44 @@ class ClaudeAdapter(ConfiguredAdapter):
         return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
                                (session.workspace,))[0]
 
+    def message_id_evidence(self, session, message_id, home):
+        """Whether a message accepted before the mod wrote receipts reached this session, from its exact message ID
+        alone: ok with {'delivered': True} when a well-formed row of the session's transcript under the Claude storage
+        `home` carries it (the queued_command row a mid-turn steer becomes), else unknown with why. Never False: no
+        text is matched and no absence is read, so a message typed in as a prompt stays unknown (mv2 update's
+        one-time pass for older records).
+        """
+        if not isinstance(home, str) or not os.path.isabs(home):
+            return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
+        if not session.native_id or not message_id:
+            return NativeResult('unknown', "This message's session or ID isn't recorded")
+        try:
+            paths = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+        except Unreadable as error:
+            return NativeResult('unknown', f"Claude's storage folder {error.path} can't be read: restore read access to it")
+        proofs, found = {}, False
+        for path in paths:
+            try:
+                lines = path.read_bytes().split(b'\n')
+            except OSError:
+                return NativeResult('unknown', f"Claude's transcript {path} can't be read: restore read access to it")
+            for raw in lines:
+                try:
+                    row = json.loads(raw)
+                    seen = _delivery_row(row)
+                except ValueError:
+                    continue  # a damaged row elsewhere says nothing about this one
+                if seen and row.get('sessionId', session.native_id) != session.native_id:
+                    continue  # a row of another session proves nothing about this one
+                uuid = row.get('uuid') if seen and isinstance(row.get('uuid'), str) and row.get('uuid') else None
+                if uuid is not None:  # every copy of a row must agree on what it proves
+                    proofs.setdefault(uuid, set()).add(seen)
+                if seen and seen == ('id', message_id):
+                    found = found or uuid is None
+        if found or any(len(seen) == 1 and ('id', message_id) in seen for seen in proofs.values()):
+            return NativeResult('ok', value={'delivered': True})
+        return NativeResult('unknown', 'No row of this session carries the message ID')
+
     def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=(),
                                   receipts=None, active_acceptances=()):
         """Whether a message Claude accepted reached this session's conversation, read from its transcript under
