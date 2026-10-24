@@ -140,7 +140,7 @@ def delivery_problem(agent_dir, name, *, is_final=None):
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir)
         failed = {identifier for identifier, state in states.items()
-                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at')}
+                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at') and not state.get('dismissed_at')}
         if not failed:
             return None
         _, _, messages = _messages(agent_dir)
@@ -148,7 +148,7 @@ def delivery_problem(agent_dir, name, *, is_final=None):
                     and message.get('id') in failed
                     and not (is_final and is_final(message, states[message['id']]))
                     for _, message in messages)
-    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry' if count else None
+    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry or --dismiss' if count else None
 
 
 def preflight_delivery(agent_dir):
@@ -343,6 +343,26 @@ def update_message(agent_dir, message_id, **changes):
         _event(agent_dir, "message.failed", {"id": message_id,
                "reason": (after.get('last_receipt') or {}).get('reason'), "lost_when_stopped": True})
     return after
+
+
+def dismiss_failures(agent_dir):
+    """Caller holds send, launch and delivery locks; preserve evidence while making failures final."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        _, _, messages = _messages(agent_dir)
+        states = _states(agent_dir)
+        dismissed = []
+        for _, message in messages:
+            state = states.get(message['id'], {})
+            if (message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up')
+                    or state.get('submission_state') not in ('failed', 'launch-only')
+                    or state.get('dismissed_at') or state.get('uncheckable_reported_at')):
+                continue
+            states[message['id']] = {**state, 'dismissed_at': now()}
+            dismissed.append(message['id'])
+        if dismissed:
+            write(agent_dir / 'inbox-state.json', states)
+    return dismissed
 
 
 def claim_cancelled_report(agent_dir, message_id):

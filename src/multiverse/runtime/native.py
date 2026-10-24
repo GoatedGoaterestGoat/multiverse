@@ -593,6 +593,8 @@ def finalize_launch_only(root, directory, message_id):
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         state = tracking.get('submission_state', 'pending')
         previous = (tracking.get('attempts') or [{}])[-1]
         value = previous.get('value')
@@ -619,6 +621,8 @@ def reopen_launch_only(root, directory, message_id):
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return False
         if tracking.get('submission_state') != 'launch-only':
             return True  # A concurrent result still goes through normal no-resend checks.
         previous = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
@@ -640,6 +644,12 @@ def reopen_launch_only(root, directory, message_id):
         return True
 
 
+def _dismissed_receipt(message_id):
+    return {'state': 'unavailable', 'ok': True, 'message_id': message_id, 'reused': True,
+            'reason': 'This delivery failure was dismissed; it stays in history and will not be retried',
+            'value': {'dismissed': True, 'final': True}}
+
+
 def _final_lineage_receipt(message_id):
     return {'state': 'unavailable', 'ok': False, 'message_id': message_id, 'reused': True,
             'reason': 'This saved message cannot be retried: its conversation is outside the recorded lineage',
@@ -652,6 +662,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         if (check and tracking.get('delivery_method') == 'resume_prompt'
@@ -797,6 +809,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)

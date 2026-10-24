@@ -48,6 +48,8 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    if value.get('dismissed') is True:
+        return f'{name}: delivery failure dismissed; kept in history. Nothing resent.'
     if value.get('outside_lineage') is True:
         if value.get('retired_by_fresh_start') is True:
             return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
@@ -75,25 +77,25 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
                failure_reason(reason, text, preserve_details=value.get('wake_refused') is True or value.get('check_error') is True))
         if value.get('launch_only') is True and value.get('final') is False:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason and resume with a working bridge, "
-                    f"then mv2 deliver {name} --retry.")
+                    f"then mv2 deliver {name} --retry or --dismiss.")
         if value.get('launch_only') is True:
             return (f"Not delivered to {name}: {why}. Saved; resend it with --delivery inbox-only "
                     f"for manual reading, or attach with mv2 attach {name}.")
         if value.get('pre_submission_failure') is True:
             return (f"Not delivered to {name}: {why}. Saved without submission; repair the named file, "
-                    f"then mv2 deliver {name} --retry.")
+                    f"then mv2 deliver {name} --retry or --dismiss.")
         if value.get('repair_runtime'):
             return (f"Not delivered to {name}: {why}. Saved; restore {clean(value['repair_runtime'])}, "
-                    f"or run mv2 kill {name} to close its verified terminal, then mv2 deliver {name} --retry.")
+                    f"or run mv2 kill {name} to close its verified terminal, then mv2 deliver {name} --retry or --dismiss.")
         if value.get('wake_refused') is True or value.get('definite_failure') is True:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason, "
-                    f"then mv2 deliver {name} --retry.")
+                    f"then mv2 deliver {name} --retry or --dismiss.")
         if check:
             return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."
         if running:
             return (f"Not delivered to {name}: {why}. Saved; restart it with mv2 kill {name}, "
-                    f"then mv2 resume {name}, then mv2 deliver {name} --retry.")
-        return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry."
+                    f"then mv2 resume {name}, then mv2 deliver {name} --retry or --dismiss.")
+        return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry or --dismiss."
     if state == 'unknown':
         if accepted:
             return f'{name}: message accepted; no confirmation yet. Do not resend.'

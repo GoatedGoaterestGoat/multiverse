@@ -51,13 +51,47 @@ class DeliveryProblemTest(BaseTest):
         ones; a break goes unnoticed because an undelivered message gives no other signal."""
         for state in ('failed', 'failed', 'unknown', 'accepted', 'cancelled'):
             self.message(state)
-        expected = '2 messages not delivered: mv2 deliver recipient --retry'
+        expected = '2 messages not delivered: mv2 deliver recipient --retry or --dismiss'
         self.assertIn(expected, list_agents.run(self.root, wide=True))
         self.assertIn(expected, inspect.cli_run(self.root, agent='recipient'))
         self.assertTrue(any(expected in reason for reason in doctor.run(self.root)['problems']))
         row = lifecycle.listing(self.root)[0]
         self.assertEqual(row['delivery_problem'], expected)
         self.assertNotIn('PRIVATE BODY', expected)
+
+    def test_dismissed_failures_stay_in_history_and_can_never_be_resent(self):
+        """Dismissing a failure must remove its warning without replaying it or hiding uncertain acceptance."""
+        selected = [self.message(state) for state in ('failed', 'launch-only')]
+        untouched = [self.message(state) for state in ('accepted', 'unknown', 'submitting', 'pending', 'cancelled')]
+        before = {item['id']: mailbox.message_record(self.directory, item['id'])[1]
+                  for item in selected + untouched}
+        with patch.object(native, 'send_or_wake', side_effect=AssertionError('dismiss must not submit')), \
+                patch.object(harnesses, 'load', side_effect=AssertionError('dismiss needs no adapter')):
+            lines = []
+            result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['dismissed'], 2)
+            self.assertIn('2 delivery failures dismissed', lines[0])
+            self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
+        self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
+        history = mailbox.inbox(self.directory, all_messages=True)['messages']
+        self.assertEqual(len(history), 7)
+        for message in history:
+            state = message['tracking']
+            if message['id'] in {item['id'] for item in selected}:
+                self.assertTrue(state.pop('dismissed_at'))
+            self.assertEqual(state, before[message['id']])
+        with patch.object(native, 'context', side_effect=AssertionError('dismissed input needs no native connection')):
+            for message in selected:
+                self.assertTrue(native.deliver(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
+                self.assertTrue(native.send_or_wake(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
+        # A retry snapshot taken before dismissal must re-read the final marker under the delivery locks.
+        stale = [{**item, 'tracking': before[item['id']]} for item in selected]
+        with patch.object(mailbox, 'inbox', return_value={'messages': stale}), \
+                patch.object(harnesses, 'load', side_effect=AssertionError('stale retry must not load an adapter')):
+            self.assertTrue(deliver.run(self.root, agent='recipient', retry=True)['ok'])
+        for message in untouched:
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before[message['id']])
 
     def test_launch_only_or_broken_connection_per_harness(self):
         """For each harness, mode and state an unavailable send or ask is classed launch-only (restarting cannot

@@ -76,7 +76,14 @@ go to stdout. With `--json`, the result stays on stdout.
 ```sh
 mv2 deliver worker --check    # settle uncertain deliveries, record confirmations
 mv2 deliver worker --retry    # resend messages that definitely failed
+mv2 deliver worker --dismiss  # make failures final without resending
 ```
+
+`--dismiss` makes definite delivery failures final, including launch-only
+refusals. It sends nothing, leaves accepted and uncertain messages unchanged,
+and keeps the original message and delivery evidence in history. Dismissed
+failures no longer appear in checks or count as delivery problems, and a later
+`--retry` cannot resend them. Send a new message if you need it delivered later.
 
 `--check` starts with one line of counts, such as `358 confirmed, 23 accepted
 without confirmation, 2 not delivered`, then shows details only for messages
@@ -96,7 +103,7 @@ retry and no longer counts as a delivery problem in list, inspect or doctor.
 
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. A damaged session journal or unloadable harness gives each affected message its own error; the remaining messages are still checked. Record errors name their file. Back up and repair a damaged `sessions.jsonl`, or restore an intact copy, before retrying. A submission needs its authoritative journal even when the saved message targets the current session; mv2 cannot assume that a torn transition left that pointer current. Reading an already saved failure does not need that transition proof. It does not resend them. List, inspect and doctor show how many
-messages were not delivered and the `mv2 deliver NAME --retry` command.
+messages were not delivered and advise `mv2 deliver NAME --retry or --dismiss`.
 
 Older definite refusals receive the same classification when list, inspect and
 doctor count failures; reading does not rewrite the ledger. If `deliver --retry`

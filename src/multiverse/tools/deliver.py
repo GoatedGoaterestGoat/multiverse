@@ -1,4 +1,4 @@
-"""Check uncertain native deliveries or retry a recipient's definite failures."""
+"""Check deliveries, retry definite failures or dismiss them without resending."""
 import sys
 from .. import display, harnesses, store, universe
 from ..runtime import native
@@ -13,22 +13,30 @@ def configure(parser):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
                       help='Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting')
+    mode.add_argument('--dismiss', action='store_true', help='Make definite delivery failures final without resending; keep them in history')
     mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
 
 
-def run(root=None, *, agent, retry=False, check=False, json=False, _present=None, _present_error=None):
-    if retry == check:
-        raise ValueError('Choose exactly one of --check or --retry')
+def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False, _present=None, _present_error=None):
+    if sum(bool(value) for value in (retry, check, dismiss)) != 1:
+        raise ValueError('Choose exactly one of --check, --retry or --dismiss')
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
     properties = store.read(directory / 'properties.json')
     name = properties['name']
+    if dismiss:
+        with store.lock(directory / '.send.lock'), store.lock(directory / '.launch.lock'), store.lock(directory / '.delivery.lock'):
+            dismissed = mailbox.dismiss_failures(directory)
+        if _present:
+            _present(f'{name}: {len(dismissed)} delivery failures dismissed; kept in history. Nothing resent.'
+                     if dismissed else f'{name}: no delivery failures to dismiss.')
+        return {'messages': [], 'dismissed': len(dismissed), 'ok': True}
     launch_id = agents.runtime(directory).get('launch_id')
     native_id = properties.get('native_session_id')
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
     held = focus.current(directory) if retry else None
     if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
-                    and not message['tracking'].get('uncheckable_reported_at')
+                    and not message['tracking'].get('uncheckable_reported_at') and not message['tracking'].get('dismissed_at')
                     and message['tracking']['submission_state'] in ('failed', 'launch-only') for message in history):
         return _focused(name, held, [], _present_error or _present)
     results = []
@@ -39,6 +47,9 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']
+        if tracking.get('dismissed_at'):
+            finalized += int(retry)
+            continue
         final_lineage = bool(tracking.get('uncheckable_reported_at'))
         state = tracking['submission_state']
         if retry and final_lineage:
