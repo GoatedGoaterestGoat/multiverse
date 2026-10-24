@@ -63,6 +63,8 @@ env -u MV2_AGENT_ID -u MV2_LAUNCH_ID -u MV2_UNIVERSE \
 ## Commit
 
 - Commit, push or open a pull request only when asked.
+- Make one commit per change, with its code, tests and docs together. Squash fix-ups before integrating; don't split one change into test-only or docs-only commits.
+- To bring a worktree commit into the main checkout, cherry-pick it. When its parent is the main checkout's tip, use `git cherry-pick --ff`, so it keeps the hash you tested and reported.
 - Write the subject as `type(scope): summary`, with type `feat`, `fix`, `refactor`, `docs`, `test` or `style`. The summary says what is true after the change, as in `fix(ui): a view widget can never keep the agent list from loading`.
 - In the body, say what was wrong, what changed and what you checked.
 - Don't add `Co-Authored-By` trailers or generated-by lines unless the user asks for them.
