@@ -33,6 +33,8 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         return _focused(name, held, [], _present_error or _present)
     results = []
     finalized = 0
+    counts = {}
+    details = []
     for message in history:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
@@ -126,11 +128,23 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             # Missing evidence for an accepted message is not a failure.
             summary['ok'] = True
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message}, **summary})
-        if _present:
+        category = _check_state(receipt, accepted=accepted) if check else None
+        if check:
+            counts[category] = counts.get(category, 0) + 1
+        if _present and category != 'confirmed':
             _, current = mailbox.message_record(directory, message['id'])
             present = _present_error if summary.get('ok') is False and _present_error else _present
-            present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
-                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
+            line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
+                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt)
+            if check:
+                details.append((present, line))
+            else:
+                present(line)
+    if _present and check and results:
+        order = ('confirmed', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain', 'could not check')
+        _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
+        for present, line in details:
+            present(line)
     if _present and finalized:
         _present(f'{name}: {finalized} earlier {"message is" if finalized == 1 else "messages are"} final' +
                  ('; nothing to retry.' if not results else '.'))
@@ -138,6 +152,23 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results),
             **({'finalized': finalized} if finalized else {})}
+
+
+def _check_state(receipt, *, accepted):
+    value = receipt.get('value')
+    value = value if isinstance(value, dict) else {}
+    state = receipt.get('state')
+    if value.get('transcript_confirmed') is True:
+        return 'confirmed'
+    if value.get('check_error') or value.get('outside_lineage') or (accepted and state in ('error', 'unavailable')):
+        return 'could not check'
+    if state in ('cancelled', 'error', 'unavailable'):
+        return 'not delivered'
+    if accepted or state in ('ok', 'native_queued'):
+        return 'accepted without confirmation'
+    if state == 'pending':
+        return 'pending'
+    return 'uncertain'
 
 
 def _focused(name, held, results, present):

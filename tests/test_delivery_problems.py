@@ -303,6 +303,7 @@ class DeliveryProblemTest(BaseTest):
                 lines = []
                 with patch.object(native, 'deliver', side_effect=AssertionError('no receipt implementation exists')):
                     deliver.run(root, agent='recipient', check=True, _present=lines.append)
+                self.assertEqual(lines.pop(0), 'recipient: 2 not delivered.')
                 self.assertEqual(len(lines), 2)
                 for line in lines:
                     self.assertIn('inbox-only', line)

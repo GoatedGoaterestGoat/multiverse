@@ -595,6 +595,7 @@ class InboxDeliveryTest(DeliveryFixture):
                     result = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
                 self.assertFalse(result['ok'])
                 self.assertEqual(len(result['messages']), 2)
+                self.assertEqual(lines.pop(0), f'{properties["name"]}: 2 could not check.')
                 self.assertEqual(len(lines), 2)
                 reason = str(self.directory / 'sessions.jsonl') if damage == 'journal' else 'fixture harness cannot load'
                 self.assertTrue(all(reason in line for line in lines), lines)

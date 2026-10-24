@@ -78,6 +78,12 @@ mv2 deliver worker --check    # settle uncertain deliveries, record confirmation
 mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
+`--check` starts with one line of counts, such as `358 confirmed, 23 accepted
+without confirmation, 2 not delivered`, then shows details only for messages
+that are not confirmed. The counts describe the deliveries checked by this
+invocation; an already recorded confirmation does not need another check.
+`--json` keeps the complete per-message results, including confirmations.
+
 `--check` reports a cancellation once as not delivered and exits nonzero, with
 advice to send a new message if you still want it delivered. Later checks omit
 that cancellation, including concurrent checks. It stays in history; neither
