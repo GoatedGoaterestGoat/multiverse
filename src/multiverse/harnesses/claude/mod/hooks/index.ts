@@ -477,10 +477,13 @@ export const register: Register = (on) => {
     }
     if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && submitted.has(stored)) {
       const { id, sent } = take(submitted, stored)
-      const shown = await aged($, stored, sent)
+      // The age goes on the sender line, in the first text block; every other block stays exactly as it was.
       const first = e.message.content.findIndex((block) => block.type === "text")
-      const content = shown === stored ? e.message.content
-        : e.message.content.map((block, index) => index === first && block.type === "text" ? { ...block, text: shown } : block)
+      const block = e.message.content[first]
+      const before = block !== undefined && block.type === "text" ? String(block.text) : undefined
+      const shown = before === undefined ? undefined : await aged($, before, sent)
+      const content = shown === undefined || shown === before ? e.message.content
+        : e.message.content.map((part, index) => index === first ? { ...part, text: shown } : part)
       const result = await next({ ...e, message: { ...e.message, content } })
       await receipt($, id, "prompt")
       return result

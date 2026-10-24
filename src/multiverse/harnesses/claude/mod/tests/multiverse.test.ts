@@ -317,6 +317,16 @@ describe('delivery', () => {
         door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: `age-${index}` })
       expect([name, w.appended.at(-1)]).toEqual([name, [{ type: 'text', text: `${shown}\nfollow-up ${index}` }]])
     }
+    // A prompt Claude stores as several text blocks: only the block with the sender line gains the age, and the
+    // others stay exactly as they were, never repeated (reviewer, 6f0af4c).
+    const parts = ['Message from lead:\nfirst', 'second']
+    await $.session.receive({ origin: { kind: 'peer' },
+      text: `<<MV2 follow-up id=3f2a0c1e-1111-4222-8333-944455556799 sent=${new Date(await w.clock.now() - 60 * MIN).toISOString()}>>${parts.join('\n')}<</MV2>>` })
+    await w.clock.settle()
+    await append($, {
+      message: { type: 'user', role: 'user', content: parts.map((part) => ({ type: 'text', text: part })) },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: 'age-blocks' })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: 'Message from lead (sent 1 hour ago):\nfirst' }, { type: 'text', text: 'second' }])
     // A send time without its zone gives no age, as in core: JavaScript would read it as local time.
     expect(agePhrase('2026-10-20T10:00:00', now)).toBeUndefined()  // days ago in any zone, so only the rule refuses it
     expect(agePhrase('2026-10-23T10:00:00+00:00', now)).toBe('sent 2 hours ago')
