@@ -109,5 +109,6 @@ class ReceiptMigrationTest(BaseTest):
             self.assertNotIn('ok', plugins.run(self.root, plugin_action='migrate', apply=True))
         with patch.object(receipt_migration, 'migrate', side_effect=RuntimeError('cannot scan receipts')):
             self.assertNotIn('ok', plugins.run(self.root, plugin_action='migrate', apply=True))
-            with patch.object(receipt_migration, 'migrate', side_effect=AssertionError('a plan must not migrate')):
+            with patch.object(receipt_migration, 'migrate', side_effect=AssertionError('a plan must not migrate')) as planned:
                 plugins.run(self.root, plugin_action='migrate')
+            planned.assert_not_called()
