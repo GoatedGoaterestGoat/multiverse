@@ -1034,8 +1034,7 @@ class LaunchIsolationTest(unittest.TestCase):
         backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
         failure = NativeResult('error', 'Claude did not store the row before its deadline',
                                {'definite_failure': True, 'transcript_confirmed': False, 'delivery_rejected': True})
-        with patch.object(ClaudeAdapter, 'delivery_attempt_ids', True, create=True), \
-                patch.object(lifecycle, 'Tmux', return_value=backend), \
+        with patch.object(lifecycle, 'Tmux', return_value=backend), \
                 patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                 patch.object(native, 'observe', return_value={'live': 'dormant'}), patch.object(native, 'owned'), \
                 patch.object(ClaudeAdapter, 'get_delivery', return_value=failure):
