@@ -1,4 +1,4 @@
-"""Check deliveries, retry definite failures or dismiss them without resending."""
+"""Check deliveries, retry reported failures or dismiss them without resending."""
 import sys
 from ..plugins import access
 from .. import display, harnesses, store, universe
@@ -13,9 +13,9 @@ def configure(parser):
     parser.add_argument('--json', action='store_true', help='Return the original delivery evidence as JSON')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
-                      help='Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting')
-    mode.add_argument('--dismiss', action='store_true', help='Make definite delivery failures final without resending; keep them in history')
-    mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
+                      help='Report failures and reconcile pending, uncertain or accepted deliveries, without submitting')
+    mode.add_argument('--dismiss', action='store_true', help='Make reported delivery failures final without resending; keep them in history')
+    mode.add_argument('--retry', action='store_true', help='Retry reported failures; accepted or uncertain submissions are not resent')
 
 
 def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False, _present=None, _present_error=None):
@@ -110,7 +110,7 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
                         finalized += 1
                         continue
                     receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
-            elif state == 'failed':
+            elif state == 'failed' and not native.receipt_failure(tracking):
                 previous = attempts[-1]
                 receipt = {**previous, 'state': 'error', 'ok': False,
                            'reason': previous.get('reason') or 'Message was not delivered',
@@ -175,6 +175,8 @@ def _check_state(receipt, *, accepted):
     state = receipt.get('state')
     if value.get('transcript_confirmed') is True:
         return 'confirmed'
+    if value.get('definite_failure') is True:
+        return 'not delivered'
     if value.get('check_error') or value.get('outside_lineage') or (accepted and state in ('error', 'unavailable')):
         return 'could not check'
     if state in ('cancelled', 'error', 'unavailable'):

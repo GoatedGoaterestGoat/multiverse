@@ -9,8 +9,9 @@ import { registerUsage } from './usage'
 // priority, its text between `<<MV2 steer id=UUID>>` (or `follow-up`) and
 // `<</MV2>>`. The model reads the text alone, without the tags or Claude's peer
 // wrapper:
-// - A steer arriving mid-turn loses its tags in session.receive, so the queued
-//   message shows clean, merges at the next tool result as a queued command,
+// - A steer arriving mid-turn keeps only its ID tag (Claude's queue line shows it
+//   until the row is stored, where the mod strips it: the tag is what tells a
+//   stored row's attempt apart, even across a reload), merges at the next tool result as a queued command,
 //   and session.append stores it without Claude's peer wrapper.
 // - A steer arriving while idle, and every follow-up, is taken in
 //   session.receive and submitted as the person's own words, which runs as a
@@ -28,6 +29,7 @@ import { registerUsage } from './usage'
 // elicitation waits on the person, idle otherwise.
 
 // `<<MV2>>` alone is the first version's tag, still found in older history.
+// `id=` names one delivery attempt (core gives a retry an ID of its own), so a receipt is about that attempt.
 // `sent=` is when the sender sent it (core's record time); older tags have none.
 const TAG = /<<MV2(?: (steer|follow-up|ask))?(?: id=([0-9a-fA-F-]{36}))?(?: sent=([0-9][0-9T:.+\-Z]*))?>>([\s\S]*)<<\/MV2>>/
 
@@ -45,6 +47,12 @@ function tagged(text: string): Message | undefined {
 // carry its agentId (turn.start since Claude Code 2.1.299's types say so); only
 // the main loop's turns count, or a background subagent would leave "working".
 let turnRunning = false
+
+// After an interruption Claude refuses a plugin's prompt ("the session was stopped and nobody has sent input
+// since") until the person sends input, but not a peer prompt. Until the person types, a message stays in
+// Claude's queue and runs as the peer prompt, its wrapper stripped where it is stored. A reload forgets this;
+// Claude's next refusal sets it again.
+let interrupted = false
 
 // The native session this process is on. A /clear moves the same process to a new one, which mv2 is told so
 // it rebinds the agent: messages, usage and resume then follow the new session.
@@ -269,27 +277,80 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
   if (removed.some(Boolean)) void report($)
 }
 
-// A message waiting to be stored: its ID for the receipt, its send time for its age.
-type Waiting = { id?: string; sent?: string }
+// A message Claude has but hasn't stored yet: its ID (one delivery attempt), for its not-delivered receipt. A
+// refused one stays waiting, so a row that turns up after all still marks it delivered.
+type Waiting = { id?: string; refused?: boolean }
 
-// Steers rewritten in session.receive and not yet stored, by text, oldest first.
-const queued = new Map<string, Waiting[]>()
+// How long an idle session may leave a taken message unstored before it counts as not delivered. A session
+// still starting isn't idle yet: Claude may start its first turn late, so the idle clock starts only once the
+// session has been up this long.
+const STORE_GRACE_MS = 5000
+const STARTUP_MS = 10000
+let startedAt: number | undefined
 
-// Texts submitted as the person's words and not yet stored, by text, oldest first.
-const submitted = new Map<string, Waiting[]>()
+// Messages Claude has but hasn't stored yet, oldest first.
+const waitingRows: Waiting[] = []
 
-// Messages with the same text are stored once each; each stored copy belongs to
-// the oldest one still waiting, so every message gets its own receipt.
-function hold(waiting: Map<string, Waiting[]>, text: string, message: Waiting) {
-  waiting.set(text, [...(waiting.get(text) ?? []), { id: message.id, sent: message.sent }])
+function hold(message: Message): Waiting {
+  const entry: Waiting = { id: message.id }
+  waitingRows.push(entry)
+  return entry
 }
 
-function take(waiting: Map<string, Waiting[]>, text: string): Waiting {
-  const [first, ...rest] = waiting.get(text) ?? []
-  if (rest.length > 0) waiting.set(text, rest)
-  else waiting.delete(text)
-  return first ?? {}
+// The text as it goes to Claude: tagged with its ID (and send time), which the mod strips where Claude stores the
+// row. Identical texts are otherwise indistinguishable, and a row credited by its text to the wrong attempt would
+// confirm a lost retry or fail a delivered one; the tag also outlives a reload, which forgets what is waiting.
+// The opening marked() writes, and only that, at the very start of a text.
+const OPENING = /^<<MV2 id=[0-9a-fA-F-]{36}(?: sent=[0-9][0-9T:.+\-Z]*)?>>/
+
+function marked(message: Message): string {
+  if (message.id === undefined) return message.text
+  return `<<MV2 id=${message.id}${message.sent !== undefined ? ` sent=${message.sent}` : ""}>>${message.text}<</MV2>>`
 }
+
+function forget(entry: Waiting) {
+  const index = waitingRows.indexOf(entry)
+  if (index >= 0) waitingRows.splice(index, 1)
+}
+
+function pending(): Waiting[] {
+  return waitingRows.filter((entry) => !entry.refused)
+}
+
+// The waiting message a stored row's tag names; a row carries none, or names nothing waiting, after a reload.
+function waitingFor(id: string | undefined): Waiting | undefined {
+  return id === undefined ? undefined : waitingRows.find((entry) => entry.id === id)
+}
+
+// Not delivered, as far as the mod can tell: Claude refused it or never stored it. A receipt names one attempt.
+// It has a file of its own beside the delivery receipt, and a delivery wins wherever both exist, so a refusal
+// whose write finishes after the row was stored, even across a reload, never hides the delivery.
+async function refuse($: EngineInterface, entry: Waiting, reason: string) {
+  if (entry.id === undefined || entry.refused) return
+  entry.refused = true
+  const directory = await $.env.get("MV2_AGENT_DIR")
+  if (!directory) return
+  const at = await $.clock.now()
+  await $.fs.write(`${directory}/claude-receipts/${entry.id}.not-delivered.json`,
+    JSON.stringify({ id: entry.id, delivered: false, definite: true, reason, at }) + "\n")
+}
+
+// A taken message must be stored within a few seconds of the session being idle.
+function expireLater($: EngineInterface, entries: Waiting[]) {
+  if (entries.length === 0) return
+  void $.clock.now().then((now) => {
+    const starting = startedAt === undefined ? 0 : Math.max(0, startedAt + STARTUP_MS - now)
+    $.clock.after(starting + STORE_GRACE_MS, () => {
+      if (turnRunning) return  // the end of that turn decides
+      for (const entry of entries) {
+        if (pending().includes(entry)) void refuse($, entry, `Claude didn't store it within ${STORE_GRACE_MS / 1000} seconds while idle`)
+      }
+    })
+  })
+}
+
+// Messages already taken when a main-loop turn started; one still unstored at its end was not delivered.
+let takenBeforeTurn: Waiting[] = []
 
 // The text the model reads: with its age when it reaches the model more than ten minutes after it was sent.
 async function aged($: EngineInterface, text: string, sent: string | undefined): Promise<string> {
@@ -298,19 +359,26 @@ async function aged($: EngineInterface, text: string, sent: string | undefined):
 
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
-  hold(submitted, message.text, message)
+  const entry = hold(message)
+  if (!turnRunning) expireLater($, [entry])
   // A hook must not wait for its own submit, so leave the hook first.
   $.clock.after(0, () => {
-    $.prompt.submit({ text: message.text, asUser: true }).catch(
-      (error) => $.ui.log(`multiverse: message not submitted: ${String(error)}`))
+    $.prompt.submit({ text: marked(message), asUser: true }).then((result) => {
+      if (result === undefined || result === null || typeof result !== "object" || !("drop" in result)) return
+      // Refused, so it never enters the conversation: forget it, and send later messages the peer way.
+      forget(entry)
+      void refuse($, entry, String(result.drop))
+      interrupted = true
+      $.ui.log(`multiverse: message not submitted: ${String(result.drop)}`)
+    }, (error) => $.ui.log(`multiverse: message not submitted: ${String(error)}`))
   })
 }
 
-async function receipt($: EngineInterface, id: string | undefined, route: string) {
+async function receipt($: EngineInterface, entry: { id?: string }, route: string) {
   const directory = await $.env.get("MV2_AGENT_DIR")
-  if (id === undefined || !directory) return
+  if (entry.id === undefined || !directory) return
   const at = await $.clock.now()
-  await $.fs.write(`${directory}/claude-receipts/${id}.json`, JSON.stringify({ id, route, at }) + "\n")
+  await $.fs.write(`${directory}/claude-receipts/${entry.id}.json`, JSON.stringify({ id: entry.id, route, at }) + "\n")
 }
 
 // Answer a side question over the session's own transcript; nothing is added
@@ -336,6 +404,7 @@ export const register: Register = (on) => {
   registerMultiverse(on)
 
   on("session.start", async ($, e, next) => {
+    startedAt = await $.clock.now()
     const result = await next(e)
     void report($)
     void $.session.id().then((id) => { sessionId = id }, () => {})
@@ -366,6 +435,7 @@ export const register: Register = (on) => {
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) {
       turnRunning = true
+      takenBeforeTurn = pending()
       void report($)
       void refreshStatus($)
     }
@@ -376,6 +446,13 @@ export const register: Register = (on) => {
     const result = await next(e)
     if (e.agentId === undefined) {
       turnRunning = false
+      if (e.isAborted) interrupted = true
+      const still = pending()
+      for (const entry of takenBeforeTurn) {
+        if (still.includes(entry)) void refuse($, entry, "Claude ended a turn without storing it")
+      }
+      takenBeforeTurn = []
+      expireLater($, pending())
       // An ended turn has closed its prompts and questions.
       waiting.clear()
       asked.clear()
@@ -449,22 +526,26 @@ export const register: Register = (on) => {
       })
       return { consumed: "Multiverse question answered by the multiverse plugin" }
     }
-    if (message.mode === "follow-up" || !turnRunning) {
+    if (!interrupted && (message.mode === "follow-up" || !turnRunning)) {
       submit($, message)
       return { consumed: "Multiverse message submitted by the multiverse plugin" }
     }
-    // Queued at `next` without its tags: it merges at the next tool result.
-    hold(queued, message.text, message)
-    return next({ ...e, text: message.text })
+    // Queued at `next`, tagged with its ID only: it merges at the next tool result, or after an interruption runs
+    // as the peer prompt of its own.
+    const entry = hold(message)
+    if (!turnRunning) expireLater($, [entry])
+    return next({ ...e, text: marked(message) })
   })
 
   on("session.append", async ($, e, next) => {
     const stored = text(e.message.content)
-    if (e.origin.kind === "peer" && e.message.name === "queued_command") {
-      // Claude's recorded rendering: its peer wrapper around our text.
-      const known = [...queued.keys()].find((queuedText) => stored.includes(queuedText))
-      const message = known !== undefined ? { text: known, ...take(queued, known) } : tagged(stored)
-      if (message === undefined) return next(e)
+    // Claude's recorded rendering: its peer wrapper around our text, mid-turn or (after an interruption) as a turn
+    // of its own.
+    // A row is ours only by the tag in its own text, never by its text alone.
+    const message = tagged(stored)
+    if (e.origin.kind === "peer" && message !== undefined) {
+      const known = waitingFor(message.id)
+      if (known !== undefined) forget(known)
       const shown = await aged($, message.text, message.sent)
       const first = e.message.content.findIndex((block) => block.type === "text")
       const reminder = stored.trimStart().startsWith("<system-reminder>")
@@ -472,20 +553,30 @@ export const register: Register = (on) => {
         : index === first ? [{ ...block, text: reminder ? `<system-reminder>\n${shown}\n</system-reminder>` : shown }]
         : [])
       const result = await next({ ...e, message: { ...e.message, content } })
-      await receipt($, message.id, "mid-turn")
+      await receipt($, message, e.message.name === "queued_command" ? "mid-turn" : "peer-prompt")
       return result
     }
-    if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && submitted.has(stored)) {
-      const { id, sent } = take(submitted, stored)
-      // The age goes on the sender line, in the first text block; every other block stays exactly as it was.
-      const first = e.message.content.findIndex((block) => block.type === "text")
+    if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && message !== undefined) {
+      const known = waitingFor(message.id)
+      if (known !== undefined) forget(known)
+      const { sent } = message
+      // Only the envelope the mod wrote comes off, once: its opening at the start of the first text block and its
+      // closing at the end of the last, so a tag the message itself mentions stays. The age goes on the sender line,
+      // in the first text block; every other block stays exactly as it was.
+      const texts = e.message.content.flatMap((part, index) => part.type === "text" ? [index] : [])
+      const first = texts[0] ?? -1
+      const last = texts[texts.length - 1] ?? -1
+      const strip = (part: string, index: number) => {
+        const opened = index === first ? part.replace(OPENING, "") : part
+        return index === last && opened.endsWith("<</MV2>>") ? opened.slice(0, -"<</MV2>>".length) : opened
+      }
       const block = e.message.content[first]
-      const before = block !== undefined && block.type === "text" ? String(block.text) : undefined
+      const before = block !== undefined && block.type === "text" ? strip(String(block.text), first) : undefined
       const shown = before === undefined ? undefined : await aged($, before, sent)
-      const content = shown === undefined || shown === before ? e.message.content
-        : e.message.content.map((part, index) => index === first ? { ...part, text: shown } : part)
+      const content = e.message.content.map((part, index) => part.type !== "text" ? part
+        : index === first && shown !== undefined ? { ...part, text: shown } : { ...part, text: strip(String(part.text), index) })
       const result = await next({ ...e, message: { ...e.message, content } })
-      await receipt($, id, "prompt")
+      await receipt($, message, "prompt")
       return result
     }
     return next(e)
@@ -497,13 +588,23 @@ export const register: Register = (on) => {
     return message === undefined ? next(e) : { text: message.text }
   })
 
+  // The person's own input at the terminal lifts Claude's refusal of a plugin's prompt. (Other input may not;
+  // staying on the peer route costs nothing, and a refusal would set it again.)
+  on("prompt.submit", { origin: { kind: "composer" } }, async ($, e, next) => {
+    interrupted = false
+    return next(e)
+  })
+
   // A steer queued mid-turn that no tool result took would start its own turn.
   on("prompt.submit", { origin: { kind: "peer" } }, async ($, e, next) => {
     if (e.turnId !== undefined) return next(e)
-    const message: Message | undefined = queued.has(e.text)
-      ? { text: e.text, mode: "steer", ...take(queued, e.text) } : tagged(e.text)
+    const message = tagged(e.text)
     if (message === undefined) return next(e)
-    submit($, message)
+    // After an interruption Claude would refuse the submitted copy; the peer prompt itself runs.
+    if (interrupted) return next(e)
+    const known = waitingFor(message.id)
+    if (known !== undefined) forget(known)
+    submit($, { ...message, mode: "steer" })
     return { drop: "Multiverse message submitted by the multiverse plugin" }
   })
 }

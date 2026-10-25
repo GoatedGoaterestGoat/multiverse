@@ -61,8 +61,9 @@ class SessionDeliveryTest(DeliveryFixture):
             self.recipient()
             self.behavior = NativeResult('native_queued')
             message = self.send('Claude receipt before clear')
-            write(self.directory / 'claude-receipts' / f'{message["id"]}.json',
-                  {'route': 'steer', 'at': 123})
+            identifier = self.calls[-1][1].id
+            write(self.directory / 'claude-receipts' / f'{identifier}.json',
+                  {'id': identifier, 'route': 'mid-turn', 'at': 123})
             self.clear()
             def claude_receipt(*args):
                 return ClaudeAdapter.get_delivery(None, *args)

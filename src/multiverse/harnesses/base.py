@@ -47,6 +47,7 @@ def arguments(value, label, required=False):
 class ConfiguredAdapter:
     package = None
     supports_bridge = False
+    delivery_attempt_ids = False  # Opt in to a new private receipt UUID for each submission.
     # The built-in adapter a harness uses ('codex', 'claude', 'pi'); '' for a local definition.
     family = ''
     resume_prompt_args = None

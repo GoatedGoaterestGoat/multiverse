@@ -289,8 +289,10 @@ class DeliveryProblemTest(BaseTest):
                         self.assertEqual(mailbox.message_record(directory, identifier)[1], tracking)
                     self.assertEqual(result.get('finalized'), 1)
                     self.assertIn('final', lines[-1])
-                    self.assertEqual(submit.call_args.args[1].id, message['id'])
-                    self.assertEqual(mailbox.message_record(directory, message['id'])[1]['submission_state'], 'accepted')
+                    tracking = mailbox.message_record(directory, message['id'])[1]
+                    self.assertEqual(submit.call_args.args[1].id, tracking['attempts'][-1]['native_message_id'])
+                    self.assertNotEqual(submit.call_args.args[1].id, message['id'])
+                    self.assertEqual(tracking['submission_state'], 'accepted')
                     deliver.run(root, agent='recipient', retry=True)
                     self.assertEqual(submit.call_count, 1)
 

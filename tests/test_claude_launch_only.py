@@ -47,16 +47,19 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
                       control_socket=str(self.work / 'in.sock'))
         return self.adapter.resume(session, LaunchContext('resume', values, environment=self.environment))
 
-    def deliver(self, message_id, target, receipt=True):
-        """A message as core records it, and the mod's receipt once its row was stored in a conversation."""
+    def deliver(self, message_id, target, receipt=True, attempt=None):
+        """A message as core records it (with its attempt's own ID, if given), and the mod's receipt for it: once
+        its row was stored, or the receipt given."""
         path = self.agent_dir / 'inbox-state.json'
         state = read(path) if path.exists() else {}
         state[message_id] = {'submission_state': 'accepted', 'target_session': target,
-                             'attempts': [{'state': 'native_queued', 'native_session_id': target}]}
+                             'attempts': [{'state': 'native_queued', 'native_session_id': target,
+                                           **({'native_message_id': attempt} if attempt else {})}]}
         write(path, state)
         if receipt:
             (self.agent_dir / 'claude-receipts').mkdir(exist_ok=True)
-            (self.agent_dir / 'claude-receipts' / f'{message_id}.json').write_text(json.dumps({'route': 'mid-turn'}))
+            (self.agent_dir / 'claude-receipts' / f'{attempt or message_id}.json').write_text(
+                json.dumps({'id': attempt or message_id, **(receipt if isinstance(receipt, dict) else {'route': 'mid-turn'})}))
 
     def forget(self):
         """No record of an earlier message or context for this agent, and no prompt history in Claude's storage."""
@@ -127,11 +130,16 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
             native = str(uuid4())
             self.deliver(str(uuid4()), str(uuid4()))  # confirmed, but in an earlier conversation of this agent
             self.deliver(str(uuid4()), native, receipt=False)  # sent to this one, never stored
+            self.deliver(str(uuid4()), native, receipt={'delivered': False, 'definite': True, 'reason': 'refused'})
             self.assertEqual(self.notice(self.session(native)), NEVER_USED)
             self.assertFalse(self.resumed(self.session(native)).native_mode['fallback_reason'])
         with self.subTest('evidence of a conversation'):
             def receipt(native):
                 self.deliver(str(uuid4()), native)
+
+            def receipt_for_its_attempt(native):
+                # Core gives a retry its own message ID; the receipt names that one.
+                self.deliver(str(uuid4()), native, attempt=str(uuid4()))
 
             def typed_prompt(native):
                 # Claude's own prompt history names the session of every prompt typed into it.
@@ -144,7 +152,7 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
             def reported_context(native):
                 write(self.agent_dir / 'runtime.json', {'usage': {'context': {'tokens': 1200}, 'reported_at': '2026-10-17T10:00:00+00:00'}})
 
-            for evidence in (receipt, typed_prompt, reported_context):
+            for evidence in (receipt, receipt_for_its_attempt, typed_prompt, reported_context):
                 with self.subTest(evidence=evidence.__name__):
                     self.forget()
                     native = str(uuid4())
@@ -624,6 +632,12 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         return {'type': 'user', 'uuid': str(uuid4()), 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
                 'origin': {'kind': 'plugin', 'name': 'multiverse', 'asUser': True}}
 
+    def peer(self, message=None, text=None, at='2026-10-19T10:00:05.000Z', msg_id=...):
+        """How a message run after an Esc is stored: Claude's own peer prompt, stamped with our msg_id, the mod
+        having stripped the wrapper."""
+        return {'type': 'user', 'uuid': str(uuid4()), 'timestamp': at, 'message': {'role': 'user', 'content': text or self.TEXT},
+                'origin': {'kind': 'peer', 'from': 'unknown', 'msg_id': message or self.message if msg_id is ... else msg_id}}
+
     def evidence(self, session=None, text=TEXT, since=SINCE, home=None, framed=True, cohort=(), ledger=None, active=()):
         result = self.adapter.accepted_message_evidence(session or self.session(), self.message, text, since,
                                                         home or str(self.storage), framed=framed,
@@ -678,6 +692,8 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         rows = [
             ('its queued_command row carries the ID', [self.steer()], '', {}, ('ok', True)),
             ('typed in as a prompt: only the text is there', [self.prompt()], '', {}, ('unknown', None)),
+            ('run after an Esc: its peer prompt carries the ID', [self.peer()], '', {}, ('ok', True)),
+            ("another message's peer prompt", [self.peer(message=other)], '', {}, ('unknown', None)),
             ("another message's ID", [self.steer(message=other)], '', {}, ('unknown', None)),
             ('nothing stored: never read as lost', [], '', {}, ('unknown', None)),
             ('a damaged row elsewhere does not cancel the ID row', [self.steer()], '{"type":', {}, ('ok', True)),
@@ -728,6 +744,9 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
             ('a follow-up typed in after the accept', [self.prompt()], '', {}, ('ok', True)),
             ('an older prompt with the same text', [self.prompt(at='2026-10-19T09:59:00.000Z')], '', {}, ('ok', False)),
             ("another message's steer, even with our text", [self.steer(message=str(uuid4()))], '', {}, ('ok', False)),
+            ('a message run after an Esc, matched by its id', [self.peer(text='other text')], '', {}, ('ok', True)),
+            ("another message's peer prompt, even with our text", [self.peer(message=str(uuid4()))], '', {}, ('ok', False)),
+            ('a peer prompt whose ID is malformed is damage', [self.peer(msg_id=5)], '', {}, ('unknown', None)),
             ('a longer message holding our text', [self.prompt(self.TEXT + '\nAnd more.')], '', {}, ('ok', False)),
             ('one copy, two identical acceptances: the older takes it', [self.prompt()], '', {'cohort': [later]},
              ('ok', True)),

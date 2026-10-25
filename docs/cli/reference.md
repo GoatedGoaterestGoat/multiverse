@@ -44,7 +44,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`status`](#status) | Alias for [`report`](#report). |
 | [`session-bind`](#session-bind) | Record a native session UUID for exact resume. |
 | [`capabilities`](#capabilities) | Discover operation support for a configured harness or exact session. |
-| [`deliver`](#deliver) | Check deliveries, retry definite failures or dismiss them without resending. |
+| [`deliver`](#deliver) | Check deliveries, retry reported failures or dismiss them without resending. |
 | [`native-status`](#native-status) | Read optional native observations; unavailable and failed observations are explicit. |
 | [`ask`](#ask) | Ask an isolated side question without changing the main conversation. |
 | [`get-usage`](#get-usage) | Read measured usage for the exact native session. |
@@ -381,7 +381,7 @@ Use exactly one of `--agent`, `--harness`.
 
 ## deliver
 
-Check deliveries, retry definite failures or dismiss them without resending.
+Check deliveries, retry reported failures or dismiss them without resending.
 
 ```sh
 mv2 deliver [--json] (--check | --dismiss | --retry) agent
@@ -391,9 +391,9 @@ mv2 deliver [--json] (--check | --dismiss | --retry) agent
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--json` |  | Return the original delivery evidence as JSON |  |
-| `--check` |  | Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting |  |
-| `--dismiss` |  | Make definite delivery failures final without resending; keep them in history |  |
-| `--retry` |  | Retry definite failures; accepted or uncertain submissions are never resent |  |
+| `--check` |  | Report failures and reconcile pending, uncertain or accepted deliveries, without submitting |  |
+| `--dismiss` |  | Make reported delivery failures final without resending; keep them in history |  |
+| `--retry` |  | Retry reported failures; accepted or uncertain submissions are not resent |  |
 
 Use exactly one of `--check`, `--dismiss`, `--retry`.
 

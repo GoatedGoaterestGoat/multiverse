@@ -20,6 +20,7 @@ def _eligible(message, tracking):
             and tracking.get('submission_state') == 'accepted'
             and tracking.get('delivery_method') != 'resume_prompt' and not tracking.get('wake_launch_id')
             and tracking.get('native_receipt') is None and not tracking.get('transcript_confirmed_at')
+            and not any(attempt.get('native_message_id') for attempt in tracking.get('attempts', []))
             and not tracking.get('dismissed_at') and not tracking.get('uncheckable_reported_at'))
 
 

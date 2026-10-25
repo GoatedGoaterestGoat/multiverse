@@ -247,14 +247,14 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
-| `inbox-state.json` | Delivery attempts and receipts per message. |
+| `inbox-state.json` | Delivery attempts and receipts per message. For an adapter using attempt IDs, each submission stores its `native_message_id` and checked `delivery_receipt`; the logical inbox message ID stays unchanged. |
 | `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
 | `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: verified native session changes, such as Claude's `/clear`, and explicit missing-conversation retirements. A retirement keeps the old ID owned and records the replacement storage before properties change; reported IDs remain unbound until the new conversation binds. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
-| `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. |
+| `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
 
 Each launch directory holds:

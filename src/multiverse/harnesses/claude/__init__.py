@@ -269,11 +269,15 @@ def _stored_message(directory, native_id):
         if record.get('target_session') != native_id and not any(
                 isinstance(attempt, dict) and attempt.get('native_session_id') == native_id for attempt in attempts):
             continue
-        try:
-            if (directory / 'claude-receipts' / f'{normalize_session_id(message_id)}.json').is_file():
+        ids = [message_id, *(attempt.get('native_message_id') for attempt in attempts if isinstance(attempt, dict))]
+        for identifier in ids:
+            try:
+                path = directory / 'claude-receipts' / f'{normalize_session_id(identifier)}.json'
+            except (ValueError, TypeError, AttributeError):
+                continue
+            receipt = mod_receipt(path, identifier)
+            if receipt and receipt[0] == 'delivered':  # a refusal, or anything else, is no delivery
                 return True
-        except ValueError:
-            continue
     return False
 
 
@@ -425,8 +429,9 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
 
 def _delivery_row(row):
     """What one transcript row says about mv2's deliveries: ('id', msg_id) for the queued_command a mid-turn steer
-    becomes, ('text', text, timestamp) for a prompt, None for any other row, or False when a row of either kind
-    is malformed (valid JSON in the wrong shape is damage, never an empty message)."""
+    becomes or the peer prompt one runs as after an interruption (both carry Claude's stamp of the message ID),
+    ('text', text, timestamp) for a prompt, None for any other row, or False when a row of either kind is
+    malformed (valid JSON in the wrong shape is damage, never an empty message)."""
     if not isinstance(row, dict):
         return False
     if row.get('type') == 'attachment':
@@ -443,6 +448,9 @@ def _delivery_row(row):
             return 'id', origin['msg_id']
         return 'text', attachment['prompt'], row.get('timestamp') or attachment.get('timestamp')
     if row.get('type') == 'user':
+        origin = row.get('origin')
+        if isinstance(origin, dict) and origin.get('kind') == 'peer' and 'msg_id' in origin:
+            return ('id', origin['msg_id']) if isinstance(origin['msg_id'], str) and origin['msg_id'] else False
         message = row.get('message')
         content = message.get('content') if isinstance(message, dict) else None
         if isinstance(content, str):
@@ -463,19 +471,17 @@ def _receipt(directory, receipts, message_id):
     when there is none; False when one exists but can't be read or isn't a receipt."""
     value = None
     if directory is not None:
-        path = Path(directory) / 'claude-receipts' / f'{message_id}.json'
-        try:
-            record = json.loads(path.read_text())
-            value = {'route': record.get('route'), 'delivered_at_ms': record.get('at')} if isinstance(record, dict) else False
-        except FileNotFoundError:
-            value = None
-        except (OSError, ValueError):
+        receipt = mod_receipt(Path(directory) / 'claude-receipts' / f'{message_id}.json', message_id)
+        if receipt is False:
             return False
+        # Not delivered is no receipt to place; the ledger's copy may still say.
+        if receipt and receipt[0] == 'delivered':
+            value = {'route': receipt[1], 'delivered_at_ms': receipt[2]}
     if value is None:
         value = (receipts or {}).get(message_id)
     if value is None:
         return None
-    if not isinstance(value, dict) or value.get('route') not in ('prompt', 'mid-turn'):
+    if not isinstance(value, dict) or value.get('route') not in RECEIPT_ROUTES:
         return False
     at = value.get('delivered_at_ms')
     when = datetime.fromtimestamp(at / 1000, timezone.utc) if type(at) is int and at > 0 else None
@@ -488,6 +494,39 @@ def _receipt(directory, receipts, message_id):
 AGED = re.compile(r' \(sent \d+ (?:min|hours?|days?) ago\)(?=:$)')
 SENDER = re.compile(r'^Message from .+:$')
 SENT = re.compile(r'[0-9][0-9T:.+\-Z]*')  # the send time the mod's tag pattern accepts
+
+
+
+RECEIPT_ROUTES = ('prompt', 'mid-turn', 'peer-prompt')  # where a delivered message's row was stored
+
+
+def mod_receipt(path, identifier):
+    """The mod's receipt for one delivery attempt: ('delivered', route, time in ms or None), ('refused', definite,
+    reason), None when there is no file, or False when it can't be read or isn't a receipt for `identifier` in the
+    shape the mod writes."""
+    value = _json_record(path)
+    if value is None or value is False:
+        return value
+    if not isinstance(value.get('id'), str) or value['id'].lower() != str(identifier).lower():
+        return False
+    if value.get('delivered') is False:
+        reason = value.get('reason')
+        return ('refused', value.get('definite') is True, reason) if isinstance(reason, str) and reason else False
+    if 'delivered' in value or value.get('route') not in RECEIPT_ROUTES:
+        return False
+    at = value.get('at')
+    return 'delivered', value['route'], at if type(at) is int and at > 0 else None
+
+
+def _json_record(path):
+    """A small JSON object file: the dict, None when there is no file, False when it can't be read or isn't one."""
+    try:
+        value = json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return False
+    return value if isinstance(value, dict) else False
 
 
 def without_age(text):
@@ -714,6 +753,7 @@ def unavailable(bridge):
 
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
+    delivery_attempt_ids = True  # each delivery attempt has its own message ID, so a receipt names one attempt
     package = Path(__file__).parent
     supports_bridge = True
     family = 'claude'
@@ -1251,15 +1291,33 @@ class ClaudeAdapter(ConfiguredAdapter):
         return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
 
     def get_delivery(self, session, message_id, executor=None):
-        """The mod's receipt, written when the message's row entered the conversation."""
+        """The mod's receipt for this delivery attempt (core gives each attempt its own message ID): delivered once
+        its row entered the conversation, or not delivered once Claude dropped it or left it unstored. A receipt
+        that is missing, can't be read or isn't definite leaves it unknown."""
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         try:
-            receipt = Path(session.session_file).parent / 'claude-receipts' / f'{normalize_session_id(message_id)}.json'
+            identifier = normalize_session_id(message_id)
         except ValueError:
             return NativeResult('error', 'Message ID must be a UUID')
-        if not receipt.is_file():
+        folder = Path(session.session_file).parent / 'claude-receipts'
+        # A delivery wins: the mod writes a refusal to a file of its own, which may finish after the row was stored.
+        receipt = mod_receipt(folder / f'{identifier}.json', identifier)
+        if receipt is None:
+            receipt = mod_receipt(folder / f'{identifier}.not-delivered.json', identifier)
+            if receipt is not None and receipt is not False and receipt[0] != 'refused':
+                receipt = False  # a delivery is never read from the refusal's file
+        elif receipt is not False and receipt[0] != 'delivered':
+            receipt = False  # nor a refusal from the delivery's
+        if receipt is None:
             return NativeResult('unknown', 'No delivery receipt from the multiverse mod yet')
-        value = json.loads(receipt.read_text())
+        if receipt is False:
+            return NativeResult('unknown', "Can't read the multiverse mod's delivery receipt for this message")
+        if receipt[0] == 'refused':
+            _, definite, reason = receipt
+            if definite:
+                return NativeResult('error', f'Not delivered: {reason}', {'transcript_confirmed': False,
+                                                                           'route': 'not-delivered', 'definite_failure': True})
+            return NativeResult('unknown', f'Not confirmed: {reason}')
         return NativeResult('native_queued', 'Delivered into the Claude conversation',
-                            {'transcript_confirmed': True, 'route': value.get('route'), 'delivered_at_ms': value.get('at')})
+                            {'transcript_confirmed': True, 'route': receipt[1], 'delivered_at_ms': receipt[2]})

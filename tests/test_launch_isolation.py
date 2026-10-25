@@ -1017,6 +1017,59 @@ class LaunchIsolationTest(unittest.TestCase):
                 self.assertEqual(read(directory / 'properties.json')['native_storage_environment']['PI_CODING_AGENT_DIR'],
                                  expected, mode)
 
+    def test_retry_after_acceptance_wakes_the_bridge_before_submitting_a_new_attempt(self):
+        """A retry's wake prompt cannot use an older attempt's late text as delivery proof."""
+        from multiverse.harnesses.claude import ClaudeAdapter
+        from multiverse.runtime import native
+        from multiverse.universe import mailbox
+        from multiverse.tools import deliver
+        executable = self.work / 'claude-version-only'
+        executable.write_text(f'#!{sys.executable}\nprint("2.1.310 (Claude Code)")\n')
+        executable.chmod(0o755)
+        manifest = self.root / 'harnesses/claude/harness.json'
+        definition = read(manifest)
+        definition['settings'].update(inbox_bridge=True, executable=str(executable))
+        write(manifest, definition)
+        backend = Mock()
+        backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
+        failure = NativeResult('error', 'Claude did not store the row before its deadline',
+                               {'definite_failure': True, 'transcript_confirmed': False, 'delivery_rejected': True})
+        with patch.object(ClaudeAdapter, 'delivery_attempt_ids', True, create=True), \
+                patch.object(lifecycle, 'Tmux', return_value=backend), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                patch.object(native, 'observe', return_value={'live': 'dormant'}), patch.object(native, 'owned'), \
+                patch.object(ClaudeAdapter, 'get_delivery', return_value=failure):
+            spawned = lifecycle.start(self.root, name='retry-wake', harness='claude')
+            directory = self.root / 'state/agents' / spawned['id']
+            old_launch = spawned['runtime']['launch_id']
+            native_id = read(directory / 'properties.json')['native_session_id']
+            agents.update_runtime(directory, old_launch, state='stopped')
+            message = mailbox.append_message(directory, 'retry this exact attempt', {}, delivery='follow-up', target_session=native_id)
+            old_id = str(uuid4())
+            mailbox.update_message(directory, message['id'], submission_state='failed', delivery_method='native',
+                target_session=native_id, last_receipt=failure.to_dict(), attempts=[{
+                    'state': 'native_queued', 'native_message_id': old_id, 'native_session_id': native_id,
+                    'launch_id': old_launch, 'delivery_receipt': failure.to_dict()}])
+            self.assertTrue(deliver.run(self.root, agent=spawned['id'], retry=True)['ok'])
+            facts = agents.runtime(directory)
+            launch = directory / 'launches' / facts['launch_id']
+            self.assertNotEqual(facts['launch_id'], old_launch)
+            self.assertIsNone(read(launch / 'request.json')['resume_message_id'])
+            self.assertNotIn(message['text'], (launch / 'task.md').read_text())
+            held = mailbox.message_record(directory, message['id'])[1]
+            self.assertEqual(held['submission_state'], 'pending')
+            self.assertEqual(held['delivery_method'], 'native')
+            self.assertEqual(len(held['attempts']), 1)
+            agents.update_runtime(directory, facts['launch_id'], state='running')
+            with patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                    patch.object(ClaudeAdapter, 'send', return_value=NativeResult('native_queued')) as submit:
+                native.flush_startup(self.root, directory, facts['launch_id'])
+                native.flush_startup(self.root, directory, facts['launch_id'])
+                submit.assert_called_once()
+                self.assertNotIn(submit.call_args.args[1].id, (message['id'], old_id))
+                tracking = mailbox.message_record(directory, message['id'])[1]
+                self.assertEqual(tracking['attempts'][-1]['native_message_id'], submit.call_args.args[1].id)
+
     def test_child_env_has_only_the_launch_identity_and_no_parent_markers(self):
         """For every bundled adapter, as shipped, with a replaced unset_env or setting a marker itself, the native
         child the real runner starts gets only the launch's identity and socket, and none of a parent's markers

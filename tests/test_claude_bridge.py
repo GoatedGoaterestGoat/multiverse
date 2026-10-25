@@ -337,6 +337,32 @@ class ClaudeBridgeTest(BaseTest):
             self.assertEqual((result.state, result.value['transcript_confirmed'], result.value['route']),
                              ('native_queued', True, 'mid-turn'))
             self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
+        with self.subTest('a not-delivered receipt'):
+            # Only Claude's definite drop, or a row never stored, fails the message so --retry may send it again;
+            # an unsure or damaged one must never become permission to resend, and a receipt counts only for the ID
+            # it names in the shape the mod writes ({} or another attempt's would confirm, or fail, this one).
+            folder = agent_dir / 'claude-receipts'
+            refused = {'id': message_id, 'delivered': False, 'reason': 'the session was stopped', 'at': 1}
+            for delivered, refusal, expected in (
+                    (None, refused | {'definite': True}, ('error', False, True)),
+                    (None, refused, ('unknown', None, None)),
+                    (None, '{"id": ', ('unknown', None, None)),
+                    (None, refused | {'definite': True, 'id': str(uuid4())}, ('unknown', None, None)),
+                    ({}, None, ('unknown', None, None)),
+                    ({'id': str(uuid4()), 'route': 'prompt', 'at': 1}, None, ('unknown', None, None)),
+                    ({'id': message_id, 'at': 1}, None, ('unknown', None, None)),
+                    ({'id': message_id, 'delivered': 'false', 'route': 'prompt', 'at': 1}, None, ('unknown', None, None)),
+                    ({'id': message_id.upper(), 'route': 'peer-prompt', 'at': 1}, None, ('native_queued', True, None)),
+                    # The refusal's write can finish after the row was stored: the delivery wins.
+                    ({'id': message_id, 'route': 'prompt', 'at': 2}, refused | {'definite': True}, ('native_queued', True, None))):
+                with self.subTest(delivered=delivered, refusal=refusal):
+                    for name, record in ((f'{message_id}.json', delivered), (f'{message_id}.not-delivered.json', refusal)):
+                        (folder / name).unlink(missing_ok=True)
+                        if record is not None:
+                            (folder / name).write_text(record if isinstance(record, str) else json.dumps(record))
+                    result = adapter.get_delivery(session, message_id)
+                    value = result.value or {}
+                    self.assertEqual((result.state, value.get('transcript_confirmed'), value.get('definite_failure')), expected)
         with self.subTest("a side question's answer"):
             # The mod's answer() writes claude-asks/<question id>.json beside the agent's session file.
             source = (MOD / 'hooks/index.ts').read_text()

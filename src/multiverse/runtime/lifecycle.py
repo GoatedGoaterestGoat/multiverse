@@ -554,9 +554,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             selected_notices = display.notice_lines(notices, command.notices)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
-            if _queue_wake and (not endpoint or not command.attachment
-                    or command.attachment.readiness not in ('binding', 'legacy-binding')):
-                raise ValueError('Paused conversation requires its native bridge before queued wake delivery')
+            if _queue_wake:
+                bound_queue = command.attachment and command.attachment.readiness in ('binding', 'legacy-binding')
+                scoped_queue = (getattr(adapter, 'delivery_attempt_ids', False) is True
+                                and (command.native_mode or {}).get('mode') == 'bridge')
+                if not endpoint or not (bound_queue or scoped_queue):
+                    raise ValueError('Queued wake delivery requires its native bridge')
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,

@@ -1313,16 +1313,25 @@ framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`
 the mode, which the mod honors, and the message ID for its receipt. The mod acts
 only on tagged text and shows the model the text alone:
 
-- A steer arriving mid-turn loses its tags in `session.receive`, so the queued
-  message shows clean in the terminal. It merges at the next tool result as a
-  queued command, and `session.append` stores that row without Claude's peer
-  wrapper, so the model, the transcript and later resumes read the text alone.
+- A steer arriving mid-turn keeps only its ID tag in `session.receive` (Claude's
+  queue line shows it until the row is stored). It merges at the next tool result
+  as a queued command, and `session.append` stores that row without the tag or
+  Claude's peer wrapper, so the model, the transcript and later resumes read the
+  text alone.
 - A steer arriving while idle, and every follow-up, is taken in `session.receive`
   and submitted with `$.prompt.submit({ text, asUser: true })`: the model reads it
   bare, as the person's own words, in a turn of its own once the current turn has
   ended. A steer queued mid-turn that no tool result took would start its own turn
   as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
   The terminal shows these as ordinary prompts; the transcript names the plugin.
+- After an interruption (a main-loop turn that ended aborted, such as Esc),
+  Claude refuses a plugin's prompt ("the session was stopped and nobody has sent
+  input since") until the person types, but not a peer prompt. Until the person's
+  own input at the terminal, the mod leaves each message in Claude's queue
+  without its tags: it runs as Claude's own peer prompt, and `session.append`
+  stores that row without the wrapper. A submit Claude refuses (after a reload
+  forgot the interruption) sends later messages this way too. Other input may
+  not lift Claude's refusal, so only the terminal's ends this.
 
 The tag also carries the message's send time (`sent=`, the inbox record's). If
 the message reaches the model more than ten minutes after it was sent, the mod
@@ -1333,10 +1342,29 @@ long turn says so. An age core already put in the frame for a wake or a retry is
 replaced, never doubled. Delivery evidence compares framed texts without that
 age, since the saved text and the stored copy can differ there.
 
-When a message's row enters the conversation, the mod writes
-`claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
-reads it: `mv2 deliver --check` then records the message as accepted and
-transcript-confirmed. A message without a receipt stays `unknown`.
+Core gives each delivery attempt its own message ID (the adapter sets
+`delivery_attempt_ids`), so the tag's `id=`, the frame's `msg_id` and a receipt
+all name one attempt, and a retry is a new one. When the message's row enters the
+conversation, the mod writes `claude-receipts/<id>.json` in the agent's
+directory. When Claude refuses its submit, or doesn't store the row within five
+seconds while idle (a session counts as idle only once it has been up ten
+seconds, since Claude may start its first turn late) or by the end of a turn that
+started after the mod took it,
+the mod writes `claude-receipts/<id>.not-delivered.json` (`delivered: false`,
+`definite: true`); a row stored later still writes the delivery receipt, which
+wins wherever both exist, whichever write finished last. Nothing is ever resubmitted.
+`get_delivery` reads it: delivered is accepted and transcript-confirmed, not
+delivered is a definite failure that `--retry` may send again, and no file, or
+one that can't be read or isn't definite, stays `unknown`. An earlier attempt's
+receipt names its own ID, so it never decides a retry. Every message goes to
+Claude tagged with its ID (and send time), as a queued steer and as a submitted
+prompt alike, and the mod strips the tag where Claude stores the row: a row is
+credited only by the tag in its own text, never by its text alone, since
+identical texts can't be told apart once stored and the mod forgets what is
+waiting when it reloads. `get_delivery` counts a receipt only when it names the
+requested ID in the shape the mod writes. Claude also stamps a peer row (a
+mid-turn steer's queued command, or the peer prompt one runs as after an
+interruption) with the attempt's ID, so delivery evidence matches it exactly.
 
 `mv2 ask` sends the question tagged `<<MV2 ask id=UUID>>` over the same inbox.
 The mod consumes it in `session.receive`, so nothing enters the conversation,

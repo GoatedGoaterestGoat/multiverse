@@ -15,6 +15,7 @@ import re
 from contextlib import contextmanager
 import fcntl
 import inspect
+from uuid import uuid4
 
 from .. import harnesses
 from ..plugins.access import Denied
@@ -585,6 +586,8 @@ def _launch_only_delivery(adapter, session, delivery):
 def launch_only_receipt(adapter, session, message, tracking, live):
     """Classify final refusal without writes, inference, or native operations."""
     state = tracking.get('submission_state', 'pending')
+    if receipt_failure(tracking):
+        return None  # It was accepted; changing bridge policy cannot erase its receipt.
     if state != 'failed' and not (state == 'pending' and not tracking.get('attempts')):
         return None  # Never reclassify accepted or uncertain input.
     previous = (tracking.get('attempts') or [{}])[-1]
@@ -633,6 +636,8 @@ def finalize_launch_only(root, directory, message_id):
         message, tracking = message_record(directory, message_id)
         if tracking.get('dismissed_at'):
             return _dismissed_receipt(message_id)
+        if receipt_failure(tracking):
+            return None  # A later native receipt can still settle this exact attempt.
         state = tracking.get('submission_state', 'pending')
         previous = (tracking.get('attempts') or [{}])[-1]
         value = previous.get('value')
@@ -695,6 +700,115 @@ def _final_lineage_receipt(message_id):
             'value': {'outside_lineage': True, 'final': True}}
 
 
+def _retryable_receipt(receipt):
+    value = receipt.get('value')
+    return receipt.get('state') == 'error' and isinstance(value, dict) and value.get('definite_failure') is True
+
+
+def receipt_failure(tracking):
+    """Only a failure discovered after acceptance needs a new receipt check before retry."""
+    if tracking.get('delivery_method') == 'resume_prompt':
+        return False  # A later wake has its own prompt evidence, not the older native receipt.
+    _, latest = _receipt_attempt(tracking)
+    receipt = latest.get('delivery_receipt') or tracking.get('last_receipt') or {}
+    return (tracking.get('submission_state') == 'failed' and _retryable_receipt(receipt)
+            and receipt['value'].get('delivery_rejected') is True)
+
+
+def _receipt_attempt(tracking):
+    """Pre-submission diagnostic attempts do not replace the last native submission's identity."""
+    attempts = tracking.get('attempts') or []
+    for index in range(len(attempts) - 1, -1, -1):
+        if 'native_message_id' in attempts[index]:
+            return index, attempts[index]
+    return len(attempts) - 1, attempts[-1] if attempts else {}
+
+
+def _receipt_id(message, attempt):
+    value = attempt.get('native_message_id')
+    return normalize_session_id(value) if value is not None else message['id']
+
+
+def _check_delivery_receipt(directory, adapter, session, executor, message, tracking):
+    """Reconcile receipt evidence under the caller's launch and delivery locks, never submit.
+
+    Opted-in adapters get a private UUID for each actual submission. Earlier
+    receipts can update their own attempt, but never the current attempt's state.
+    """
+    message_id = message['id']
+    target = tracking.get('target_session') or message.get('target_session')
+    receipt_session = session
+    if target and target != session.native_id:
+        if not _session_changes(directory, executor.properties, target):
+            return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                    'reason': "Message targets a conversation outside this agent's recorded lineage; delivery cannot be checked",
+                    'value': {'outside_lineage': True,
+                              'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
+        receipt_session = replace(session, native_id=target)
+    if tracking.get('submission_state') == 'failed' and not receipt_failure(tracking):
+        return {**(tracking.get('last_receipt') or tracking['attempts'][-1]), 'ok': False}
+    saved = tracking.get('native_receipt')
+    if isinstance(saved, dict) and saved.get('transcript_confirmed') is True:
+        return {'state': 'native_queued', 'ok': True, 'message_id': message_id, 'reused': True,
+                'reason': 'Delivery already confirmed', 'value': saved}
+    attempts = list(tracking.get('attempts') or [])
+    latest_index, latest = _receipt_attempt(tracking)
+    try:
+        # Late success is recorded on its old attempt without confirming a retry.
+        # Only attempt-scoped IDs in this same conversation are revisited here.
+        changed = False
+        for index, attempt in enumerate(attempts[:latest_index]):
+            old = attempt.get('delivery_receipt') or {}
+            old_value = old.get('value') if isinstance(old, dict) else None
+            if (not attempt.get('native_message_id') or attempt.get('native_session_id') != receipt_session.native_id
+                    or isinstance(old_value, dict) and old_value.get('transcript_confirmed') is True):
+                continue
+            try:
+                evidence = effects.call(adapter, 'get_delivery', receipt_session, _receipt_id(message, attempt), executor)
+            except Denied:
+                raise
+            except Exception:
+                continue  # A historical read problem cannot change the current attempt.
+            if (evidence.state == 'native_queued' and isinstance(evidence.value, dict)
+                    and evidence.value.get('transcript_confirmed') is True):
+                attempts[index] = {**attempt, 'delivery_receipt': evidence.to_dict()}
+                changed = True
+        if changed:
+            update_message(directory, message_id, attempts=attempts)
+        result = effects.call(adapter, 'get_delivery', receipt_session, _receipt_id(message, latest), executor)
+        confirmed = isinstance(result.value, dict) and result.value.get('transcript_confirmed') is True
+        failure = _retryable_receipt(result.to_dict())
+        if not confirmed and not failure:
+            from . import delivery_evidence
+            result = delivery_evidence.check(directory, adapter, session, executor, message, tracking) or result
+        receipt = {**result.to_dict(), 'message_id': message_id,
+                   'ok': result.state not in ('error', 'unknown', 'unavailable')}
+        if isinstance(result.value, dict) and result.value.get('lost_when_stopped') is True:
+            receipt.update(state='cancelled', ok=False)
+            update_message(directory, message_id, submission_state='cancelled', final_reason='lost',
+                           last_receipt=receipt, native_receipt=result.value, cancelled_at=now())
+            return receipt
+        changes = {}
+        if _retryable_receipt(receipt):
+            receipt['value']['delivery_rejected'] = True
+            changes = {'submission_state': 'failed', 'native_receipt': receipt['value'],
+                       'last_receipt': receipt, 'transcript_confirmed_at': None}
+        elif result.state == 'native_queued':
+            changes = {'submission_state': 'accepted', 'native_receipt': result.value, 'last_receipt': receipt}
+            if (result.value or {}).get('transcript_confirmed') is True:
+                changes['transcript_confirmed_at'] = now()
+        if changes:
+            if latest.get('native_message_id'):
+                attempts[latest_index] = {**latest, 'delivery_receipt': receipt}
+                changes['attempts'] = attempts
+            update_message(directory, message_id, **changes)
+        return receipt
+    except Denied:
+        raise
+    except Exception as error:
+        return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     effects.require('get_delivery' if check else 'send', reference)
     directory = agents.directory(root, reference)
@@ -738,37 +852,12 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             elif check:
                 return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         if check:
-            target = tracking.get('target_session') or message.get('target_session')
-            receipt_session = session
-            if target and target != session.native_id:
-                if not _session_changes(directory, executor.properties, target):
-                    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
-                            'reason': 'Message targets a conversation outside this agent\'s recorded lineage; delivery cannot be checked',
-                            'value': {'outside_lineage': True,
-                                      'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
-                receipt_session = replace(session, native_id=target)
-            if tracking.get('submission_state') == 'failed':
-                return {**tracking['attempts'][-1], 'ok': False}
-            try:
-                result = effects.call(adapter, 'get_delivery', receipt_session, message_id, executor)
-                if not (isinstance(result.value, dict) and result.value.get('transcript_confirmed') is True):
-                    from . import delivery_evidence
-                    result = delivery_evidence.check(directory, adapter, session, executor, message, tracking) or result
-                if isinstance(result.value, dict) and result.value.get('lost_when_stopped') is True:
-                    receipt = {**result.to_dict(), 'state': 'cancelled', 'ok': False, 'message_id': message_id}
-                    update_message(directory, message_id, submission_state='cancelled', final_reason='lost',
-                                   last_receipt=receipt, native_receipt=result.value, cancelled_at=now())
-                    return receipt
-                if result.state == 'native_queued':
-                    changes = {'submission_state': 'accepted', 'native_receipt': result.value}
-                    if (result.value or {}).get('transcript_confirmed'):
-                        changes['transcript_confirmed_at'] = now()
-                    update_message(directory, message_id, **changes)
-                return {**result.to_dict(), 'message_id': message_id, 'ok': result.state not in ('error', 'unknown', 'unavailable')}
-            except Denied:
-                raise
-            except Exception as error:
-                return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
+            return _check_delivery_receipt(directory, adapter, session, executor, message, tracking)
+        if retry and receipt_failure(tracking):
+            receipt = _check_delivery_receipt(directory, adapter, session, executor, message, tracking)
+            if not _retryable_receipt(receipt):
+                return receipt
+            _, tracking = message_record(directory, message_id)
         selected_mode = message.get('delivery', 'inbox-only')
         if selected_mode not in ('steer', 'follow-up'):
             raise ValueError('Native delivery requires steer or follow-up')
@@ -814,14 +903,22 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         attempt = {'state': 'unknown', 'reason': 'Submission in progress', 'message_id': message_id,
                    'native_session_id': session.native_id, 'mode': selected_mode, 'agent_id': session.agent_id,
                    'launch_id': session.launch_id, 'at': now()}
+        native_message_id = (str(uuid4()) if inspect.getattr_static(adapter, 'delivery_attempt_ids', False) is True
+                             else message['id'])
+        if native_message_id != message['id']:
+            attempt['native_message_id'] = native_message_id
         framed = framed_text(root, message)
         delivery_context = {'launch_id': session.launch_id, 'native_id': session.native_id,
-                            'home': session.home, 'workspace': session.workspace, 'text': framed, 'since': attempt['at']}
+                            'home': session.home, 'workspace': session.workspace, 'text': framed, 'since': attempt['at'],
+                            **({'native_message_id': native_message_id} if 'native_message_id' in attempt else {})}
+        if 'native_message_id' in attempt:
+            attempt['delivery_context'] = delivery_context
         # Persist BEFORE the native call: a crash cannot turn uncertain submission
         # into pending and silently replay it on restart.
         update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
                        delivery_method='native', attempts=[*previous, attempt], restart_on_delivery=False,
-                       last_receipt=None, final_reason=None, delivery_context=delivery_context)
+                       last_receipt=None, native_receipt=None, transcript_confirmed_at=None,
+                       final_reason=None, delivery_context=delivery_context)
         try:
             if not session.native_id:
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
@@ -830,7 +927,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                         and adapter_hook(adapter, 'continue_queued') is not None):
                     from .queue_continuation import claim_restart
                     session = claim_restart(directory, session, message_id)
-                result = effects.call(adapter, 'send', session, Message(message['id'], message['text'], message.get('from', {}),
+                result = effects.call(adapter, 'send', session, Message(native_message_id, message['text'], message.get('from', {}),
                                       delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
         except Denied:
             raise
@@ -895,6 +992,19 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         state = tracking.get('submission_state', 'pending')
         eligible = state == 'pending' or (retry and state == 'failed')
         wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
+        if wake and receipt_failure(tracking):
+            with lock(directory / '.delivery.lock'):
+                message, tracking = message_record(directory, message_id)
+                if not receipt_failure(tracking):
+                    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                            'reason': 'Delivery changed while preparing its retry; check it again'}
+                if executor is None:
+                    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                            'reason': 'Cannot recheck the previous delivery attempt until the agent records are repaired'}
+                receipt = _check_delivery_receipt(directory, adapter, session, executor, message, tracking)
+                if not _retryable_receipt(receipt):
+                    return receipt
+                _, tracking = message_record(directory, message_id)
         capability = effects.call(adapter, 'capabilities', session).get('wake') if wake else None
         if wake and (capability is None or capability.state != 'supported'):
             launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None
@@ -909,9 +1019,10 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     try:
         previous_socket = (executor.facts.get('tmux') or {}).get('socket') if executor else None
         paused = (session.queue_state or {}).get('state') in ('paused', 'interrupting')
-        queued_wake = (paused and session.attachment is not None
-                       and session.attachment.readiness in ('binding', 'legacy-binding')
-                       and adapter_hook(adapter, 'continue_queued') is not None)
+        queued_wake = ((paused and session.attachment is not None
+                        and session.attachment.readiness in ('binding', 'legacy-binding')
+                        and adapter_hook(adapter, 'continue_queued') is not None)
+                       or receipt_failure(tracking) and inspect.getattr_static(adapter, 'delivery_attempt_ids', False) is True)
         options = {'_queue_wake': True, '_restart_queue': bool(new_message and not retry)} if queued_wake else {}
         launched = lifecycle.start(root, resume=reference, resume_message_id=message_id,
                                    socket_path=previous_socket, **options)

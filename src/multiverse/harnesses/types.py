@@ -305,7 +305,10 @@ class BindingObserver(Protocol):
 
 @dataclass(frozen=True)
 class Message:
-    """`framed` is recipient text; `id` is private receipt correlation metadata."""
+    """`framed` is recipient text; `id` is private receipt correlation metadata.
+
+    With delivery_attempt_ids, it names this submission, not the logical inbox message.
+    """
     id: str
     text: str
     sender: Mapping[str, Any] = field(default_factory=dict)

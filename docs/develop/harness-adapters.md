@@ -165,9 +165,29 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 
 A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages any launch accepted without transcript confirmation. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
 
+An adapter may report a retryable failure after acceptance with `error` and
+`value={'definite_failure': True, 'transcript_confirmed': False}`. Core records
+it as `failed` and keeps the check in `last_receipt`, without adding a submission
+attempt. A check error without that exact flag leaves the acceptance unchanged.
+An explicit retry rechecks the failed attempt before sending or waking; a late
+confirmation prevents another submission, and unreadable evidence blocks it.
+A stopped attempt-scoped recipient resumes with no interactive prompt; the durable startup queue submits the retry through `send` after its bridge is ready. This path disables launch fallback and requires a bridge. Nothing retries automatically. Claude also uses this failure result when its
+mod's row-storage deadline expires: this is a deliberate policy exception to
+proof of non-delivery, so a manual retry may duplicate a late stored copy.
+
+Adapters that set `delivery_attempt_ids = True` receive a fresh private UUID in
+`Message.id` for every actual submission. Core persists it as `native_message_id`
+on the attempt and its `delivery_context` before calling `send`, and passes the
+same UUID to `get_delivery`. The logical inbox message ID never changes. Old
+records without this field keep their original message ID. Each attempt keeps
+its submission context and checked `delivery_receipt`; a late confirmation of an older attempt cannot
+change the current attempt's state. Transcript fallback for these IDs accepts
+only exact-ID or receipt confirmation, never matching text from another attempt.
+Legacy text-allocation cohorts include every scoped acceptance under its native ID, including earlier retries, so their receipts reserve their own rows. Missing attempt context leaves same-body text proof unknown. The legacy receipt migration skips these newer records.
+
 | Harness | Receipt |
 | --- | --- |
-| Claude | The mod writes `claude-receipts/MESSAGE_ID.json` in the agent directory when the message enters the conversation |
+| Claude | The mod writes `claude-receipts/ATTEMPT_ID.json` for delivery and `ATTEMPT_ID.not-delivered.json` for failure. A valid delivery wins when both exist; older records use the message ID. |
 | Codex | The adapter searches the thread's queue (100 entries) and recent turns (20) |
 | Pi | The extension answers from its transcript metadata and in-process records |
 
