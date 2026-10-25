@@ -24,7 +24,9 @@
       ],
       "context_window": null,
       "long_context_window": null,
-      "max_output_tokens": 8192
+      "max_output_tokens": 8192,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-haiku-4-5",
@@ -48,7 +50,17 @@
       ],
       "context_window": 200000,
       "long_context_window": 200000,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-haiku-5-5",
@@ -78,7 +90,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-3-5-sonnet",
@@ -102,7 +124,9 @@
       ],
       "context_window": null,
       "long_context_window": null,
-      "max_output_tokens": 8192
+      "max_output_tokens": 8192,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-3-7-sonnet",
@@ -126,7 +150,9 @@
       ],
       "context_window": null,
       "long_context_window": null,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-sonnet-4-0",
@@ -150,7 +176,9 @@
       ],
       "context_window": 200000,
       "long_context_window": 1000000,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-sonnet-4-5",
@@ -174,7 +202,9 @@
       ],
       "context_window": 200000,
       "long_context_window": 1000000,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-sonnet-4-6",
@@ -196,14 +226,24 @@
         "high",
         "max"
       ],
-      "default_effort": null,
+      "default_effort": "high",
       "inputs": [
         "text",
         "image"
       ],
       "context_window": 200000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-sonnet-5",
@@ -233,7 +273,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-sonnet-5-5",
@@ -263,7 +313,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-4-0",
@@ -287,7 +347,9 @@
       ],
       "context_window": 200000,
       "long_context_window": 200000,
-      "max_output_tokens": 32000
+      "max_output_tokens": 32000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-opus-4-1",
@@ -311,7 +373,12 @@
       ],
       "context_window": 200000,
       "long_context_window": 200000,
-      "max_output_tokens": 32000
+      "max_output_tokens": 32000,
+      "default": false,
+      "picker": [
+        "bedrock",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-4-5",
@@ -335,7 +402,9 @@
       ],
       "context_window": 200000,
       "long_context_window": 200000,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-opus-4-6",
@@ -357,14 +426,24 @@
         "high",
         "max"
       ],
-      "default_effort": null,
+      "default_effort": "high",
       "inputs": [
         "text",
         "image"
       ],
       "context_window": 200000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-4-7",
@@ -394,7 +473,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-4-8",
@@ -424,7 +513,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-5",
@@ -454,7 +553,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-opus-5-5",
@@ -484,7 +593,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": true,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-fable-5",
@@ -514,7 +633,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-fable-5-1",
@@ -544,7 +673,17 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": [
+        "anthropic_aws",
+        "bedrock",
+        "first_party",
+        "foundry",
+        "gateway",
+        "mantle",
+        "vertex"
+      ]
     },
     {
       "id": "claude-mythos-5",
@@ -568,7 +707,9 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": []
     },
     {
       "id": "claude-mythos-5-1",
@@ -598,7 +739,9 @@
       ],
       "context_window": 1000000,
       "long_context_window": null,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": []
     }
   ],
   "aliases": {

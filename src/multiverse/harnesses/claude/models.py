@@ -54,7 +54,7 @@ def catalog(environment):
                   aliases=tuple(sorted(name for name, target in aliases.items() if target == item['id'])),
                   efforts=tuple(item['efforts']), default_effort=item['default_effort'], inputs=tuple(item['inputs']),
                   context_window=item['context_window'], long_context_window=item['long_context_window'],
-                  max_output_tokens=item['max_output_tokens'])
+                  max_output_tokens=item['max_output_tokens'], default=item['default'], hidden=key not in item['picker'])
         for item in data['models'] if item['provider_ids'].get(key)),
         free_form=True, source='table', version=data['claude_code'], provider=key.replace('_', '-'))
 

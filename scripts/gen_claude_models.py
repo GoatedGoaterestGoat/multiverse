@@ -5,10 +5,12 @@
     python scripts/gen_claude_models.py BINARY         # from that Claude Code binary
     python scripts/gen_claude_models.py --check        # exit 1 when the table is stale for that binary
 
-Claude Code has no command that lists its models, but its binary embeds a hand-maintained catalog (a JavaScript
-object literal that starts with that phrase). This finds it, converts it to JSON and keeps what mv2 uses. mv2
-never reads the binary or Claude's own caches at run time: each Claude Code version check reruns this script and
-commits the table with the version it came from.
+Claude Code has no command that lists its models, but its binary embeds two catalogs, as JavaScript object
+literals: a hand-maintained one (every model's IDs per provider, efforts and context), and a release copy of its
+downloadable model catalog, which is what its /model picker shows (default efforts it adds, the default model, and
+which models it offers at all). This reads both, converts them to JSON and keeps what mv2 uses. mv2 never reads the
+binary or Claude's own caches at run time: each Claude Code version check reruns this script and commits the table
+with the version it came from.
 """
 import argparse
 import difflib
@@ -23,16 +25,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / "src" / "multiverse" / "harnesses" / "claude" / "models.json"
 MARKER = b"Hand-maintained baked-in model catalog"
+RELEASE = b'$schema:"https://downloads.claude.ai/model-catalog/v1/schema.json"'
 PROVIDERS = ("first_party", "bedrock", "vertex", "foundry", "anthropic_aws", "anthropic_google_cloud", "mantle",
              "gateway")
 STRING = re.compile(r'("(?:\\.|[^"\\])*")')
 
 
-def literal(data):
-    """The catalog's object literal, from the `{` before the marker to its matching `}`."""
-    at = data.find(MARKER)
+def literal(data, marker=MARKER, what="model catalog"):
+    """A catalog's object literal, from the `{` before its marker to the matching `}`."""
+    at = data.find(marker)
     if at < 0:
-        raise SystemExit("no model catalog in this binary: Claude Code moved or renamed it")
+        raise SystemExit(f"no {what} in this binary: Claude Code moved or renamed it")
     start = data.rindex(b"={", 0, at) + 1
     depth, quote, index = 0, None, start
     while index < len(data):
@@ -52,7 +55,7 @@ def literal(data):
             if not depth:
                 return data[start:index + 1].decode()
         index += 1
-    raise SystemExit("the model catalog never ends: Claude Code changed its format")
+    raise SystemExit(f"the {what} never ends: Claude Code changed its format")
 
 
 def parse(text):
@@ -85,7 +88,31 @@ def efforts(capabilities):
     return ["low", "medium", "high"] + ["xhigh"] * ("xhigh_effort" in capabilities) + ["max"] * ("max_effort" in capabilities)
 
 
-def model(entry):
+def picker(release):
+    """From the release catalog, Claude Code's (`cc`) picker: each model it offers, with its default effort and the
+    providers it is offered on, and the default model."""
+    shape(isinstance(release, dict) and release.get("schema_version") == 1,
+          f"release catalog schema {release.get('schema_version') if isinstance(release, dict) else None!r}")
+    cc = (release.get("surfaces") or {}).get("cc")
+    shape(isinstance(cc, dict), "a release catalog without Claude Code's surface")
+    configs, states = cc.get("model_selector_config"), cc.get("model_selector_state")
+    shape(isinstance(configs, list) and len(configs) == 1 and isinstance(configs[0], dict)
+          and isinstance(configs[0].get("models"), list) and configs[0]["models"], "the release catalog's models")
+    shape(isinstance(states, list) and len(states) == 1 and isinstance(states[0], dict)
+          and isinstance(states[0].get("model"), str), "the release catalog's default model")
+    offered = {}
+    for entry in configs[0]["models"]:
+        shape(isinstance(entry, dict) and isinstance(entry.get("id"), str), "a release model without an id")
+        runtime = entry.get("runtime", {})
+        shape(isinstance(runtime, dict), f"release model {entry['id']}'s runtime")
+        effort, places = runtime.get("default_effort"), entry.get("offered_on")
+        shape(effort is None or isinstance(effort, str), f"release model {entry['id']}'s default effort")
+        shape(isinstance(places, list) and set(places) <= set(PROVIDERS), f"release model {entry['id']}'s providers")
+        offered[entry["id"]] = (effort.strip().lower() if effort else None, sorted(places))
+    return offered, states[0]["model"]
+
+
+def model(entry, offered, default):
     shape(isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"], "a model without an id")
     name = entry["id"]
     ids, capabilities = entry.get("provider_ids"), entry.get("capabilities", [])
@@ -98,7 +125,7 @@ def model(entry):
     shape(isinstance(context, dict) and isinstance(output, dict), f"{name}'s context or max_output_tokens")
     window = tokens(context.get("window"), f"{name}'s context window")
     largest = tokens(context.get("maximum_window"), f"{name}'s maximum window") or window
-    effort = entry.get("default_effort")
+    effort = entry.get("default_effort") or offered.get(name, (None,))[0]  # the picker's, where the hand-kept one has none
     shape(effort is None or effort in efforts(capabilities), f"{name}'s default effort {effort!r}")
     return {
         "id": name,
@@ -113,14 +140,29 @@ def model(entry):
         # The window with the "[1m]" suffix, only where Claude Code takes the suffix for this model.
         "long_context_window": largest if context.get("supports_1m_suffix") else None,
         "max_output_tokens": tokens(output.get("upper") or output.get("default"), f"{name}'s max output"),
+        "default": name == default,
+        # The providers whose picker lists it; on others it is hidden (older or gated), though --model may take it.
+        "picker": offered.get(name, (None, []))[1],
     }
 
 
-def table(catalog, version):
+def table(catalog, version, release):
     shape(isinstance(catalog, dict) and catalog.get("schema_version") == 1,
           f"schema {catalog.get('schema_version') if isinstance(catalog, dict) else None!r}")
     shape(isinstance(catalog.get("models"), list) and catalog["models"], "no models list")
-    models = [model(entry) for entry in catalog["models"]]
+    shape(all(isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"] for entry in catalog["models"]),
+          "a model without an id")
+    # The release catalog names a model by its first-party ID, which is often dated ("claude-haiku-4-5-20251001").
+    names = {}
+    for entry in catalog["models"]:
+        for name in (entry["id"], (entry.get("provider_ids") or {}).get("first_party")):
+            if isinstance(name, str):
+                names.setdefault(name, entry["id"])
+    shown, default = picker(release)
+    unknown = sorted(set(shown) - set(names)) + ([] if default in names else [default])
+    shape(not unknown, f"the release catalog names models the hand-maintained one lacks: {unknown}")
+    offered = {names[name]: facts for name, facts in shown.items()}
+    models = [model(entry, offered, names[default]) for entry in catalog["models"]]
     known = {item["id"] for item in models}
     aliases = {}
     for name, alias in (catalog.get("aliases") or {}).items():
@@ -145,7 +187,8 @@ def binary_version(binary):
 
 def render(binary):
     data = Path(binary).read_bytes()
-    return json.dumps(table(parse(literal(data)), binary_version(binary)), indent=2) + "\n"
+    release = parse(literal(data, RELEASE, "release model catalog"))
+    return json.dumps(table(parse(literal(data)), binary_version(binary), release), indent=2) + "\n"
 
 
 def main():
