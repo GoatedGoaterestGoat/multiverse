@@ -67,6 +67,14 @@ copies of one row uuid that disagree on anything allocation reads (its type, its
 message ID, or its time, an attachment's own when the row has none), whatever order they're read in. Missing reason hooks default to no additional
 diagnostic; they cannot change the evidence result.
 
+Messages accepted before the mod wrote receipts have no saved frame to compare,
+so `mv2 update`'s one-time pass asks `message_id_evidence(session, message_id, home)`
+instead: delivered only when a well-formed row of the session carries the exact
+message ID (a row naming another session doesn't count), and unknown otherwise, never lost. A message typed in as a prompt has
+no such row and stays unknown; damage elsewhere in the transcript doesn't cancel a
+found row, but any copy of that row (by its uuid) that differs does: another kind
+of row, a malformed one, or one naming another session.
+
 Core retains the failed launch's exact prompt, start time, conversation identity
 and storage context after observing its process exit. `deliver --check` re-asks
 the evidence hook with that snapshot, even after another launch or conversation
@@ -78,7 +86,9 @@ missing facts never authorize retry. A new wake clears the preceding snapshot.
 
 Every transcript lookup lists
 Claude's folders itself rather than with a glob, which skips unreadable folders
-silently. Only a folder that could hold the session counts: Claude names a project
+silently. Every reader opens a transcript (and Claude's prompt history)
+without waiting, and reads it only if the opened file is a regular file: a FIFO,
+device or directory at its name means can't tell, never an empty file. Only a folder that could hold the session counts: Claude names a project
 folder after the real path it was launched in, NFC-normalized, with every UTF-16
 code unit that isn't an ASCII letter or digit replaced by `-` (past 200 units, the
 first 200 plus `-` and a hash). So an unreadable folder blocks when its name,
@@ -1260,7 +1270,7 @@ The pieces keep to their own side of the boundary:
 
 - **Adapter** (`harnesses/claude/__init__.py`): launch flags, the inbox socket,
   the peer-token format, the `<<MV2>>` tag, the registered bridge id (`BRIDGE`,
-  `claude-mod-v1`), receipts, `ask`, capabilities and readiness. Everything about
+  `claude-mod-v2`), receipts, `ask`, capabilities and readiness. Everything about
   a launch's bridge comes from one pure `Bridge` view (`launched`, `registered`,
   `ready`, `reason`), so capabilities, `send`, `ask` and readiness cannot disagree.
 - **Mod** (`mod/`): hooks inside Claude. It reports itself once running
@@ -1314,6 +1324,15 @@ only on tagged text and shows the model the text alone:
   ended. A steer queued mid-turn that no tool result took would start its own turn
   as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
   The terminal shows these as ordinary prompts; the transcript names the plugin.
+
+The tag also carries the message's send time (`sent=`, the inbox record's). If
+the message reaches the model more than ten minutes after it was sent, the mod
+gives the sender line its age, in core's wording (`Message from lead (sent 25 min
+ago):`), when Claude stores the row: after a tool result for a mid-turn steer,
+and when its own turn starts for the others, so a follow-up that waited behind a
+long turn says so. An age core already put in the frame for a wake or a retry is
+replaced, never doubled. Delivery evidence compares framed texts without that
+age, since the saved text and the stored copy can differ there.
 
 When a message's row enters the conversation, the mod writes
 `claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
@@ -1404,7 +1423,9 @@ read. The text is its first line, cleaned and shortened like a summary, and an
 empty or missing file shows nothing. A malformed record, a name that breaks the
 manifest rule or is a core name, and a repeated name declare nothing.
 
-The mod also registers the bridge (`BRIDGE`, `claude-mod-v1`) for its launch
+The mod also registers the bridge (`BRIDGE`, `claude-mod-v2`; the ID changes
+when the tag gains a part an older mod can't read: a mod still on `claude-mod-v1`
+until it reloads stays connected and gets tags without a send time) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
@@ -1444,7 +1465,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.309; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.310; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

@@ -17,6 +17,22 @@ mv2 update            # get it
 
 It never switches branches, rebases or stashes.
 
+The first update to the message-age and delivery-summary release also checks
+older accepted messages once in this universe and its subverses. Only an exact
+message ID in the recorded conversation can add a confirmation; text matches,
+missing evidence and accepted wake prompts stay unchanged. Nothing is resent or
+marked lost. The pass runs beside plugin settings conversion and records its
+completion in `state/migrations/message-id-receipts-v1.json`. Records that cannot
+be read or whose storage cannot be proved stay unchanged; this pass does not
+retry them automatically. Transcript scans share a 60-second budget across the
+selected tree, checked between messages; anything not checked stays unchanged,
+and the completion record says when that budget was reached. To repeat a pass
+after repairing records, back up and remove that completion file, then run
+`mv2 plugins migrate --apply` in that universe. Already confirmed messages are
+not revisited. If you update by
+`git pull` instead, run `mv2 plugins migrate --apply --recursive` once to perform
+this pass; later runs do not rescan the messages.
+
 After updating, do these three things:
 
 1. **Restart the dashboard.**

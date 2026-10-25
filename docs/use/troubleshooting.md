@@ -38,7 +38,7 @@ The first line gives the name, the harness and its mode, and the state. The mode
 
 | Reason starts with | Cause | Fix |
 | --- | --- | --- |
-| `Native process exited with code N` | The program quit; the last lines of its terminal follow | Read them in `mv2 inspect NAME`. The cause is often a login, trust or flag problem, so run the program once by hand |
+| `Native process exited with code N` | The program quit; the last lines of its terminal follow. SIGTERM, recorded as -15 or the shell exit status 143, is an ordinary stop, not a launch failure in list or doctor. Other signals and exit codes keep their existing meaning | Read them in `mv2 inspect NAME`. The cause is often a login, trust or flag problem, so run the program once by hand |
 | `Timed out after 60s waiting for launch readiness` | `--wait` gave up; the launch is still running | Run `mv2 inspect NAME`, and attach to answer a login or trust prompt |
 | `Harness executable not found` | The program isn't on `PATH` | Install it, or set `executable` in `harness.json` |
 | `Workspace does not exist` | The universe's workspace or the agent's saved one is gone | Restore the directory |

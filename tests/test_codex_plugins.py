@@ -423,7 +423,7 @@ def register(mv):
     def test_generated_config_is_honoured_by_a_private_codex(self):
         """On private app-servers the generated MCP server connects with only its declared env, and plain argv and
         shell_environment_policy.set bring harness env to shell commands, also across a bridge resume; fragile because
-        it depends on Codex's config schema, and a schema change drops env or MCP servers silently."""
+        it depends on Codex's config schema and idle/unsubscribed reload boundary, so drift silently leaves stale env."""
         from native_safety import isolated_home, install
         import subprocess
         install()
@@ -539,8 +539,10 @@ for line in sys.stdin:
                     resumed_output = self.work / 'resumed-shell-env.txt'
                     script = ("import os,pathlib;pathlib.Path(" + repr(str(resumed_output))
                               + ").write_text(os.environ.get('APP_TOKEN','missing'))")
+                    # Exercise the gap between observable output and shell completion.
                     await rpc({'id': 5, 'method': 'thread/shellCommand', 'params': {'threadId': thread['thread']['id'],
-                        'command': shlex.join([sys.executable, '-c', script]), 'timeoutMs': 5000}})
+                        'command': shlex.join([sys.executable, '-c', script + ';import time;time.sleep(1)']),
+                        'timeoutMs': 5000}})
                     for _ in range(100):
                         if resumed_output.exists():
                             break
@@ -548,8 +550,23 @@ for line in sys.stdin:
                     self.assertTrue(resumed_output.exists(), 'resumed shell command did not produce output')
                     # Native rejoin preserves a still-subscribed thread's old config.
                     self.assertEqual(resumed_output.read_text(), 'shell-secret')
+                    # An output file can precede shell completion. Native reload
+                    # requires idle work and no subscribers, not a timed pause.
+                    deadline = asyncio.get_running_loop().time() + 15
+                    while True:
+                        observed = await rpc({'id': 21, 'method': 'thread/read', 'params': {
+                            'threadId': thread['thread']['id'], 'includeTurns': False}})
+                        self.assertEqual(observed['thread']['id'], thread['thread']['id'])
+                        if (observed['thread']['status']['type'] == 'idle'
+                                and observed['thread'].get('canAcceptDirectInput') is True):
+                            break
+                        self.assertLess(asyncio.get_running_loop().time(), deadline,
+                                        'native shell work did not become idle before resume')
+                        await asyncio.sleep(.05)
+                    detached = await rpc({'id': 22, 'method': 'thread/unsubscribe',
+                        'params': {'threadId': thread['thread']['id']}})
+                    self.assertEqual(detached['status'], 'unsubscribed')
                     await connection.close()
-                    await asyncio.sleep(.1)
                     connection = await unix_connect(str(socket))
                     await rpc({'id': 10, 'method': 'initialize', 'params': {
                         'clientInfo': {'name': 'mv2-test', 'version': '1'}, 'capabilities': {'experimentalApi': True}}})

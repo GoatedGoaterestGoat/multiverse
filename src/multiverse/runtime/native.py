@@ -3,6 +3,7 @@
 Durable message storage never depends on these best-effort operations.
 """
 from dataclasses import asdict, replace
+from datetime import datetime
 import json
 from pathlib import Path
 import stat
@@ -235,7 +236,7 @@ class NativeExecutor:
         return NativeResult('ok', 'Written to the inbox')
 
 
-def framed_text(root, message):
+def framed_text(root, message, *, at=None):
     """The recipient's text: who sent the message, then the message as written."""
     sender = message.get('from') or {}
     name = sender.get('name') or 'user'
@@ -251,7 +252,29 @@ def framed_text(root, message):
             origin = f' (in universe {read(Path(scope) / "universe.json")["name"]})'
         except (OSError, ValueError, KeyError):
             origin = f' (in universe {scope})'
-    return f'Message from {name}{origin}:\n{message["text"]}'
+    age = _message_age(message.get('at'), at=at)
+    return f'Message from {name}{origin}{" (" + age + ")" if age else ""}:\n{message["text"]}'
+
+
+def _message_age(sent_at, *, at=None):
+    """Only aware, trustworthy elapsed time can qualify a sender header."""
+    try:
+        sent = datetime.fromisoformat(sent_at)
+        current = at if at is not None else datetime.fromisoformat(now())
+        if sent.tzinfo is None or current.tzinfo is None:
+            return ''
+        seconds = (current - sent).total_seconds()
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return ''
+    if seconds <= 600:
+        return ''
+    if seconds < 3600:
+        amount, unit = int(seconds // 60), 'min'
+    elif seconds < 86400:
+        amount, unit = int(seconds // 3600), 'hour'
+    else:
+        amount, unit = int(seconds // 86400), 'day'
+    return f'sent {amount} {unit}{"s" if amount != 1 and unit != "min" else ""} ago'
 
 
 @contextmanager
@@ -593,6 +616,8 @@ def finalize_launch_only(root, directory, message_id):
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         state = tracking.get('submission_state', 'pending')
         previous = (tracking.get('attempts') or [{}])[-1]
         value = previous.get('value')
@@ -619,17 +644,19 @@ def reopen_launch_only(root, directory, message_id):
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return False
         if tracking.get('submission_state') != 'launch-only':
             return True  # A concurrent result still goes through normal no-resend checks.
         previous = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
         value = previous.get('value')
         if not isinstance(value, dict) or value.get('launch_only') is not True or value.get('final') is not True:
             return False
-        _, adapter, session, _ = context(root, directory.name, reconcile=False)
+        _, adapter, session, executor = context(root, directory.name, reconcile=False)
         capabilities = getattr(adapter, 'capabilities', None)
         if capabilities is None:
             return False
-        capability = capabilities(session).get(
+        capability = capabilities(session, executor).get(
             'send_follow_up' if message.get('delivery') == 'follow-up' else 'send_steer')
         if capability is None or capability.state != 'supported':
             return False
@@ -638,6 +665,12 @@ def reopen_launch_only(root, directory, message_id):
         receipt = {**previous, 'value': {**value, 'final': False}, 'reconsidered_at': now()}
         update_message(directory, message_id, submission_state='failed', final_reason=None, last_receipt=receipt)
         return True
+
+
+def _dismissed_receipt(message_id):
+    return {'state': 'unavailable', 'ok': True, 'message_id': message_id, 'reused': True,
+            'reason': 'This delivery failure was dismissed; it stays in history and will not be retried',
+            'value': {'dismissed': True, 'final': True}}
 
 
 def _final_lineage_receipt(message_id):
@@ -652,6 +685,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         if (check and tracking.get('delivery_method') == 'resume_prompt'
@@ -773,7 +808,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                     from .queue_continuation import claim_restart
                     session = claim_restart(directory, session, message_id)
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      delivery=selected_mode, framed=framed), executor)
+                                      delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
@@ -797,6 +832,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
+        if tracking.get('dismissed_at'):
+            return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)

@@ -71,7 +71,7 @@ class PluginTextTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertIn("[/x]", " ".join(headers))  # the missing column's title too
                 self.assertIn("val [/x] [bold]", [cell for row in rows for cell in row])
                 self.assertIn("grp [/x]", [cell for row in rows for cell in row])
-                self.assertIn("texty: Clean [/x]", d.palette())
+                await d.until(lambda: "texty: Clean [/x]" in d.palette(), "the plugin's palette entry")
                 plugins = await d.open_plugins()
                 row = plugins.query_one("#plugins-table").get_row_at(0)
                 self.assertEqual([getattr(cell, "plain", cell) for cell in row][:4], ["texty", "on", "on", "1.0 [/x]"])

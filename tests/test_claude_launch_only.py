@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import threading
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -631,6 +632,90 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
                                                         **({'active_acceptances': active} if active else {}))
         return result.state, (result.value or {}).get('delivered')
 
+    def test_a_fifo_at_a_transcript_name_never_blocks_a_reader(self):
+        """Every transcript reader refuses anything but a regular file without waiting on it; fragile because opening a
+        FIFO for reading waits for a writer, so one stray FIFO would hang mv2 update's pass, deliver --check, wake
+        evidence and the dashboard's usage reads (behind a lock every agent's usage read takes) (reviewer, 6f0af4c)."""
+        from multiverse.harnesses.claude import _typed_prompt
+        environment = {'CLAUDE_CONFIG_DIR': str(self.storage)}
+        session = replace(self.session(), home=str(self.storage))
+        transcript = self.project / f'{self.native}.jsonl'
+        self.project.mkdir(parents=True)
+        os.mkfifo(transcript)
+        history = self.storage / 'history.jsonl'
+        os.mkfifo(history)
+        def release():  # a reader still waiting on a FIFO opens once a writer appears
+            for fifo in (transcript, history):
+                try:
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+        self.addCleanup(release)
+        readers = [
+            ('the exact-ID pass', lambda: self.adapter.message_id_evidence(session, self.message, str(self.storage)).state, 'unknown'),
+            ('deliver --check', lambda: self.adapter.accepted_message_evidence(session, self.message, self.TEXT, self.SINCE,
+                                                                                str(self.storage)).state, 'unknown'),
+            ('wake evidence', lambda: self.adapter.startup_prompt_evidence(session, 'Please rebase.', self.SINCE, environment), None),
+            ('storage adoption', lambda: self.adapter.session_storage_evidence(session, str(self.storage)).state, 'unknown'),
+            ('usage', lambda: self.adapter.get_usage(session).state, 'error'),
+            ("Claude's prompt history", lambda: _typed_prompt(self.native, environment), False),
+        ]
+        for name, read, expected in readers:
+            with self.subTest(name):
+                answer = []
+                worker = threading.Thread(target=lambda: answer.append(read()), daemon=True)
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive(), f'{name} waited on a FIFO')
+                self.assertEqual(answer, [expected])
+
+    def test_an_old_acceptance_is_confirmed_only_by_its_exact_message_id(self):
+        """mv2 update's one-time pass confirms messages accepted before the mod wrote receipts from their exact message
+        ID alone; fragile because a text match or an absence read as proof would mark an old message delivered, or lost,
+        on evidence another message could have left."""
+        other = str(uuid4())
+        row = lambda message, uuid: {**self.steer(message=message), 'uuid': uuid}
+        rows = [
+            ('its queued_command row carries the ID', [self.steer()], '', {}, ('ok', True)),
+            ('typed in as a prompt: only the text is there', [self.prompt()], '', {}, ('unknown', None)),
+            ("another message's ID", [self.steer(message=other)], '', {}, ('unknown', None)),
+            ('nothing stored: never read as lost', [], '', {}, ('unknown', None)),
+            ('a damaged row elsewhere does not cancel the ID row', [self.steer()], '{"type":', {}, ('ok', True)),
+            ('copies of one row disagree on its ID', [row(self.message, 'r-1'), row(other, 'r-1')], '', {}, ('unknown', None)),
+            # Any copy of the row's uuid that differs, whatever it is, leaves the row in doubt (reviewer, 6f0af4c).
+            ('a copy of the row that is another type', [row(self.message, 'r-2'), {'type': 'assistant', 'uuid': 'r-2'}], '', {},
+             ('unknown', None)),
+            ('a malformed copy of the row', [row(self.message, 'r-3'), {'type': 'attachment', 'uuid': 'r-3', 'attachment': None}],
+             '', {}, ('unknown', None)),
+            ("a copy of the row naming another session", [row(self.message, 'r-4'),
+             {**row(self.message, 'r-4'), 'sessionId': str(uuid4())}], '', {}, ('unknown', None)),
+            ('identical copies of the row', [row(self.message, 'r-5'), row(self.message, 'r-5')], '', {}, ('ok', True)),
+            # An explicit null names no session, so it isn't this one; only a row with no sessionId field at all is
+            # taken as this session's (recheck of 644e52f).
+            ('a row whose sessionId is null', [{**row(self.message, 'r-6'), 'sessionId': None}], '', {}, ('unknown', None)),
+            ('a row with no sessionId field', [row(self.message, 'r-7')], '', {}, ('ok', True)),
+            ('a row without a uuid whose sessionId is null', [{**self.steer(), 'sessionId': None}], '', {}, ('unknown', None)),
+            ('a row naming another session', [{**self.steer(), 'sessionId': str(uuid4())}], '', {}, ('unknown', None)),
+            ('a row naming this session', [{**self.steer(), 'sessionId': self.native}], '', {}, ('ok', True)),
+            ('a relative home', [self.steer()], '', {'home': 'relative/claude'}, ('unknown', None)),
+            ('no session ID', [self.steer()], '', {'session': self.session(native=None)}, ('unknown', None)),
+        ]
+        for case, written, raw, options, expected in rows:
+            with self.subTest(case):
+                self.transcript(*written, raw=raw)
+                found = self.adapter.message_id_evidence(options.get('session') or self.session(), self.message,
+                                                         options.get('home') or str(self.storage))
+                self.assertEqual((found.state, (found.value or {}).get('delivered')), expected)
+        with self.subTest('an unreadable folder that could hold the session'):
+            self.transcript(self.steer(message=other))
+            self.project.chmod(0)
+            try:
+                found = self.adapter.message_id_evidence(self.session(), self.message, str(self.storage))
+            finally:
+                self.project.chmod(0o700)
+            self.assertEqual(found.state, 'unknown')
+            self.assertIn(str(self.project), found.reason)
+
     def test_accepted_message_delivered_lost_or_unknown(self):
         """A message Claude accepted is delivered when the session's transcript holds it, in either stored form, lost
         only when every transcript that could hold it was read whole without it, and unknown otherwise; fragile because
@@ -714,6 +799,17 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
              ('unknown', None)),
             ('raw body absent', [self.prompt('something else')], '', {'text': 'Please rebase.', 'framed': False}, ('ok', False)),
             ('raw body with the id', [self.steer()], '', {'text': 'Please rebase.', 'framed': False}, ('ok', True)),
+            # The mod gives a late message's sender line its age when the row is stored, so the saved text and the
+            # stored copy differ there; reading that as absence would report a delivered message lost.
+            ('a copy the mod gave an age', [self.prompt('Message from lead (sent 25 min ago):\nPlease rebase.')], '', {},
+             ('ok', True)),
+            ('saved with an age, stored with a later one', [self.prompt('Message from lead (in universe review) (sent 3 hours ago):'
+             '\nPlease rebase.')], '', {'text': 'Message from lead (in universe review) (sent 2 hours ago):\nPlease rebase.'},
+             ('ok', True)),
+            ('an identical message aged differently is still the same text', [self.prompt()], '',
+             {'cohort': [(earlier[0], 'Message from lead (sent 11 min ago):\nPlease rebase.', earlier[2])]}, ('unknown', None)),
+            ('only the sender line\'s age is ignored', [self.prompt('Message from lead:\nPlease rebase (sent 25 min ago).')], '',
+             {}, ('ok', False)),
             ('a naive accept time', [self.prompt()], '', {'since': '2026-10-19T10:00:00'}, ('unknown', None)),
             ('no session ID', [self.prompt()], '', {'session': self.session(native=None)}, ('unknown', None)),
             ('a relative home', [self.prompt()], '', {'home': 'relative/claude'}, ('unknown', None)),

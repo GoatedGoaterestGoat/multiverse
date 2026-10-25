@@ -27,7 +27,7 @@ from multiverse.store import read, write
 from multiverse.tools import runtime_update, send
 from test_multiverse import BaseTest, TerminalBase, until
 
-FOREIGN = ('other-bridge-v1', 'pi-socket-v1', 'claude-mod-v2')
+FOREIGN = ('other-bridge-v1', 'pi-socket-v1', 'claude-mod-v9')
 
 
 class Inbox:
@@ -327,8 +327,10 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
         self.assertNotIn('id', result)
         message_id = frame['msg_id']
         self.assertNotIn(message_id, json.dumps(result))
+        # The mod registered the current bridge, so the tag carries the inbox record's own send time.
+        record = json.loads((self.root / 'state' / 'agents' / agent['id'] / 'inbox.jsonl').read_text().splitlines()[-1])
         self.assertEqual(frame['message']['content'],
-                         f'<<MV2 steer id={message_id}>>Message from reviewer:\nPlease rebase<</MV2>>')
+                         f'<<MV2 steer id={message_id} sent={record["at"]}>>Message from reviewer:\nPlease rebase<</MV2>>')
 
 
 if __name__ == '__main__':

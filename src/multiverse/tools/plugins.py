@@ -1,6 +1,8 @@
 """List, turn on or off, configure, trust and check plugins."""
 import argparse
 import json
+import sys
+import time
 from pathlib import Path
 
 from .. import plugins, universe
@@ -115,6 +117,16 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
                     except (OSError, ValueError) as error:
                         item["problem"] = str(error)
                         item["unchanged"] = getattr(error, "unchanged", True)
+        if apply:
+            # Already-shipped updaters invoke this command from the newly updated checkout.
+            # Receipt migration is independent: no changes to plugin JSON or exit status.
+            try:
+                from ..runtime.receipt_migration import after_update, SECONDS
+                deadline = time.monotonic() + SECONDS
+                for scope in scopes:
+                    after_update(scope, deadline=deadline)
+            except Exception as error:
+                print(f"Receipt migration did not run: {error}", file=sys.stderr)
         result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply,
                   "not_installed": [{"plugin": name, "file": legacy, "universe": str(scope)}
                                     for scope in scopes for name, legacy in plugins.not_installed(scope)]}

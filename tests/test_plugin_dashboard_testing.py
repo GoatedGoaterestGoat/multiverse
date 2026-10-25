@@ -14,6 +14,13 @@ def register(mv):
     mv.dashboard.screen("board", "screens:Board")
     mv.dashboard.action("Say hello", lambda context: f"hello {context.row['name'] if context.row else '-'}")
 '''
+SLOW = '''
+import time
+
+def register(mv):
+    time.sleep(1.2)  # longer than the dashboard waits for a plugin to load
+    mv.dashboard.action("Say hello", lambda context: "hello from slowpoke")
+'''
 SCREENS = '''
 from multiverse.plugins.ui import FieldScreen
 from textual.widgets import Static
@@ -61,6 +68,19 @@ class DashboardTestingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.until(lambda: not d.app.operating, "the action to end")
             self.assertTrue(finished.is_set(), "the dashboard was left while the scan the action started still ran")
 
+    async def test_a_plugin_slower_than_the_first_refresh_is_still_offered_and_run(self):
+        """A plugin whose register() outlasts the dashboard's half-second wait for plugins still has its palette
+        entry found and run by d.run_action (and d.until, which it waits with); fragile because ready() returns once the first refresh is
+        drawn and the dashboard reads the palette again only on a refresh this driver does not schedule, so on a
+        loaded machine a plugin's action is missing and its test fails now and then (a macOS full-run flake)."""
+        self.write_plugin("slowpoke", {"module": "plugin", "api": "1.9", "extends": ["dashboard.action"]},
+                          {"plugin.py": SLOW})
+        self.enable("slowpoke")
+        async with self.dashboard() as d:
+            self.assertNotIn("slowpoke: Say hello", d.palette())  # still loading: the case this test is about
+            await d.run_action("slowpoke: Say hello")  # as the flaky tests did: right after the first refresh
+            self.assertIn("hello from slowpoke", d.status)
+
     async def test_the_plugin_host_is_never_started_by_a_test(self):
         """The published dashboard test helper enters on the universe's agents, offers the plugins' palette
         entries, refreshes and opens the Plugins screen without ever starting the plugin host; a break goes unnoticed
@@ -74,8 +94,7 @@ class DashboardTestingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(sorted(row[0].strip(" ├─╰│▾▸") for row in rows
                                         if "worker" in row[0] or "builder" in row[0]), ["builder", "worker"])
                 self.assertIn("2 agents", d.header)
-                self.assertIn("greeter: Say hello", d.palette())
-                self.assertIn("greeter: board", d.palette())
+                await d.until(lambda: {"greeter: Say hello", "greeter: board"} <= set(d.palette()), "the palette entries")
                 self.assertEqual(d.root, self.root)
                 self.assertNotIn("host off", d.header)
                 self.agent("third")

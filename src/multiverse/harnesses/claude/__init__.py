@@ -58,7 +58,10 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
-BRIDGE = 'claude-mod-v1'
+BRIDGE = 'claude-mod-v2'  # the mod that reads a tag's send time
+# A mod that registered before it could, until it reloads: still connected, and sent tags without a send time,
+# since it would miss a tag it can't parse and show the model raw tags with no receipt.
+BRIDGES = ('claude-mod-v1', BRIDGE)
 FUNCTION_HOOKS = 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'  # loads the mod: set for bridge launches only
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
@@ -82,6 +85,27 @@ class Unreadable(Exception):
     def __init__(self, path):
         super().__init__(f"{path} can't be read")
         self.path = str(path)
+
+
+def open_regular(path):
+    """`path` opened for reading, through any link, only when it is a regular file, and never waiting: a FIFO,
+    device or directory at a transcript's name raises Unreadable. The type is read from the opened descriptor, so a
+    file swapped in after a check can't slip past, and a FIFO with no writer can't hold the open (or a lock)."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise Unreadable(path)
+        os.set_blocking(descriptor, True)
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_regular(path):
+    """The whole of a regular file (open_regular)."""
+    with open_regular(path) as handle:
+        return handle.read()
 
 
 PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
@@ -179,8 +203,10 @@ def transcript_identity(path, native_id):
             return f'{path} is a link, not a transcript'
         if not stat.S_ISREG(path.lstat().st_mode):
             return f'{path} is not a regular file'
-        with open(path, 'rb') as handle:
+        with open_regular(path) as handle:
             head = handle.read(IDENTITY_BYTES)
+    except Unreadable:
+        return f'{path} is not a regular file'
     except OSError as error:
         return f"{path} can't be read ({error.strerror or error})"
     named = set()
@@ -344,7 +370,7 @@ class Transcript:
         status = self.path.stat()
         if status.st_ino != self.inode or status.st_size < self.offset:
             self.inode, self.offset, self.responses, self.last = status.st_ino, 0, {}, None
-        with self.path.open('rb') as handle:
+        with open_regular(self.path) as handle:
             handle.seek(self.offset)
             data = handle.read()
         end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
@@ -552,15 +578,15 @@ def _typed_prompt(native_id, environment):
     path = claude_home(environment) / 'history.jsonl'
     needle = f'"sessionId":"{native_id}"'.encode()
     try:
-        if not path.is_file():
+        if not path.exists():
             return False
-        with path.open('rb') as stream:
+        with open_regular(path) as stream:
             tail = b''
             while chunk := stream.read(1 << 20):
                 if needle in tail + chunk:
                     return True
                 tail = chunk[-len(needle):]
-    except OSError:
+    except (OSError, Unreadable):
         return False
     return False
 
@@ -599,8 +625,8 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     damaged = None
     for path in paths:
         try:
-            lines = path.read_bytes().split(b'\n')
-        except OSError:
+            lines = read_regular(path).split(b'\n')
+        except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
         for raw in lines:
             if not raw.strip():
@@ -686,6 +712,20 @@ def _receipt(directory, receipts, message_id):
     return value['route'], when
 
 
+# A late message's age at the end of its sender line ("Message from NAME (sent 25 min ago):", after any
+# "(in universe U)"): core ages the frame it prepares and the mod ages it again when the row is stored, so framed
+# texts are compared without it, and without anything else changed.
+AGED = re.compile(r' \(sent \d+ (?:min|hours?|days?) ago\)(?=:$)')
+SENDER = re.compile(r'^Message from .+:$')
+SENT = re.compile(r'[0-9][0-9T:.+\-Z]*')  # the send time the mod's tag pattern accepts
+
+
+def without_age(text):
+    """`text` with no age in its sender line, for comparing framed texts."""
+    first, newline, rest = text.partition('\n')
+    return AGED.sub('', first, count=1) + newline + rest if SENDER.match(first) else text
+
+
 def message_delivered(native_id, message_id, text, since, environment, workspaces=(), framed=True, cohort=(),
                       directory=None, receipts=None, active=()):
     """(answer, why) for whether a message Claude accepted reached session `native_id`'s conversation.
@@ -705,7 +745,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     copies of one row uuid that disagree on its type, text or time make that row unknown, whatever order they're
     read in.
     """
-    start, needle = moment(since), (text or '').strip()
+    start, needle = moment(since), (without_age(text) if framed else text or '').strip()
     if not native_id or not needle or start is None or start.tzinfo is None or not environment:
         return None, None
     ours = _receipt(directory, receipts, message_id) if message_id else None
@@ -720,8 +760,8 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     damaged, ids, versions, prints, conflicting = None, set(), {}, {}, set()
     for path in paths:
         try:
-            lines = path.read_bytes().split(b'\n')
-        except OSError:
+            lines = read_regular(path).split(b'\n')
+        except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
         for raw in lines:
             if not raw.strip():
@@ -742,7 +782,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
                     conflicting.add(uuid)
             if seen and seen[0] == 'id':
                 versions.setdefault(uuid or object(), []).append(('id', seen[1], None, path))
-            elif seen and (seen[1].strip() == needle if framed else needle in seen[1]):
+            elif seen and (without_age(seen[1]).strip() == needle if framed else needle in seen[1]):
                 versions.setdefault(uuid or object(), []).append(('text', None, seen[2], path))
     copies = []
     for key, found in versions.items():
@@ -774,7 +814,7 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         if not (isinstance(entry, (tuple, list)) and len(entry) == 3 and all(isinstance(part, str) for part in entry)):
             return None, 'An earlier acceptance on this session has an incomplete record'
         other, other_text, other_since = entry
-        if other == message_id or other in ids or other_text.strip() != needle:
+        if other == message_id or other in ids or without_age(other_text).strip() != needle:
             continue
         accepted = moment(other_since)
         if accepted is None or accepted.tzinfo is None:
@@ -882,7 +922,7 @@ def bridge_of(enabled, session):
     plain = launch.get('mode') == 'plain'
     launched = bool(enabled) and not plain
     registered = bool(launched and session.native_id and session.endpoint
-                      and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
+                      and session.endpoint.transport == 'unix-lines' and session.bridge in BRIDGES)
     ready = registered and session.state == 'running'
     # Launch-only: restarting as configured now can't connect it. The setting is off (final), or an auto launch
     # fell back because this Claude was too old (until it is updated). A launch made while the setting was off,
@@ -953,6 +993,50 @@ class ClaudeAdapter(ConfiguredAdapter):
         Core makes the message a definite failure only on False; True or None keep it uncertain."""
         return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
                                (session.workspace,))[0]
+
+    def message_id_evidence(self, session, message_id, home):
+        """Whether a message accepted before the mod wrote receipts reached this session, from its exact message ID
+        alone: ok with {'delivered': True} when a well-formed row of the session's transcript under the Claude storage
+        `home` carries it (the queued_command row a mid-turn steer becomes), else unknown with why. Never False: no
+        text is matched and no absence is read, so a message typed in as a prompt stays unknown (mv2 update's
+        one-time pass for older records).
+        """
+        if not isinstance(home, str) or not os.path.isabs(home):
+            return NativeResult('unknown', f'Claude storage {home!r} is not an absolute path')
+        if not session.native_id or not message_id:
+            return NativeResult('unknown', "This message's session or ID isn't recorded")
+        try:
+            paths = session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+        except Unreadable as error:
+            return NativeResult('unknown', f"Claude's storage folder {error.path} can't be read: restore read access to it")
+        proofs, found = {}, False
+        for path in paths:
+            try:
+                lines = read_regular(path).split(b'\n')
+            except (OSError, Unreadable):
+                return NativeResult('unknown', f"Claude's transcript {path} can't be read: restore read access to it")
+            for raw in lines:
+                try:
+                    row = json.loads(raw)
+                    seen = _delivery_row(row)
+                except ValueError:
+                    continue  # a damaged row elsewhere says nothing about this one
+                uuid = row.get('uuid') if isinstance(row, dict) and isinstance(row.get('uuid'), str) and row['uuid'] else None
+                if uuid is not None:
+                    # Every copy of a row, whatever it is, must agree on its session and what it proves (which
+                    # tells its kind apart: only an attachment proves an ID), or the row proves nothing; so each
+                    # copy is fingerprinted before anything is filtered out.
+                    # A row with no sessionId field is taken as this session's; an explicit null names none.
+                    named = ('named', json.dumps(row['sessionId'])) if 'sessionId' in row else ('unnamed',)
+                    proofs.setdefault(uuid, set()).add((named, seen))
+                elif seen == ('id', message_id) and row.get('sessionId', session.native_id) == session.native_id:
+                    found = True
+        ours = ('id', message_id)
+        this = {('unnamed',), ('named', json.dumps(session.native_id))}
+        if found or any(len(copies) == 1 and next(iter(copies))[1] == ours and next(iter(copies))[0] in this
+                        for copies in proofs.values()):
+            return NativeResult('ok', value={'delivered': True})
+        return NativeResult('unknown', 'No row of this session carries the message ID')
 
     def accepted_message_evidence(self, session, message_id, text, since, home, *, framed=True, cohort=(),
                                   receipts=None, active_acceptances=()):
@@ -1267,8 +1351,12 @@ class ClaudeAdapter(ConfiguredAdapter):
         if target is None:
             return NativeResult('unavailable', token)
         # Always `next`: the mod decides from the tag when a follow-up runs.
+        # When the sender sent it, for the age the mod adds once the model gets it; only a plain timestamp, so the
+        # attribute can never end the tag.
+        sent = (f' sent={message.sent_at}' if session.bridge == BRIDGE and isinstance(message.sent_at, str)
+                and SENT.fullmatch(message.sent_at) else '')
         try:
-            opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}>>'
+            opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}{sent}>>'
         except ValueError:
             opening = f'<<MV2 {mode}>>'  # no receipt without a UUID
         frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': message.id,

@@ -8,6 +8,7 @@
 // answers "no implementation", which `append` below accepts so the tests run on both.
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import { agePhrase } from '../hooks/age'
 
 const STEER = '3f2a0c1e-1111-4222-8333-944455556661'
 const FOLLOW_UP = '3f2a0c1e-1111-4222-8333-944455556662'
@@ -27,9 +28,9 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
-function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined } = {}) {
+function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number } = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
-  const clock = mock.clock(on)
+  const clock = mock.clock(on, { now: options.now ?? 0 })
   // Claude's core for the engine events the tests raise: each passes through.
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
@@ -274,6 +275,61 @@ describe('delivery', () => {
     await prompted()
     await w.clock.settle()
     expect(receipts()).toEqual([STEER, second(STEER), FOLLOW_UP, second(FOLLOW_UP)].map((id) => `/agent/claude-receipts/${id}.json`))
+  })
+
+  // A late message read as current is acted on as though nothing had changed since it was written; the age is
+  // added where each row is stored, on two paths, so a break on either goes unnoticed.
+  test('a message reaching the model more than ten minutes after it was sent says how old it is', async ($, on) => {
+    const MIN = 60_000
+    const now = Date.parse('2026-10-23T12:00:00Z')
+    const w = world(on, { now })
+    const at = (ms: number) => new Date(now - ms).toISOString()
+    // A mid-turn steer, 25 minutes late.
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    const steer = 'Message from lead:\nRebase first.'
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER} sent=${at(25 * MIN)}>>${steer}<</MV2>>` })
+    await append($, {
+      message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+                 content: [{ type: 'text', text: wrapped(steer) }] },
+      door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-1' })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: '<system-reminder>\nMessage from lead (sent 25 min ago):\nRebase first.\n</system-reminder>' }])
+    // Follow-ups typed in as the person's words: the age counts from sending to the moment the row is stored.
+    const rows: [string, number, number, string, string][] = [
+      ['ten minutes is not late', 10 * MIN, 0, 'Message from lead:', 'Message from lead:'],
+      ['an hour, singular', 60 * MIN, 0, 'Message from lead:', 'Message from lead (sent 1 hour ago):'],
+      ['from another universe', 125 * MIN, 0, 'Message from lead (in universe review):', 'Message from lead (in universe review) (sent 2 hours ago):'],
+      ['days', 3 * 24 * 60 * MIN, 0, 'Message from lead:', 'Message from lead (sent 3 days ago):'],
+      ['no sender line', 40 * MIN, 0, 'Rebase first.', 'Rebase first.'],
+      ['core aged it already: the age is replaced, not added', 50 * MIN, 0, 'Message from lead (sent 12 min ago):', 'Message from lead (sent 50 min ago):'],
+      ['core aged one from another universe', 3 * 60 * MIN, 0, 'Message from lead (in universe review) (sent 1 hour ago):', 'Message from lead (in universe review) (sent 3 hours ago):'],
+      // Last, since it moves the clock.
+      ['waited behind a turn after arriving', 0, 30 * MIN, 'Message from lead:', 'Message from lead (sent 30 min ago):'],
+    ]
+    for (const [index, [name, age, wait, line, shown]] of rows.entries()) {
+      const id = `3f2a0c1e-1111-4222-8333-9444555567${String(index).padStart(2, '0')}`
+      const body = `${line}\nfollow-up ${index}`
+      await $.session.receive({ origin: { kind: 'peer' },
+        text: `<<MV2 follow-up id=${id} sent=${new Date(now - age).toISOString()}>>${body}<</MV2>>` })
+      await w.clock.settle()
+      await w.clock.advance(wait)
+      await append($, {
+        message: { type: 'user', role: 'user', content: [{ type: 'text', text: body }] },
+        door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: `age-${index}` })
+      expect([name, w.appended.at(-1)]).toEqual([name, [{ type: 'text', text: `${shown}\nfollow-up ${index}` }]])
+    }
+    // A prompt Claude stores as several text blocks: only the block with the sender line gains the age, and the
+    // others stay exactly as they were, never repeated (reviewer, 6f0af4c).
+    const parts = ['Message from lead:\nfirst', 'second']
+    await $.session.receive({ origin: { kind: 'peer' },
+      text: `<<MV2 follow-up id=3f2a0c1e-1111-4222-8333-944455556799 sent=${new Date(await w.clock.now() - 60 * MIN).toISOString()}>>${parts.join('\n')}<</MV2>>` })
+    await w.clock.settle()
+    await append($, {
+      message: { type: 'user', role: 'user', content: parts.map((part) => ({ type: 'text', text: part })) },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: 'age-blocks' })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: 'Message from lead (sent 1 hour ago):\nfirst' }, { type: 'text', text: 'second' }])
+    // A send time without its zone gives no age, as in core: JavaScript would read it as local time.
+    expect(agePhrase('2026-10-20T10:00:00', now)).toBeUndefined()  // days ago in any zone, so only the rule refuses it
+    expect(agePhrase('2026-10-23T10:00:00+00:00', now)).toBe('sent 2 hours ago')
   })
 
   test('a steer no tool result took is dropped as a peer prompt and submitted instead', async ($, on) => {

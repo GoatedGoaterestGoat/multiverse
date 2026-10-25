@@ -51,13 +51,52 @@ class DeliveryProblemTest(BaseTest):
         ones; a break goes unnoticed because an undelivered message gives no other signal."""
         for state in ('failed', 'failed', 'unknown', 'accepted', 'cancelled'):
             self.message(state)
-        expected = '2 messages not delivered: mv2 deliver recipient --retry'
+        expected = '2 messages not delivered: mv2 deliver recipient --retry or --dismiss'
         self.assertIn(expected, list_agents.run(self.root, wide=True))
         self.assertIn(expected, inspect.cli_run(self.root, agent='recipient'))
         self.assertTrue(any(expected in reason for reason in doctor.run(self.root)['problems']))
         row = lifecycle.listing(self.root)[0]
         self.assertEqual(row['delivery_problem'], expected)
         self.assertNotIn('PRIVATE BODY', expected)
+
+    def test_dismissed_failures_stay_in_history_and_can_never_be_resent(self):
+        """Dismissing a failure must remove its warning without replaying it or hiding uncertain acceptance."""
+        selected = [self.message(state) for state in ('failed', 'launch-only')]
+        untouched = [self.message(state) for state in ('accepted', 'unknown', 'submitting', 'pending', 'cancelled')]
+        before = {item['id']: mailbox.message_record(self.directory, item['id'])[1]
+                  for item in selected + untouched}
+        with patch.object(native, 'send_or_wake', side_effect=AssertionError('dismiss must not submit')), \
+                patch.object(harnesses, 'load', side_effect=AssertionError('dismiss needs no adapter')):
+            lines = []
+            result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['dismissed'], 2)
+            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.'])
+            self.assertIn('2 delivery failures dismissed', lines[0])
+            self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
+        self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
+        history = mailbox.inbox(self.directory, all_messages=True)['messages']
+        self.assertEqual(len(history), 7)
+        for message in history:
+            state = message['tracking']
+            if message['id'] in {item['id'] for item in selected}:
+                self.assertTrue(state.pop('dismissed_at'))
+            self.assertEqual(state, before[message['id']])
+        with patch.object(native, 'context', side_effect=AssertionError('dismissed input needs no native connection')):
+            for message in selected:
+                self.assertTrue(native.deliver(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
+                self.assertTrue(native.send_or_wake(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
+        # A retry snapshot taken before dismissal must re-read the final marker under the delivery locks.
+        stale = [{**item, 'tracking': before[item['id']]} for item in selected]
+        with patch.object(mailbox, 'inbox', return_value={'messages': stale}), \
+                patch.object(harnesses, 'load', side_effect=AssertionError('stale retry must not load an adapter')):
+            self.assertTrue(deliver.run(self.root, agent='recipient', retry=True)['ok'])
+        for message in untouched:
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before[message['id']])
+        self.message('failed')
+        lines = []
+        self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)['dismissed'], 1)
+        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent.'])
 
     def test_launch_only_or_broken_connection_per_harness(self):
         """For each harness, mode and state an unavailable send or ask is classed launch-only (restarting cannot
@@ -136,7 +175,7 @@ class DeliveryProblemTest(BaseTest):
         """A policy refusal stays final until explicit retry sees messaging connected, including after a ledger reset, while a
         failed wake, pre-submission failure and temporary fallback stay retryable; fragile because three ledger generations and two
         delivery mechanisms share submission_state, and a break silently loses or duplicates messages (LC-23,
-        CLAUDE-13, e5bbba0)."""
+        CLAUDE-13, e5bbba0); Codex must probe the resumed bridge before reopening its policy refusal."""
         never = patch.object(native, 'send_or_wake', side_effect=AssertionError('a final refusal must not be resent'))
         with self.subTest('a typed refusal'):
             for state in ('failed', 'accepted', 'unknown', 'cancelled'):
@@ -255,6 +294,63 @@ class DeliveryProblemTest(BaseTest):
                     deliver.run(root, agent='recipient', retry=True)
                     self.assertEqual(submit.call_count, 1)
 
+        with self.subTest('Codex plain refusals retry once after the same session resumes with an auto bridge'):
+            root = self.universe('codex-enabled-bridge')
+            directory = self.recipient(root, self.running(), harness='codex')
+            native_id = read(directory / 'properties.json')['native_session_id']
+            manifest = root / 'harnesses/codex/harness.json'
+            definition = read(manifest)
+            definition['settings']['inbox_bridge'] = False
+            write(manifest, definition)
+            requests, queued = [], []
+            controllable = False
+            def rpc(specification, workspace, timeout):
+                plan = specification.plan()
+                request = next(plan)
+                while True:
+                    requests.append(request)
+                    if 'threadId' in request.params:
+                        self.assertEqual(request.params['threadId'], native_id)
+                    if request.method == 'thread/queue/add':
+                        queued.append({'id': 'queue-' + str(len(queued)),
+                                       'clientUserMessageId': request.params['clientUserMessageId']})
+                        answer = {'queuedSubmission': queued[-1]}
+                    else:
+                        answer = {'initialize': {}, 'thread/read': {'thread': {'id': native_id,
+                            'cwd': str(self.work), 'status': {'type': 'idle' if controllable else 'notLoaded'}}},
+                            'thread/turns/list': {'data': []}, 'thread/queue/list': {'data': queued[:1]},
+                            'thread/queue/start': {'turn': {'id': 'turn'}}}[request.method]
+                    try:
+                        request = plan.send({'result': answer})
+                    except StopIteration as done:
+                        return done.value
+            with patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                    patch.object(native, 'owned'), patch.object(native, 'execute_rpc', side_effect=rpc):
+                for mode in ('steer', 'follow-up'):
+                    self.assertFalse(send.run(root, agent='recipient', text='saved ' + mode, delivery=mode)['ok'])
+                history = mailbox.inbox(directory, all_messages=True)['messages']
+                self.assertEqual([m['tracking']['submission_state'] for m in history], ['launch-only'] * 2)
+                ledger = directory / 'inbox-state.json'
+                original = ledger.read_bytes()
+                self.assertEqual(deliver.run(root, agent='recipient', retry=True)['finalized'], 2)
+                self.assertEqual(requests, [])
+                definition['settings'].pop('inbox_bridge')  # Auto, as on a resumed real bridge.
+                write(manifest, definition)
+                write(directory / 'runtime.json', {**self.running(),
+                    'native_mode': {'mode': 'bridge', 'policy': 'auto'},
+                    'control_endpoint': {'transport': 'unix-websocket', 'address': str(self.work / 'codex.sock')}})
+                # A bridge whose exact thread is not controllable cannot reopen a refusal.
+                deliver.run(root, agent='recipient', retry=True)
+                self.assertEqual(ledger.read_bytes(), original)
+                self.assertEqual(queued, [])
+                controllable = True
+                self.assertTrue(deliver.run(root, agent='recipient', retry=True)['ok'])
+                self.assertEqual([item['clientUserMessageId'] for item in queued], [m['id'] for m in history])
+                self.assertEqual([m['tracking']['submission_state'] for m in
+                    mailbox.inbox(directory, all_messages=True)['messages']], ['accepted'] * 2)
+                self.assertEqual(deliver.run(root, agent='recipient', retry=True)['messages'], [])
+                self.assertEqual(len(queued), 2)
+
         with self.subTest('a custom harness, running then stopped'):
             root = self.universe('custom')
             write(root / 'harnesses/custom/harness.json', CUSTOM)
@@ -303,6 +399,7 @@ class DeliveryProblemTest(BaseTest):
                 lines = []
                 with patch.object(native, 'deliver', side_effect=AssertionError('no receipt implementation exists')):
                     deliver.run(root, agent='recipient', check=True, _present=lines.append)
+                self.assertEqual(lines.pop(0), 'recipient: 2 not delivered.')
                 self.assertEqual(len(lines), 2)
                 for line in lines:
                     self.assertIn('inbox-only', line)

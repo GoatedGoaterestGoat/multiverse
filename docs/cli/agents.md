@@ -28,12 +28,16 @@ mv2 -u .multiverse/subverses/review spawn --name reviewer --task '...'
 ## Find and refer to agents
 
 ```sh
-mv2 list               # this universe
-mv2 list --recursive   # and every subverse
-mv2 list --wide        # full summaries and errors
+mv2 list                        # this universe
+mv2 list --recursive            # and every subverse
+mv2 list --wide                 # full summaries and errors
+mv2 list --columns name,phase   # only these columns, in this order
+mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, state, reported phase and summary. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+
+`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at. `--json` always gives every field.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
@@ -72,6 +76,10 @@ not moved into it. This flag does not reset a readable conversation.
 If a replacement Codex conversation stops before any native ID was bound,
 the matching fresh-start journal proves there is no bound conversation to
 protect, so another `--start-fresh` is allowed. A missing ID alone is not proof.
+A plain Codex agent that has never bound a session must first bind its
+conversation with `mv2 session-bind --agent NAME --session-id SESSION_ID`, or
+be removed with `mv2 remove NAME`; `--start-fresh` cannot discover an unknown
+conversation by guessing an ID.
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 

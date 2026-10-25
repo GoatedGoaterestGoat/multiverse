@@ -481,13 +481,14 @@ def run(root=None, *, check=False, json=False, plugin_fetch_timeout=PLUGIN_FETCH
 
 
 def _convert_settings(checkout, root):
-    """Convert the caller's universe's pre-plugin settings files with the code just updated to.
+    """Convert pre-plugin settings and run the once-only receipt pass with the code just updated to.
 
     This process still has the old code loaded, so a fresh one runs `mv2 plugins
     migrate --apply --recursive --json` from the checkout, with that universe as
     its own. Its JSON says what was converted and what was not: none, converted,
     partial, failed or not_installed. A universe that does not resolve is skipped;
-    nothing here ever fails the update."""
+    nothing here ever fails the update. The new migrate command also performs the
+    exact-message-ID receipt pass, preserving this older caller's JSON contract."""
     from .. import universe
     try:
         target = universe.resolve(root)

@@ -71,12 +71,32 @@ A delivered message has not necessarily been read or answered. Wait for a reply,
 Failed delivery and check lines go to stderr and exit nonzero; successful lines
 go to stdout. With `--json`, the result stays on stdout.
 
+A message prepared more than 10 minutes after it was sent adds its age to the
+sender line: `Message from lead (sent 25 min ago):`, or `Message from lead
+(in universe review) (sent 25 min ago):`. Whole minutes are shown below an hour,
+then hours, then days. Inbox reads, wake preparation and retries use the original
+send time. Missing or unusable timestamps add no age. The text of a message
+already accepted by a native queue is not rewritten by checking or retrying it.
+
 ## Check and retry deliveries
 
 ```sh
 mv2 deliver worker --check    # settle uncertain deliveries, record confirmations
 mv2 deliver worker --retry    # resend messages that definitely failed
+mv2 deliver worker --dismiss  # make failures final without resending
 ```
+
+`--dismiss` makes definite delivery failures final, including launch-only
+refusals. It sends nothing, leaves accepted and uncertain messages unchanged,
+and keeps the original message and delivery evidence in history. Dismissed
+failures no longer appear in checks or count as delivery problems, and a later
+`--retry` cannot resend them. Send a new message if you need it delivered later.
+
+`--check` starts with one line of counts, such as `358 confirmed, 23 accepted
+without confirmation, 2 not delivered`, then shows details only for messages
+that are not confirmed. The counts describe the deliveries checked by this
+invocation; an already recorded confirmation does not need another check.
+`--json` keeps the complete per-message results, including confirmations.
 
 `--check` reports a cancellation once as not delivered and exits nonzero, with
 advice to send a new message if you still want it delivered. Later checks omit
@@ -90,7 +110,7 @@ retry and no longer counts as a delivery problem in list, inspect or doctor.
 
 `--check` also reports definite failures and exits nonzero while any checked
 message failed. A damaged session journal or unloadable harness gives each affected message its own error; the remaining messages are still checked. Record errors name their file. Back up and repair a damaged `sessions.jsonl`, or restore an intact copy, before retrying. A submission needs its authoritative journal even when the saved message targets the current session; mv2 cannot assume that a torn transition left that pointer current. Reading an already saved failure does not need that transition proof. It does not resend them. List, inspect and doctor show how many
-messages were not delivered and the `mv2 deliver NAME --retry` command.
+messages were not delivered and advise `mv2 deliver NAME --retry or --dismiss`.
 
 Older definite refusals receive the same classification when list, inspect and
 doctor count failures; reading does not rewrite the ledger. If `deliver --retry`
@@ -110,7 +130,8 @@ A plain launch caused by an automatic fallback is temporary: fix its cause, then
 resume with a working bridge and run `mv2 deliver NAME --retry`. The same applies
 after enabling messaging for an agent originally launched without it. Once the
 connection is ready, an explicit `--retry` rechecks even a refusal recorded as
-final. If delivery is still unavailable, the refusal stays final; `--check` and
+final. For Codex, that retry probes the resumed bridge's exact thread before
+reopening the refusal. If delivery is still unavailable, the refusal stays final; `--check` and
 ordinary reads never reopen it. Older refusals that lack explicit final evidence are classified by the current harness
 setting; accepted and uncertain deliveries are never reopened.
 
@@ -138,6 +159,12 @@ evidence check and is never resent automatically.
 Identical accepted messages need separate stored copies: each text row confirms
 at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
 an exact message-ID receipt confirms only that message.
+
+`mv2 update` makes a one-time pass over older acceptances without receipts.
+An exact stored message ID can confirm one; matching text alone cannot. Messages
+without that proof and accepted wake prompts keep their previous state. The
+pass never sends a message or reports one lost. See [updating](../use/updating.md)
+for running the same pass after a manual checkout update.
 
 ## Focus an agent
 

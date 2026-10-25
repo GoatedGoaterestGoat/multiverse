@@ -291,6 +291,7 @@ class Message:
 
     delivery: DeliveryMode = 'steer'
     framed: str = ''
+    sent_at: str | None = None  # Original aware ISO send time; never the retry or receipt time.
 
 
 class Executor(Protocol):

@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { agePhrase, withAge } from './age'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
 import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
@@ -27,16 +28,17 @@ import { registerUsage } from './usage'
 // elicitation waits on the person, idle otherwise.
 
 // `<<MV2>>` alone is the first version's tag, still found in older history.
-const TAG = /<<MV2(?: (steer|follow-up|ask))?(?: id=([0-9a-fA-F-]{36}))?>>([\s\S]*)<<\/MV2>>/
+// `sent=` is when the sender sent it (core's record time); older tags have none.
+const TAG = /<<MV2(?: (steer|follow-up|ask))?(?: id=([0-9a-fA-F-]{36}))?(?: sent=([0-9][0-9T:.+\-Z]*))?>>([\s\S]*)<<\/MV2>>/
 
-type Message = { text: string; mode: "steer" | "follow-up" | "ask"; id?: string }
+type Message = { text: string; mode: "steer" | "follow-up" | "ask"; id?: string; sent?: string }
 
 // The tagged message in a text; undefined when the text carries none.
 function tagged(text: string): Message | undefined {
   const match = TAG.exec(text)
   if (match === null) return undefined
   const mode = match[1] === "follow-up" || match[1] === "ask" ? match[1] : "steer"
-  return { text: match[3] ?? "", mode, id: match[2] }
+  return { text: match[4] ?? "", mode, id: match[2], sent: match[3] }
 }
 
 // Main-loop turn state. A subagent's or teammate's turn.start and turn.complete
@@ -201,7 +203,8 @@ async function report($: EngineInterface) {
     while (!registered || reported !== status()) {
       const value = status()
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
-      if (!registered) argv.push("--bridge", "claude-mod-v1")
+      // v2 reads a tag's send time; mv2 sends one only to a mod that registered it.
+      if (!registered) argv.push("--bridge", "claude-mod-v2")
       const result = await $.process.run(argv, { timeoutMs: 10000 })
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)
@@ -266,28 +269,36 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
   if (removed.some(Boolean)) void report($)
 }
 
-// Steers rewritten in session.receive and not yet stored: their IDs by text, oldest first.
-const queued = new Map<string, (string | undefined)[]>()
+// A message waiting to be stored: its ID for the receipt, its send time for its age.
+type Waiting = { id?: string; sent?: string }
 
-// Texts submitted as the person's words and not yet stored: their IDs by text, oldest first.
-const submitted = new Map<string, (string | undefined)[]>()
+// Steers rewritten in session.receive and not yet stored, by text, oldest first.
+const queued = new Map<string, Waiting[]>()
+
+// Texts submitted as the person's words and not yet stored, by text, oldest first.
+const submitted = new Map<string, Waiting[]>()
 
 // Messages with the same text are stored once each; each stored copy belongs to
 // the oldest one still waiting, so every message gets its own receipt.
-function hold(waiting: Map<string, (string | undefined)[]>, text: string, id: string | undefined) {
-  waiting.set(text, [...(waiting.get(text) ?? []), id])
+function hold(waiting: Map<string, Waiting[]>, text: string, message: Waiting) {
+  waiting.set(text, [...(waiting.get(text) ?? []), { id: message.id, sent: message.sent }])
 }
 
-function take(waiting: Map<string, (string | undefined)[]>, text: string): string | undefined {
-  const [id, ...rest] = waiting.get(text) ?? []
+function take(waiting: Map<string, Waiting[]>, text: string): Waiting {
+  const [first, ...rest] = waiting.get(text) ?? []
   if (rest.length > 0) waiting.set(text, rest)
   else waiting.delete(text)
-  return id
+  return first ?? {}
+}
+
+// The text the model reads: with its age when it reaches the model more than ten minutes after it was sent.
+async function aged($: EngineInterface, text: string, sent: string | undefined): Promise<string> {
+  return sent === undefined ? text : withAge(text, agePhrase(sent, await $.clock.now()))
 }
 
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
-  hold(submitted, message.text, message.id)
+  hold(submitted, message.text, message)
   // A hook must not wait for its own submit, so leave the hook first.
   $.clock.after(0, () => {
     $.prompt.submit({ text: message.text, asUser: true }).catch(
@@ -443,7 +454,7 @@ export const register: Register = (on) => {
       return { consumed: "Multiverse message submitted by the multiverse plugin" }
     }
     // Queued at `next` without its tags: it merges at the next tool result.
-    hold(queued, message.text, message.id)
+    hold(queued, message.text, message)
     return next({ ...e, text: message.text })
   })
 
@@ -452,20 +463,28 @@ export const register: Register = (on) => {
     if (e.origin.kind === "peer" && e.message.name === "queued_command") {
       // Claude's recorded rendering: its peer wrapper around our text.
       const known = [...queued.keys()].find((queuedText) => stored.includes(queuedText))
-      const message = known !== undefined ? { text: known, id: take(queued, known) } : tagged(stored)
+      const message = known !== undefined ? { text: known, ...take(queued, known) } : tagged(stored)
       if (message === undefined) return next(e)
+      const shown = await aged($, message.text, message.sent)
       const first = e.message.content.findIndex((block) => block.type === "text")
       const reminder = stored.trimStart().startsWith("<system-reminder>")
       const content = e.message.content.flatMap((block, index) => block.type !== "text" ? [block]
-        : index === first ? [{ ...block, text: reminder ? `<system-reminder>\n${message.text}\n</system-reminder>` : message.text }]
+        : index === first ? [{ ...block, text: reminder ? `<system-reminder>\n${shown}\n</system-reminder>` : shown }]
         : [])
       const result = await next({ ...e, message: { ...e.message, content } })
       await receipt($, message.id, "mid-turn")
       return result
     }
     if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && submitted.has(stored)) {
-      const id = take(submitted, stored)
-      const result = await next(e)
+      const { id, sent } = take(submitted, stored)
+      // The age goes on the sender line, in the first text block; every other block stays exactly as it was.
+      const first = e.message.content.findIndex((block) => block.type === "text")
+      const block = e.message.content[first]
+      const before = block !== undefined && block.type === "text" ? String(block.text) : undefined
+      const shown = before === undefined ? undefined : await aged($, before, sent)
+      const content = shown === undefined || shown === before ? e.message.content
+        : e.message.content.map((part, index) => index === first ? { ...part, text: shown } : part)
+      const result = await next({ ...e, message: { ...e.message, content } })
       await receipt($, id, "prompt")
       return result
     }
@@ -482,7 +501,7 @@ export const register: Register = (on) => {
   on("prompt.submit", { origin: { kind: "peer" } }, async ($, e, next) => {
     if (e.turnId !== undefined) return next(e)
     const message: Message | undefined = queued.has(e.text)
-      ? { text: e.text, mode: "steer", id: take(queued, e.text) } : tagged(e.text)
+      ? { text: e.text, mode: "steer", ...take(queued, e.text) } : tagged(e.text)
     if (message === undefined) return next(e)
     submit($, message)
     return { drop: "Multiverse message submitted by the multiverse plugin" }

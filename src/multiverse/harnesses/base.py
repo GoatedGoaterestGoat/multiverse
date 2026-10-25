@@ -56,6 +56,10 @@ class ConfiguredAdapter:
     # values must come from mv2's environment. Where it doesn't (Pi), spawn records the harness's value.
     settings_storage = False
 
+    def message_id_evidence(self, session, message_id, home):
+        """Optional exact-ID-only proof for old acceptances; unsupported evidence stays unknown."""
+        return NativeResult('unknown', 'This adapter has no exact message-ID transcript evidence')
+
     def allow_recorded_launch(self, session):
         """Opt in to core's historical-launch proof for data callbacks only."""
         return False

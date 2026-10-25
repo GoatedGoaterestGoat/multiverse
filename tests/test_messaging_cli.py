@@ -66,6 +66,36 @@ class MessagingCliTest(BaseTest):
     def texts(self, name, text):
         return [record for record in self.history(name) if record['text'] == text]
 
+    def test_delivery_check_summarizes_confirmations_without_hiding_other_evidence(self):
+        """Large checks must keep uncertain and failed messages visible without burying them in confirmed rows;
+        presentation must never discard the complete JSON evidence or submit messages again."""
+        answers = {}
+        for text, answer in [('confirmed ' + str(index), NativeResult('ok', value={'transcript_confirmed': True}))
+                             for index in range(3)] + [
+                ('accepted', NativeResult('native_queued')), ('failed', NativeResult('error', 'definite refusal')),
+                ('uncertain', NativeResult('unknown', 'acceptance unknown'))]:
+            self.behavior = (NativeResult('error', 'definite refusal') if text == 'failed'
+                             else TimeoutError('acceptance unknown') if text == 'uncertain' else NativeResult('native_queued'))
+            self.output('send', 'first', '--text', text, code=1 if text in ('failed', 'uncertain') else 0)
+            answers[self.history('first')[-1]['id']] = answer
+        directory = self.directories['first']
+        ledger = store.read(directory / 'inbox-state.json')
+        with patch.object(harnesses.load(self.root, 'claude'), 'get_delivery',
+                          side_effect=lambda session, message_id, executor: answers[message_id]):
+            output = self.output('deliver', 'first', '--check', code=1)
+            self.assertEqual(output.splitlines()[0],
+                             'first: 3 confirmed, 1 accepted without confirmation, 1 not delivered, 1 uncertain.')
+            self.assertNotIn('confirmed in its conversation', output)
+            self.assertIn('accepted; no confirmation yet', output)
+            self.assertIn('cannot yet tell', self.stderr)
+            self.assertIn('definite refusal', self.stderr)
+            store.write(directory / 'inbox-state.json', ledger)
+            complete = json.loads(self.output('deliver', 'first', '--check', '--json', code=1))
+            self.assertEqual(len(complete['messages']), 6)
+            self.assertEqual(sum(message.get('transcript_confirmed') is True for message in complete['messages']), 3)
+            self.assertFalse(complete['ok'])
+        self.assertEqual(len(self.calls), 6)
+
     def test_a_batch_send_reaches_every_valid_recipient_once(self):
         """A comma batch delivers to every valid recipient once, with aliases deduplicated and stdin read once, even
         when one recipient fails or is unknown; fragile because the loop shares one body and error path, so an
