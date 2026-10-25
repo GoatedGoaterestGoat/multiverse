@@ -219,6 +219,45 @@ class ClaudeTranscriptReadingTest(BaseTest):
             self.assertEqual(index.rewrites, 1)
             self.assertEqual(self.read()[0].rewrites, 2)  # the transcript read, through newest_copy
 
+    def test_a_damaged_field_never_breaks_usage_or_the_index(self):
+        """Usage reads every row through the shared index; fragile because one malformed field on an unrelated row
+        made the whole read fail, and the half-updated index then counted rows twice once the file was fixed."""
+        response = lambda uuid, mid, tokens: {'type': 'assistant', 'uuid': uuid, 'message': {
+            'id': mid, 'usage': {'input_tokens': tokens}}}
+        boundary = {'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'b'}
+        for name, damaged in [('a list where a map belongs', boundary | {'compactMetadata': {'preservedMessages': ['x']}}),
+                              ('a string there', boundary | {'compactMetadata': {'preservedMessages': 'x'}}),
+                              ('compactMetadata a list', boundary | {'compactMetadata': ['x']})]:
+            with self.subTest(name):
+                self.write([response('a', 'm1', 15), damaged, response('c', 'm2', 5)])
+                index = t.Transcript(self.path).read()
+                self.assertEqual({key: value['input_tokens'] for key, value in index.responses.items()}, {'m1': 15, 'm2': 5})
+                self.assertEqual((len(index.entries), index.entries[1].kind, index.entries[1].preserved),
+                                 (3, 'system/compact_boundary', ()))  # still a boundary, with nothing preserved
+        with self.subTest('any other shape the parser does not expect makes that row unreadable'):
+            self.write([response('a', 'm1', 15), boundary, response('c', 'm2', 5)])
+            real_fields = t._fields
+            odd = lambda offset, line, digest, chain, row: (real_fields(offset, line, digest, chain, row)
+                                                           if row.get('uuid') != 'b' else row['missing'])
+            with patch.object(t, '_fields', odd):
+                index = t.Transcript(self.path).read()
+            self.assertEqual(([item.kind for item in index.entries], sorted(index.responses)),
+                             (['assistant', 'unreadable', 'assistant'], ['m1', 'm2']))
+        with self.subTest('a parse that fails midway commits nothing, so a reread never counts a row twice'):
+            self.write([response('a', 'm1', 15), response('c', 'm2', 5)])
+            index, real, calls = t.Transcript(self.path), t.entry, []
+
+            def flaky(*args):
+                calls.append(args)
+                if len(calls) == 2:
+                    raise RuntimeError('unexpected')
+                return real(*args)
+            with patch.object(t, 'entry', flaky), self.assertRaises(RuntimeError):
+                index.read()
+            self.assertEqual((index.offset, index.entries, index.responses), (0, [], {}))
+            offsets = [item.offset for item in index.read().entries]
+            self.assertEqual((len(offsets), len(set(offsets))), (2, 2))
+
     def test_older_copies_must_be_part_of_the_newest(self):
         """The reads take the newest copy only while older copies hold a uuid prefix of its rows; fragile because
         Claude moves a transcript by renaming it, so a second copy is an anomaly, and reading past one that disagrees

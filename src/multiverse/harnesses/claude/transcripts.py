@@ -273,21 +273,27 @@ class Transcript:
             start = self.offset
             handle.seek(self.offset)
             data = handle.read()
+        end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
+        # Parse the new lines first and change nothing until all of them parsed: a failure leaves the index as it
+        # was, so the next read starts from the same place and never counts a row twice.
+        added, responses, last, position = [], {}, self.last, self.offset
+        chain = self.entries[-1].chain if self.entries else ''
+        for line in data[:end].split(b'\n')[:-1]:
+            item = entry(position, line + b'\n', chain)
+            added.append(item)
+            if item.kind == 'assistant' and item.usage is not None and item.response:
+                responses[item.response] = item.usage
+                last = item.at or last
+            position, chain = position + item.size, item.chain
+        self.entries.extend(added)
+        self.responses.update(responses)
+        self.last = last
+        self.prefix.update(data[:end])
+        self.tail = (self.tail + data[:end])[-TAIL:]
+        self.offset += end
         self.stamp = stamp
         if prove or not start:
             self.proven = stamp
-        end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
-        self.prefix.update(data[:end])
-        self.tail = (self.tail + data[:end])[-TAIL:]
-        position = self.offset
-        for line in data[:end].split(b'\n')[:-1]:
-            item = entry(position, line + b'\n', self.entries[-1].chain if self.entries else '')
-            self.entries.append(item)
-            if item.kind == 'assistant' and item.usage is not None and item.response:
-                self.responses[item.response] = item.usage
-                self.last = item.at or self.last
-            position += item.size
-        self.offset += end
         return self
 
 
@@ -400,8 +406,14 @@ def _text(content):
     return ''
 
 
+def _map(value):
+    return value if isinstance(value, dict) else {}
+
+
 def entry(offset, line, previous=''):
-    """The Entry for one complete line (its newline included) at `offset`, after the line whose chain is `previous`."""
+    """The Entry for one complete line (its newline included) at `offset`, after the line whose chain is `previous`.
+    A line that isn't a JSON object, or whose fields have a shape this doesn't know, is `unreadable`: one damaged
+    row never stops a read."""
     digest = hashlib.sha256(line).hexdigest()[:16]
     chain = hashlib.sha256(f'{previous}:{digest}'.encode()).hexdigest()[:16]
     try:
@@ -410,6 +422,13 @@ def entry(offset, line, previous=''):
         row = None
     if not isinstance(row, dict):
         return Entry(offset, len(line), digest, chain, 'unreadable')
+    try:
+        return _fields(offset, line, digest, chain, row)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return Entry(offset, len(line), digest, chain, 'unreadable')
+
+
+def _fields(offset, line, digest, chain, row):
     kind = str(row.get('type') or '?') + (f"/{row['subtype']}" if isinstance(row.get('subtype'), str) else '')
     message = row.get('message') if isinstance(row.get('message'), dict) else {}
     attachment = row.get('attachment') if isinstance(row.get('attachment'), dict) else {}
@@ -417,8 +436,7 @@ def entry(offset, line, previous=''):
     content = message.get('content', row.get('content'))
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     usage = message.get('usage') if row.get('type') == 'assistant' and isinstance(message.get('usage'), dict) else None
-    preserved = ((row.get('compactMetadata') or {}).get('preservedMessages') or {}).get('uuids') \
-        if isinstance(row.get('compactMetadata'), dict) else None
+    preserved = _map(_map(row.get('compactMetadata')).get('preservedMessages')).get('uuids')
     text = _text(content) if row.get('type') in ('user', 'system') else ''
     if attachment.get('type') == 'queued_command' and isinstance(attachment.get('prompt'), str):
         text = attachment['prompt']
