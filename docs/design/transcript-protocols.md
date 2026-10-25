@@ -90,7 +90,7 @@ which rows are real prompts.
 
 | Label | Means |
 | --- | --- |
-| `prompt` | Starts a turn. `source` says who: `human`, `plugin` (mv2's deliveries), `peer`, `task-notification`, `auto-continuation` |
+| `prompt` | Starts a turn. `source` says who: `human`, `plugin` (mv2's deliveries), `peer`, `task-notification`, `auto-continuation`. A prompt mv2 puts on Claude's command line, such as a spawn's `--task`, is `human`: Claude stores it as typed |
 | `mid_turn` | Joins the running turn: a steer, or a prompt typed while the model works |
 | `tool_result` | A tool's result |
 | `command` | Starts a slash command; core makes it a turn of its own |
