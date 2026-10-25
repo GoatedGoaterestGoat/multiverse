@@ -55,9 +55,9 @@ class TranscriptApiTest(PluginTestCase):
 
     def test_reads_need_access_and_say_why_they_cannot_go_on(self):
         """A transcript read needs transcripts.read and observe where the plugin is on, checked for every page;
-        a /clear under a cursor raises TranscriptChanged("replaced") with where to resume, and an unreadable
-        store raises TranscriptUnavailable, all api.Error and never an OSError; fragile because transcripts hold
-        tool output and secrets, and a read that quietly crosses a /clear or reads 'nothing' corrupts a plugin's
+        a /clear under a cursor raises TranscriptChanged("replaced") with where to resume, malformed generation
+        tokens raise api.Error, and unavailable generations return info but refuse data reads; fragile because
+        transcripts hold tool output and secrets, and a read that quietly crosses a /clear or reads 'nothing' corrupts a plugin's
         own state."""
         with self.subTest("access"):
             self.write_plugin("nosy", {"module": "plugin", "api": "1.13", "permissions": ["agents.read"]},
@@ -84,6 +84,33 @@ class TranscriptApiTest(PluginTestCase):
             resumed = self.agent_.transcript_rows(after=caught.exception.resume)
             self.assertEqual([row.label for row in resumed.rows], ["prompt"])
             self.assertEqual(len(self.agent_.transcript().earlier), 1)
+        other = self.agent("other")
+        self.transcript(other, self.rows.rows)
+        unknown = self.mv.universe(self.root).agent("other").transcript().generation
+        turn_id = self.agent_.transcript_turns().turns[0].id
+        for case, generation, expected in (
+            ("malformed generation", "not-a-generation-token", api.Error),
+            ("unknown generation", unknown, api.TranscriptUnavailable),
+        ):
+            for name, call in (
+                ("info", self.agent_.transcript),
+                ("rows", self.agent_.transcript_rows),
+                ("iterator", lambda **kw: list(self.agent_.iter_transcript_rows(**kw))),
+                ("turns", self.agent_.transcript_turns),
+                ("turn", lambda **kw: self.agent_.transcript_turn(turn_id, **kw)),
+            ):
+                with self.subTest(case, read=name):
+                    if expected is api.TranscriptUnavailable and name == "info":
+                        info = call(generation=generation)
+                        self.assertEqual(info.state, "unavailable")
+                        self.assertIn("Unknown transcript generation", info.reason)
+                        self.assertIsNone(info.start)
+                        continue
+                    with self.assertRaises(expected) as caught:
+                        call(generation=generation)
+                    self.assertIs(type(caught.exception), expected)
+                    if expected is api.TranscriptUnavailable:
+                        self.assertFalse(caught.exception.retry)
         with self.subTest("an unreadable store"):
             self.fake.unreadable()
             with self.assertRaises(api.TranscriptUnavailable) as caught:

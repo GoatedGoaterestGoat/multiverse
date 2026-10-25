@@ -200,7 +200,7 @@ def _launch_plan(info, plan):
                 level = None
             if level != "act":
                 raise _Skip(f"it has {level or 'no'} access here; launch contributions need act"
-                            + (f" (a person can grant it with: mv2 plugins grant {loaded.name} act)" if level else ""))
+                            + (f" ({loader.raise_hint(info.universe, loaded.name, 'act')})" if level else ""))
             for entry in entries:
                 # Each entry fits this launch or not on its own: a plugin may ship one per version or mode.
                 reason = entry.fits(info.version)

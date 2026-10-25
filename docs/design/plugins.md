@@ -643,7 +643,8 @@ by call):
 - **observe** reads and is safe to cache, retry and run in render paths within
   their time budget. An observe call may bring core's own records up to date
   with what the harness verifiably did, such as recording a `/clear` the
-  adapter detected, as listing and usage do. It never starts or stops a
+  adapter detected (in `sessions.jsonl` and the agent's current session record
+  in `properties.json`), as listing and usage do. It never starts or stops a
   process, switches a conversation, adopts the caller's storage, or acts for
   the caller.
 - **spend** uses tokens, money or time and changes nothing: `ask`, and the

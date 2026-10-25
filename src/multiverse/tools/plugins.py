@@ -365,14 +365,30 @@ def _ask_grant(root, name):
         print(f"Type a number from 1 to {len(choices)}, or a level: {', '.join(choices)}.")
 
 
+def _permission_lines(result):
+    """What a plugin may do here: what its access allows, then what that level holds back; what it asks for while
+    it is off, where it has no access."""
+    access = result.get("access") or {}
+    if access.get("allowed") is None:
+        return ["It asks to:", *(f"- {text}" for text in result["permissions"])]
+    lines = ["It can:", *(f"- {text}" for text in access["allowed"])] if access["allowed"] else []
+    if access.get("held_back"):
+        lines.append(f'Held back by its {access["level"]} access ({access["raise"]}):')
+        lines.extend(f'- {item["text"]} (needs {item["needs"]})' for item in access["held_back"])
+    return lines
+
+
 def _access_line(access):
-    level, request = access.get("level"), access["request"]
+    level, request, minimum = access.get("level"), access["request"], access["minimum"]
+    asks = f"it asks for {request}" + (f", at least {minimum}" if minimum != request else ", and needs it")
     if level is None:
-        return f"Access: it asks for {request}" + (f", at least {access['minimum']}" if access["minimum"] != request
-                                                   else "") + "; it has none while it is off."
-    line = f"Access here: {level}" + (f" (it asks for {request})" if level != request else "")
-    if access.get("ceiling") and levels.rank(access["ceiling"]) < levels.rank(request):
-        line += f"; this universe allows at most {access['ceiling']}"
+        return f"Access: {asks}; it has none while it is off."
+    line = f"Access here: {level} ({asks})"
+    caps = {item["by"]: item["level"] for item in access.get("limited_by") or []}
+    if "MV2_EFFECTS" in caps:
+        line += f"; MV2_EFFECTS caps every plugin in this process at {caps['MV2_EFFECTS']}"
+    if "access_ceiling" in caps:
+        line += f"; this universe's access_ceiling allows at most {caps['access_ceiling']}"
     return line + "."
 
 
@@ -415,9 +431,8 @@ def text(action, result):
             if result["access"].get("why"):
                 lines.append(f'Why: {result["access"]["why"]}')
         if result["permissions"]:
-            lines.append("It can:")
-            lines.extend(f"- {text}" for text in result["permissions"])
-            lines.append("Plugins run with your own permissions; these are what it asked for, not a sandbox.")
+            lines.extend(_permission_lines(result))
+            lines.append("Plugins run with your own permissions: these limits guard against mistakes, not a sandbox.")
         for command, help_text in result["commands"].items():
             lines.append(f"Command: mv2 {command}: {help_text}")
         if result["settings"]:
@@ -437,12 +452,11 @@ def text(action, result):
             lines[0] = (f'Turned {result["name"]} on in {result["universe"]}, with {access["level"]} access: '
                         f'it {levels.MEANING[access["level"]]}.')
             if access["level"] != access["request"]:
-                lines.append(f'It asks for {access["request"]}. A person can grant more with: '
-                             f'mv2 plugins grant {result["name"]} {access["request"]}'
+                hint = access.get("raise") or f'a person can grant more with: mv2 plugins grant {result["name"]} {access["request"]}'
+                lines.append(f'It asks for {access["request"]}. {hint[0].upper()}{hint[1:]}'
                              + (" (no terminal asked, so it has its minimum)" if result.get("defaulted") else ""))
         if result["permissions"]:
-            lines.append("It can:")
-            lines.extend(f"- {text}" for text in result["permissions"])
+            lines.extend(_permission_lines(result))
         lines.extend(f"Installed its default settings: {path}" for path in result["installed"])
         if result["problem"]:
             lines.append(f'! {result["problem"]}')

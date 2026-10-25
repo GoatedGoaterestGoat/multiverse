@@ -133,8 +133,9 @@ def _contribution(loaded, effect, label, function, root_of):
             raise AccessDenied(f"{loaded.name} is off here; its {label} needs {effect}. "
                                f"Turn it on with: mv2 plugins enable {loaded.name}")
         if levels.rank(have) < levels.rank(effect):
+            hint = loader.raise_hint(root, loaded.name, effect)
             raise AccessDenied(f"{loaded.name} has {have} access here; its {label} needs {effect}. "
-                               f"A person can grant it with: mv2 plugins grant {loaded.name} {effect}")
+                               f"{hint[0].upper()}{hint[1:]}")
         with levels.within(have, loaded.name), levels.within(effect, f"{loaded.name}'s {label}", declared=True):
             return function(*arguments, **keywords)
     return contributed
@@ -1430,8 +1431,10 @@ class Agent:
 
         Without `generation`, every read is of the current generation, and a cursor from another raises
         TranscriptChanged("replaced") with `resume` at the current start. With `generation` (a readable token
-        from `earlier`), a read is of that generation only, and another's cursor is an api.Error; an unknown or
-        unreadable token raises TranscriptUnavailable (retry false)."""
+        from `earlier`), a read is of that generation only, and another's cursor is an api.Error. For an unknown
+        or unreadable generation, this method returns state "unavailable" (or "error" for a provider error)
+        and reason; row and turn reads raise TranscriptUnavailable (retry false). Malformed generation syntax
+        raises api.Error, including in this method."""
         return _from_core(TranscriptInfo, self._transcript("info", "reading the transcript", generation=generation,
                                                            tip=tip))
 

@@ -5,10 +5,13 @@ with a fake, so they need no plugin code, no filesystem and no tmux. FakeService
 is also the base of the fakes in GOAT's dashboard tests (plugins/compaction).
 """
 import asyncio
+import os
+import json
 from pathlib import Path
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
@@ -422,6 +425,79 @@ class GrantPromptTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.until(lambda: found("plain")["on"] and not shown.busy, "plain to be on")
                 self.assertIs(d.screen, shown)
                 self.assertIsNone(found("plain")["access"]["granted"])
+
+
+class GrantedPermissionTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_the_plugins_screen_says_what_its_access_allows_and_what_it_holds_back(self):
+        """The Plugins screen lists under 'Allowed to' only what a plugin's access level here permits, and the rest
+        as held back with the level each needs, at every level, and only what it asks for while it is off; fragile
+        because the permissions a plugin asks for read as allowed when a lowered grant holds them back, telling the
+        person a plugin can spawn agents and send messages when it can't (qa-dashboard, PR A)."""
+        self.write_plugin("watcher", {"module": "plugin", "api": "1.13",
+                                      "access": {"request": "act", "minimum": "observe"}}, {"plugin.py": GRANTED})
+
+        async with self.dashboard() as d:
+            async def details():
+                shown = await d.open_plugins()
+                await d.until(lambda: "watcher" in [item["name"] for item in shown.items], "watcher in the list")
+                shown.query_one("#plugins-table", DataTable).move_cursor(
+                    row=[item["name"] for item in shown.items].index("watcher"), animate=False)
+                await d.until(lambda: str(shown.query_one("#plugin-details").render()).startswith("watcher"),
+                              "watcher's details")
+                text = " ".join(str(shown.query_one("#plugin-details").render()).split())
+                await d.close_screen()
+                return text
+
+            with self.subTest("off: nothing is allowed yet, so it says what it asks for"):
+                text = await details()
+                self.assertIn("read this universe's agents", text.partition("Asks to:")[2])
+                self.assertIn("send messages to any agent", text.partition("Asks to:")[2])
+                self.assertNotIn("Allowed to", text)
+            for level, allowed, held in (
+                    ("observe", ["read this universe's agents"],
+                     ["ask agents side questions (needs spend)", "send messages to any agent in this universe, as this "
+                      "plugin (needs act)", "spawn, resume and kill agents in this universe (needs act)"]),
+                    ("spend", ["read this universe's agents", "ask agents side questions"],
+                     ["send messages to any agent in this universe, as this plugin (needs act)"]),
+                    ("act", ["read this universe's agents", "ask agents side questions", "send messages to any agent"],
+                     [])):
+                with self.subTest(granted=level):
+                    if plugins.entry(self.root, "watcher").on:
+                        plugins.set_grant(self.root, "watcher", level)
+                    else:
+                        plugins.set_enabled(self.root, "watcher", True, grant=level)
+                    text = await details()
+                    self.assertNotIn("change it with", text)  # the old, generic advice
+                    if level == "observe":
+                        self.assertIn("(a person can grant it with: mv2 plugins grant watcher act)", text)
+                    allowed_part, _, held_part = text.partition("Held back by its")
+                    for words in allowed:
+                        self.assertIn(words, allowed_part.partition("Allowed to:")[2])
+                    for words in held:
+                        self.assertIn(words, held_part)
+                    if held:
+                        self.assertIn(f"Held back by its {level} access (", text)
+                        self.assertNotIn(held[0].rpartition(" (needs")[0], allowed_part)
+                    else:
+                        self.assertIn("Access here: act (it asks for act, at least observe)", text)
+                        self.assertNotIn("Held back", text)
+            # Granted act but capped where a grant can't help: the line names the cap, and the advice how to lift it.
+            for cap, environment, settings, says, lift in (
+                    ("access_ceiling", {}, {"access_ceiling": "observe"},
+                     "this universe's access_ceiling allows at most observe",
+                     "this universe's plugins.json caps every plugin at observe (access_ceiling)"),
+                    ("MV2_EFFECTS", {"MV2_EFFECTS": "observe"}, {},
+                     "MV2_EFFECTS caps every plugin in this process at observe",
+                     "MV2_EFFECTS=observe caps every plugin in this process: run it without MV2_EFFECTS")):
+                with self.subTest(capped_by=cap), mock.patch.dict(os.environ, environment):
+                    (self.root / "plugins.json").write_text(json.dumps(
+                        {"schema": 1, "enabled": {"watcher": True}, "access": {"watcher": "act"}, **settings}))
+                    text = await details()
+                    self.assertIn("Access here: observe (it asks for act, at least observe); " + says, text)
+                    self.assertIn(f"Held back by its observe access ({lift}", text)
+                    self.assertNotIn("mv2 plugins grant", text)
+                    if cap == "MV2_EFFECTS":
+                        self.assertNotIn("access_ceiling", text)  # the process's cap is not the universe's
 
 
 if __name__ == "__main__":

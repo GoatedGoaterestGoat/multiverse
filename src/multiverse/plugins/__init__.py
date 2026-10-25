@@ -179,6 +179,8 @@ def problems(root, reserved=(), wait=None):
             found_problems.append(found.problem or f"{found.name} is {found.state}")
         elif found.on and found.state in ("on", "loaded"):
             usable.append(found)
+            if below_minimum(root, found):
+                found_problems.append(below_minimum(root, found))
     claimed = {}
     for found in usable:
         for name in found.manifest.commands:
@@ -300,6 +302,8 @@ def listing(root, wait=loader.REFRESH_WAIT):
             # The plugin's real settings wait in its old file: it is off here until that is converted (compaction
             # fails closed), and its defaults are never shown as its settings.
             state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
+        elif problem is None and state in ("on", "loaded", "loading"):
+            problem = below_minimum(root, found)  # on, but it can't work: said where the listing is read
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
@@ -810,11 +814,32 @@ def _access_here(root, found):
     """listing()'s access: what the plugin asks for here and what it has."""
     wanted = found.manifest.access if found.manifest is not None else manifests.Access()
     settings = config.load(root)
+    level = loader.access_level(root, found)
+    # What that level lets it use of what it asked for, and what it holds back, each with the level it needs:
+    # None while it is off here, where it has no level.
+    allowed, held_back = found.manifest.permissions_at(level) if found.manifest is not None and level else (None, None)
     return {"request": wanted.request, "minimum": wanted.minimum, "why": wanted.why,
-            "granted": settings.access.get(found.name), "level": loader.access_level(root, found),
+            "granted": settings.access.get(found.name), "level": level,
+            "allowed": allowed, "held_back": held_back,
+            # What holds it below its request, strongest first: MV2_EFFECTS, the universe's access_ceiling, its grant.
+            "limited_by": [{"by": what, "level": cap} for what, cap in loader.limits(root, found)],
+            # How a person gives it what it asks for, where it has less: the change that would actually do it.
+            "raise": (loader.raise_hint(root, found.name, wanted.request)
+                      if level is not None and levels.rank(level) < levels.rank(wanted.request) else None),
             "ceiling": levels.lowest(*(level for level in (settings.ceiling, levels.process_ceiling())
                                        if level is not None)) if (settings.ceiling or levels.process_ceiling())
             else None}
+
+
+def below_minimum(root, found):
+    """The problem of a plugin that is on here but held below the least access it can work with, or None."""
+    if found is None or not found.on or found.manifest is None:
+        return None
+    level, minimum = loader.access_level(root, found), found.manifest.access.minimum
+    if level is None or levels.rank(level) >= levels.rank(minimum):
+        return None
+    return (f"{found.name} is on but held back below its minimum here: it has {level} access and needs at least "
+            f"{minimum}; {loader.raise_hint(root, found.name, minimum)}")
 
 
 def entry_access(root, name):

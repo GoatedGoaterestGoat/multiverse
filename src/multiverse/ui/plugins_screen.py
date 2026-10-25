@@ -72,21 +72,41 @@ def levels(item):
 
 
 def access_line(item):
-    """Its access here, or what it asks for while it is off; None for a plugin that says nothing about access."""
+    """Its access here, or what it asks for while it is off, in mv2 plugins info's words, with what caps it here (the
+    process's MV2_EFFECTS, the universe's access_ceiling); None for a plugin that says nothing about access."""
     found = item.get("access") if isinstance(item.get("access"), dict) else {}
-    request, minimum, level, ceiling = (found.get(key) for key in ("request", "minimum", "level", "ceiling"))
-    if level:
-        line = f"Access here: {clean(level)}"
-        if request and request != level:
-            line += f" (it asks for {clean(request)}; change it with mv2 plugins grant {clean(item['name'])} LEVEL)"
-    elif request:
-        line = f"Asks for {clean(request)} access" + (f", works with {clean(minimum)} or more" if minimum and minimum != request else "")
-    else:
+    request, minimum, level = found.get("request"), found.get("minimum"), found.get("level")
+    if not request:
         return None
-    order = plugin_access.LEVELS
-    if ceiling in order and request in order and order.index(ceiling) < order.index(request):
-        line += f" · this universe allows at most {clean(ceiling)}"
+    asks = f"it asks for {clean(request)}" + (f", at least {clean(minimum)}" if minimum and minimum != request
+                                              else ", and needs it")
+    if not level:
+        return f"Access: {asks}; it has none while it is off"
+    line = f"Access here: {clean(level)} ({asks})"
+    caps = {entry.get("by"): entry.get("level") for entry in found.get("limited_by") or () if isinstance(entry, dict)}
+    if caps.get("MV2_EFFECTS"):
+        line += f"; MV2_EFFECTS caps every plugin in this process at {clean(caps['MV2_EFFECTS'])}"
+    if caps.get("access_ceiling"):
+        line += f"; this universe's access_ceiling allows at most {clean(caps['access_ceiling'])}"
     return line
+
+
+def permission_lines(item):
+    """What the plugin may do here: what its access level allows, then what that level holds back, each with the
+    level it needs. A plugin that is off has no level yet, so its line says what it asks for."""
+    texts = lambda values: "; ".join(clean(str(value)) for value in values)
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    if not item.get("on") or found.get("allowed") is None:  # off (no level), or a listing that doesn't say
+        if not item.get("permissions"):
+            return []
+        return [("Allowed to: " if item.get("on") and "allowed" not in found else "Asks to: ") + texts(item["permissions"])]
+    lines = ["Allowed to: " + texts(found["allowed"])] if found["allowed"] else []
+    held = [entry for entry in found.get("held_back") or () if isinstance(entry, dict)]
+    if held:  # with the one change that would give it what it asks for (a grant, the ceiling or MV2_EFFECTS)
+        hint = f" ({clean(str(found['raise']))})" if found.get("raise") else ""
+        lines.append(f"Held back by its {clean(str(found.get('level')))} access{hint}: "
+                     + "; ".join(f"{clean(str(entry.get('text')))} (needs {clean(str(entry.get('needs')))})" for entry in held))
+    return lines
 
 
 def describe(item):
@@ -106,8 +126,7 @@ def describe(item):
     access = access_line(item)
     if access:
         lines.append(access)
-    if item.get("permissions"):
-        lines.append("Allowed to: " + "; ".join(clean(text) for text in item["permissions"]))
+    lines += permission_lines(item)
     for shadow in item.get("shadowed") or ():
         if str(shadow.get("directory")) in overridden:
             continue

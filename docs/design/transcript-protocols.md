@@ -19,9 +19,10 @@ until they get their own implementation.
   list permissions need `transcripts.read`.
 - **Core may bring its own records up to date first.** Before choosing which
   transcript to read, core checks whether the agent's process has moved to
-  another session, and records a verified move in `sessions.jsonl`, as listing
-  and usage do ([session lineage](session-lineage.md)). The read itself
-  changes nothing.
+  another session, and records a verified move, as listing and usage do
+  ([session lineage](session-lineage.md)): in `sessions.jsonl`, and in the
+  agent's current session record (`properties.json`'s `native_session_id` and
+  `updated_at` move to the new session). The read itself changes nothing.
 - **Nothing is recorded.** Row content never goes into the event journal,
   `errors.log`, status items or any log. Errors name a row by cursor or ref.
 - **Bounded.** A page holds at most `limit` rows (default 200, at most 2000)
@@ -56,6 +57,13 @@ to another session (`/clear`, a fresh start), never on a compaction, a moved
 file or a rewrite. Earlier generations come from the agent's
 `sessions.jsonl`; one whose transcript can still be found can be read with its
 token.
+
+Malformed generation syntax raises `api.Error`. For a well-formed token that
+is unknown or whose transcript is unreadable, `agent.transcript()` reports
+`state` (`unavailable`, or `error` for a provider error) and `reason`. Row and
+turn reads raise `TranscriptUnavailable` with `retry=False` instead. This lets
+a plugin check availability before asking for data, while keeping invalid
+arguments distinct from unavailable storage.
 
 When history changed under a cursor, the read raises
 `api.TranscriptChanged` with a reason and a place to resume:

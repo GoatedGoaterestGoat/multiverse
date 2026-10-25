@@ -109,6 +109,91 @@ class AccessTest(PluginTestCase):
                             universe.agent("worker").send("hi")
                         send.assert_not_called()  # refused before core is asked
 
+    def test_what_a_plugin_is_shown_allowed_is_what_its_grant_allows(self):
+        """mv2 plugins info and the listing say a plugin can do only what its access here allows, and list the rest as
+        held back with the level each needs (a declaration no level gates stays allowed; off, it only asks): a
+        break would tell a person a plugin lowered to observe can still spawn and send, the opposite of the truth."""
+        self.write_plugin("lister", {"module": "plugin", "api": "1.13", "permissions": [
+            "agents.read", "messages.ask", "messages.send", "harness.claude", "network.listen"],
+            "access": {"request": "act", "minimum": "observe", "why": "it lists and sends"}},
+            {"plugin.py": "def register(mv): pass\n"})
+        names = {"agents.read": "read this universe's agents", "messages.ask": "ask agents side questions",
+                 "messages.send": "send messages", "harness.claude": "add to Claude Code launches",
+                 "network.listen": "listen for network connections"}
+        for level, allowed, held in (
+                ("act", {"agents.read", "messages.ask", "messages.send", "harness.claude", "network.listen"}, {}),
+                ("spend", {"agents.read", "messages.ask", "network.listen"},
+                 {"messages.send": "act", "harness.claude": "act"}),
+                ("observe", {"agents.read", "network.listen"},
+                 {"messages.ask": "spend", "messages.send": "act", "harness.claude": "act"}),
+                (None, None, None)):
+            with self.subTest(level or "off"):
+                config.set_enabled(self.root, "lister", level is not None, grant=level)
+                access = plugins.entry_access(self.root, "lister")
+                info = tool.cli_run(self.root, plugin_action="info", name="lister")
+                if level is None:
+                    self.assertEqual((access["allowed"], access["held_back"]), (None, None))
+                    self.assertIn("It asks to:\n- ", info)
+                    self.assertNotIn("It can:", info)
+                    continue
+                shown = {name for name, text in names.items() for item in access["allowed"] if item.startswith(text)}
+                self.assertEqual(shown, allowed)
+                kept = {name: item["needs"] for name, text in names.items() for item in access["held_back"]
+                        if item["text"].startswith(text)}
+                self.assertEqual(kept, held)
+                if held:
+                    self.assertIn(f"Held back by its {level} access (a person can grant it with: mv2 plugins grant "
+                                  "lister act):", info)
+                    self.assertIn("(needs act)", info)
+                    can = info.split("It can:")[1].split("Held back")[0]
+                    self.assertNotIn("send messages", can)
+                else:
+                    self.assertNotIn("Held back", info)
+        listed = {item["name"]: item for item in plugins.listing(self.root)}["lister"]
+        self.assertEqual(listed["access"], plugins.entry_access(self.root, "lister"))  # the screen reads the same
+
+    def test_a_refusal_names_what_actually_limits_the_plugin(self):
+        """A refusal, a launch's note, mv2 plugins info and doctor name what holds a plugin back (MV2_EFFECTS, the
+        universe's access_ceiling or its grant) and how to change it, and a plugin held below its minimum is said to
+        be: a grant hint under a ceiling can't help, and an 'on' plugin that can't work looks fine, both unnoticed."""
+        planner = self.planner()
+        self.write_plugin("strict", {"module": "plugin", "api": "1.13", "permissions": ["agents.read"],
+                                     "access": {"request": "act", "minimum": "act", "why": "it installs"}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        for limit, environment, settings, hint, line in (
+                ("grant", {}, {"access": {"planner": "observe", "strict": "observe"}},
+                 "A person can grant it with: mv2 plugins grant planner act", "Access here: observe (it asks for act, "
+                                                                               "at least observe)."),
+                ("access_ceiling", {}, {"access_ceiling": "observe"},
+                 "This universe's plugins.json caps every plugin at observe (access_ceiling)",
+                 "; this universe's access_ceiling allows at most observe."),
+                ("MV2_EFFECTS", {"MV2_EFFECTS": "observe"}, {},
+                 "MV2_EFFECTS=observe caps every plugin in this process: run it without MV2_EFFECTS",
+                 "; MV2_EFFECTS caps every plugin in this process at observe.")):
+            with self.subTest(limit), mock.patch.dict(os.environ, environment):
+                (self.root / "plugins.json").write_text(json.dumps(
+                    {"schema": 1, "enabled": {"planner": True, "strict": True}, **settings}))
+                with self.assertRaises(api.AccessDenied) as refused:
+                    plugins.command(self.root, "planner-install").run(self.root)
+                self.assertIn(hint, str(refused.exception))
+                launch = harness.LaunchInfo(universe=self.root, agent_id="a", agent_name="worker", mode="spawn",
+                                            family="claude", harness="claude", bridge=True)
+                skipped = harness.launch_plan(launch).plugins["planner"]["reason"]
+                self.assertIn(hint.lower(), skipped.lower())
+                info = tool.cli_run(self.root, plugin_action="info", name="planner")
+                self.assertIn(line, info)
+                if limit != "grant":
+                    self.assertNotIn("mv2 plugins grant", info)
+                strict = "strict is on but held back below its minimum here: it has observe access and needs at least act"
+                self.assertTrue(any(problem.startswith(strict) for problem in plugins.problems(self.root)))
+                listed = {item["name"]: item for item in plugins.listing(self.root)}["strict"]
+                self.assertIn(listed["state"], ("on", "loaded"))  # on, and said to be held back
+                self.assertTrue(listed["problem"].startswith(strict))
+        (self.root / "plugins.json").write_text(json.dumps({"schema": 1, "enabled": {"planner": True, "strict": True}}))
+        self.assertFalse([problem for problem in plugins.problems(self.root) if "minimum" in problem])
+        self.assertIn("Access here: act (it asks for act, and needs it).",
+                      tool.cli_run(self.root, plugin_action="info", name="strict"))
+
     def test_declared_classes_cap_what_runs_inside_them(self):
         """A contribution runs under the class it declared (undeclared: act) and only where the plugin's level
         reaches it: an observe column or @mv.effect("observe") function can't send, an act command is refused

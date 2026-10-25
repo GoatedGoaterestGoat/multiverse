@@ -160,11 +160,40 @@ class Manifest:
         return permission in LEVEL_PERMISSIONS[self.access.request]
 
     def permission_texts(self):
-        """Each permission as words, for `mv2 plugins enable` and `info`."""
-        names = self.permissions or (LEVEL_PERMISSIONS[self.access.request] if self.access.declared else ())
-        return [PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
-                                          if MODEL_PERMISSION.fullmatch(name) else name)
-                for name in sorted(names)]
+        """Each permission it asks for, as words, for `mv2 plugins enable` and `info`."""
+        return [permission_text(name) for name in self._permission_names()]
+
+    def permissions_at(self, level):
+        """What it asked for, at access `level` here (None where it is off): (the texts that level allows,
+        [{"text", "needs"}] for the rest, each with the level it needs). A declaration no level gates stays
+        allowed while the plugin is on."""
+        allowed, held = [], []
+        for name in self._permission_names():
+            needs = permission_needs(name)
+            if level is not None and (needs is None or levels.rank(level) >= levels.rank(needs)):
+                allowed.append(permission_text(name))
+            else:
+                held.append({"text": permission_text(name), "needs": needs})
+        return allowed, held
+
+    def _permission_names(self):
+        return sorted(self.permissions or (LEVEL_PERMISSIONS[self.access.request] if self.access.declared else ()))
+
+
+def permission_text(name):
+    return PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
+                                     if MODEL_PERMISSION.fullmatch(name) else name)
+
+
+def permission_needs(name):
+    """The access level using a permission needs (1.13): the lowest level that carries it; spend for models.*; act
+    for harness.*, since a launch addition needs act; None for a declaration of what the plugin's own code does,
+    which no level gates (process.spawn, network.listen)."""
+    if MODEL_PERMISSION.fullmatch(name):
+        return "spend"
+    if name.startswith("harness."):
+        return "act"
+    return next((level for level in levels.LEVELS if name in LEVEL_PERMISSIONS[level]), None)
 
 
 def check_name(value, what="name"):

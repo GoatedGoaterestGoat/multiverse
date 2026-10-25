@@ -543,6 +543,40 @@ def access_level(root, found):
                            if level is not None))
 
 
+def limits(root, found):
+    """[(what, level)] of what caps plugin `found` below its request here, strongest first: ("MV2_EFFECTS", level)
+    for this process, ("access_ceiling", level) for the universe's plugins.json, ("grant", level) for its own
+    grant. Empty where nothing does, or it is off."""
+    if found is None or not found.on or found.manifest is None:
+        return []
+    request = found.manifest.access.request
+    settings = config.load(root) if root is not None else config.Config()
+    found_limits = [("MV2_EFFECTS", levels.process_ceiling()), ("access_ceiling", settings.ceiling),
+                    ("grant", settings.access.get(found.name))]
+    return [(what, level) for what, level in found_limits
+            if level is not None and levels.rank(level) < levels.rank(request)]
+
+
+def raise_hint(root, name, needs):
+    """How a person gives plugin `name` `needs` access here: the change that would actually do it, naming what
+    holds it below (MV2_EFFECTS, the universe's access_ceiling, its grant), or that it never asks for that much."""
+    try:
+        found = entry(root, name)
+    except (PluginError, OSError, ValueError):
+        found = None
+    request = found.manifest.access.request if found is not None and found.manifest is not None else None
+    if request is not None and levels.rank(request) < levels.rank(needs):
+        return f"it asks for at most {request}, so no grant gives it {needs}"
+    caps = [(what, level) for what, level in (limits(root, found) if found is not None else [])
+            if levels.rank(level) < levels.rank(needs)]
+    if caps and caps[0][0] == "MV2_EFFECTS":
+        return f"MV2_EFFECTS={caps[0][1]} caps every plugin in this process: run it without MV2_EFFECTS"
+    if caps and caps[0][0] == "access_ceiling":
+        return (f"this universe's plugins.json caps every plugin at {caps[0][1]} (access_ceiling): a person can "
+                f"raise or remove it there")
+    return f"a person can grant it with: mv2 plugins grant {name} {needs}"
+
+
 def _package_name(found):
     digest = hashlib.sha256(str(Path(found.manifest.directory).resolve()).encode()).hexdigest()[:10]
     return f"{PACKAGE}.{found.name.replace('-', '_')}_{digest}"
