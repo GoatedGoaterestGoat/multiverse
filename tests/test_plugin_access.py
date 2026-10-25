@@ -281,3 +281,17 @@ class AccessTest(PluginTestCase):
             plugins.set_enabled(self.root, "planner", True)
             self.assertEqual(self.mv("planner").access(self.root), "observe")  # at most its minimum
             plugins.set_grant(self.root, "planner", "observe")  # lowering, or keeping, is fine
+        with self.subTest("from an agent, while a person lowers it"), \
+                mock.patch.dict(os.environ, {"MV2_AGENT_ID": "a1"}):
+            config.set_grant(self.root, "planner", "act")
+            lock, lowered = config.lock, []
+
+            def person_first(target):  # the person's grant takes the lock just before the agent's write does
+                if not lowered:
+                    lowered.append(True)
+                    config.set_grant(self.root, "planner", "observe")  # its own lock is the real one
+                return lock(target)
+            with mock.patch.object(config, "lock", person_first):
+                with self.assertRaisesRegex(plugins.PluginError, "can't raise.*observe access recorded here now"):
+                    plugins.set_grant(self.root, "planner", "spend")  # a lowering from act, raising from observe
+            self.assertEqual(config.load(self.root).access["planner"], "observe")  # the person's lowering stays

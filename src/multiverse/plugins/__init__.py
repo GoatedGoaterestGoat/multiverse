@@ -887,11 +887,13 @@ def set_grant(root, name, level):
         raise PluginError(f"{name} asks for at most {wanted.request} access")
     if levels.rank(level) < levels.rank(wanted.minimum):
         raise PluginError(f"{name} needs at least {wanted.minimum} access" + (f": {wanted.why}" if wanted.why else ""))
-    if from_agent():
-        held = config.load(root).access.get(name, wanted.request)
-        if levels.rank(level) > levels.rank(held):
-            raise PluginError(f"An agent can't raise a plugin's access. A person runs: mv2 plugins grant {name} {level}")
-    config.set_grant(root, name, level)
+    try:
+        # From an agent, compared with the grant recorded now and written in one locked step: a person who lowers
+        # it meanwhile is never overwritten.
+        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent() else None)
+    except config.WouldRaise as error:
+        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                          f"mv2 plugins grant {name} {level}") from None
     return {"name": name, "granted": level, "level": loader.access_level(root, entry(root, name))}
 
 
@@ -979,7 +981,13 @@ def set_enabled(root, name, on, grant=None):
             installed.append(str(settings_files.path(root, name)))
     elif grant is not None:
         raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
-    config.set_enabled(root, name, bool(on), grant=grant if on else None)
+    try:
+        config.set_enabled(root, name, bool(on), grant=grant if on else None,
+                           no_raise_from=found.manifest.access.request if on and from_agent() and found.manifest
+                           else None)
+    except config.WouldRaise as error:
+        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                          f"mv2 plugins grant {name} {grant}") from None
     if on and not was_on:
         anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
     return {"name": name, "on": bool(on), "installed": installed, "granted": grant if on else None}

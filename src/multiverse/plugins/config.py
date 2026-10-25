@@ -115,9 +115,22 @@ def load(root):
         return Config(problem=str(error), exists=True)
 
 
-def set_enabled(root, name, value, grant=None):
+class WouldRaise(ValueError):
+    """A grant write that would raise the grant recorded now, refused where only lowering is allowed."""
+
+
+def _no_raise(parsed, name, level, held_default):
+    """Refuse writing `level` above the grant recorded now (`held_default` where none is): checked in the same
+    locked step as the write, so a person's lowering in between is never overwritten."""
+    held = parsed.access.get(name, held_default)
+    if levels.rank(level) > levels.rank(held):
+        raise WouldRaise(f"{name} has {held} access recorded here now")
+
+
+def set_enabled(root, name, value, grant=None, *, no_raise_from=None):
     """Turn a plugin on (True) or off (False) here, and record `grant` with it when given, changing nothing
-    else in the file."""
+    else in the file. With `no_raise_from` (the plugin's request, its grant where none is recorded), a grant
+    above the one recorded now is refused instead (WouldRaise), in the same locked step."""
     check_name(name)
     if not isinstance(value, bool):
         raise ValueError("A plugin is turned on with true or off with false")
@@ -127,7 +140,9 @@ def set_enabled(root, name, value, grant=None):
         data = _raw(root)
         if data is None:
             data = {"schema": 1, "enabled": {}}
-        parse(data, str(path(root)))  # refuse to rewrite a file that cannot be used
+        parsed = parse(data, str(path(root)))  # refuse to rewrite a file that cannot be used
+        if grant is not None and no_raise_from is not None:
+            _no_raise(parsed, name, grant, no_raise_from)
         data.setdefault("enabled", {})[name] = value
         if grant is not None:
             data.setdefault("access", {})[name] = grant
@@ -135,15 +150,19 @@ def set_enabled(root, name, value, grant=None):
     return load(root)
 
 
-def set_grant(root, name, level):
-    """Record the access level granted to a plugin here, changing nothing else in the file."""
+def set_grant(root, name, level, *, no_raise_from=None):
+    """Record the access level granted to a plugin here, changing nothing else in the file. With `no_raise_from`
+    (the plugin's request, its grant where none is recorded), a level above the grant recorded now is refused
+    (WouldRaise), compared and written in one locked step."""
     check_name(name)
     levels.check(level, "grant")
     with lock(Path(root) / "state" / ".plugins.lock"):
         data = _raw(root)
         if data is None:
             data = {"schema": 1, "enabled": {}}
-        parse(data, str(path(root)))
+        parsed = parse(data, str(path(root)))
+        if no_raise_from is not None:
+            _no_raise(parsed, name, level, no_raise_from)
         data.setdefault("access", {})[name] = level
         write(path(root), data)
     return load(root)
