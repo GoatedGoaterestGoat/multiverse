@@ -96,7 +96,7 @@ class ManifestTest(PluginTestCase):
             self.write_plugin("future", {"api": "1.999"})
             self.enable("future")
             # Written for a newer API, with names this mv2 does not know yet: incompatible, never invalid.
-            self.write_plugin("newer", {"api": "1.999", "permissions": ["transcripts.read", "models.claude"],
+            self.write_plugin("newer", {"api": "1.999", "permissions": ["calendar.read", "models.claude"],
                                         "extends": ["transcripts"], "transcripts": {"rows": 10}})
             self.enable("newer")
             (self.plugins_dir / "bad").mkdir()
@@ -108,7 +108,7 @@ class ManifestTest(PluginTestCase):
             for name in ("future", "newer"):
                 self.assertEqual(states[name].state, "incompatible")
                 self.assertIn(f"needs plugin API 1.999; this mv2 has {have}; update mv2", states[name].problem)
-            self.assertIn("transcripts.read", states["newer"].manifest.permission_texts())
+            self.assertIn("calendar.read", states["newer"].manifest.permission_texts())
             self.assertEqual(states["bad"].state, "invalid")
             self.assertEqual(states["typo"].state, "invalid")
         with self.subTest("mv2 plugins new"):

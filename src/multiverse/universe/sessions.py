@@ -183,6 +183,29 @@ def effective(directory, data):
     return data, rows
 
 
+
+def generations(directory, properties):
+    """Known earlier native scopes, ordered by their latest departure; read-only.
+
+    The caller supplies its properties snapshot. Journal validation is the same
+    as for the current pointer; no filesystem/provider discovery or historical
+    home resolution belongs here. A pending fresh start has no new generation.
+    """
+    current, rows = effective(directory, properties)
+    current_key = (current.get('harness'), current.get('native_session_id'), current.get('native_session_home'))
+    earlier = {}
+    for row in rows:
+        identity = row['from']
+        if identity is None:
+            continue  # A bind establishes a generation; it ends none.
+        key = (row['harness'], identity, row['home'])
+        earlier.pop(key, None)  # A return/departure moves it to its latest place.
+        if key != current_key:
+            earlier[key] = {'harness': row['harness'], 'native_id': identity,
+                            'home': row['home'], 'reason': row['reason'], 'ended_at': row['at']}
+    return tuple(earlier.values())
+
+
 def recover(directory, data):
     updated, rows = effective(directory, data)
     repaired = bool(rows and updated != data)

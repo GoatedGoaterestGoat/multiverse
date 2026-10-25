@@ -11,7 +11,7 @@ Ideas that have been discussed and agreed on but are not scheduled yet. Each ent
 
 ## Harness adapter protocols
 
-The transcript protocols (reading rows by cursor, labels, turns, model metadata, the one-shot run) are designed in their own document and ship Claude-only first.
+The transcript protocols (reading rows by cursor, labels, turns, model metadata, the one-shot run) are designed in their own document, [transcript-protocols.md](transcript-protocols.md), and ship Claude-only first.
 
 - **Codex and Pi versions of the transcript protocols.** These need a dedicated Codex agent. For Codex's one-shot run, tools have to be switchable off verifiably (0.162.1 can't), then it runs on a private app-server sharing the user's login.
 - **Install by seeding a new session.** A generic fallback for harnesses without an in-process compaction hook: start a new session from the compacted rows and rebind the agent to it. It costs a restart and the agent's in-memory state.

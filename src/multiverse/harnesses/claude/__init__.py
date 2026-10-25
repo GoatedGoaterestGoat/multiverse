@@ -41,8 +41,9 @@ from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
 from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
-from ..types import Usage
+from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read
+from . import transcripts as rows_source
 from .transcripts import (  # every transcript reader reads through this one row source
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
@@ -323,6 +324,51 @@ def _typed_prompt(native_id, environment):
     except (OSError, Unreadable):
         return False
     return False
+
+
+BODY_LIMIT = 16 << 20  # a row over this comes without its data
+NO_STORAGE = "mv2 has no record of this agent's Claude storage; resume it once"
+
+
+def reading_storage(session):
+    """(home, why) for reading a session's transcript: the recorded home only, never this process's.
+
+    One exception (draft 7 6.2, from GOAT c09b770): inside the agent's own session, whose MV2_AGENT_DIR is the
+    agent's folder, the inherited environment is the launch's own, so an agent launched before mv2 recorded its
+    storage can read until its next resume: CLAUDE_CONFIG_DIR (a relative one against the workspace), else
+    HOME/.claude, as its real path, the form session_home records.
+    """
+    if session.home:
+        return (session.home, None) if os.path.isabs(session.home) else (None, NO_STORAGE)
+    agent = Path(session.session_file).parent if session.session_file else None
+    own = os.environ.get('MV2_AGENT_DIR')
+    if agent is None or not own or os.path.realpath(own) != os.path.realpath(agent):
+        return None, NO_STORAGE
+    value = os.environ.get('CLAUDE_CONFIG_DIR')
+    if value:
+        home = value if os.path.isabs(value) else os.path.join(session.workspace or '', value)
+    else:
+        home = os.path.join(os.environ.get('HOME') or str(Path.home()), '.claude')
+    return (os.path.realpath(home), None) if os.path.isabs(home) else (None, NO_STORAGE)
+
+
+def _check(reader):
+    """Core's deadline and snapshot check, between the steps of a read."""
+    if reader is not None:
+        reader.check()
+
+
+def _empty_view(state, reason):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(), context_from=0,
+                          tip=None, gap=None, history_version=0)
+
+
+def _fact(item, label, source):
+    command, args = rows_source.command_of(item.head) if label == 'command' else (None, None)
+    call = item.answers[0] if item.kind == 'user' and item.tool_result and item.answers else item.companion
+    return RowFact(position=rows_source.position_of(item), ref=item.ref, kind=item.kind, label=label, source=source,
+                   call_id=call, command=command, args=args, stop=item.stop, ends_turn=rows_source.ends_turn(item),
+                   at=item.at, size=item.size, preview=item.head[:200] if label in ('prompt', 'command') else '')
 
 
 def launch_storage(session, environment):
@@ -1022,6 +1068,80 @@ class ClaudeAdapter(ConfiguredAdapter):
         # Usage is measured from the session's transcript, so every launch has it, connected or not.
         result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
+
+    def transcript_view(self, session, *, tip=None, reader=None):
+        """The session's transcript as one view for core: every row's facts in stored order (never a body), the
+        history as indexes in conversation order from `tip` (or the newest leaf), and where the context starts."""
+        _check(reader)
+        if not session.native_id:
+            return _empty_view('unavailable', 'No Claude session ID recorded')
+        home, why = reading_storage(session)
+        if home is None:
+            return _empty_view('unavailable', why)
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+        except rows_source.CantTell as error:
+            return _empty_view('error', str(error))
+        if index is None:
+            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet')
+        _check(reader)  # indexing a large copy cold takes a moment
+        analysis = rows_source.analyse(index, tip)
+        entries = index.entries
+        facts = tuple(_fact(item, *labelled) for item, labelled in zip(entries, analysis.labels))
+        source = TranscriptSource(state='supported', home=home, format='claude-jsonl',
+                                  version=next((item.version for item in reversed(entries) if item.version), None),
+                                  size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
+        return TranscriptView(source=source, rows=facts, history=analysis.history.rows,
+                              context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
+                              gap=analysis.history.gap, history_version=analysis.version)
+
+    def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
+        """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for
+        a row over `max_bytes` (or 16 MiB) or one that isn't an object. Raises TranscriptRowsChanged when a row's
+        bytes changed since the view: its position names the offset after it and a hash chained over every line up
+        to it, so an earlier row changing changes it too."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)) if home else None
+        except rows_source.CantTell as error:  # the copies stopped agreeing since the view
+            raise TranscriptRowsChanged() from error
+        if index is None:
+            raise TranscriptRowsChanged()
+        out = []
+        with rows_source.open_regular(index.path) as handle:
+            for number in indexes:
+                _check(reader)
+                fact = view.rows[number]
+                # The index proved its prefix unchanged when it was read: the row must still have the view's position
+                # (its chained hash covers every earlier byte), and its own line's bytes, read now, must still match.
+                if number >= len(index.entries) or rows_source.position_of(index.entries[number]) != fact.position:
+                    raise TranscriptRowsChanged()
+                item = index.entries[number]
+                handle.seek(item.offset)
+                line = handle.read(item.size)
+                if len(line) != item.size or hashlib.sha256(line).hexdigest()[:16] != item.digest:
+                    raise TranscriptRowsChanged()
+                if fact.size > min(max_bytes, BODY_LIMIT):
+                    out.append(None)
+                    continue
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    value = None
+                out.append(value if isinstance(value, dict) else None)
+        return out
+
+    def transcript_readable(self, session, *, reader=None):
+        """Whether an earlier generation's transcript can still be found under its recorded home; None: can't tell."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        if not home or not session.native_id:
+            return None
+        try:
+            return bool(session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)))
+        except Unreadable:
+            return None
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""

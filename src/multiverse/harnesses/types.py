@@ -1,6 +1,6 @@
 """Adapter boundary: specifications and observations, never tmux or state writes."""
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Generator, Literal, Mapping, Protocol
+from typing import Any, Callable, Generator, Literal, Mapping, Protocol, Sequence
 from uuid import UUID
 
 
@@ -17,6 +17,7 @@ EFFECTS: Mapping[str, Effect] = {
         'launch_started', 'launch_refusal', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
+        'transcript_view', 'transcript_bodies', 'transcript_readable',
     ), 'observe'),
     'ask': 'spend',
     **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
@@ -365,3 +366,65 @@ class Usage:
     cached_input_tokens: int | None = None
     cache_write_tokens: int | None = None
     complete: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class TranscriptSource:
+    state: Literal['supported', 'unavailable', 'error']
+    home: str | None = None
+    reason: str = ''
+    format: str | None = None
+    version: str | None = None
+    size: int | None = None
+    updated_at: str | None = None
+    stable_rows: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class RowFact:
+    """Provider metadata only; native row bodies never enter the core index."""
+    position: str
+    ref: str | None
+    kind: str
+    label: str
+    source: str | None = None
+    call_id: str | None = None
+    command: str | None = None
+    args: str | None = None
+    stop: str | None = None
+    ends_turn: bool = False
+    at: str | None = None
+    size: int = 0
+    preview: str = ''
+
+
+@dataclass(frozen=True, kw_only=True)
+class TranscriptView:
+    """One native generation at one tip, with history indexes in conversation order."""
+    source: TranscriptSource
+    rows: tuple[RowFact, ...]
+    history: tuple[int, ...]
+    context_from: int
+    tip: str | None
+    gap: str | None
+    history_version: int
+
+
+class TranscriptRowsChanged(ValueError):
+    """Selected bytes no longer match the metadata view; never carry row content."""
+    def __init__(self):
+        super().__init__('Transcript rows changed after the metadata snapshot')
+
+
+class TranscriptReader(Protocol):
+    deadline: float
+    def check(self) -> None: ...
+
+
+class TranscriptProvider(Protocol):
+    def transcript_view(self, session: SessionHandle, *, tip: str | None = None,
+                        reader: TranscriptReader | None = None) -> TranscriptView: ...
+    def transcript_bodies(self, session: SessionHandle, view: TranscriptView,
+                          indexes: Sequence[int], *, max_bytes: int,
+                          reader: TranscriptReader | None = None) -> list[dict | None]: ...
+    def transcript_readable(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...

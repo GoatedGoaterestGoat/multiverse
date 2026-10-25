@@ -22,7 +22,7 @@ are not covered.
 """
 from contextlib import contextmanager, ExitStack
 import functools
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import os
 from pathlib import Path
 
@@ -1031,6 +1031,150 @@ class Universe:
             return _call(doctor.run, self.path)
 
 
+class TranscriptChanged(Error):
+    """The transcript changed under a cursor (1.13). `reason`: "replaced" (the agent is on another generation
+    now, after a /clear; `resume` is its start), "rewritten" (the bytes before the cursor changed; `resume` is the
+    same place found again by the nearest ref, or None), or "diverged" (a history read's cursor row is no longer
+    on the history; `resume` is after the last row both histories share). `generation` is the current one. Later
+    1.x minors may add reasons; treat an unknown one as "replaced"."""
+
+    def __init__(self, message, *, reason, resume=None, generation=None):
+        super().__init__(message)
+        self.reason, self.resume, self.generation = reason, resume, generation
+
+
+class TranscriptUnavailable(Error):
+    """The transcript can't be read now (1.13). `retry`: True when the agent's identity was busy or changing, so
+    trying again soon may work; False when it stays unavailable until something is fixed (the message says what)."""
+
+    def __init__(self, message, *, retry=False):
+        super().__init__(message)
+        self.retry = retry
+
+
+@dataclass(frozen=True, kw_only=True)
+class Generation:
+    """An earlier session this agent was on (a /clear, a fork, a fresh start), from its session lineage (1.13)."""
+    generation: str                # token, accepted as generation= while readable
+    native_id: str
+    reason: str                    # the lineage's reason: "clear", "detected", "missing-conversation", ...
+    ended_at: str                  # when the agent left it
+    readable: bool | None          # its transcript can still be found; None: can't tell
+
+
+@dataclass(frozen=True, kw_only=True)
+class TranscriptInfo:
+    """What `agent.transcript()` says about one generation of an agent's transcript (1.13). Cheap: a stat and the
+    index's counts. Keep `end` and `history_version` with what you parsed, and skip work while both are
+    unchanged."""
+    state: str                     # "supported", "unavailable" or "error"; the rest is empty unless supported
+    reason: str = ""
+    format: str | None = None      # "claude-jsonl"
+    version: str | None = None     # the harness version that wrote the newest row, where stored
+    native_id: str | None = None
+    generation: str | None = None  # opaque token: this native session in its recorded storage
+    start: str | None = None       # cursor before the first row
+    end: str | None = None         # cursor after the last complete row: unchanged means nothing new
+    rows: int | None = None
+    bytes: int | None = None
+    updated_at: str | None = None
+    tip: str | None = None         # the tip the counts below used (None: the newest leaf)
+    gap: str | None = None         # ref of a parent the history needs and the harness never stored
+    turns: int | None = None
+    context_rows: int | None = None
+    context_turns: int | None = None
+    context_start: str | None = None   # cursor before the first row in context (== start without a compaction)
+    history_version: int | None = None  # rises when the history changes other than by growing
+    stable_rows: bool = True       # a complete row never changes in place (it may be removed)
+    earlier: tuple = ()            # Generation, oldest first
+
+
+@dataclass(frozen=True, kw_only=True)
+class Row:
+    """One stored row of a transcript (1.13)."""
+    cursor: str                    # the position after this row: after=row.cursor continues from it
+    ref: str | None                # the harness's own ID for it (Claude's uuid); some rows have none
+    kind: str                      # the stored type: "user", "assistant", "system/compact_boundary", ...
+    label: str                     # prompt, mid_turn, tool_result, command, command_output, injected, compaction,
+                                   # response or meta; treat a label a later minor adds as meta
+    source: str | None = None      # prompt and mid_turn: who (human, plugin, peer, task-notification, ...)
+    call_id: str | None = None     # tool_result and a skill's injected instructions: the tool call it answers
+    abandoned: bool = False        # off the history for this tip
+    in_context: bool = True        # kept by the latest compaction on the history
+    stop: str | None = None        # an assistant row's stop reason, where stored
+    ends_turn: bool = False        # a native turn-end row (Claude's system/turn_duration, or its
+                                   # "[Request interrupted by user…" row)
+    at: str | None = None
+    size: int = 0                  # stored bytes
+    data: dict | None = None       # the row as stored, a fresh copy per call; None over 16 MiB or unreadable
+    format: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class RowPage:
+    """A bounded page of rows, oldest first, or in history order for a history read (1.13)."""
+    rows: tuple                    # Row
+    next: str                      # cursor to continue after the last row (== `after` when nothing new)
+    previous: str                  # cursor before the first row
+    at_end: bool                   # nothing complete after `next` right now
+    generation: str
+    remaining: int | None = None
+    tip: str | None = None         # history reads: the tip used
+    gap: str | None = None         # history reads: as TranscriptInfo.gap
+
+
+@dataclass(frozen=True, kw_only=True)
+class Turn:
+    """Core's grouping of the history into prompt turns and command turns (1.13); it never spans generations."""
+    id: str                        # its first row's ref ("@" + that row's cursor when it has none, stable while
+                                   # its position survives); "preamble" for rows before the first turn
+    kind: str                      # "prompt", "command" or "preamble"
+    command: str | None = None     # a command turn's name, "/compact"
+    args: str | None = None
+    source: str | None = None
+    at: str | None = None
+    start: str = ""                # cursor before its first row
+    end: str = ""                  # cursor after its last row
+    rows: int = 0
+    in_context: bool = True        # some of its rows are in context
+    finished: bool | None = None   # None: can't be told
+    preview: str = ""              # the prompt's or command's first 200 characters
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnPage:
+    turns: tuple                   # Turn, oldest first
+    next: str
+    previous: str
+    at_end: bool
+    generation: str
+    remaining: int | None = None
+    tip: str | None = None
+    gap: str | None = None
+
+
+def _from_core(kind, value):
+    """An API result from core's result of the same shape: core imports no API types, so a field core adds later
+    is one line here."""
+    known = {item.name for item in fields(kind)}
+    values = {name: getattr(value, name) for name in known if hasattr(value, name)}
+    if kind is TranscriptInfo:
+        values["earlier"] = tuple(_from_core(Generation, item) for item in values.get("earlier") or ())
+    elif kind is RowPage:
+        values["rows"] = tuple(_from_core(Row, item) for item in values.get("rows") or ())
+    elif kind is TurnPage:
+        values["turns"] = tuple(_from_core(Turn, item) for item in values.get("turns") or ())
+    return kind(**values)  # a row's data is already a fresh copy: core re-reads each body per call
+
+
+def _choices(value, what):
+    if value is None:
+        return None
+    if isinstance(value, str) or not all(isinstance(item, str) for item in value):
+        raise Error(f"{what} takes a set of names")
+    return frozenset(value)
+
+
 @dataclass(frozen=True)
 class SendResult:
     ok: bool
@@ -1139,6 +1283,74 @@ class Agent:
             found = _call(mailbox.inbox, self.directory, limit=None, peek=True)
         return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
                 for message in found["messages"]]
+
+    def _transcript(self, call, what, **arguments):
+        """A transcript read (observe, transcripts.read) through core, for this agent's own universe."""
+        self._plugin._need("transcripts.read")
+        from ..runtime import transcripts
+
+        def read():
+            try:
+                return getattr(transcripts, call)(self.universe.path, self.directory, **arguments)
+            except transcripts.Changed as error:
+                raise TranscriptChanged(str(error), reason=error.reason, resume=error.resume,
+                                        generation=getattr(error, "generation", None)) from None
+            except transcripts.Unavailable as error:
+                raise TranscriptUnavailable(str(error), retry=bool(getattr(error, "retry", False))) from None
+        with _acting(self._plugin._loaded, "observe", self.universe, what):
+            return _call(read)
+
+    def transcript(self, *, generation=None, tip=None):
+        """What this agent's transcript holds now (1.13; needs transcripts.read): counts, cursors and the earlier
+        generations. Cheap. `tip`: a row ref the history and its counts start from.
+
+        Without `generation`, every read is of the current generation, and a cursor from another raises
+        TranscriptChanged("replaced") with `resume` at the current start. With `generation` (a readable token
+        from `earlier`), a read is of that generation only, and another's cursor is an api.Error; an unknown or
+        unreadable token raises TranscriptUnavailable (retry false)."""
+        return _from_core(TranscriptInfo, self._transcript("info", "reading the transcript", generation=generation,
+                                                           tip=tip))
+
+    def transcript_rows(self, *, after=None, before=None, limit=200, max_bytes=1 << 20, history=False, labels=None,
+                        kinds=None, tip=None, generation=None, bodies=True):
+        """A bounded page of rows (1.13; needs transcripts.read), oldest first, or in history order with
+        `history=True`. `after`/`before`: a cursor or a row ref; `before` alone gives the newest rows. `labels`
+        and `kinds` keep only those rows, and the rest are neither counted nor read. The history read is
+        history=True with `tip`: the page says the tip used and the gap, and its rows' refs are the walked
+        history. `bodies=False` leaves `data` out and reads no bodies (max_bytes doesn't apply), to walk a whole
+        history's refs cheaply. Raises TranscriptChanged when the transcript changed under a cursor; see
+        transcript() for `generation`."""
+        return _from_core(RowPage, self._transcript(
+            "rows", "reading transcript rows", after=after, before=before, limit=limit, max_bytes=max_bytes,
+            history=bool(history), labels=_choices(labels, "labels"), kinds=_choices(kinds, "kinds"), tip=tip,
+            generation=generation, bodies=bool(bodies)))
+
+    def iter_transcript_rows(self, *, after=None, limit=200, max_bytes=1 << 20, history=False, labels=None,
+                             kinds=None, tip=None, generation=None, bodies=True):
+        """Every row from `after` on, a bounded page at a time (1.13): each page is read, and access checked,
+        as transcript_rows reads it, and it raises what a page raises."""
+        cursor = after
+        while True:
+            page = self.transcript_rows(after=cursor, limit=limit, max_bytes=max_bytes, history=history,
+                                        labels=labels, kinds=kinds, tip=tip, generation=generation, bodies=bodies)
+            yield from page.rows
+            if page.at_end or not page.rows:
+                return
+            cursor = page.next
+
+    def transcript_turns(self, *, after=None, before=None, limit=50, tip=None, generation=None):
+        """Core's turns over the history (1.13; needs transcripts.read), oldest first: prompt turns, command turns
+        and a preamble. `after`/`before`: a turn ID or a cursor."""
+        return _from_core(TurnPage, self._transcript("turns", "reading transcript turns", after=after,
+                                                     before=before, limit=limit, tip=tip, generation=generation))
+
+    def transcript_turn(self, turn_id, *, after=None, limit=200, max_bytes=1 << 20, tip=None, generation=None):
+        """A bounded page of one turn's rows (1.13; needs transcripts.read)."""
+        if not isinstance(turn_id, str) or not turn_id:
+            raise Error("transcript_turn takes a turn's id, from transcript_turns")
+        return _from_core(RowPage, self._transcript("turn", "reading a transcript turn", turn_id=turn_id,
+                                                    after=after, limit=limit, max_bytes=max_bytes, tip=tip,
+                                                    generation=generation))
 
     def history(self, last=20):
         """The last messages, read or not, oldest first (needs messages.read)."""

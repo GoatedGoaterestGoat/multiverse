@@ -249,3 +249,30 @@ A command harness has no bridge. Send it messages with `--delivery inbox-only`, 
 | Integration | The bridge's own offline tests | `claude plugin test` for the mod; `tests/pi_bridge_test.mjs` for Pi |
 
 Tests must never touch a person's own native state, and Codex tests use isolated homes. See [testing](testing.md).
+
+## Transcript reading
+
+The optional `TranscriptProvider` methods are observe: `transcript_view`,
+`transcript_bodies` and `transcript_readable`. Without them, transcript reads say
+that the harness does not implement the protocol yet. Core pins a reconciled
+`SessionHandle` and releases its locks before asking the provider. The supplied
+reader exposes only a deadline and `check()` for the pinned identity; it has no
+native transport or process controls.
+
+`transcript_view` returns a `TranscriptView`: row facts in stored order, history
+indexes in conversation order, the context boundary, tip and gap. Facts carry
+labels and positions, never bodies. A position changes if preceding bytes change
+and stays valid when rows are appended. `transcript_bodies` reads only requested
+indexes and raises the content-free `TranscriptRowsChanged` if their bytes no
+longer match the view. `transcript_readable` checks a recorded earlier generation.
+All reads use the pinned native ID and storage. An unrecorded home can be resolved
+from inherited values only inside that agent's own session.
+
+Core owns the opaque cursor envelope, generation selection, filters, page limits
+and turn grouping. Bodies larger than 16 MiB are metadata stubs; metadata-only
+pages never read bodies. A prompt finishes from a later prompt or timestamped
+native end evidence, never from runtime idle status. Commands retain their own
+output while later responses remain with the current prompt. Turns, including
+the preamble, are listed by their first row in history order. See the
+[transcript design](../design/transcript-protocols.md) for the history and
+replacement rules, and the [plugin API](plugins.md) for the public read methods.

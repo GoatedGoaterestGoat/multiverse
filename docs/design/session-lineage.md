@@ -118,6 +118,22 @@ Usage remains scoped to the current native conversation. A rebind does not add
 earlier generations' tokens, cost or context to the new session's measurement.
 The journal preserves history for explicit transcript or accounting features.
 
+
+## Transcript generations
+
+`universe.sessions.generations(directory, properties)` reads the journal against
+that same properties snapshot. A generation is its harness, native ID and saved
+home together. Each non-null `from` ends one; a fresh start's replacement home
+belongs to its `to`, and a later `bind` ends none. There are no known earlier
+generations without a journal. A returned-to generation appears once, at its
+latest departure, and the current scope is excluded.
+
+The helper preserves historical home strings without following today's links;
+an unknown old home stays unknown. It returns only identities, departure reasons
+and times. The transcript provider decides whether those conversations are still
+readable. A damaged or conflicting journal keeps its named repair error rather
+than yielding partial history.
+
 ## Messages across a session change
 
 Messages address the agent. When a saved message has definitely not been

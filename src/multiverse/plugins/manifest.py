@@ -51,6 +51,7 @@ PERMISSIONS = {
     "messages.send": "send messages to any agent in this universe, as this plugin",
     "messages.ask": "ask agents side questions",
     "messages.read": "read agents' messages",
+    "transcripts.read": "read agents' transcripts: their conversations, tool calls and results",
     "universe.write": "change this universe's definition files (refresh)",
     "network.listen": "listen for network connections",
     "process.spawn": "start other programs",
@@ -62,10 +63,10 @@ MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
 # The permissions each access level carries, for a manifest with "access" and no "permissions" (1.13).
 # harness.*, process.spawn and network.listen are declarations of what the plugin's own code does: never derived.
 LEVEL_PERMISSIONS = {
-    "observe": frozenset({"agents.read", "messages.read"}),
-    "spend": frozenset({"agents.read", "messages.read", "messages.ask"}),
-    "act": frozenset({"agents.read", "messages.read", "messages.ask", "agents.control", "messages.send",
-                      "universe.write"}),
+    "observe": frozenset({"agents.read", "messages.read", "transcripts.read"}),
+    "spend": frozenset({"agents.read", "messages.read", "transcripts.read", "messages.ask"}),
+    "act": frozenset({"agents.read", "messages.read", "transcripts.read", "messages.ask", "agents.control",
+                      "messages.send", "universe.write"}),
 }
 WHY_CHARACTERS = 300
 DEFAULTS = ("on", "off")

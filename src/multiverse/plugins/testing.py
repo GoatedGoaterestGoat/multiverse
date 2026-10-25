@@ -251,6 +251,130 @@ CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV
            "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
 
 
+class ClaudeRows:
+    """Claude transcript rows for a fake transcript (1.13): each joined to the one before by parentUuid, with rising
+    timestamps, in the shapes Claude Code stores. `prompt` and `command` start a turn; the rest belong to the
+    latest one. `rewind(row)` makes the next row a second child of an earlier one, as a rewind does: without a
+    tip, the history follows the newest leaf."""
+
+    def __init__(self):
+        from datetime import datetime, timezone
+        self.rows, self._parent, self._prompt = [], None, None
+        self._clock = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def add(self, kind, **fields):
+        """A row of `kind` with these fields; uuid, parentUuid, timestamp and the turn's promptId are filled in."""
+        from datetime import timedelta
+        from uuid import uuid4
+        self._clock += timedelta(seconds=1)
+        row = {"type": kind, "uuid": str(uuid4()), "parentUuid": self._parent, "timestamp": self._clock.isoformat(),
+               "sessionId": "fake", **({"promptId": self._prompt} if self._prompt and kind == "user" else {}),
+               **fields}
+        self.rows.append(row)
+        self._parent = row["uuid"]
+        return row
+
+    def prompt(self, text, source="human"):
+        from uuid import uuid4
+        self._prompt = str(uuid4())
+        return self.add("user", message={"role": "user", "content": text}, origin={"kind": source})
+
+    def response(self, text=None, *, tool=None, stop="end_turn"):
+        """The model's reply: `text`, or a tool call (`tool` = (call_id, name, input)), with its stop reason."""
+        from uuid import uuid4
+        block = ({"type": "tool_use", "id": tool[0], "name": tool[1], "input": tool[2]} if tool
+                 else {"type": "text", "text": text or ""})
+        return self.add("assistant", message={"id": "msg_" + uuid4().hex[:12], "role": "assistant", "model": "claude-test",
+                                              "content": [block], "stop_reason": "tool_use" if tool else stop,
+                                              "usage": {"input_tokens": 10, "output_tokens": 5}})
+
+    def tool_result(self, call_id, text):
+        return self.add("user", message={"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": call_id, "content": text}]}, toolUseResult={"stdout": text})
+
+    def turn_end(self, milliseconds=1000):
+        return self.add("system", subtype="turn_duration", durationMs=milliseconds)
+
+    def interrupted(self, tool=False):
+        """An Esc: Claude usually writes no turn_duration then, and this row ends the turn."""
+        text = "[Request interrupted by user" + (" for tool use]" if tool else "]")
+        return self.add("user", message={"role": "user", "content": [{"type": "text", "text": text}]})
+
+    def steer(self, text, source="peer"):
+        """A message the model sees before the running turn ends (a mid-turn steer)."""
+        return self.add("attachment", attachment={"type": "queued_command", "commandMode": "prompt", "prompt": text,
+                                                  "origin": {"kind": source}})
+
+    def command(self, name, args="", output=""):
+        """A typed slash command (name with its /, as "/model"), and its output."""
+        from uuid import uuid4
+        self._prompt = str(uuid4())
+        row = self.add("user", message={"role": "user", "content": f"{name} {args}".strip()})
+        self.add("user", message={"role": "user", "content": f"<local-command-stdout>{output}</local-command-stdout>"})
+        return row
+
+    def rewind(self, row):
+        """The next row hangs off `row`, an earlier one: a second branch."""
+        self._parent = row["uuid"]
+
+
+class FakeTranscript:
+    """A Claude transcript an agent reads, in a PluginTestCase (1.13): stored where the agent's records say its
+    Claude storage is, so a test reads it through the real API, core and Claude adapter."""
+
+    def __init__(self, case, agent_dir, rows):
+        from uuid import uuid4
+        self._case, self.agent_dir = case, Path(agent_dir)
+        self.native_id = str(uuid4())
+        self._bind(None, self.native_id, None)
+        self.rewrite(rows)
+
+    @property
+    def path(self):
+        from ..harnesses.claude.transcripts import project_key
+        from ..store import read
+        workspace = read(self.agent_dir / "properties.json")["workspace"]
+        return self._case.claude_config / "projects" / project_key(workspace) / f"{self.native_id}.jsonl"
+
+    def _bind(self, previous, native_id, reason):
+        from ..store import read, write
+        from ..universe import agents
+        home = os.path.realpath(self._case.claude_config)
+        if previous is None:
+            data = read(self.agent_dir / "properties.json")
+            data.update(native_session_id=native_id, native_session_home=home)
+            write(self.agent_dir / "properties.json", data)
+            return
+        launch = read(self.agent_dir / "runtime.json")["launch_id"]
+        agents.rebind_session(self.agent_dir.parent.parent.parent, self.agent_dir.name, previous, native_id, reason,
+                              launch, home=home)
+
+    def append(self, *rows):
+        """Rows Claude writes next."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as stream:
+            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+
+    def rewrite(self, rows):
+        """The same file, its bytes changed (as Claude does when it removes a row): same inode, new content."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w") as stream:
+            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+
+    def clear(self, rows=()):
+        """A /clear: the agent moves to a new session, the old one stays on disk and in its lineage."""
+        from uuid import uuid4
+        previous, self.native_id = self.native_id, str(uuid4())
+        self._bind(previous, self.native_id, "clear")
+        self.rewrite(rows)
+
+    def unreadable(self):
+        """The folder that holds the session can't be read: a read must say it can't tell, never 'empty'."""
+        folder = self.path.parent
+        folder.chmod(0)
+        self._case.addCleanup(folder.chmod, 0o755)
+
+
 class PluginTestCase(unittest.TestCase):
     # The plugin under test: a directory with plugin.json, or None to write plugins in the test.
     plugin = None
@@ -363,6 +487,12 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def transcript(self, agent, rows=()):
+        """A Claude transcript for `agent` (its directory, from agent(), or an api.Agent) that the API reads (1.13):
+        a FakeTranscript, with append, rewrite, clear and unreadable. Build rows with ClaudeRows."""
+        directory = agent.directory if hasattr(agent, "directory") and not isinstance(agent, Path) else agent
+        return FakeTranscript(self, directory, list(rows))
 
     def claude_transcript(self, native_id, records, project="project"):
         """Write a Claude session transcript (JSON lines) where Claude keeps it, under CLAUDE_CONFIG_DIR."""

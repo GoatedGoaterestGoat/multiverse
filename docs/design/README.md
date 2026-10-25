@@ -9,6 +9,7 @@ These pages record decisions, rationale and detailed contracts for maintainers. 
 | [session-lineage.md](session-lineage.md) | How an agent follows native session changes such as Claude's `/clear`, and the lineage it records |
 | [shared-conversations.md](shared-conversations.md) | Agent identity in shared Codex conversations, the command boundary, attachment cleanup and native refusals |
 | [future-work.md](future-work.md) | Agreed ideas that are not scheduled yet |
+| [transcript-protocols.md](transcript-protocols.md) | How plugins read an agent's conversation (API 1.13): cursors and generations, labels, history and context, turns, and what a harness adapter provides for them |
 | [plugins.md](plugins.md) | The plugin system's design: discovery, trust, settings, the API and its versions, harness extensions, the event journal and host, and moving compaction into a plugin |
 | [codex-plugins.md](codex-plugins.md) | The Codex investigation behind the plugin design's Codex section: what 0.159.3 and 0.162.1 support, the launch contribution, and the full inventory of config keys |
 
