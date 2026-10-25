@@ -555,7 +555,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 12)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 13)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -584,6 +584,71 @@ keep changing, as they did in PR #16, without breaking plugins.
 - Results are frozen dataclasses with the fields a plugin needs, plus `.record`,
   the tool's full record, for anything the dataclass leaves out. `.record` is
   not covered by the version, and the docs say so.
+
+### Effect classes and access grants (1.13)
+
+Every operation in the plugin API and the adapter protocol has one effect
+class, and each plugin works under the access level a person grants it per
+universe ([access levels](../develop/plugins.md#access-levels) lists them call
+by call):
+
+- **observe** reads and is safe to cache, retry and run in render paths within
+  their time budget. An observe call may bring core's own records up to date
+  with what the harness verifiably did, such as recording a `/clear` the
+  adapter detected, as listing and usage do. It never starts or stops a
+  process, switches a conversation, adopts the caller's storage, or acts for
+  the caller.
+- **spend** uses tokens, money or time and changes nothing: `ask`, and the
+  one-shot run to come.
+- **act** changes a session, a launch, an inbox or a universe's files: spawn,
+  resume, kill, send, a refresh applied, an inbox read that marks messages
+  read, a settings edit, launch contributions and harness extensions.
+- A plugin's own state (its state folder, log, status items, its own
+  namespaced events, reading its settings) and a universe's own definition
+  facts (its name, its harness definitions without an agent) are outside the
+  classes, so they never raise for access.
+
+The grant:
+
+1. **A plugin requests a level** in its manifest (`access`: request, minimum,
+   why). One without `access` requests `act` with minimum `act`: its reach
+   before levels.
+2. **A person grants that level or a lower one**, per universe: `mv2 plugins
+   enable` asks on a terminal or takes `--grant`, the dashboard's Plugins
+   screen asks, and `mv2 plugins grant` changes it. Only these record a grant,
+   in `plugins.json` (`access`), with no inheritance. A plugin that is on with
+   no grant recorded has its request, so no universe needs a migration write.
+   Without a terminal, `enable` records the minimum. From an agent
+   (`MV2_AGENT_ID` or `MV2_AGENT_DIR` set), `enable` records at most the
+   minimum and `grant` never raises one; both print the command a person runs.
+3. **The plugin reads its level** (`mv.access()`) and offers what fits it.
+   Below its minimum, enabling is refused with its own reason.
+4. **Core enforces it.** A plugin off in a universe has no access there,
+   whatever `plugins.json` records. The API refuses a call above the plugin's
+   level in the target universe with `api.AccessDenied` (an `api.Error`, never
+   an `OSError`, so an `except OSError` written for disk errors doesn't
+   swallow it). Core checks the same limit at its entry points, before a launch
+   or send writes any record, and before each adapter call, by the protocol's
+   `EFFECTS` map in `harnesses/types.py`. A launch contribution from a plugin
+   below `act` is left out of the launch with the reason. `access_ceiling` in
+   `plugins.json` caps every plugin in a universe, and `MV2_EFFECTS` every
+   plugin in one process.
+5. **Declared classes:** a command, dashboard action or helper action declares
+   its class (`effect=`, `act` when undeclared) and runs only where the
+   plugin's level reaches it; columns, panels, inspector lines, capabilities,
+   usage adjustments and settings checks run as `observe`; `mv.effect()`
+   declares a plugin's own functions. A call above the declared class, made
+   inside, is refused. The declared class follows a context variable, not
+   threads a plugin starts itself.
+
+Permissions stay checked under the levels: both must pass. A manifest with
+`access` and no `permissions` gets the permissions of its requested level.
+
+This is a change to the 1.x promise: a 1.x plugin that called
+into a universe where it is off, or acted from a column, panel, inspector line,
+capability or usage function, is now refused there. Everything else a 1.12
+plugin did keeps working, at `act`. Like permissions and trust, the levels are
+a guard against mistakes that makes a plugin's reach readable, not a sandbox.
 
 ### Operations: the client
 

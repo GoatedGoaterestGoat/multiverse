@@ -1,5 +1,6 @@
 """Check deliveries, retry definite failures or dismiss them without resending."""
 import sys
+from ..plugins import access
 from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
@@ -20,6 +21,7 @@ def configure(parser):
 def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False, _present=None, _present_error=None):
     if sum(bool(value) for value in (retry, check, dismiss)) != 1:
         raise ValueError('Choose exactly one of --check, --retry or --dismiss')
+    access.require('observe' if check else 'act', f'deliver {agent}')
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
     properties = store.read(directory / 'properties.json')
@@ -116,6 +118,8 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
                                      'definite_failure': True}}
             else:
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
+        except access.Denied:
+            raise
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True,
                        **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}

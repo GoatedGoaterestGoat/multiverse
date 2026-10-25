@@ -495,13 +495,15 @@ mv2 update [--check] [--json] [--plugin-fetch-timeout SECONDS]
 List, turn on or off, configure, trust and check plugins.
 
 ```sh
-mv2 plugins [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--json] [ACTION] [name]
+mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--json] [ACTION] [name] [LEVEL]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `ACTION` |  | list (default), info, enable, disable, settings, trust, untrust, check, host, events, install, migrate or new | `list` |
+| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate or new | `list` |
 | `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name) |  |
+| `LEVEL` |  | grant: observe, spend or act |  |
+| `--grant` | `observe`, `spend`, `act` | enable: the access level to grant it here (otherwise a terminal asks; without one, its minimum) |  |
 | `--set` | `KEY=VALUE` | settings: change one setting (VALUE is JSON, or else text); repeatable |  |
 | `--unset` | `KEY` | settings: remove one setting, back to its default; repeatable |  |
 | `--prune` |  | events: delete journal segments past retention now |  |

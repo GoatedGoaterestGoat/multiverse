@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, loader, manifest as manifests, settings as settings_files
+from . import access as levels, config, loader, manifest as manifests, settings as settings_files
 from .loader import PluginError, entries, entry
 
 CATALOG_KINDS = ("skills", "commands", "workflows")
@@ -300,6 +300,7 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 "permissions": manifest.permission_texts() if manifest else [],
                 "commands": dict(manifest.commands) if manifest else {},
                 "provides": _provides(found),
+                "access": _access_here(root, found),
                 "settings": None,
                 "shadowed": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed],
                 # A trusted universe copy that takes the place of another source's plugin says so: a cloned
@@ -779,6 +780,69 @@ def install(name):
     return {"name": name, "path": str(known[name]), "installed": (known[name] / "plugin.json").is_file()}
 
 
+def _access_here(root, found):
+    """listing()'s access: what the plugin asks for here and what it has."""
+    wanted = found.manifest.access if found.manifest is not None else manifests.Access()
+    settings = config.load(root)
+    return {"request": wanted.request, "minimum": wanted.minimum, "why": wanted.why,
+            "granted": settings.access.get(found.name), "level": loader.access_level(root, found),
+            "ceiling": levels.lowest(*(level for level in (settings.ceiling, levels.process_ceiling())
+                                       if level is not None)) if (settings.ceiling or levels.process_ceiling())
+            else None}
+
+
+def entry_access(root, name):
+    """listing()'s access for one plugin, without listing the others."""
+    return _access_here(Path(root), entry(Path(root), name))
+
+
+def from_agent():
+    """Whether this process runs for an agent: its launches and their children carry MV2_AGENT_ID or MV2_AGENT_DIR.
+    A guard against mistakes, not against an agent that unsets them."""
+    return bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+
+
+def _grant_for(root, found, grant):
+    """The grant to record when `found` is turned on here: `grant` checked against what the plugin asks for, or,
+    from an agent, at most its minimum. None records nothing (it has what it requests)."""
+    if found.manifest is None:
+        return grant
+    wanted = found.manifest.access
+    if grant is not None:
+        levels.check(grant, "grant")
+        if levels.rank(grant) > levels.rank(wanted.request):
+            raise PluginError(f"{found.name} asks for at most {wanted.request} access")
+        if levels.rank(grant) < levels.rank(wanted.minimum):
+            raise PluginError(f"{found.name} needs at least {wanted.minimum} access"
+                              + (f": {wanted.why}" if wanted.why else ""))
+    if from_agent():
+        if grant is not None and levels.rank(grant) > levels.rank(wanted.minimum):
+            raise PluginError(f"An agent can turn {found.name} on with at most {wanted.minimum} access. "
+                              f"For more, a person runs: mv2 plugins grant {found.name} {grant}")
+        if grant is None and wanted.minimum != wanted.request:
+            return wanted.minimum
+    return grant
+
+
+def set_grant(root, name, level):
+    """Record the access level `name` has here: between its minimum and its request. An agent may lower a
+    grant, never raise it. Returns {"name", "granted", "level"} (level: in effect now, None while it is off)."""
+    root = Path(root)
+    found = entry(root, name)
+    levels.check(level, "grant")
+    wanted = found.manifest.access if found.manifest is not None else manifests.Access()
+    if levels.rank(level) > levels.rank(wanted.request):
+        raise PluginError(f"{name} asks for at most {wanted.request} access")
+    if levels.rank(level) < levels.rank(wanted.minimum):
+        raise PluginError(f"{name} needs at least {wanted.minimum} access" + (f": {wanted.why}" if wanted.why else ""))
+    if from_agent():
+        held = config.load(root).access.get(name, wanted.request)
+        if levels.rank(level) > levels.rank(held):
+            raise PluginError(f"An agent can't raise a plugin's access. A person runs: mv2 plugins grant {name} {level}")
+    config.set_grant(root, name, level)
+    return {"name": name, "granted": level, "level": loader.access_level(root, entry(root, name))}
+
+
 def _provides(found):
     """What a plugin adds: from its manifest, and once it is loaded in this process, from what it registered."""
     manifest = found.manifest
@@ -839,11 +903,14 @@ def universe_copy(root, name):
     return None
 
 
-def set_enabled(root, name, on):
-    """Turn a plugin on or off in this universe. Turning it on installs its default settings when there are none.
+def set_enabled(root, name, on, grant=None):
+    """Turn a plugin on or off in this universe. Turning it on installs its default settings when there are none,
+    and records `grant` (an access level between its minimum and its request) when given.
 
-    Returns {"name", "on", "installed": [paths]}. A plugin must be found to be
-    turned on, and a universe plugin must be trusted first.
+    Returns {"name", "on", "installed": [paths], "granted"}. A plugin must be found to be
+    turned on, and a universe plugin must be trusted first. From an agent, it is
+    turned on with at most its minimum access (recorded when that is below its
+    request). Turning a plugin off leaves its recorded grant alone.
     """
     root = Path(root)
     installed = []
@@ -852,12 +919,15 @@ def set_enabled(root, name, on):
         found = entry(root, name)
         if found.state in ("invalid", "untrusted", "changed", "incompatible"):
             raise PluginError(found.problem)
+        grant = _grant_for(root, found, grant)
         if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
             installed.append(str(settings_files.path(root, name)))
-    config.set_enabled(root, name, bool(on))
+    elif grant is not None:
+        raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
+    config.set_enabled(root, name, bool(on), grant=grant if on else None)
     if on and not was_on:
         anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
-    return {"name": name, "on": bool(on), "installed": installed}
+    return {"name": name, "on": bool(on), "installed": installed, "granted": grant if on else None}
 
 
 def anchor_events(root, name, again=False):

@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 
+from . import access as levels
+
 FILE = "plugin.json"
 # The same rule as a bridge id: lowercase letters, digits and single hyphens.
 NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
@@ -57,9 +59,18 @@ PERMISSIONS = {
     "harness.pi": "add to Pi launches",
 }
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
+# The permissions each access level carries, for a manifest with "access" and no "permissions" (1.13).
+# harness.*, process.spawn and network.listen are declarations of what the plugin's own code does: never derived.
+LEVEL_PERMISSIONS = {
+    "observe": frozenset({"agents.read", "messages.read"}),
+    "spend": frozenset({"agents.read", "messages.read", "messages.ask"}),
+    "act": frozenset({"agents.read", "messages.read", "messages.ask", "agents.control", "messages.send",
+                      "universe.write"}),
+}
+WHY_CHARACTERS = 300
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings", "harnesses", "statusline", "events"}
+                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -103,6 +114,16 @@ class HarnessEntry:
 
 
 @dataclass(frozen=True)
+class Access:
+    """The access level a plugin asks for, the least it can work with, and why (1.13). A manifest without
+    "access" asks for act with act as its least: exactly its reach before levels."""
+    request: str = "act"
+    minimum: str = "act"
+    why: str | None = None
+    declared: bool = False
+
+
+@dataclass(frozen=True)
 class Item:
     """A status-line item a plugin writes: its name and whether it shows by default on each line."""
     name: str
@@ -126,12 +147,23 @@ class Manifest:
     harnesses: dict = field(default_factory=dict)  # family -> tuple of HarnessEntry
     statusline: tuple = ()  # Item
     events: tuple = ()  # event type patterns it subscribes to: "agent.status", "message.*", "*"
+    access: Access = Access()
+
+    def permitted(self, permission):
+        """Whether the manifest asks for `permission`: listed, or, for one with "access" and no "permissions",
+        carried by the level it requests."""
+        if self.permissions or not self.access.declared:
+            return permission in self.permissions
+        if MODEL_PERMISSION.fullmatch(permission):
+            return levels.rank(self.access.request) >= levels.rank("spend")
+        return permission in LEVEL_PERMISSIONS[self.access.request]
 
     def permission_texts(self):
         """Each permission as words, for `mv2 plugins enable` and `info`."""
+        names = self.permissions or (LEVEL_PERMISSIONS[self.access.request] if self.access.declared else ())
         return [PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
                                           if MODEL_PERMISSION.fullmatch(name) else name)
-                for name in sorted(self.permissions)]
+                for name in sorted(names)]
 
 
 def check_name(value, what="name"):
@@ -252,7 +284,23 @@ def _parse(directory, data):
         raise ValueError('events needs "events" in extends')
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
                     frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline,
-                    tuple(events))
+                    tuple(events), _access(data.get("access")))
+
+
+def _access(value):
+    if value is None:
+        return Access()
+    if not isinstance(value, dict) or set(value) - {"request", "minimum", "why"} or "request" not in value:
+        raise ValueError('access must be {"request": LEVEL, "minimum": LEVEL, "why": "..."}, with request')
+    request = levels.check(value["request"], "access.request")
+    minimum = levels.check(value.get("minimum", request), "access.minimum")
+    if levels.rank(minimum) > levels.rank(request):
+        raise ValueError("access.minimum must not be above access.request")
+    why = value.get("why")
+    if why is not None and (not isinstance(why, str) or not why.strip() or len(why) > WHY_CHARACTERS
+                            or "\n" in why or "\r" in why):
+        raise ValueError(f"access.why must be one line of at most {WHY_CHARACTERS} characters")
+    return Access(request, minimum, why.strip() if why else None, True)
 
 
 def _version(value, what):

@@ -1,7 +1,8 @@
 """The Plugins screen: which plugins are on in a scope, and each one's settings.
 
 `PluginsScreen` lists the plugins a scope sees with their state, turns them on
-and off (`plugins.json` of that scope) and opens their settings. A plugin that
+and off (`plugins.json` of that scope), asks which access to grant one that can
+work with less than it asks for, and opens their settings. A plugin that
 registered its own settings screen gets it; every other plugin gets
 `PluginSettingsScreen`, a field screen generated from the JSON Schema its
 manifest ships. All plugin work goes through the app's PluginService, off the
@@ -18,9 +19,10 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
-from ..plugins import loader
+from ..plugins import access as plugin_access, loader
 from ..plugins.settings import DELETE
 from .plugin_service import universe_name
+from .screens import ChoiceScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
@@ -51,6 +53,37 @@ def provided(provides):
     return " · ".join(shown)
 
 
+def levels(item):
+    """The access levels a person may grant this plugin when turning it on here, highest first; empty when there is
+    nothing to choose (it asks for what it needs at least, or the universe allows no more)."""
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    order = plugin_access.LEVELS
+    request, minimum, ceiling = found.get("request"), found.get("minimum"), found.get("ceiling")
+    if request not in order or minimum not in order:
+        return []
+    top = min(order.index(request), order.index(ceiling)) if ceiling in order else order.index(request)
+    allowed = order[order.index(minimum):top + 1]
+    return list(reversed(allowed)) if len(allowed) > 1 else []
+
+
+def access_line(item):
+    """Its access here, or what it asks for while it is off; None for a plugin that says nothing about access."""
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    request, minimum, level, ceiling = (found.get(key) for key in ("request", "minimum", "level", "ceiling"))
+    if level:
+        line = f"Access here: {clean(level)}"
+        if request and request != level:
+            line += f" (it asks for {clean(request)}; change it with mv2 plugins grant {clean(item['name'])} LEVEL)"
+    elif request:
+        line = f"Asks for {clean(request)} access" + (f", works with {clean(minimum)} or more" if minimum and minimum != request else "")
+    else:
+        return None
+    order = plugin_access.LEVELS
+    if ceiling in order and request in order and order.index(ceiling) < order.index(request):
+        line += f" · this universe allows at most {clean(ceiling)}"
+    return line
+
+
 def describe(item):
     """The selected plugin in a few lines: what it is, why it is not working and what it last did wrong."""
     lines = [f"{clean(item['name'])} {clean(item.get('version') or '')} · {clean(item.get('source') or '')}".rstrip()]
@@ -65,6 +98,9 @@ def describe(item):
     adds = provided(item.get("provides"))
     if adds:
         lines.append("Adds here: " + adds)
+    access = access_line(item)
+    if access:
+        lines.append(access)
     if item.get("permissions"):
         lines.append("Allowed to: " + "; ".join(clean(text) for text in item["permissions"]))
     for shadow in item.get("shadowed") or ():
@@ -184,14 +220,33 @@ class PluginsScreen(ModalScreen):
         item = self.selected()
         if item is None or self.busy:
             return
-        self.busy = True
+        self.busy = True  # also while the access chooser is open, so a held Space opens one
         self.error("")
-        self.switch(item["name"], not item["on"])
+        offered = [] if item["on"] else levels(item)
+        if not offered:
+            self.switch(item["name"], not item["on"])
+            return
+        name, why = item["name"], (item.get("access") or {}).get("why")
+
+        def chosen(level):
+            if level is None:  # Esc: it stays off, and no grant is recorded
+                self.busy = False
+                return
+            self.switch(name, True, level)
+
+        rows = [(level, f"{level.capitalize()}: {plugin_access.MEANING[level]}"
+                 + (" (what it asks for)" if index == 0 else "")) for index, level in enumerate(offered)]
+        self.app.push_screen(ChoiceScreen(f"Turn on {name} here", rows, description=clean(
+            (f"{why} " if why else "") + f"Choose the access {name} gets in this universe; it uses only what fits. "
+            "Esc leaves it off.")), chosen)
 
     @work(group="plugins-toggle", exit_on_error=False)
-    async def switch(self, name, on):
+    async def switch(self, name, on, grant=None):
         try:
-            await asyncio.to_thread(self.service.set_enabled, self.root, name, on)
+            if grant is None:
+                await asyncio.to_thread(self.service.set_enabled, self.root, name, on)
+            else:
+                await asyncio.to_thread(self.service.set_enabled, self.root, name, on, grant=grant)
         except Exception as error:
             self.busy = False
             self.error(str(error))

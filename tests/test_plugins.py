@@ -194,15 +194,15 @@ class ConfigTest(PluginTestCase):
         with self.subTest("a newer mv2's keys"):
             self.write_plugin("tool")
             config.set_enabled(self.root, "tool", True)
-            path.write_text(json.dumps({**json.loads(path.read_text()), "access": {"tool": "spend"},
-                                        "access_ceiling": "observe"}))
+            path.write_text(json.dumps({**json.loads(path.read_text()), "layout": {"tool": "left"},
+                                        "sandbox": "strict"}))
             loaded = config.load(self.root)
             self.assertIsNone(loaded.problem)
             self.assertTrue(loaded.is_on("tool"))
             self.assertEqual(plugins.entry(self.root, "tool").state, "on")
-            self.assertTrue(any("access, access_ceiling" in note for note in plugins.notes(self.root)))
+            self.assertTrue(any("layout, sandbox" in note for note in plugins.notes(self.root)))
             config.set_enabled(self.root, "tool", False)  # writing it keeps what a newer mv2 put there
-            self.assertEqual(json.loads(path.read_text())["access"], {"tool": "spend"})
+            self.assertEqual(json.loads(path.read_text())["layout"], {"tool": "left"})
         with self.subTest("unusable"):
             for text in ('{"enabled": {"a": "yes"}}', '{"schema": 1, "access": {}, "enabled": {"a": "yes"}}'):
                 path.write_text(text)

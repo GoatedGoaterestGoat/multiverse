@@ -17,6 +17,8 @@ import fcntl
 import inspect
 
 from .. import harnesses
+from ..plugins.access import Denied
+from . import effects
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from ..harnesses.types import ObservedBinding, normalize_session_id
@@ -39,6 +41,7 @@ def execute(command: CommandSpec, workspace, timeout=10):
 
 def start_shared_service(specification, workspace, log_path, unset_env, observe_versions=None):
     """Ask the native owner to start/reuse its daemon. Never stop or restart it."""
+    effects.require('spawn', 'native service')
     try:
         return _start_shared_service(specification, workspace, log_path, unset_env, observe_versions)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
@@ -122,6 +125,7 @@ def validate_recovery_command(command, session):
 
 
 def attachment_ready(adapter, session):
+    effects.require('attachment_ready', session.agent_id)
     if session.attachment:
         if session.attachment.readiness == 'binding':
             return bool(session.native_id and (session.native_relay or {}).get('state') == 'ready')
@@ -135,7 +139,7 @@ def attachment_ready(adapter, session):
         return describe(session)
     # Compatibility for independent providers implementing the original protocol.
     return (not session.endpoint or bool(session.native_id and
-            adapter.capabilities(session)['send_steer'].state == 'supported'))
+            effects.call(adapter, 'capabilities', session)['send_steer'].state == 'supported'))
 
 
 def legacy_attachment(shared_service=False):
@@ -322,6 +326,7 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
     A provider owns the evidence checks. Core owns launch fencing, the CAS,
     storage scope, ownership and the durable transition.
     """
+    effects.require('observed_binding', properties.get('id', 'agent'))
     if not properties.get('harness') or not properties.get('workspace'):
         # Legacy/minimal records have no observation contract. Resume supplies
         # its normal workspace fallback before opting into this path.
@@ -377,12 +382,13 @@ def context(root, reference, *, reconcile=False):
 
 
 def stop(root, reference):
+    effects.require('stop', reference)
     directory, adapter, session, executor = context(root, reference)
     executor.stopping = True
     live = observe(executor.properties, executor.facts)['live']
     if live in ('stopped', 'dormant'):
         session = replace(session, state=live)
-    result = adapter.stop(session, executor)
+    result = effects.call(adapter, 'stop', session, executor)
     for message_id in (result.value or {}).get('cancelled_message_ids', []):
         try:
             message_record(directory, message_id)
@@ -397,10 +403,11 @@ def stop(root, reference):
 
 
 def capabilities(root, reference, run_probe=False):
+    effects.require('capabilities', reference)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         _, adapter, session, executor = context(root, reference, reconcile=True)
-    result = adapter.capabilities(session, executor if run_probe else None)
+    result = effects.call(adapter, 'capabilities', session, executor if run_probe else None)
     # The same runtime snapshot the session came from, never a newer launch's.
     result.update(_plugin_capabilities(adapter, session, executor.facts, result))
     return {name: asdict(value) for name, value in result.items()}
@@ -435,6 +442,7 @@ def _adjusted_usage(adapter, session, facts, result):
 
 def usage_snapshot(root, properties, facts, *, reconciled=False):
     """Nonblocking snapshot; listing can reuse its own already reconciled records."""
+    effects.require('get_usage', properties.get('id', 'agent'))
     try:
         adapter = harnesses.load(root, properties['harness'])
         directory = root / 'state' / 'agents' / properties['id']
@@ -443,13 +451,17 @@ def usage_snapshot(root, properties, facts, *, reconciled=False):
         if facts.get('binding_conflict'):
             return NativeResult('unavailable', facts['binding_conflict']).to_dict()
         session = SessionHandle.from_records(properties, facts, directory)
-        result = adapter.get_usage(session).to_dict()
+        result = effects.call(adapter, 'get_usage', session).to_dict()
+    except Denied:
+        raise
     except Exception as error:
         return NativeResult('error', str(error)).to_dict()
     return _adjusted_usage(adapter, session, facts, result)
 
 
 def operation(root, reference, name, question=''):
+    if name in ('ask', 'get_usage'):
+        effects.require(name, reference)
     directory = agents.directory(root, reference)
     try:
         if name == 'ask' and not question.strip():
@@ -459,7 +471,7 @@ def operation(root, reference, name, question=''):
             if executor.facts.get('binding_conflict'):
                 return NativeResult('unavailable', executor.facts['binding_conflict']).to_dict()
             if name == 'get_usage':
-                result = adapter.get_usage(session, executor).to_dict()
+                result = effects.call(adapter, 'get_usage', session, executor).to_dict()
                 facts = executor.facts  # the launch the measurement belongs to
             elif name != 'ask':
                 return NativeResult('unavailable', f'Unknown operation: {name}').to_dict()
@@ -468,7 +480,9 @@ def operation(root, reference, name, question=''):
             return _adjusted_usage(adapter, session, facts, result)
         # An answer can take a while: wait outside the launch lock so sends and
         # stop are not held. The question still targets this exact session.
-        return adapter.ask(session, question, executor).to_dict()
+        return effects.call(adapter, 'ask', session, question, executor).to_dict()
+    except Denied:
+        raise
     except Exception as error:
         return NativeResult('error', str(error)).to_dict()
 
@@ -483,6 +497,7 @@ def control(root, reference, operation_name):
 
 
 def flush_startup(root, directory, launch_id, error=None):
+    effects.require('send', directory.name)
     # Same lock order as send. Setting ready and taking the batch is atomic with
     # new sends; hold send.lock through submission to preserve batch ordering.
     with lock(directory / '.send.lock'):
@@ -563,7 +578,7 @@ def _launch_only_delivery(adapter, session, delivery):
     capabilities = getattr(adapter, 'capabilities', None)
     if capabilities is None:
         return None
-    capability = capabilities(session).get('send_follow_up' if delivery == 'follow-up' else 'send_steer')
+    capability = effects.call(adapter, 'capabilities', session).get('send_follow_up' if delivery == 'follow-up' else 'send_steer')
     return capability if capability and capability.mechanism == 'launch-only' else None
 
 
@@ -580,7 +595,7 @@ def launch_only_receipt(adapter, session, message, tracking, live):
     capability = _launch_only_delivery(adapter, session, message.get('delivery'))
     if capability is None or live not in ('alive', 'stopped', 'dormant'):
         return None
-    wake = adapter.capabilities(session).get('wake')
+    wake = effects.call(adapter, 'capabilities', session).get('wake')
     if live in ('stopped', 'dormant') and wake is not None and wake.state == 'supported':
         return None
     return {'state': 'unavailable', 'ok': False, 'reason': capability.reason,
@@ -642,6 +657,7 @@ def reopen_launch_only(root, directory, message_id):
     The caller holds send.lock. Capability lookup uses the current launch under
     its lock; normal delivery rechecks generation and session before submitting.
     """
+    effects.require('send', directory.name)
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
         if tracking.get('dismissed_at'):
@@ -656,7 +672,7 @@ def reopen_launch_only(root, directory, message_id):
         capabilities = getattr(adapter, 'capabilities', None)
         if capabilities is None:
             return False
-        capability = capabilities(session, executor).get(
+        capability = effects.call(adapter, 'capabilities', session, executor).get(
             'send_follow_up' if message.get('delivery') == 'follow-up' else 'send_steer')
         if capability is None or capability.state != 'supported':
             return False
@@ -680,6 +696,7 @@ def _final_lineage_receipt(message_id):
 
 
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
+    effects.require('get_delivery' if check else 'send', reference)
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
     # take their own shorter lock, separate from read-position changes.
@@ -695,6 +712,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             return wake.check(root, directory, message, tracking)
         try:
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
+        except Denied:
+            raise
         except Exception as error:
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
                        'reason': f'Cannot load recipient adapter: {error}', 'at': now(),
@@ -731,7 +750,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             if tracking.get('submission_state') == 'failed':
                 return {**tracking['attempts'][-1], 'ok': False}
             try:
-                result = adapter.get_delivery(receipt_session, message_id, executor)
+                result = effects.call(adapter, 'get_delivery', receipt_session, message_id, executor)
                 if not (isinstance(result.value, dict) and result.value.get('transcript_confirmed') is True):
                     from . import delivery_evidence
                     result = delivery_evidence.check(directory, adapter, session, executor, message, tracking) or result
@@ -746,6 +765,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                         changes['transcript_confirmed_at'] = now()
                     update_message(directory, message_id, **changes)
                 return {**result.to_dict(), 'message_id': message_id, 'ok': result.state not in ('error', 'unknown', 'unavailable')}
+            except Denied:
+                raise
             except Exception as error:
                 return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
         selected_mode = message.get('delivery', 'inbox-only')
@@ -777,6 +798,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         try:
             executor.check_session()
+        except Denied:
+            raise
         except Exception as error:
             result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id}
             update_message(directory, message_id, submission_state='failed', attempts=[*previous, result])
@@ -807,8 +830,10 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                         and adapter_hook(adapter, 'continue_queued') is not None):
                     from .queue_continuation import claim_restart
                     session = claim_restart(directory, session, message_id)
-                result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
+                result = effects.call(adapter, 'send', session, Message(message['id'], message['text'], message.get('from', {}),
                                       delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
+        except Denied:
+            raise
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
@@ -826,6 +851,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
 
 def send_or_wake(root, reference, message_id, retry=False, *, new_message=False):
     """Caller holds .send.lock. Release .launch.lock before start takes it."""
+    effects.require('send', reference)
     # Waking a stopped agent launches it, and launching uses this module: the one
     # import that has to wait until the call.
     from . import lifecycle, missing_runtime
@@ -869,7 +895,7 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         state = tracking.get('submission_state', 'pending')
         eligible = state == 'pending' or (retry and state == 'failed')
         wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
-        capability = adapter.capabilities(session).get('wake') if wake else None
+        capability = effects.call(adapter, 'capabilities', session).get('wake') if wake else None
         if wake and (capability is None or capability.state != 'supported'):
             launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None
             receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt',
@@ -898,6 +924,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
                        'Resuming with this message as the interactive starting prompt',
                        'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
         return {**receipt, 'notices': launched['notices']} if launched.get('notices') else receipt
+    except Denied:
+        raise
     except Exception as error:
         return _wake_failure(directory, message_id, error)
 

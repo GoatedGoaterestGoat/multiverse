@@ -46,6 +46,7 @@ authority or repair the runtime record.
 | Variable | What it does |
 | --- | --- |
 | `MV2_PLUGINS` | `off` (or `0`, `false`, `no`) turns on safe mode. No plugin loads at all, bundled ones included, in that command or dashboard or in the launches it makes. Agents don't inherit it. See [plugins](../use/plugins.md#safe-mode). |
+| `MV2_EFFECTS` | `observe`, `spend` or `act`: no plugin in that command or dashboard has more than this access level, whatever it was granted. Any other value counts as `observe`. Agents don't inherit it. See [plugins](../use/plugins.md#access). |
 | `MV2_PLUGIN_PATH` | Directories to find plugins in, separated by `:`. Each one is a plugin or a folder of plugins. Plugins found here come before every other source and need no trust. Agents don't inherit it. See [making plugins](../develop/plugins.md#quickstart). |
 | `MV2_<NAME>`, `MV2_<NAME>_*` | Plugin NAME's launch additions set these in agent sessions. NAME is the plugin's name upper-cased, with hyphens as underscores, as in the compaction plugin's `MV2_COMPACTION`. A plugin can set no other `MV2_*` variable. |
 

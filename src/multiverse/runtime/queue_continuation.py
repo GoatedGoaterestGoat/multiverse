@@ -5,6 +5,7 @@ only a new message's delivery may explicitly restart the FIFO head.
 """
 from dataclasses import replace
 
+from . import effects
 from ..store import read
 from ..universe import agents
 
@@ -48,6 +49,7 @@ def record_primary_event(directory, launch_id, event):
 
 def claim_restart(directory, session, message_id):
     """Called under delivery locks; the returned handle belongs to one send only."""
+    effects.require('continue_queued', session.agent_id)
     if not session.native_id or not isinstance(message_id, str) or not message_id:
         return session
     if read(directory / 'properties.json').get('native_session_id') != session.native_id:

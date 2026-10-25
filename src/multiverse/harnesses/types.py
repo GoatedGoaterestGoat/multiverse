@@ -4,6 +4,25 @@ from typing import Any, Callable, Generator, Literal, Mapping, Protocol
 from uuid import UUID
 
 
+Effect = Literal['observe', 'spend', 'act']
+# Effects belong to the protocol, not an adapter's implementation. Core checks
+# them before dispatch; launch/send also check before publishing any records.
+EFFECTS: Mapping[str, Effect] = {
+    **dict.fromkeys((
+        'capabilities', 'get_usage', 'get_delivery', 'observed_binding',
+        'session_home', 'session_storage_evidence', 'resume_notice',
+        'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
+        'attachment_ready', 'attachment_recovery', 'retained_usage',
+        'connection_problem', 'status_watch', 'supports_launch_refusal',
+        'launch_started', 'launch_refusal', 'startup_retryable',
+        'startup_prompt_evidence', 'startup_prompt_evidence_reason',
+        'accepted_message_evidence', 'message_id_evidence',
+    ), 'observe'),
+    'ask': 'spend',
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
+}
+
+
 class BridgeUnavailable(ValueError):
     """Preparation failed before a native child or conversation was started."""
 

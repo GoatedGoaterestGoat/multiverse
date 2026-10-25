@@ -146,8 +146,8 @@ class PluginService:
     def listing(self, root):
         return plugins.listing(Path(root))
 
-    def set_enabled(self, root, name, on):
-        return plugins.set_enabled(Path(root), name, on)
+    def set_enabled(self, root, name, on, grant=None):
+        return plugins.set_enabled(Path(root), name, on, grant=grant)
 
     def edit_settings(self, root, name, changes):
         return plugins.edit_settings(Path(root), name, changes)

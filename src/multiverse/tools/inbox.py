@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json as json_module
 import re
 import time
+from ..plugins import access
 from ..universe import agents
 from .. import store
 from ..universe import mailbox
@@ -36,6 +37,7 @@ def since_time(value):
 
 def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         json=False, last=None, since=None, limit=50, wait=False, timeout=None, _present=None):
+    access.require('observe' if peek or all_messages else 'act', 'read inbox' if peek or all_messages else 'mark inbox read')
     if wait and (all_messages or after is not None or last is not None or since is not None):
         raise ValueError('--wait reads unread messages; history options cannot be combined with it')
     if timeout is not None and not wait:

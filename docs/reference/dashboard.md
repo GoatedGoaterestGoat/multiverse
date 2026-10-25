@@ -55,7 +55,7 @@ Choose columns in the universe's `views/default.json` (see [views](#views)). [Co
 | `v` | Show full details of an agent or folder |
 | `x` | Move the selected agent or subverse |
 | `d` | Send the selected agent or subverse to the trash, after confirming |
-| `P` | Open the selected universe's plugins: turn each on or off, see what it adds, and Configure it; see [plugins](../use/plugins.md) |
+| `P` | Open the selected universe's plugins: turn each on or off (choosing its access when it can work with less than it asks for), see what it adds and its access, and Configure it; see [plugins](../use/plugins.md) |
 | `Tab` | Move between the list, a local view and its links |
 | `F5` | Refresh now |
 | `?` | Show all keys |

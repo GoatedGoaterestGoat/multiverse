@@ -188,6 +188,15 @@ def _launch_plan(info, plan):
         record = plan.plugins.setdefault(loaded.name, {"version": manifest.version, "state": "loaded"})
         added, unfit = [], []
         try:
+            # Launch contributions and harness extensions act (1.13): a plugin granted less here is left out,
+            # visibly, as one that broke.
+            try:
+                level = loader.access_level(info.universe, loader.entry(info.universe, loaded.name))
+            except loader.PluginError:
+                level = None
+            if level != "act":
+                raise _Skip(f"it has {level or 'no'} access here; launch contributions need act"
+                            + (f" (a person can grant it with: mv2 plugins grant {loaded.name} act)" if level else ""))
             for entry in entries:
                 # Each entry fits this launch or not on its own: a plugin may ship one per version or mode.
                 reason = entry.fits(info.version)

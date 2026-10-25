@@ -6,20 +6,24 @@ import time
 from pathlib import Path
 
 from .. import plugins, universe
-from ..plugins import loader, manifest as manifests, settings as settings_files, trust
+from ..plugins import access as levels, loader, manifest as manifests, settings as settings_files, trust
 
-ACTIONS = ("list", "info", "enable", "disable", "settings", "trust", "untrust", "check", "host", "events",
+ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
            "install", "migrate", "new")
 HOST_ACTIONS = ("status", "start", "stop")
-NAMED = ("info", "enable", "disable", "settings", "trust", "untrust")
+NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust")
 
 
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
-                        help="list (default), info, enable, disable, settings, trust, untrust, check, host, events, "
-                             "install, migrate or new")
+                        help="list (default), info, enable, disable, grant, settings, trust, untrust, check, host, "
+                             "events, install, migrate or new")
     parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
                                                "for new: the new plugin's name)")
+    parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act")
+    parser.add_argument("--grant", choices=levels.LEVELS, dest="grant",
+                        help="enable: the access level to grant it here (otherwise a terminal asks; without one, "
+                             "its minimum)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="assignments",
                         help="settings: change one setting (VALUE is JSON, or else text); repeatable")
     parser.add_argument("--unset", action="append", default=[], metavar="KEY", dest="removals",
@@ -60,9 +64,13 @@ def _changes(assignments, removals):
 
 
 def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-        recursive=False, directory=None, load=False, json=False):
+        recursive=False, directory=None, load=False, level=None, grant=None, json=False):
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
+    if level is not None and plugin_action != "grant":
+        raise ValueError(f"mv2 plugins {plugin_action} takes one name")
+    if grant is not None and plugin_action != "enable":
+        raise ValueError("--grant belongs to mv2 plugins enable; to change a grant: mv2 plugins grant NAME LEVEL")
     if (apply or recursive) and plugin_action != "migrate":
         raise ValueError("--apply and --recursive belong to mv2 plugins migrate")
     if directory and plugin_action != "new":
@@ -145,8 +153,19 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             if item["name"] == name:
                 return {"universe": str(root), **item}
         plugins.entry(root, name)  # raises with the reason
+    if plugin_action == "grant":
+        if level is None:
+            raise ValueError("mv2 plugins grant takes a plugin's name and a level: observe, spend or act")
+        return {"universe": str(root), **plugins.set_grant(root, name, level),
+                "access": plugins.entry_access(root, name)}
     if plugin_action in ("enable", "disable"):
-        result = plugins.set_enabled(root, name, plugin_action == "enable")
+        defaulted = False
+        if plugin_action == "enable" and grant is None:
+            # No terminal asked (cli_run asks on one): its minimum, raised later with mv2 plugins grant.
+            wanted = plugins.entry(root, name).manifest
+            if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent():
+                grant, defaulted = wanted.access.minimum, True
+        result = plugins.set_enabled(root, name, plugin_action == "enable", grant=grant)
         found = plugins.entry(root, name)
         from ..plugins import host
         top = root
@@ -154,6 +173,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             top = universe.parent(top)
         needs_host = bool(found.manifest and host.NEEDS & found.manifest.extends)
         return {"universe": str(root), **result, "state": found.state, "problem": found.problem,
+                "access": plugins.entry_access(root, name), "defaulted": defaulted,
                 "permissions": found.manifest.permission_texts() if found.manifest else [],
                 "needs_host": needs_host, "host_running": host.running(top) if needs_host else None}
     if plugin_action == "settings":
@@ -305,15 +325,55 @@ def check(directory, load=False):
 
 
 def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-            recursive=False, directory=None, load=False, json=False):
+            recursive=False, directory=None, load=False, level=None, grant=None, json=False):
+    if plugin_action == "enable" and grant is None and not json and name:
+        grant = _ask_grant(root, name)
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
-                 apply=apply, recursive=recursive, directory=directory, load=load)
+                 apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant)
     if json:
         return result
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
         print(text(plugin_action, result))
         raise SystemExit(1)  # a failed check, or a migration that did not apply
     return text(plugin_action, result)
+
+
+def _ask_grant(root, name):
+    """On a terminal, for a person: the level to grant, asked from the plugin's request down to its minimum.
+    None (no terminal, an agent, or nothing to choose): run() decides."""
+    if plugins.from_agent() or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    found = plugins.entry(universe.resolve(root), name)
+    if found.manifest is None:
+        return None
+    wanted = found.manifest.access
+    choices = list(reversed(levels.LEVELS[levels.rank(wanted.minimum):levels.rank(wanted.request) + 1]))
+    if len(choices) < 2:
+        return None
+    print(f"{name} {levels.ASKS[wanted.request]} (it asks for {wanted.request}; it can work with {wanted.minimum})."
+          + (f" {wanted.why}" if wanted.why else ""))
+    for number, choice in enumerate(choices, 1):
+        print(f"  {number}. {choice}: {levels.MEANING[choice]}")
+    while True:
+        answer = input(f"Grant which level here? [1-{len(choices)}, Enter for {choices[0]}] ").strip().lower()
+        if not answer:
+            return choices[0]
+        if answer in choices:
+            return answer
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print(f"Type a number from 1 to {len(choices)}, or a level: {', '.join(choices)}.")
+
+
+def _access_line(access):
+    level, request = access.get("level"), access["request"]
+    if level is None:
+        return f"Access: it asks for {request}" + (f", at least {access['minimum']}" if access["minimum"] != request
+                                                   else "") + "; it has none while it is off."
+    line = f"Access here: {level}" + (f" (it asks for {request})" if level != request else "")
+    if access.get("ceiling") and levels.rank(access["ceiling"]) < levels.rank(request):
+        line += f"; this universe allows at most {access['ceiling']}"
+    return line + "."
 
 
 def _state(item):
@@ -350,6 +410,10 @@ def text(action, result):
             lines.append(f'It overrides the {override["source"]} {result["name"]} at {override["directory"]}.')
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
+        if result.get("access"):
+            lines.append(_access_line(result["access"]))
+            if result["access"].get("why"):
+                lines.append(f'Why: {result["access"]["why"]}')
         if result["permissions"]:
             lines.append("It can:")
             lines.extend(f"- {text}" for text in result["permissions"])
@@ -367,7 +431,15 @@ def text(action, result):
     if action in ("enable", "disable"):
         if not result["on"]:
             return f'Turned {result["name"]} off in {result["universe"]}.'
+        access = result.get("access") or {}
         lines = [f'Turned {result["name"]} on in {result["universe"]}.']
+        if access.get("level"):
+            lines[0] = (f'Turned {result["name"]} on in {result["universe"]}, with {access["level"]} access: '
+                        f'it {levels.MEANING[access["level"]]}.')
+            if access["level"] != access["request"]:
+                lines.append(f'It asks for {access["request"]}. A person can grant more with: '
+                             f'mv2 plugins grant {result["name"]} {access["request"]}'
+                             + (" (no terminal asked, so it has its minimum)" if result.get("defaulted") else ""))
         if result["permissions"]:
             lines.append("It can:")
             lines.extend(f"- {text}" for text in result["permissions"])
@@ -379,6 +451,12 @@ def text(action, result):
                          "(the dashboard starts it too).")
         lines.append("Agents launched from now on use it; restart running agents to use it there.")
         return "\n".join(lines)
+    if action == "grant":
+        level = result.get("level")
+        return (f'Granted {result["name"]} {result["granted"]} access in {result["universe"]}'
+                + (f'; it has {level} here now.' if level and level != result["granted"]
+                   else "." if level else "; it has none while it is off.")
+                + " Agents launched from now on use it; restart running agents to use it there.")
     if action == "settings":
         lines = [f'{result["name"]} settings: {result["path"]}']
         if result["changed"]:

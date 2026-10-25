@@ -21,11 +21,12 @@ something changes or goes. Fields of `record` (an operation's full result)
 are not covered.
 """
 from contextlib import contextmanager, ExitStack
+import functools
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
-from . import agent_files, harness, loader, settings as settings_files
+from . import access as levels, agent_files, harness, loader, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
 
 VERSION = loader.API_VERSION
@@ -52,11 +53,19 @@ class UniverseGone(Gone):
     """The universe a write was for is gone: its root was removed or moved."""
 
 
+class AccessDenied(Error):
+    """A call above the access level this plugin has in that universe (none where it is off), or above the
+    class its own code declared (effect=, mv.effect) (1.13). Never an OSError: an except OSError written for
+    disk errors does not swallow it."""
+
+
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except Error:
         raise
+    except levels.Denied as error:
+        raise AccessDenied(str(error)) from None
     except agent_files.Gone as error:
         raise _gone(error) from error
     except OSError as error:
@@ -89,6 +98,48 @@ def _os_error(error):
         return plain if plain is not None else Error(str(error))
 
 
+def _effect(value):
+    try:
+        return levels.check(value, "effect")
+    except ValueError as error:
+        raise Error(str(error)) from None
+
+
+def _declared(loaded, effect, label, function):
+    """`function`, run under the class its registration declared (an observe column can't send)."""
+    @functools.wraps(function)  # its signature too: mv2 reads a settings check's to pass the universe or not
+    def declared(*arguments, **keywords):
+        with levels.within(effect, f"{loaded.name}'s {label}", declared=True):
+            return function(*arguments, **keywords)
+    return declared
+
+
+def _level_here(loaded, root):
+    """The access level `loaded` has in universe `root` (None where it is off or not seen there)."""
+    try:
+        return loader.access_level(root, loader.entry(root, loaded.name))
+    except (loader.PluginError, OSError, ValueError):
+        return None
+
+
+def _contribution(loaded, effect, label, function, root_of):
+    """A contribution core runs for a person (a command, an action, a helper): refused before it runs when its
+    declared class is above the plugin's level in that universe, else run under both."""
+    @functools.wraps(function)
+    def contributed(*arguments, **keywords):
+        root = root_of(arguments, keywords)
+        have = _level_here(loaded, root)
+        if have is None:
+            raise AccessDenied(f"{loaded.name} is off here; its {label} needs {effect}. "
+                               f"Turn it on with: mv2 plugins enable {loaded.name}")
+        if levels.rank(have) < levels.rank(effect):
+            raise AccessDenied(f"{loaded.name} has {have} access here; its {label} needs {effect}. "
+                               f"A person can grant it with: mv2 plugins grant {loaded.name} {effect}")
+        with levels.within(have, loaded.name), levels.within(effect, f"{loaded.name}'s {label}", declared=True):
+            return function(*arguments, **keywords)
+    return contributed
+
+
 def _gone(error):
     return (UniverseGone if isinstance(error, agent_files.UniverseGone) else AgentGone)(str(error))
 
@@ -106,15 +157,22 @@ class _Points:
 
 
 class Cli(_Points):
-    def command(self, name, configure, run, cli_run=None):
+    def command(self, name, configure, run, cli_run=None, *, effect="act"):
         """An `mv2 NAME` command, shaped like the tools: configure(parser), run(root, **arguments)
-        returning a record, and optionally cli_run(root, **arguments) returning readable text."""
+        returning a record, and optionally cli_run(root, **arguments) returning readable text.
+        `effect` (1.13) is its class: observe, spend or act (the default). It runs only where the plugin's
+        level reaches it, and an API call above it, made inside it, is refused."""
+        effect = _effect(effect)
         registrations = self._allow("cli")
         if name not in self._loaded.manifest.commands:
             raise Error(f'{self._loaded.name} registers command {name!r}; declare it in plugin.json "commands"')
         if not callable(configure) or not callable(run) or (cli_run is not None and not callable(cli_run)):
             raise Error("configure, run and cli_run must be functions")
-        registrations.commands[name] = loader.Command(name, configure, run, cli_run)
+        root_of = lambda arguments, keywords: Path(arguments[0] if arguments else keywords.get("root") or _root(None))
+        label = f"command {name}"
+        registrations.commands[name] = loader.Command(
+            name, configure, _contribution(self._loaded, effect, label, run, root_of),
+            _contribution(self._loaded, effect, label, cli_run, root_of) if cli_run is not None else None)
 
 
 class Bootstrap(_Points):
@@ -152,7 +210,10 @@ class Dashboard(_Points):
             raise Error("value and group must be functions of the row")
         if not isinstance(width, int) or isinstance(width, bool) or not 1 <= width <= 120:
             raise Error("A column width is 1 to 120")
-        registrations.columns[key] = loader.Column(key, str(title), width, value, bool(compact), bool(flexible), group)
+        label = f"column {key}"  # drawn on every refresh: observe, so a column can't act
+        registrations.columns[key] = loader.Column(
+            key, str(title), width, _declared(self._loaded, "observe", label, value), bool(compact), bool(flexible),
+            _declared(self._loaded, "observe", label, group) if group is not None else None)
 
     def panel(self, kind, render=None, *, title=None, auto=False):
         """A local view widget type a view names as `kind` (or PLUGIN:kind).
@@ -173,13 +234,15 @@ class Dashboard(_Points):
             return render
         if not callable(render):
             raise Error('A panel renders with a function of its context, or names "module:Class"')
-        registrations.data_panels[str(kind)] = loader.DataPanel(str(kind), render,
-                                                                 None if title is None else str(title), bool(auto))
+        registrations.data_panels[str(kind)] = loader.DataPanel(
+            str(kind), _declared(self._loaded, "observe", f"panel {kind}", render),
+            None if title is None else str(title), bool(auto))
         return render
 
     def inspector(self, function):
         """function(row) -> a line for the agent inspector, or None. Usable as a decorator."""
-        self._allow("dashboard.inspector").inspector.append(function)
+        self._allow("dashboard.inspector").inspector.append(_declared(self._loaded, "observe", "inspector line",
+                                                                      function))
         return function
 
     def theme(self, colors):
@@ -211,19 +274,23 @@ class Dashboard(_Points):
             raise Error(f'{self._loaded.name} shows settings fields but declares no "settings" in plugin.json')
         registrations.settings_fields = fields
 
-    def action(self, name, function=None):
+    def action(self, name, function=None, *, effect="act"):
         """A command palette entry, "PLUGIN: name", for something that is not a setting (API 1.5).
 
         function(context) runs off the screen's event loop and may return a
         status line; context.row is a copy of the selected row (or None),
         context.scope the selected universe's Path. It runs only where the plugin
-        is on. Usable as a decorator factory."""
+        is on, and where its level reaches `effect` (1.13; act unless declared).
+        Usable as a decorator factory."""
         if function is None:
-            return lambda decorated: self.action(name, decorated)
+            return lambda decorated: self.action(name, decorated, effect=effect)
+        effect = _effect(effect)
         registrations = self._allow("dashboard.action")
         if not isinstance(name, str) or not name.strip() or not callable(function):
             raise Error("action(name, function) needs a name and a function")
-        registrations.actions[name.strip()] = function
+        root_of = lambda arguments, keywords: Path(getattr(arguments[0], "scope", None) or _root(None))
+        registrations.actions[name.strip()] = _contribution(self._loaded, effect, f"action {name.strip()}", function,
+                                                            root_of)
         return function
 
     def screen(self, name, reference):
@@ -270,7 +337,8 @@ class Capabilities(_Points):
         registrations = self._allow("capabilities")
         if not isinstance(name, str) or not name or not callable(function):
             raise Error("add(name, function) needs a capability name and a function")
-        registrations.capabilities[name] = lambda info: _capability(function(info))
+        declared = _declared(self._loaded, "observe", f"capability {name}", function)
+        registrations.capabilities[name] = lambda info: _capability(declared(info))
         return function
 
 
@@ -284,7 +352,7 @@ class Usage(_Points):
     def adjust(self, function):
         """function(SessionInfo, usage) -> usage: change what `mv2 get-usage` and the dashboard report,
         after the harness has measured it. Return the record unchanged when there is nothing to do."""
-        self._allow("usage").usage.append(function)
+        self._allow("usage").usage.append(_declared(self._loaded, "observe", "usage adjustment", function))
         return function
 
 
@@ -448,15 +516,18 @@ class Helpers(_Points):
         scope = ["-u", str(_root(universe))] if universe is not None else []
         return [sys.executable, "-m", "multiverse.plugins", *scope, "run", self._loaded.name, name, *map(str, arguments)]
 
-    def action(self, name, function=None):
+    def action(self, name, function=None, *, effect="act"):
         """`python -m multiverse.plugins run PLUGIN NAME ARGS...` runs function(ARGS) -> exit code.
-        Harness extensions call mv2 this way. Usable as a decorator factory."""
+        Harness extensions call mv2 this way. It runs only where the plugin's level reaches `effect`
+        (1.13; act unless declared), in the universe the helper runs for. Usable as a decorator factory."""
         if function is None:
-            return lambda decorated: self.action(name, decorated)
+            return lambda decorated: self.action(name, decorated, effect=effect)
+        effect = _effect(effect)
         registrations = self._allow("helper")
         if not isinstance(name, str) or not name or not callable(function):
             raise Error("action(name, function) needs a name and a function")
-        registrations.helpers[name] = function
+        registrations.helpers[name] = _contribution(self._loaded, effect, f"helper action {name}", function,
+                                                    lambda arguments, keywords: _root(None))
         return function
 
 
@@ -684,14 +755,16 @@ class SettingsAccess:
         """Change only the named settings ({"default.budget": 60000}, or api.DELETE to remove one)."""
         if self._loaded.manifest.settings is None:
             raise Error(f'{self._loaded.name} declares no "settings" in plugin.json')
-        found = _call(settings_files.edit, self._universe(universe), self._loaded.manifest, changes,
-                      self._loaded.registrations.settings_check)
+        root = self._universe(universe)
+        with _acting(self._loaded, "act", root, "editing its settings"):
+            found = _call(settings_files.edit, root, self._loaded.manifest, changes,
+                          self._loaded.registrations.settings_check)
         return found.values
 
     def check(self, function):
         """function(settings), or function(settings, universe directory), raises ValueError naming what is
         wrong. It sees the whole file. Usable as a decorator."""
-        self._loaded.registrations.settings_check = function
+        self._loaded.registrations.settings_check = _declared(self._loaded, "observe", "settings check", function)
         return function
 
     def migrate(self, function):
@@ -703,8 +776,47 @@ class SettingsAccess:
         "legacy" it may return (settings, on): on (true or false) also sets the
         plugin's switch in that universe's plugins.json, whatever it said before.
         It runs with that universe as the API's. Usable as a decorator."""
-        self._loaded.registrations.settings_migrate = function
+        self._loaded.registrations.settings_migrate = _declared(self._loaded, "observe", "settings migration",
+                                                                function)
         return function
+
+
+@contextmanager
+def _acting(loaded, level, universe, what):
+    """Run an API call of class `level` for `loaded` in `universe`: refused (AccessDenied) above its level
+    there or above its own declared class; core's dispatch inside sees the same limit."""
+    root = universe.path if isinstance(universe, Universe) else Path(universe)
+    with levels.within(_level_here(loaded, root), loaded.name):
+        try:
+            levels.require(level, what)
+        except levels.Denied as error:
+            raise AccessDenied(str(error)) from None
+        yield
+
+
+class _Effect:
+    """mv.effect(level): the class of the plugin's own functions, as a decorator or a with-block (1.13)."""
+
+    def __init__(self, loaded, level):
+        self._loaded, self.level = loaded, _effect(level)
+        self._stack = []
+
+    def __call__(self, function):
+        @functools.wraps(function)
+        def declared(*arguments, **keywords):
+            with levels.within(self.level, f"{self._loaded.name}'s {getattr(function, '__name__', 'code')}",
+                               declared=True):
+                return function(*arguments, **keywords)
+        return declared
+
+    def __enter__(self):
+        context = levels.within(self.level, f"{self._loaded.name}'s code", declared=True)
+        context.__enter__()
+        self._stack.append(context)
+        return self
+
+    def __exit__(self, *details):
+        return self._stack.pop().__exit__(*details)
 
 
 def _root(universe):
@@ -745,7 +857,18 @@ class Plugin:
         return loader.process
 
     def can(self, permission):
-        return permission in self._loaded.manifest.permissions
+        return self._loaded.manifest.permitted(permission)
+
+    def access(self, universe=None):
+        """The access level this plugin has in `universe` (1.13): observe, spend or act, or None where it is off.
+        Register or offer only what fits it."""
+        return _level_here(self._loaded, _root(universe))
+
+    def effect(self, level):
+        """Declare the class of the plugin's own code (1.13): `@mv.effect("observe")` on a function, or
+        `with mv.effect("observe"):`. An API call above it, made inside, is refused. It follows a context
+        variable, not threads the plugin starts itself."""
+        return _Effect(self._loaded, level)
 
     def universe(self, path=None):
         """A universe: `path`, else the one this process works in (MV2_UNIVERSE, else the current directory)."""
@@ -772,7 +895,10 @@ class Plugin:
         this process's environment, which a dashboard or the plugin host may not share with it."""
         from .. import harnesses
         root = _root(universe)
-        adapter = _call(harnesses.load, root, harness)
+        # Without an agent it reads the universe's own harness definitions, which a plugin needs to configure
+        # itself before it is turned on: outside the classes. For an agent it reads that agent's records: observe.
+        with _acting(self._loaded, "observe", root, "harness_info for an agent") if agent is not None else ExitStack():
+            adapter = _call(harnesses.load, root, harness)
         spec = getattr(adapter, "spec", {}) or {}
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
@@ -850,17 +976,21 @@ class Universe:
         """Agents with their state and reported work (needs agents.read)."""
         self._plugin._need("agents.read")
         from ..tools import list_agents
-        return [Agent(row, self._plugin) for row in _call(list_agents.run, self.path, recursive=recursive, json=True)]
+        with _acting(self._plugin._loaded, "observe", self, "listing agents"):
+            return [Agent(row, self._plugin) for row in _call(list_agents.run, self.path, recursive=recursive,
+                                                              json=True)]
 
     def agent(self, reference):
         """One agent by name, unique ID prefix or ID (needs agents.read)."""
         self._plugin._need("agents.read")
         from ..runtime import lifecycle
         from ..universe import agents
-        identity = _call(agents.directory, self.path, reference).name
-        # Just this agent's row, built by the listing's own code: no other agent is observed. A record whose
-        # own ID is not its directory's is not this agent, so it is never returned as one.
-        for row in _call(lifecycle.listing, self.path, only=identity):
+        with _acting(self._plugin._loaded, "observe", self, "reading an agent"):
+            identity = _call(agents.directory, self.path, reference).name
+            # Just this agent's row, built by the listing's own code: no other agent is observed. A record whose
+            # own ID is not its directory's is not this agent, so it is never returned as one.
+            rows = _call(lifecycle.listing, self.path, only=identity)
+        for row in rows:
             if row.get("id") == identity:
                 return Agent(row, self._plugin)
         raise Error(f"No agent named {reference} here")
@@ -869,31 +999,36 @@ class Universe:
         """Start a new agent (needs agents.control); returns it."""
         self._plugin._need("agents.control")
         from ..tools import spawn
-        _call(spawn.run, self.path, name=name, task=task, harness=harness, model=model, wait=wait)
+        with _acting(self._plugin._loaded, "act", self, "spawn"):
+            _call(spawn.run, self.path, name=name, task=task, harness=harness, model=model, wait=wait)
         return self.agent(name)
 
     def catalog(self):
         """Skills, commands, workflows and harnesses here: [{kind, name, description, path}]."""
         from ..universe import catalog
-        return _call(catalog.catalog, self.path)
+        with _acting(self._plugin._loaded, "observe", self, "reading the catalog"):
+            return _call(catalog.catalog, self.path)
 
     def command(self, name, arguments=""):
         """A command, workflow or skill's prompt text with `arguments` appended, as `mv2 command` prints it."""
         from ..universe import catalog
-        return _call(catalog.command, self.path, name, arguments)
+        with _acting(self._plugin._loaded, "observe", self, "reading a command"):
+            return _call(catalog.command, self.path, name, arguments)
 
     def refresh(self, apply=False):
         """The template refresh plan, applied when `apply` (needs universe.write to apply)."""
         if apply:
             self._plugin._need("universe.write")
         from ..tools import refresh
-        return _call(refresh.run, self.path, apply=apply, json=True)
+        with _acting(self._plugin._loaded, "act" if apply else "observe", self, "applying a refresh" if apply else "a refresh plan"):
+            return _call(refresh.run, self.path, apply=apply, json=True)
 
     def doctor(self):
         """mv2 doctor's result: {ok, problems} (needs agents.read)."""
         self._plugin._need("agents.read")
         from ..tools import doctor
-        return _call(doctor.run, self.path)
+        with _acting(self._plugin._loaded, "observe", self, "doctor"):
+            return _call(doctor.run, self.path)
 
 
 @dataclass(frozen=True)
@@ -945,28 +1080,33 @@ class Agent:
         """The last `lines` lines of the agent's terminal, or why there is none (needs agents.read)."""
         self._plugin._need("agents.read")
         from ..tools import inspect
-        capture = _call(inspect.run, self.universe.path, agent=self.id)
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading the terminal"):
+            capture = _call(inspect.run, self.universe.path, agent=self.id)
         return "\n".join(inspect.tail(capture, lines)) if isinstance(capture, str) else str(capture)
 
     def usage(self):
         self._plugin._need("agents.read")
         from ..tools import get_usage
-        return _call(get_usage.run, self.universe.path, agent=self.id)
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading usage"):
+            return _call(get_usage.run, self.universe.path, agent=self.id)
 
     def capabilities(self):
         self._plugin._need("agents.read")
         from ..tools import capabilities
-        return _call(capabilities.run, self.universe.path, agent=self.id)
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading capabilities"):
+            return _call(capabilities.run, self.universe.path, agent=self.id)
 
     def resume(self, *, wait=False):
         self._plugin._need("agents.control")
         from ..tools import resume
-        return _call(resume.run, self.universe.path, agent=self.id, wait=wait, json=True)
+        with _acting(self._plugin._loaded, "act", self.universe, "resume"):
+            return _call(resume.run, self.universe.path, agent=self.id, wait=wait, json=True)
 
     def kill(self):
         self._plugin._need("agents.control")
         from ..tools import kill
-        return _call(kill.run, self.universe.path, agent=self.id)
+        with _acting(self._plugin._loaded, "act", self.universe, "kill"):
+            return _call(kill.run, self.universe.path, agent=self.id)
 
     def send(self, text, delivery="steer"):
         """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
@@ -975,7 +1115,8 @@ class Agent:
         self._plugin._need("messages.send")
         from ..tools import send
         sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
-        record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery)
+        with _acting(self._plugin._loaded, "act", self.universe, "send"):
+            record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery)
         native = record.get("native_delivery") or {}
         return SendResult(bool(record.get("ok", True)), record.get("delivery", delivery), str(record.get("state", "")),
                           str(record.get("reason") or native.get("reason") or ""), record)
@@ -984,7 +1125,8 @@ class Agent:
         """A side question answered from the agent's conversation, never added to it (needs messages.ask)."""
         self._plugin._need("messages.ask")
         from ..tools import ask
-        result = _call(ask.run, self.universe.path, agent=self.id, question=question)
+        with _acting(self._plugin._loaded, "spend", self.universe, "ask"):
+            result = _call(ask.run, self.universe.path, agent=self.id, question=question)
         if result.get("state") != "ok":
             raise Error(result.get("reason") or "The agent did not answer")
         return (result.get("value") or {}).get("answer", "")
@@ -993,7 +1135,8 @@ class Agent:
         """Unread inbox-only messages, left unread (needs messages.read): [{at, from, text, delivery}]."""
         self._plugin._need("messages.read")
         from ..universe import mailbox
-        found = _call(mailbox.inbox, self.directory, limit=None, peek=True)
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading the inbox"):
+            found = _call(mailbox.inbox, self.directory, limit=None, peek=True)
         return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
                 for message in found["messages"]]
 
@@ -1001,6 +1144,7 @@ class Agent:
         """The last messages, read or not, oldest first (needs messages.read)."""
         self._plugin._need("messages.read")
         from ..universe import mailbox
-        found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading message history"):
+            found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
         return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
                 for message in found["messages"][-last:]]

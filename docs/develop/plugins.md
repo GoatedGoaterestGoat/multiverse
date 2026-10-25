@@ -54,6 +54,7 @@ To see the column, add `"shout"` to `columns` in `.multiverse/views/default.json
 | `default` | `"on"` or `"off"` (the default). Only a bundled plugin's `"on"` counts. |
 | `extends` | The extension points it uses. Registering for one it doesn't list raises `api.Error`. |
 | `permissions` | What it asks to do; see [permissions](#permissions). |
+| `access` | `{"request": LEVEL, "minimum": LEVEL, "why": "..."}` (1.13): the access level it asks for, the least it can work with, and one line on why; see [access levels](#access-levels). Without it, a plugin asks for `act` with `act` as its least. |
 | `commands` | `{"NAME": "help text"}` for each `mv2 NAME` it registers. Needs `cli`. |
 | `statusline` | `{"ITEM": {"claude": true, "tmux": false}}`: its status-line items, and whether each shows by default on Claude's line and the tmux bar. Needs `statusline`. An item can't take a name mv2 draws itself (`agent`, `harness`, `status`, `phase`, `summary`, `inbox`, `context`). An item named `focus`, which mv2 took after 1.8, isn't shown, and `mv2 doctor` says why. |
 | `events` | Event types it subscribes to: `"agent.status"`, `"message.*"`, `"*"`. Needs `events`. |
@@ -146,6 +147,26 @@ These need no permission:
 - `mv.name`, `mv.version`, `mv.directory` and `mv.can(permission)`.
 
 A call that can't be done raises `api.Error` with a readable message. A filesystem or system failure (such as `EACCES` or `ENOSPC`) raises an `api.Error` that is also the `OSError` it was, with its `errno`, so `except OSError` catches it too.
+
+### Access levels
+
+Every call above has an effect class, and a plugin works under the access level a person grants it in each universe (1.13):
+
+| Class | Means | Calls |
+| --- | --- | --- |
+| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, `harness_info(..., agent=)`, `session`, `agent_at`, `current_agent` |
+| `spend` | Uses model tokens, money or time, still changing nothing | `ask` |
+| `act` | Changes a session, a launch, an inbox or a universe's files | `spawn`, `resume`, `kill`, `send`, `refresh(apply=True)`, `mv.settings.edit`, launch contributions and harness extensions |
+
+A plugin writing its own state is outside the classes: `mv.state_dir`, `mv.agent_state_dir`, `api.files`, `mv.log`, `mv.statusline.write`, `mv.events.emit` and `mv.settings.read` never raise for access, so they stay safe in `finally` blocks. So are a universe's own facts that a plugin needs to configure itself before it is turned on there: `universe.id`, `.name`, `.parent`, `.subverses()` and `mv.harness_info(universe, name)` without `agent=`. With `agent=`, `harness_info` reads that agent's records and is `observe`.
+
+- **Its level here:** `mv.access(universe=None)` gives `"observe"`, `"spend"` or `"act"`, or `None` where the plugin is off. It's the level granted there (what it requests when nothing is recorded), never above its request, and capped by the universe's `access_ceiling` and by `MV2_EFFECTS` for the process. Register or offer only what fits it: compaction with `spend` could build trees but not install them.
+- **A call above it** raises `api.AccessDenied` (an `api.Error`, never an `OSError`), before core does anything: `planner has observe access here; send needs act`. A plugin that is off in a universe has no access there at all.
+- **Declared classes:** `mv.cli.command(..., effect=)`, `mv.dashboard.action(..., effect=)` and `mv.helper.action(..., effect=)` declare what each does; undeclared means `act`. One whose class is above the plugin's level there is refused before it runs. A call above the declared class, made inside it, is refused too. Columns, panels, inspector lines, capabilities, usage adjustments and settings checks run as `observe`.
+- **Your own functions:** `@mv.effect("observe")`, or `with mv.effect("observe"):`, declares the class of code of your own. It follows a context variable, so it doesn't follow threads your code starts.
+- **Permissions stay:** a manifest that lists `permissions` keeps them checked, and the level check comes on top. A manifest with `access` and no `permissions` gets the permissions of the level it requests: `agents.read` and `messages.read` for `observe`, plus `messages.ask` and `models.*` for `spend`, plus `agents.control`, `messages.send` and `universe.write` for `act`. `harness.*`, `process.spawn` and `network.listen` stay declarations.
+
+Like permissions, this guards against mistakes and makes a plugin's reach readable. It isn't a sandbox: a plugin's code runs with your permissions.
 
 ### Permissions
 

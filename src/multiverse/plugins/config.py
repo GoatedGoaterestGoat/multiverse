@@ -1,6 +1,11 @@
-"""A universe's `plugins.json`: which plugins are on there, the dashboard theme and event retention.
+"""A universe's `plugins.json`: which plugins are on there, their access, the dashboard theme and event retention.
 
-    {"schema": 1, "enabled": {"compaction": true}, "theme": null}
+    {"schema": 1, "enabled": {"compaction": true}, "access": {"compaction": "spend"},
+     "access_ceiling": null, "theme": null}
+
+`access` records the level a person granted a plugin here (1.13); a plugin that
+is on with none recorded has what its manifest requests. `access_ceiling` caps
+every plugin here (observe makes a read-only universe).
 
 It is the only on/off switch for a plugin. A missing file, or a plugin it does
 not name, means the plugin's manifest default. There is no inheritance between
@@ -12,11 +17,12 @@ import json
 from pathlib import Path
 
 from ..store import lock, write
+from . import access as levels
 from .manifest import check_name
 
 FILE = "plugins.json"
 # "keys" chose between plugins' dashboard keys, which are gone; a file that still has it reads as before.
-KNOWN_FIELDS = {"schema", "enabled", "theme", "keys", "events"}
+KNOWN_FIELDS = {"schema", "enabled", "theme", "keys", "events", "access", "access_ceiling"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,8 @@ class Config:
     events: dict = field(default_factory=dict)  # journal retention: retain_days, max_mb
     exists: bool = False
     unknown: tuple = ()  # top-level fields a newer mv2 wrote: kept in the file, not used here
+    access: dict = field(default_factory=dict)  # plugin name -> the level granted here
+    ceiling: str | None = None  # access_ceiling: no plugin here has more
 
     def is_on(self, name, default="off"):
         value = self.enabled.get(name)
@@ -77,7 +85,18 @@ def parse(data, where=FILE):
     for key, value in events.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 100000:
             raise ValueError(f"{where}: events.{key} must be a positive number")
-    return Config(enabled=dict(enabled), theme=theme, events=dict(events), exists=True, unknown=unknown)
+    access = data.get("access", {})
+    if not isinstance(access, dict):
+        raise ValueError(f"{where}: access must map plugin names to observe, spend or act")
+    for name, value in access.items():
+        check_name(name, f"access: {name!r}")
+        if value not in levels.LEVELS:
+            raise ValueError(f"{where}: access.{name} must be observe, spend or act")
+    ceiling = data.get("access_ceiling")
+    if ceiling is not None and ceiling not in levels.LEVELS:
+        raise ValueError(f"{where}: access_ceiling must be observe, spend, act or null")
+    return Config(enabled=dict(enabled), theme=theme, events=dict(events), exists=True, unknown=unknown,
+                  access=dict(access), ceiling=ceiling)
 
 
 def load(root):
@@ -91,16 +110,35 @@ def load(root):
         return Config(problem=str(error), exists=True)
 
 
-def set_enabled(root, name, value):
-    """Turn a plugin on (True) or off (False) here, changing nothing else in the file."""
+def set_enabled(root, name, value, grant=None):
+    """Turn a plugin on (True) or off (False) here, and record `grant` with it when given, changing nothing
+    else in the file."""
     check_name(name)
     if not isinstance(value, bool):
         raise ValueError("A plugin is turned on with true or off with false")
+    if grant is not None:
+        levels.check(grant, "grant")
     with lock(Path(root) / "state" / ".plugins.lock"):
         data = _raw(root)
         if data is None:
             data = {"schema": 1, "enabled": {}}
         parse(data, str(path(root)))  # refuse to rewrite a file that cannot be used
         data.setdefault("enabled", {})[name] = value
+        if grant is not None:
+            data.setdefault("access", {})[name] = grant
+        write(path(root), data)
+    return load(root)
+
+
+def set_grant(root, name, level):
+    """Record the access level granted to a plugin here, changing nothing else in the file."""
+    check_name(name)
+    levels.check(level, "grant")
+    with lock(Path(root) / "state" / ".plugins.lock"):
+        data = _raw(root)
+        if data is None:
+            data = {"schema": 1, "enabled": {}}
+        parse(data, str(path(root)))
+        data.setdefault("access", {})[name] = level
         write(path(root), data)
     return load(root)

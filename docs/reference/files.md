@@ -83,16 +83,19 @@ These files record which plugins are on, their settings and their state. See [pl
 
 This file says which plugins are on in this universe. A missing file, or a plugin it doesn't name, means the plugin's default. The default is off, except for bundled plugins marked on, such as typeahead.
 
-Subverses don't inherit the file. `mv2 plugins enable` and `disable` and the dashboard's `P` write it. An unusable file stops nothing: every plugin is at its default, and `mv2 doctor` says why.
+Subverses don't inherit the file. `mv2 plugins enable`, `disable` and `grant` and the dashboard's `P` write it. An unusable file stops nothing: every plugin is at its default, and `mv2 doctor` says why.
 
 ```json
-{"schema": 1, "enabled": {"compaction": true, "remote": false}, "theme": null, "events": {"retain_days": 7, "max_mb": 32}}
+{"schema": 1, "enabled": {"compaction": true, "remote": false}, "access": {"compaction": "spend"},
+ "access_ceiling": null, "theme": null, "events": {"retain_days": 7, "max_mb": 32}}
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `schema` | Always `1`. |
 | `enabled` | Plugin name to `true` (on) or `false` (off). |
+| `access` | Plugin name to the access level granted here: `observe`, `spend` or `act`. A plugin that is on with none recorded has what it asks for. |
+| `access_ceiling` | No plugin here has more than this level: `observe` makes the universe read-only for plugins. `null` (the default) sets no ceiling. |
 | `theme` | The plugin whose dashboard colors to use, or `null`. |
 | `events` | How long the event journal keeps closed segments: `retain_days` (default `7`) and `max_mb` (default `32`). |
 

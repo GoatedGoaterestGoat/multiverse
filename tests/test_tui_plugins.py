@@ -12,10 +12,13 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, OptionList, Static
+from multiverse import plugins
+from multiverse.plugins.testing import PluginTestCase
 from multiverse.plugins.settings import DELETE
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, schema_fields
+from multiverse.ui.screens import ChoiceScreen
 from tui_demo import DemoBackend
 
 SCHEMA = {"type": "object", "properties": {
@@ -358,6 +361,67 @@ class SettingsScreenTests(DashboardCase):
                 edit.widgets["mode"].action_step(-2)  # back to the default option
                 self.assertEqual(await self.save(pilot, screen), ("alpha", {
                     ("default", "budget"): 9, ("loud",): True, ("mode",): DELETE}))
+
+
+GRANTED = """
+def register(mv):
+    pass
+"""
+
+
+class GrantPromptTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_turning_on_a_plugin_that_can_do_with_less_asks_which_access_to_grant(self):
+        """Space on a plugin that can work with less than it asks for asks which access to grant and records the
+        one chosen, Esc records nothing, a plugin with nothing to choose turns on at once, and Space twice in one turn
+        opens one chooser; fragile because the grant is a person's only say over a plugin's reach, and a prompt that
+        is skipped, stacked or answered for them records a level nobody chose."""
+        self.write_plugin("watcher", {"module": "plugin", "api": "1.13",
+                                      "access": {"request": "act", "minimum": "observe",
+                                                 "why": "observe shows the plan; act installs it"}},
+                          {"plugin.py": GRANTED})
+        self.write_plugin("plain", {"module": "plugin"}, {"plugin.py": GRANTED})  # no access: act, nothing to choose
+
+        def found(name):
+            return next(item for item in plugins.listing(self.root) if item["name"] == name)
+
+        async with self.dashboard() as d:
+            shown = await d.open_plugins()
+
+            async def select(name):
+                table = shown.query_one("#plugins-table", DataTable)
+                await d.until(lambda: name in [item["name"] for item in shown.items], f"{name} in the list")
+                table.move_cursor(row=[item["name"] for item in shown.items].index(name), animate=False)
+                await d.settle()
+
+            with self.subTest("Space twice in one turn opens one chooser, and Esc records nothing"):
+                await select("watcher")
+                shown.action_toggle()
+                shown.action_toggle()
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the access chooser")
+                self.assertEqual(sum(isinstance(screen, ChoiceScreen) for screen in d.app.screen_stack), 1)
+                choices = d.screen.query_one("#choices", OptionList)
+                self.assertEqual([choices.get_option_at_index(index).id for index in range(choices.option_count)],
+                                 ["act", "spend", "observe"])
+                self.assertIn("observe shows the plan", str(d.screen.query_one("#dialog-description").render()))
+                await d.press("escape")
+                await d.until(lambda: d.screen is shown and not shown.busy, "the Plugins screen again")
+                self.assertFalse(found("watcher")["on"])
+                self.assertIsNone(found("watcher")["access"]["granted"])
+            with self.subTest("the level chosen is the one recorded"):
+                await d.press("space")
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the access chooser")
+                await d.press("down", "enter")
+                await d.until(lambda: found("watcher")["on"] and not shown.busy, "watcher to be on")
+                self.assertEqual((found("watcher")["access"]["granted"], found("watcher")["access"]["level"]),
+                                 ("spend", "spend"))
+                await d.until(lambda: "Access here: spend (it asks for act" in str(
+                    shown.query_one("#plugin-details").render()), "the access line")
+            with self.subTest("a plugin with nothing to choose turns on at once"):
+                await select("plain")
+                await d.press("space")
+                await d.until(lambda: found("plain")["on"] and not shown.busy, "plain to be on")
+                self.assertIs(d.screen, shown)
+                self.assertIsNone(found("plain")["access"]["granted"])
 
 
 if __name__ == "__main__":

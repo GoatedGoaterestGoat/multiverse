@@ -32,9 +32,9 @@ import traceback
 import types
 
 from ..store import now
-from . import config, manifest as manifests, settings as settings_files, trust
+from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 12)
+API_VERSION = (1, 13)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -519,6 +519,19 @@ def entry(root, name):
         if found.name == name:
             return found
     raise PluginError(f"No plugin named {name} here. Run mv2 plugins to see the plugins this universe can use.")
+
+
+def access_level(root, found):
+    """The access level plugin `found` has in universe `root`: None where it is off; else the level granted there
+    (none recorded: what it requests), never above its request, capped by the universe's access_ceiling and by
+    MV2_EFFECTS for this process."""
+    if found is None or not found.on or found.manifest is None:
+        return None
+    request = found.manifest.access.request
+    settings = config.load(root) if root is not None else config.Config()
+    granted = settings.access.get(found.name, request)
+    return levels.lowest(*(level for level in (granted, request, settings.ceiling, levels.process_ceiling())
+                           if level is not None))
 
 
 def _package_name(found):

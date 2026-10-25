@@ -15,16 +15,31 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 
 `HarnessAdapter` in `harnesses/types.py` is the contract. An adapter has four attributes: `name`, `session_mode`, `bootstrap` (extra text appended to the universe bootstrap) and `default_model`. Its methods are:
 
-| Method | Returns | Must |
-| --- | --- | --- |
-| `spawn(context)` | `CommandSpec` | Build the launch for a new session from `context.values` and `context.model`. |
-| `resume(session, context)` | `CommandSpec` | Reopen exactly `session`. Raise `ValueError` if the saved native ID or session file is missing or wrong, and never fall back to the latest session. When `context.resume_prompt` is set, pass it as the first interactive prompt (wake). |
-| `stop(session, executor)` | `NativeResult` | Cancel work running outside the terminal, such as on a shared server. Core then ends the process and the pane. Return `ok` when there is nothing to cancel. |
-| `capabilities(session, executor=None)` | `dict[str, Capability]` | Give one entry per name in `CAPABILITIES`, with a reason when not `supported`. Stay cheap without an executor. With one (`mv2 capabilities --probe`), you may ask the native side. |
-| `send(session, message, executor)` | `NativeResult` | Deliver `message.framed` to the exact session, at `message.delivery` (`steer` or `follow-up`). |
-| `get_delivery(session, message_id, executor)` | `NativeResult` | Look up the receipt for one message, without sending anything. |
-| `ask(session, question, executor)` | `NativeResult` | Answer a side question without adding it to the conversation, or return `unavailable`. |
-| `get_usage(session, executor=None)` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
+| Method | Effect | Returns | Must |
+| --- | --- | --- | --- |
+| `spawn(context)` | `act` | `CommandSpec` | Build the launch for a new session from `context.values` and `context.model`. |
+| `resume(session, context)` | `act` | `CommandSpec` | Reopen exactly `session`. Raise `ValueError` if the saved native ID or session file is missing or wrong, and never fall back to the latest session. When `context.resume_prompt` is set, pass it as the first interactive prompt (wake). |
+| `stop(session, executor)` | `act` | `NativeResult` | Cancel work running outside the terminal, such as on a shared server. Core then ends the process and the pane. Return `ok` when there is nothing to cancel. |
+| `capabilities(session, executor=None)` | `observe` | `dict[str, Capability]` | Give one entry per name in `CAPABILITIES`, with a reason when not `supported`. Stay cheap without an executor. With one (`mv2 capabilities --probe`), you may ask the native side. |
+| `send(session, message, executor)` | `act` | `NativeResult` | Deliver `message.framed` to the exact session, at `message.delivery` (`steer` or `follow-up`). |
+| `get_delivery(session, message_id, executor)` | `observe` | `NativeResult` | Look up the receipt for one message, without sending anything. |
+| `ask(session, question, executor)` | `spend` | `NativeResult` | Answer a side question without adding it to the conversation, or return `unavailable`. |
+| `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
+
+`EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+Core checks the current plugin access limit before calling the adapter, and
+before a launch or send writes records. Optional identity, storage, readiness,
+receipt and usage evidence methods are `observe`; launching a relay and
+continuing a native queue are `act`.
+
+An `observe` call may reconcile core's records with verified native evidence,
+such as recording a detected `/clear` in `sessions.jsonl` or a delivery receipt.
+It does not start or stop a process, switch a conversation, adopt the caller's
+storage, submit a message or mark an inbox read. `deliver --check` is observe;
+retrying or dismissing deliveries and consuming an inbox require act. A policy
+refusal raises the API's `AccessDenied`, rather than becoming a native delivery
+failure. These checks guard plugin API and dispatch mistakes; they are not a
+sandbox for Python code.
 
 Core also looks for these optional methods and attributes:
 
