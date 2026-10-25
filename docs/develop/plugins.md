@@ -85,7 +85,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `statusline` | `mv.statusline.write(agent, "mood", "calm")` | A declared item's text for one agent (an `Agent` or its directory). The text is one line of up to 200 characters, and `""` removes it. People order and hide items in `statusline.json` |
 | `launch` | `mv.launch.contribute("claude", fn)`: `fn(info)` returns an `api.Contribution` or `None` | Additions to every launch of that family (`claude`, `codex` or `pi`); see [launch additions](#launch-additions) |
 | `capabilities` | `mv.capabilities.add("greeting", fn)`: `fn(session)` returns `api.Capability("supported", "why")` | A capability `mv2 capabilities` reports for each agent: `supported`, `unavailable` or `error`. Core's names are refused |
-| `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it |
+| `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it. Its changes to `context`, mv2's measured reading, are dropped (1.13): show an estimate in a [column](#columns) of your own |
 | `events` | `mv.events.on("agent.status", fn)`: `fn(event)` | A handler in the plugin host; see [events and the host](#events-and-the-host) |
 | `service` | `mv.service(start, stop=None)` | Long-running work in the plugin host |
 | `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `"$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`. `mv.helper.command("ping", *args)` gives that argv |

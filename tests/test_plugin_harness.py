@@ -195,22 +195,24 @@ class LaunchPlanTest(PluginTestCase):
         self.assertEqual(record["modes"], [{"plugin": "warden", "mode": "without the guard"}])
 
     def test_usage_adjusters_never_change_what_they_were_given(self):
-        """Plugin usage adjusters get a copy, adjust only ok results, and mutation or exceptions never corrupt
-        measured usage; a break goes unnoticed because the Context numbers are just slightly wrong."""
+        """Plugin usage adjusters get a copy, adjust only ok results, never change core's measured context (1.13:
+        changes to it are dropped, the rest applies), and mutation or exceptions never corrupt measured usage; a
+        break goes unnoticed because the Context numbers are just slightly wrong."""
         for name, body in (("amutate", "usage['context']['tokens'] = 999; raise RuntimeError('half done')"),
                            ("bjunk", "return ['not', 'usage']"),
-                           ("cset", "return {**usage, 'context': {**usage['context'], 'estimated': True}}"),
+                           ("cset", "return {**usage, 'context': {'tokens': 1, 'estimated': True}, 'note': 'kept'}"),
                            ("dnone", "return None")):
             self.write_plugin(name, {"module": "plugin", "extends": ["usage"]}, {
                 "plugin.py": f"def adjust(info, usage):\n    {body}\ndef register(mv): mv.usage.adjust(adjust)\n"})
             self.enable(name)
         self.enable("guard", on=False)
         measured = {"context": {"tokens": 5}}
-        adjusted = {"context": {"tokens": 5, "estimated": True}}
-        with self.subTest("each adjuster gets a copy"):
+        adjusted = {"context": {"tokens": 5}, "note": "kept"}  # core's context as measured; the rest applies
+        with self.subTest("each adjuster gets a copy, and core's context stays as measured"):
             info = harness.SessionInfo(self.root, "a", "claude", "claude")
             self.assertEqual(harness.adjust_usage(info, measured), adjusted)
             self.assertEqual(measured, {"context": {"tokens": 5}})
+            self.assertEqual(harness.adjust_usage(info, {"cost": 2}), {"cost": 2, "note": "kept"})  # none added
             errors = loader.errors()
             self.assertIn("usage: RuntimeError: half done", errors["amutate"])
             self.assertIn("usage: TypeError: a usage adjustment returns the usage record (a dict) or None",

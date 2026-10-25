@@ -576,6 +576,15 @@ keep changing, as they did in PR #16, without breaking plugins.
   It does not cover names starting with `_`, a result's `.record` (the tool's
   full record), or anything else in `multiverse`, which a plugin does not
   import.
+
+  1.13 makes two documented changes to it, both the user's decisions: the
+  access levels (a call where the plugin is off, or one above its level, is
+  refused; see [effect classes and access grants](#effect-classes-and-access-grants-113)),
+  and `mv.usage.adjust`, which still runs but can no longer change core's
+  measured `context`: changes to it are dropped, and the rest of what an
+  adjuster returns applies as before. A plugin shows an estimate of its own in
+  a column of its own (`replaces="context"`), never in place of what mv2
+  measured.
 - mv2 supports the current major and the one before it for at least one
   release. A plugin on the old major loads with a deprecation note in
   `mv2 plugins`.
@@ -747,7 +756,7 @@ for several plugins using it at once.
 | `mv.doctor.check(fn)` | `fn(universe)` returns problems as sentences | All run. Each is listed under its plugin. |
 | `mv.launch.contribute(family, fn)` | `fn(LaunchInfo)` returns an `api.Contribution` or None, within 2 s (see [Harness extensions](#harness-extensions)). The manifest's `harnesses` adds plugin directories and extensions with no code. | All run in plugin-name order. Contributions merge by fixed rules, and the harness's own settings and environment never change. A plugin that fails or conflicts is left out of that launch, with the reason recorded, and the launch goes on. |
 | `mv.capabilities.add(name, fn)` | A capability key: `fn(SessionInfo)` returns `api.Capability(state, reason, mechanism)` | Core keys are reserved. One owner per key. |
-| `mv.usage.adjust(fn)` | `fn(SessionInfo, usage)` returns usage, for example with the context replaced and marked estimated | Applied in plugin-name order, after the adapter. Compaction is the only user so far. |
+| `mv.usage.adjust(fn)` | `fn(SessionInfo, usage)` returns usage | Applied in plugin-name order, after the adapter. Since 1.13 its changes to `context`, core's measured reading, are dropped; the rest applies. Compaction used it until its own Context column. |
 | `statusline` in the manifest, and `mv.statusline.write(agent, name, text)` | A status-line item the manifest declares (`{"trees": {"claude": true, "tmux": false}}`), with its text written by whatever process knows it (see [Status lines](#status-lines)) | Each name has one owner, and core's names are refused. The order and on/off come from `statusline.json`, as today. |
 | `mv.dashboard.column(key, title, width, value, compact=, flexible=, group=, fallback=, replaces=)` | An agent column: `value(row)` for agent rows, `group(row)` for subverse rows; since 1.13 it can fall back to a core column's cell or stand in for a data column (not Name, Live, Status or Focus, which carry core's attention markers) | Core keys are reserved. Two plugins standing in for one column cancel, and doctor says so. A view can name it `KEY` while that is unique, and `plugin:KEY` always works. A view keeps a plugin column it names even while the plugin is off, and shows `—` for rows whose universe has it off. A short name that later becomes ambiguous shows `—`, and the clash is listed on the Plugins screen. |
 | `mv.dashboard.panel(type, render, title=, auto=)` | A view widget type for `views/*.json`. `render(api.PanelContext)` returns `api.Markdown`, `api.Table`, `api.Artifacts` or a list of them: plain data the dashboard draws, refreshed with the agent list, off its event loop within 2 s. The context has the scope's `universe`, the view's `widget` object, the scope tree's `agents` (with `agents.read`) and the `plugins` on there. With `auto=True` it also shows after the view's own widgets wherever the plugin is on, unless the view's `"plugin_panels"` (`"auto"`, `"none"` or a list of types) leaves it out. The older class form, `"module:Class"`, stays for interactive panels. | The same naming rule. It shows only where its plugin is on; elsewhere it shows "needs plugin X". |
@@ -1400,8 +1409,8 @@ plugin's files are under `src/multiverse/plugins/builtin/compaction/`.
 | Adapter `_with_bridge`: `MV2_COMPACTION=1`, the `PreCompact` guard in `--settings`, `bridge without compaction` | A launch contribution: environment, `claude_settings` with the guard, `problem` and `mode` |
 | Adapter `compaction_state`, `compaction_defaults`, `compaction()` | The plugin's own functions over its Claude extension |
 | Adapter `_compaction_capability`; `base.py` giving every harness "no tree compaction"; `CAPABILITIES` listing it | `mv.capabilities.add("compaction", …)`, which answers for every harness, with the same texts |
-| Adapter `latest_compaction()` and `get_usage`'s estimated context | `mv.usage.adjust`, with the same fields (`estimated`, `estimated_at`, `estimated_from`) |
-| `display.py` "estimated after compaction: conversation only" | Generic in core: it shows `estimated_reason` from the adjuster |
+| Adapter `latest_compaction()` and `get_usage`'s estimated context | `mv.usage.adjust`, with the same fields (`estimated`, `estimated_at`, `estimated_from`); since 1.13 compaction's own Context column instead |
+| `display.py` "estimated after compaction: conversation only" | Generic in core: it showed `estimated_reason` from the adjuster, until 1.13 removed core's estimate display |
 | `tools/compaction.py`, `cli.py`'s `compaction` | The plugin's `command.py`, registered with `mv.cli.command("compaction", …)`, with the same arguments and output |
 | `tools/doctor.py` `_compaction` | `mv.doctor.check` |
 | `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | The plugin's `screens.py`, registered with `mv.dashboard.settings(screen=…)` and opened from the plugin settings screen (`P`); `c` is free. The screens are unchanged, on `FieldScreen`, and the per-agent scheduler opens from inside them. |

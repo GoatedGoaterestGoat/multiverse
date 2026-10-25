@@ -480,6 +480,11 @@ def adjust_usage(info, value):
     or returns something unusable (not a JSON object) changes nothing: the
     value stays as the adapter measured it or the last good adjustment left
     it, and the failure is recorded against the plugin. None means no change.
+
+    `context` is core's measured reading and stays exactly as measured (1.13):
+    an adjuster's changes to it are dropped, and what else it returns applies.
+    A plugin shows an estimate of its own in a column of its own, never in place
+    of what mv2 measured.
     """
     if not any(found.on and "usage" in found.manifest.extends for found in loader.declared(info.universe)):
         return value  # no plugin here adjusts usage: no trust check or import for every listed agent
@@ -501,7 +506,13 @@ def adjust_usage(info, value):
                 changed = True
             except (TypeError, ValueError) as error:
                 loader.record(loaded, "usage", error, info.universe)
-    return current if changed else value
+    if not changed:
+        return value
+    if isinstance(value, dict) and "context" in value:
+        current["context"] = json.loads(json.dumps(value["context"]))
+    else:
+        current.pop("context", None)
+    return value if current == value else current
 
 
 def item_path(agent_dir, name):
