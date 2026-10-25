@@ -773,7 +773,7 @@ hangs `mv2`. Its load goes on: what it ends with lands when it ends, so a slow
 cold import is loaded then. The hang is also remembered against the plugin's
 files (`~/.multiverse/plugin-load-timeouts.json`): for the next 10 minutes,
 processes wait for it at most 0.5 s, and a launch leaves it out while it still
-loads, saying so in the launch's `plugins` record and fallback reason; it is
+loads, saying so in the launch's `plugins` record and its Plugins line; it is
 forgotten once it loads, its files change or the 10 minutes pass. A late
 result is kept only while it is still the plugin's latest attempt with the
 files it started with: after an edit, the new code loads (under a package of
@@ -815,7 +815,7 @@ class Contribution:          # what it may return
     pi_extensions: tuple[str, ...] = ()
     codex: CodexContribution | None = None         # allowlisted config, instructions, MCP servers (see Codex)
     problem: str | None = None                     # "Launched without compaction: …"
-    mode: str | None = None                        # e.g. "without compaction", shown in native_mode
+    mode: str | None = None                        # e.g. "without compaction", shown as the plugin's
 ```
 
 - **Merging.** The adapter's own settings and environment never change: a
@@ -833,18 +833,21 @@ class Contribution:          # what it may return
 - **Failure.** If plugin discovery itself fails, the launch goes on exactly as
   the adapter made it, and the record says why (`error`). A plugin left out
   because it broke (its contribution raised, timed out, returned something
-  unusable or conflicted) is also a problem of the launch, which Claude shows as
-  its fallback reason in the inspector and capabilities. A plugin that merely
+  unusable or conflicted) is also a problem of the launch, which the inspector's
+  Plugins line and `mv2 inspect` show. A plugin that merely
   does not fit (version, bridge, a plain launch) is recorded only. `mv2 doctor`
   says when a plugin's pre-plugin settings file is still waiting to be
   converted, or could not be.
 - **Recording.** What each plugin contributed, and why one was left out, goes in
   `runtime.json` under `plugins`:
   `{"compaction": {"version": "1.0.0", "state": "loaded"}, "typeahead": {"state": "skipped", "reason": "needs Claude Code 2.1.292; this is 2.1.290"}}`.
-  The inspector, `mv2 inspect` and `capabilities` read it there. A `problem` is
-  also appended to `native_mode.fallback_reason`, so today's "Launched without
-  compaction: …" and the `bridge without compaction` mode stay exactly as they
-  are.
+  The inspector, `mv2 inspect` and `capabilities` read it there. Each plugin's
+  `problem` and `mode` are in its entry, and the launch's `problems` and `modes`
+  lists. Since 1.13 they are shown only as the plugin's, never in
+  `native_mode`, which is the harness's own: "Launched without compaction: …"
+  is on the Plugins line, and the mode reads `bridge`, not
+  `bridge without compaction`. A launch recorded before then still carries
+  them in its fallback reason, which the Plugins line doesn't repeat.
 - **Timing.** Contributions are read at launch. Turning a plugin on or off, or
   changing its config, needs a restart of the agent, as `compaction.json`'s
   `enabled` does today.

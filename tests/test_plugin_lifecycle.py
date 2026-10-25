@@ -123,21 +123,31 @@ class PluginLaunchTest(NativeBackendTest):
         self.assertEqual(found["spawn"]["state"], "supported")  # core's, not the plugin's "unavailable"
 
     def test_inspect_says_why_a_plugin_was_left_out_of_the_launch(self):
-        """The launch's recorded plugin problems (a plugin left out for unusable settings) reach mv2 inspect, once even
-        where the fallback reason already carries them; a break goes unnoticed: a plain Claude launch has no fallback
-        reason, so the agent runs without the plugin and only runtime.json says why."""
+        """Plugin problems and modes must remain visible without changing harness mode or repeating legacy fallback
+        text; fragile because older records lack modes and damaged optional entries must not break inspection."""
         from dataclasses import replace
         from multiverse.tools import inspect
         why = "plugin picky was left out: its settings cannot be used: level must be 1 or 2"
         original = self.adapter.command
-        for name, fallback in (("plain", None), ("bridged", "bridge note; " + why)):
+        outcome = 'guard: without optional guard'
+        for name, fallback, modes, shown in (
+            ("plain", None, None, []),
+            ("bridged", "bridge note; " + why, None, []),
+            ("mode", "harness fallback", [{"plugin": "guard", "mode": "without optional guard"}], [outcome]),
+            ("bad-modes", None, {"plugin": "guard", "mode": "not a list"}, []),
+            ("mixed-modes", None, [None, "bad", {}, {"plugin": 3, "mode": "bad"},
+                                   {"plugin": "guard", "mode": []}, {"plugin": "", "mode": "bad"},
+                                   {"plugin": "guard", "mode": ""},
+                                   {"plugin": "guard", "mode": "without optional guard"},
+                                   {"plugin": "guard", "mode": "without optional guard"}], [outcome]),
+        ):
             with self.subTest(name):
                 def command(context):
                     made = original(context)
                     mode = {**(made.native_mode or {}), "fallback_reason": fallback} if fallback else made.native_mode
                     return replace(made, native_mode=mode, plugins={
                         "plugins": {"picky": {"version": "1.0.0", "state": "skipped", "reason": why[29:]}},
-                        "status_items": [], "problems": [why]})
+                        "status_items": [], "problems": [why], **({"modes": modes} if modes is not None else {})})
                 with patch.object(self.adapter, "command", side_effect=command):
                     result = lifecycle.start(self.root, name="picky-" + name, harness="service-test")
                 self.addCleanup(shutil.rmtree, Path("/tmp") / ("mv2-native-" + result["runtime"]["launch_id"]), True)
@@ -145,7 +155,15 @@ class PluginLaunchTest(NativeBackendTest):
                 self.assertEqual(text.count(why), 1, text)
                 self.assertIn("Note: " + (fallback or why), text.splitlines())  # plain: its own line
                 found = inspect.cli_run(self.root, agent=result["id"], json=True)
-                self.assertEqual(found.get("notices", []).count(why), 0 if fallback else 1)
+                repeated = bool(fallback and why in fallback)
+                expected = ([] if repeated else [why]) + shown
+                self.assertEqual(found.get("notices", []), expected)
+                for line in shown:
+                    self.assertEqual(text.count(line), 1)
+                    self.assertIn("Note: " + line, text.splitlines())
+                    self.assertLess(text.index(why), text.index(line))
+                self.assertEqual(found["fallback"], fallback)
+                self.assertNotIn("without optional guard", found["mode"])
 
     def test_each_launch_records_one_exit(self):
         """Each launch records exactly one agent.exited with the right state however the runner ends; a break goes

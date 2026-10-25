@@ -118,8 +118,9 @@ def launch(info):
 - `api.Contribution` has these fields:
   - `environment`.
   - `claude_settings`, merged into Claude Code's `--settings` (objects merge, lists such as hooks append). Only a connected Claude launch takes it.
-  - `problem`, shown as the launch's fallback reason.
-  - `mode`, appended to the launch's native mode.
+  - `problem`: why the plugin can't do its job in this launch.
+  - `mode`: how the launch runs for your plugin, such as `"without my-plugin"`.
+  - Both are shown as your plugin's, on the inspector's Plugins line and in `mv2 inspect`, and kept in the launch's `plugins` record. They never change the harness's own mode or fallback reason (1.13).
 - A plugin may set `MV2_<NAME>` and `MV2_<NAME>_*` (its name upper-cased, hyphens as underscores). It may also set any variable outside `MV2_` except `HOME`, `PATH`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `CODEX_THREAD_ID` and `CLAUDECODE`. A plugin that sets a variable the harness or another plugin already set is left out of that launch.
 - Additions are read at launch, so a running agent keeps what it started with.
 

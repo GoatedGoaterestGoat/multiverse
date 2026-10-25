@@ -907,13 +907,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         environment = {**command.environment, FUNCTION_HOOKS: '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
-        # The adapter's own settings and environment never change; problems and modes join the launch's own.
+        # The adapter's own settings and environment never change. Their problems and modes are the plugins'
+        # (plan.record()), never this harness's native_mode.
         plan = plugins.plan_for(context, 'claude', self.name, version=claude_version(command.argv[0]), bridge=True,
                                 base_settings=settings, base_environment=environment)
-        if plan.problems:
-            native_mode['fallback_reason'] = '; '.join(filter(None, [native_mode['fallback_reason'], *plan.problems]))
-        if plan.modes:
-            native_mode['mode'] = ' '.join([native_mode['mode'], *plan.modes])
         directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,

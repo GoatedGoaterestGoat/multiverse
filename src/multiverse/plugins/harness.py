@@ -65,8 +65,10 @@ class Contribution:
     """What a plugin adds to one launch. Every field is optional."""
     environment: dict = field(default_factory=dict)
     claude_settings: dict = field(default_factory=dict)
-    problem: str | None = None  # the plugin cannot do its job in this launch: shown as its fallback reason
-    mode: str | None = None     # e.g. "without compaction": appended to the launch's native mode
+    # Both are the plugin's outcome, shown as the plugin's (the launch's plugins record, mv2 inspect, the inspector's
+    # Plugins line), never in the harness's own mode or fallback reason.
+    problem: str | None = None  # the plugin cannot do its job in this launch
+    mode: str | None = None     # how the launch runs for this plugin, e.g. "without compaction"
 
 
 @dataclass
@@ -78,16 +80,18 @@ class LaunchPlan:
     pi_extensions: list = field(default_factory=list)
     codex: list = field(default_factory=list)  # (plugin name, plugin directory, HarnessEntry)
     problems: list = field(default_factory=list)
-    modes: list = field(default_factory=list)
+    modes: list = field(default_factory=list)  # {"plugin", "mode"}: each plugin's mode outcome
     status_items: list = field(default_factory=list)  # {"name", "plugin", "claude", "tmux"}
     plugins: dict = field(default_factory=dict)  # name -> {"version", "state", "reason"?, "added"?}
     error: str | None = None  # why no plugin could be considered at all
 
     def record(self):
         """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing, and the
-        launch's plugin problems (a plugin left out because it broke), which mv2 inspect shows."""
+        launch's plugin problems (a plugin left out because it broke) and mode outcomes, which mv2 inspect and the
+        inspector show as the plugins'. The harness's own native_mode never carries them."""
         return {"plugins": self.plugins, "status_items": self.status_items,
                 **({"problems": list(self.problems)} if self.problems else {}),
+                **({"modes": [dict(item) for item in self.modes]} if self.modes else {}),
                 **({"error": self.error} if self.error else {})}
 
     def skip(self, name, reason):
@@ -261,11 +265,13 @@ def _launch_plan(info, plan):
             if contribution.problem:
                 plan.problems.append(contribution.problem)
             if contribution.mode:
-                plan.modes.append(contribution.mode)
+                plan.modes.append({"plugin": loaded.name, "mode": contribution.mode})
         record["added"] = sorted({kind for kind, _ in added} | ({"environment"} if environment else set())
                                  | ({"claude_settings"} if any(c.claude_settings for c in contributions) else set()))
         if any(contribution.problem for contribution in contributions):
             record["problem"] = "; ".join(c.problem for c in contributions if c.problem)
+        if any(contribution.mode for contribution in contributions):
+            record["mode"] = " ".join(c.mode for c in contributions if c.mode)
     # A known plugin's old settings wait while it is not installed: the launch says so rather than run quietly
     # without it.
     from . import KNOWN, not_installed, not_installed_message

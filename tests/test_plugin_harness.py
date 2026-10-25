@@ -178,6 +178,22 @@ class LaunchPlanTest(PluginTestCase):
                                 and "level must be 1 or 2" in problem for problem in plan.problems), plan.problems)
             self.assertEqual(plan.record()["problems"], plan.problems)  # recorded, so inspect can say it
 
+    def test_a_plugins_outcome_is_recorded_as_its_own(self):
+        """A contribution's problem and mode reach the launch's plugins record under the plugin's name, in its entry
+        and in the launch's lists: the harness's own mode no longer carries them, so a break would make a launch
+        that runs without a plugin's guard look normal in mv2 inspect and the inspector."""
+        self.write_plugin("warden", {"module": "plugin", "extends": ["launch"]}, {
+            "plugin.py": "from multiverse.plugins import api\n"
+                         "def register(mv): mv.launch.contribute('claude', lambda info: "
+                         "api.Contribution(problem='Launched without the guard: off here', mode='without the guard'))\n"})
+        self.enable("warden")
+        record = harness.launch_plan(self.info()).record()
+        self.assertEqual({key: record["plugins"]["warden"].get(key) for key in ("state", "problem", "mode")},
+                         {"state": "loaded", "problem": "Launched without the guard: off here",
+                          "mode": "without the guard"})
+        self.assertIn("Launched without the guard: off here", record["problems"])
+        self.assertEqual(record["modes"], [{"plugin": "warden", "mode": "without the guard"}])
+
     def test_usage_adjusters_never_change_what_they_were_given(self):
         """Plugin usage adjusters get a copy, adjust only ok results, and mutation or exceptions never corrupt
         measured usage; a break goes unnoticed because the Context numbers are just slightly wrong."""
