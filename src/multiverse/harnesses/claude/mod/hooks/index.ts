@@ -48,6 +48,12 @@ function tagged(text: string): Message | undefined {
 // the main loop's turns count, or a background subagent would leave "working".
 let turnRunning = false
 
+// Whether this module has seen a main-loop turn boundary since it loaded. A reload can come mid-turn, and Claude
+// doesn't say whether a turn is running, so until a turn.start or turn.complete the state is unknown, not idle:
+// a steer then takes the queued way (right either way), and no message is timed out before an observed idle moment.
+let turnKnown = false
+const idle = () => turnKnown && !turnRunning
+
 // After an interruption Claude refuses a plugin's prompt ("the session was stopped and nobody has sent input
 // since") until the person sends input, but not a peer prompt. Until the person types, a message stays in
 // Claude's queue and runs as the peer prompt, its wrapper stripped where it is stored. A reload forgets this;
@@ -281,12 +287,9 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
 // refused one stays waiting, so a row that turns up after all still marks it delivered.
 type Waiting = { id?: string; refused?: boolean }
 
-// How long an idle session may leave a taken message unstored before it counts as not delivered. A session
-// still starting isn't idle yet: Claude may start its first turn late, so the idle clock starts only once the
-// session has been up this long.
+// How long an idle session may leave a taken message unstored before it counts as not delivered. Idle means an
+// observed one (idle()): a session just loaded, or still starting, has shown no turn boundary yet.
 const STORE_GRACE_MS = 5000
-const STARTUP_MS = 10000
-let startedAt: number | undefined
 
 // Messages Claude has but hasn't stored yet, oldest first.
 const waitingRows: Waiting[] = []
@@ -338,14 +341,11 @@ async function refuse($: EngineInterface, entry: Waiting, reason: string) {
 // A taken message must be stored within a few seconds of the session being idle.
 function expireLater($: EngineInterface, entries: Waiting[]) {
   if (entries.length === 0) return
-  void $.clock.now().then((now) => {
-    const starting = startedAt === undefined ? 0 : Math.max(0, startedAt + STARTUP_MS - now)
-    $.clock.after(starting + STORE_GRACE_MS, () => {
-      if (turnRunning) return  // the end of that turn decides
-      for (const entry of entries) {
-        if (pending().includes(entry)) void refuse($, entry, `Claude didn't store it within ${STORE_GRACE_MS / 1000} seconds while idle`)
-      }
-    })
+  $.clock.after(STORE_GRACE_MS, () => {
+    if (!idle()) return  // the end of the turn running decides
+    for (const entry of entries) {
+      if (pending().includes(entry)) void refuse($, entry, `Claude didn't store it within ${STORE_GRACE_MS / 1000} seconds while idle`)
+    }
   })
 }
 
@@ -360,7 +360,7 @@ async function aged($: EngineInterface, text: string, sent: string | undefined):
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
   const entry = hold(message)
-  if (!turnRunning) expireLater($, [entry])
+  if (idle()) expireLater($, [entry])
   // A hook must not wait for its own submit, so leave the hook first.
   $.clock.after(0, () => {
     $.prompt.submit({ text: marked(message), asUser: true }).then((result) => {
@@ -404,7 +404,6 @@ export const register: Register = (on) => {
   registerMultiverse(on)
 
   on("session.start", async ($, e, next) => {
-    startedAt = await $.clock.now()
     const result = await next(e)
     void report($)
     void $.session.id().then((id) => { sessionId = id }, () => {})
@@ -435,6 +434,7 @@ export const register: Register = (on) => {
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) {
       turnRunning = true
+      turnKnown = true
       takenBeforeTurn = pending()
       void report($)
       void refreshStatus($)
@@ -446,6 +446,7 @@ export const register: Register = (on) => {
     const result = await next(e)
     if (e.agentId === undefined) {
       turnRunning = false
+      turnKnown = true
       if (e.isAborted) interrupted = true
       const still = pending()
       for (const entry of takenBeforeTurn) {
@@ -526,14 +527,14 @@ export const register: Register = (on) => {
       })
       return { consumed: "Multiverse question answered by the multiverse plugin" }
     }
-    if (!interrupted && (message.mode === "follow-up" || !turnRunning)) {
+    if (!interrupted && (message.mode === "follow-up" || idle())) {
       submit($, message)
       return { consumed: "Multiverse message submitted by the multiverse plugin" }
     }
     // Queued at `next`, tagged with its ID only: it merges at the next tool result, or after an interruption runs
     // as the peer prompt of its own.
     const entry = hold(message)
-    if (!turnRunning) expireLater($, [entry])
+    if (idle()) expireLater($, [entry])
     return next({ ...e, text: marked(message) })
   })
 

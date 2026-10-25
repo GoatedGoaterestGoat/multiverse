@@ -1348,8 +1348,9 @@ Core gives each delivery attempt its own message ID (the adapter sets
 all name one attempt, and a retry is a new one. When the message's row enters the
 conversation, the mod writes `claude-receipts/<id>.json` in the agent's
 directory. When Claude refuses its submit, or doesn't store the row within five
-seconds while idle (a session counts as idle only once it has been up ten
-seconds, since Claude may start its first turn late) or by the end of a turn that
+seconds while idle (idle as the mod has seen it: after a load, a hot reload
+included, it knows of no turn until one starts or ends, so a session just loaded,
+perhaps mid-turn, never times a message out) or by the end of a turn that
 started after the mod took it,
 the mod writes `claude-receipts/<id>.not-delivered.json` (`delivered: false`,
 `definite: true`); a row stored later still writes the delivery receipt, which

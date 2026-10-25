@@ -240,6 +240,7 @@ describe('delivery', () => {
 
   test('an idle steer and a follow-up are submitted as the person’s words', async ($, on) => {
     const w = world(on)
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
     const idle = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
     expect(idle).toEqual({ consumed: expect.any(String) })
     await $.turn.start({ text: 'Hello.', turnId: 't1' })
@@ -407,6 +408,7 @@ describe('delivery', () => {
   test('a submit Claude refuses moves later messages to the peer route', async ($, on) => {
     // A reload forgets the interruption; Claude's refusal tells the mod again.
     const w = world(on, { refuse: 'the session was stopped and nobody has sent input since' })
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>First.<</MV2>>` })).toEqual({ consumed: expect.any(String) })
     await w.clock.settle()
     expect(w.logs.some((line) => line.includes('the session was stopped'))).toBe(true)
@@ -418,6 +420,7 @@ describe('delivery', () => {
     // Without it the message stays accepted-but-unconfirmed forever and --retry never resends it.
     const reason = 'the session was stopped and nobody has sent input since'
     const w = world(on, { refuse: reason })
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
     await w.clock.settle()
     expect(JSON.parse(w.files.get(`/agent/claude-receipts/${STEER}.not-delivered.json`) ?? 'null'))
@@ -430,6 +433,7 @@ describe('delivery', () => {
   for (const order of ['the late first copy first', 'the retry first'] as const) {
     test(`a row that never comes is refused after a few idle seconds, and a retry is told apart from it, ${order}`, async ($, on) => {
       const w = world(on)
+      await $.turn.complete(turnComplete('t0'))  // an observed idle moment
       const receipt = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.json`) ?? 'null')
       const refusal = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.not-delivered.json`) ?? 'null')
       const prompted = (handed: string) => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: handed }] },
@@ -511,6 +515,7 @@ describe('delivery', () => {
     // receipt is a file of its own, which the adapter lets win (lifecycle's review of CLAUDE-15).
     let release = () => {}
     const w = world(on, { holdRefusals: new Promise<void>((resolve) => { release = resolve }) })
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
     await w.clock.settle()
     await w.clock.advance(5000)  // the refusal starts; its write is held
@@ -524,17 +529,26 @@ describe('delivery', () => {
     expect(w.files.has(`/agent/claude-receipts/${STEER}.not-delivered.json`)).toBe(true)
   })
 
-  test("a session still starting isn't idle: a message taken then gets longer before it counts as not delivered", async ($, on) => {
-    // A retry of a stopped agent arrives in its first moments; Claude may start that turn late, and a false refusal invites a duplicate.
+  test('after a load the turn state is unknown: no message is timed out before an observed idle moment', async ($, on) => {
+    // A reload can come mid-turn: a follow-up taken then waits behind the running turn, and refusing it after five
+    // seconds would invite a duplicate retry. A fresh process is the same case (reviewer, 3ccc675).
     const w = world(on)
-    const receipt = () => JSON.parse(w.files.get(`/agent/claude-receipts/${STEER}.not-delivered.json`) ?? 'null')
+    const refusal = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.not-delivered.json`) ?? 'null')
     await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
-    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
+    // A steer takes the queued way, right whether a turn is running or not; a follow-up is submitted, to run after.
+    expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Rebase first.<</MV2>>` }))
+      .toEqual({ text: handed(STEER, 'Rebase first.') })
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>Then test.<</MV2>>` })
     await w.clock.settle()
-    await w.clock.advance(9000)
-    expect(receipt()).toBe(null)
-    await w.clock.advance(6000)
-    expect(receipt()).toEqual(expect.objectContaining({ delivered: false, definite: true }))
+    await w.clock.advance(60_000)
+    expect([refusal(STEER), refusal(FOLLOW_UP)]).toEqual([null, null])
+    // The turn that was running ends: the session is idle now, and the clock starts.
+    await $.turn.complete(turnComplete('t0'))
+    await w.clock.settle()
+    await w.clock.advance(4000)
+    expect(refusal(FOLLOW_UP)).toBe(null)
+    await w.clock.advance(1000)
+    expect(refusal(FOLLOW_UP)).toEqual(expect.objectContaining({ delivered: false, definite: true }))
   })
 
   test("a turn that ends without the message's row refuses it", async ($, on) => {
