@@ -36,15 +36,18 @@ class LocalBackend:
         for member in members:  # a leftover folder is not a damaged agent: say what to do with it, not what failed to read
             if isinstance(member.get("damaged"), dict) and member["damaged"].get("recover") == "remove":
                 member["summary"] = "damaged: a leftover folder with no agent records · d moves it to the trash"
-        plugin_columns = any(key not in COLUMNS for key in config["columns"])
+        replace = config.get("replace", True)
+        plugin_columns = (any(key not in COLUMNS and not columns.core_key(key) for key in config["columns"])
+                          or (replace and columns.replaceable(config["columns"])))
         trouble, on = [], {}
         if plugin_columns:
-            # Plugin columns: resolved and computed here, off the event loop. Each agent row says which
-            # plugins its universe has on and carries its plugin cells; rendering only reads them.
+            # Plugin columns, and those standing in for a core one: resolved and computed here, off the event loop.
+            # Each agent row says which plugins its universe has on and carries its plugin cells; rendering only
+            # reads them.
             try:
                 scopes = list(universe.tree(root))
-                columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"])
-                on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
+                columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"], replace=replace)
+                on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes} if columns.PLUGIN_COLUMNS else {}
                 for member in members:
                     member["plugins"] = on.get(str(member.get("universe")), [])
                 columns.fill_cells(members)

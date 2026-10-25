@@ -187,7 +187,21 @@ class PluginService:
     def problems(self, root):
         # A plugin still loading says so instead of holding up the Plugins screen; its real problem, if any,
         # shows when the screen reads again after the load ends (loader.generation() rises).
-        return plugins.problems(Path(root), wait=loader.REFRESH_WAIT)
+        return plugins.problems(Path(root), wait=loader.REFRESH_WAIT) + self.column_problems(root)
+
+    def column_problems(self, root):
+        """A plugin column whose replaces= or fallback= names no core column: it draws a dash and stands in for
+        nothing, so the Plugins screen says why. The dashboard holds the core keys, so it says it, not plugins/."""
+        from .columns import COLUMNS
+        said = []
+        for loaded in loader.active(Path(root), wait=0):  # plugins.problems above has already waited for them
+            for key, column in loaded.registrations.columns.items():
+                if column.replaces and column.replaces not in COLUMNS:
+                    said.append(f"{loaded.name}'s column {key} replaces {column.replaces}, which is not a core column")
+                elif column.fallback and column.fallback not in COLUMNS:
+                    said.append(f"{loaded.name}'s column {key} falls back to {column.fallback}, which is not a core "
+                                "column")
+        return said
 
     def error_count(self):
         """Plugin failures recorded in this process (cheap: no plugin code runs)."""

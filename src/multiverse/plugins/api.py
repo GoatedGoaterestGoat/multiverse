@@ -198,11 +198,19 @@ class Doctor(_Points):
 
 
 class Dashboard(_Points):
-    def column(self, key, title, width, value, *, compact=False, flexible=False, group=None):
+    def column(self, key, title, width, value, *, compact=False, flexible=False, group=None, fallback=None,
+               replaces=None):
         """An agent column views can name as KEY (while unique) or PLUGIN:KEY.
 
         value(row) -> str for an agent row; group(row) -> str for a subverse row
-        (blank without it). `compact` keeps it in narrow tables."""
+        (blank without it). `compact` keeps it in narrow tables. The row is the agent's listing row, read-only;
+        the keys promised for 1.x are listed in docs/develop/plugins.md. value runs on every refresh, off the
+        dashboard's event loop and within 2 s, so keep it cheap.
+
+        fallback="KEY" (1.13): a row value(row) gives None for draws that core column's cell instead.
+        replaces="KEY" (1.13): the column stands in for that core column wherever a view lists it, where this
+        plugin is on (implying fallback=KEY unless another is given). Name, Live, Status and Focus can't be
+        replaced: asking is a problem doctor and the Plugins screen show, and the column loads without it."""
         registrations = self._allow("dashboard.column")
         if not isinstance(key, str) or not key.replace("_", "").replace("-", "").isalnum():
             raise Error("A column key is letters, digits, hyphens and underscores")
@@ -210,10 +218,21 @@ class Dashboard(_Points):
             raise Error("value and group must be functions of the row")
         if not isinstance(width, int) or isinstance(width, bool) or not 1 <= width <= 120:
             raise Error("A column width is 1 to 120")
+        for name, given in (("fallback", fallback), ("replaces", replaces)):
+            if given is not None and (not isinstance(given, str) or not given):
+                raise Error(f"{name} is a core column's key, such as 'context'")
+        fallback = loader.CORE_COLUMN_ALIASES.get(fallback, fallback)
+        replaces = loader.CORE_COLUMN_ALIASES.get(replaces, replaces)
+        if replaces in loader.ATTENTION_COLUMNS:
+            registrations.problems.append(
+                f"{self._loaded.name}'s column {key} can't replace {replaces.title()}: Name, Live, Status and Focus "
+                f"always show core's own")
+            replaces = None
         label = f"column {key}"  # drawn on every refresh: observe, so a column can't act
         registrations.columns[key] = loader.Column(
             key, str(title), width, _declared(self._loaded, "observe", label, value), bool(compact), bool(flexible),
-            _declared(self._loaded, "observe", label, group) if group is not None else None)
+            _declared(self._loaded, "observe", label, group) if group is not None else None,
+            fallback or replaces, replaces)
 
     def panel(self, kind, render=None, *, title=None, auto=False):
         """A local view widget type a view names as `kind` (or PLUGIN:kind).

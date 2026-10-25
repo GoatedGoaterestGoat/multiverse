@@ -82,6 +82,14 @@ class Column:
     compact: bool = False
     flexible: bool = False
     group: object = None  # group(row) -> str, for subverse rows
+    fallback: str | None = None  # a core column key: a row without a value draws that column's cell (1.13)
+    replaces: str | None = None  # a core column key it stands in for wherever a view lists that column (1.13)
+
+
+# Core column names a view may use for another (ui/views.py reads them from here), and the columns no plugin may
+# stand in for: since focus mode they carry what core must always show (the focus, waiting and damaged markers).
+CORE_COLUMN_ALIASES = {"activity": "status", "tokens": "context"}
+ATTENTION_COLUMNS = ("name", "live", "status", "focus")
 
 
 @dataclass
@@ -116,6 +124,7 @@ class Registrations:
     helpers: dict = field(default_factory=dict)  # action -> fn(arguments) -> exit code
     handlers: list = field(default_factory=list)  # (event type pattern, fn(api.Event)), run in the host
     services: list = field(default_factory=list)  # (start(api.ServiceContext), stop or None), run in the host
+    problems: list = field(default_factory=list)  # what register(mv) asked for and could not have, said by doctor
 
 
 @dataclass

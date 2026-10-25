@@ -35,6 +35,8 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
+Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A plugin's column can also stand in for a core column. Where the view lists that core key, such as `context`, and the plugin is on, the dashboard shows the plugin's column there, and a row the plugin has no value for shows core's cell. To keep core's own column, list it as `core:context`, set `"replace": false` in the view, or name the plugin's column to place it yourself. Name, Live, Status and Focus always show core's own. The Plugins screen says when a plugin's column replaces a core one.
+
 ## Keys
 
 | Key | Action |
@@ -123,6 +125,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
 | `columns` | Agent columns, in order. The top universe's choice applies to the whole tree |
+| `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 
 Artifact paths are relative to the universe directory and must stay inside it. Text and Markdown files preview in the dashboard. Other files open in your system's viewer when you choose the link.

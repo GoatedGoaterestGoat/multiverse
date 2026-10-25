@@ -406,6 +406,37 @@ class LoadingTest(PluginTestCase):
         self.assertIn(f"{api.BOOTSTRAP_CHARACTERS} characters", self.entry("long").problem)
 
 
+    def test_a_column_stands_in_only_for_a_data_column_and_only_alone(self):
+        """replaces= naming Name, Live, Status or Focus (or an alias for one) is said as a problem and the column
+        loads without it, and two plugins replacing one column cancel, said too: a break would silently hide
+        core's focus, waiting and damaged markers, or let the dashboard flip between two plugins' columns."""
+        def column(key, replaces, fallback=None):
+            extra = f", fallback={fallback!r}" if fallback else ""
+            return (f"    mv.dashboard.column({key!r}, {key.title()!r}, 6, lambda row: None, "
+                    f"replaces={replaces!r}{extra})\n")
+        for name, lines in (("estimate", column("estimate", "tokens")),
+                            ("rival", column("rival", "context") + column("marker", "activity")),
+                            ("own", column("own", "phase", fallback="summary"))):
+            self.write_plugin(name, {"api": "1.13", "module": "plugin", "extends": ["dashboard.column"]},
+                              {"plugin.py": "def register(mv):\n" + lines})
+            self.enable(name)
+        problems = plugins.problems(self.root)  # loads them; listing() itself never imports a plugin
+        found = {item["name"]: item for item in plugins.listing(self.root)}
+        self.assertEqual((found["estimate"]["provides"]["replaces"], found["rival"]["provides"]["replaces"],
+                          found["own"]["provides"]["replaces"]), (["context"], ["context"], ["phase"]))
+        self.assertIn("estimate and rival both replace the context column, so neither does", problems)
+        self.assertIn("rival's column marker can't replace Status: Name, Live, Status and Focus always show core's "
+                      "own", problems)
+        registered = {item.name: item.loaded.registrations.columns for item in loader.entries(self.root)
+                      if item.loaded is not None and item.name in found}
+        marker, own, estimate = registered["rival"]["marker"], registered["own"]["own"], registered["estimate"]["estimate"]
+        self.assertEqual((marker.replaces, marker.fallback), (None, None))  # it still loads, under its own key
+        self.assertEqual((own.replaces, own.fallback), ("phase", "summary"))  # an explicit fallback wins
+        self.assertEqual((estimate.replaces, estimate.fallback), ("context", "context"))  # replaces implies it
+        self.enable("rival", on=False)
+        self.assertFalse([line for line in plugins.problems(self.root) if "replace" in line])
+
+
 class ApiTest(PluginTestCase):
     def test_api_calls_need_their_declared_permission(self):
         """An API call without its declared permission raises (including agents in a panel's context without

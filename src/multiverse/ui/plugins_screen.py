@@ -21,6 +21,7 @@ from textual.widgets import DataTable, Footer, Label, Static
 from ..display import clean
 from ..plugins import access as plugin_access, loader
 from ..plugins.settings import DELETE
+from .columns import COLUMNS
 from .plugin_service import universe_name
 from .screens import ChoiceScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
@@ -40,10 +41,14 @@ PROVIDES = (("columns", "columns"), ("panels", "widgets"), ("screens", "screens"
 
 
 def provided(provides):
-    """What a plugin adds, as `columns a, b · widgets c`; empty when nothing is known or it adds nothing."""
+    """What a plugin adds, as `columns a, b · widgets c`; empty when nothing is known or it adds nothing. A column
+    standing in for a core one is said by core's title ("replaces the Context column"), so it is never silent."""
     if not isinstance(provides, dict):
         return ""
     shown = []
+    replaced = [clean(COLUMNS[key].title) for key in provides.get("replaces") or () if key in COLUMNS]
+    if replaced:
+        shown.append(f"replaces the {' and '.join(replaced)} column{'s' if len(replaced) > 1 else ''}")
     for key, label in PROVIDES:
         value = provides.get(key)
         if isinstance(value, (list, tuple)) and value:

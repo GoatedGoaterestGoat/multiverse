@@ -9,11 +9,13 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from multiverse import plugins
 from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import write
 from multiverse.ui import columns, panels
 from multiverse.ui.backend import LocalBackend
+from multiverse.ui.plugins_screen import provided
 from multiverse.ui.views import view
 from multiverse.universe import templates
 
@@ -141,7 +143,7 @@ class ColumnTests(PluginTestCase):
             self.agent(name, root=root)
         errors_before = sum(len(texts) for texts in loader.errors().values())
         snapshot = LocalBackend().snapshot(root)
-        self.assertEqual(self.cells(snapshot), {"a": "A", "b": "B", "bad": None, "c": "C"})
+        self.assertEqual(self.cells(snapshot), {"a": "A", "b": "B", "bad": "—", "c": "C"})  # a raising row: a dash
         self.assertEqual(sum(len(texts) for texts in loader.errors().values()) - errors_before, 1)
         calls = [call for call in self.mod(root).CALLS if call[0] == "agent"]
         self.assertEqual(sorted(call[1] for call in calls), ["a", "b", "bad", "c"])
@@ -278,7 +280,7 @@ class ColumnTests(PluginTestCase):
         row = {"kind": "agent", "name": "worker", "universe": str(child), "plugins": ["steady"]}
         off = {"kind": "agent", "name": "idle", "universe": str(root), "plugins": []}
         columns.fill_cells([row, off])
-        self.assertEqual(row["plugin_cells"], {"steady:shout": "WORKER"})  # broken has no value: shown as a dash
+        self.assertEqual(row["plugin_cells"], {"steady:shout": "WORKER", "steady:broken": "—"})  # it raised: a dash
         self.assertNotIn("plugin_cells", off)
         subverse = {"name": "child", "path": str(child), "plugins": ["steady"]}
         columns.fill_cells([subverse], group=True)
@@ -305,6 +307,102 @@ class ColumnTests(PluginTestCase):
         columns.reset_plugin_caches()
         self.assertEqual(columns.PLUGIN_COLUMNS, {})
         self.assertEqual(view(root)["widgets"][0]["count"], 0)
+
+
+ESTIMATE = """
+def register(mv):
+    def value(row):
+        if row["name"] == "broken":
+            raise RuntimeError("no estimate for broken")
+        return "~42k" if row["name"] == "worker" else None
+    mv.dashboard.column("context", "Estimate", 10, value, replaces="context")
+"""
+RIVAL = """
+def register(mv):
+    mv.dashboard.column("context", "Rival", 10, lambda row: "rival", replaces="context")
+"""
+GRABBY = """
+def register(mv):
+    mv.dashboard.column("mood", "Mood", 8, lambda row: "calm", replaces="status")
+    mv.dashboard.column("typo", "Typo", 8, lambda row: "t", replaces="contxt")
+"""
+
+
+class StandInTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_a_plugin_column_stands_in_for_a_core_one_only_where_the_view_lets_it(self):
+        """A plugin column with replaces= is drawn where the view lists that core key (or its old name), core's cell
+        filling the rows it has no value for and a raising row a dash, and never for core:KEY, a view with
+        "replace": false, a view that places the plugin column itself, two plugins replacing one key, or Status;
+        fragile because the rule spans the plugin API, the view and the table, and a break silently shows core's
+        figure where the plugin's belongs, or hides core's Status behind a plugin's; a key that is no core column
+        is named on the Plugins screen."""
+        for name, code in (("estimator", ESTIMATE), ("rival", RIVAL), ("grabby", GRABBY)):
+            self.write_plugin(name, {"module": "plugin", "api": "1.13", "extends": ["dashboard.column"]},
+                              {"plugin.py": code})
+        self.enable("estimator")
+        self.enable("grabby")
+        for name in ("worker", "quiet", "broken"):
+            self.agent(name)
+        self.agent("outside", root=self.subverse("elsewhere"))  # estimator is off there
+
+        async with self.dashboard(size=(170, 40)) as d:
+            async def shown(columns, settled=None, **extra):
+                """The table's headers and each agent's cells by header, once `settled(headers)` holds."""
+                write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": columns,
+                                                              **extra})
+                deadline = time.monotonic() + 8
+                while True:
+                    await d.refresh()
+                    headers, rows = d.table()
+                    if settled is None or settled(headers) or time.monotonic() > deadline:
+                        break
+                cells = {}
+                for row in rows:
+                    name = row[0].strip(" ├─╰│▾▸")
+                    for agent in ("worker", "quiet", "broken", "outside"):
+                        if name.startswith(agent):
+                            cells[agent] = dict(zip(headers, row))
+                return headers, cells
+
+            headers, cells = await shown(["name", "status", "context"], replace=False)
+            core = cells["worker"]["Context"]  # core's own cell for an agent with no usage
+            self.assertNotIn(core, ("—", "~42k", "…"))
+            with self.subTest("where the view lists the core key"):
+                headers, cells = await shown(["name", "status", "context"])
+                self.assertIn("Estimate", headers)
+                self.assertNotIn("Context", headers)
+                self.assertEqual({agent: cells[agent]["Estimate"] for agent in cells},
+                                 {"worker": "~42k", "quiet": core, "broken": "—", "outside": core})
+                self.assertIn("Status", headers)  # grabby's replaces="status" is refused
+                self.assertNotIn("Mood", headers)
+            with self.subTest("its old name"):
+                headers, _ = await shown(["name", "tokens"])
+                self.assertIn("Estimate", headers)
+            for label, columns, extra in (("core:context", ["name", "core:context"], {}),
+                                          # naming a plugin column too, so the plugin columns are resolved at all
+                                          ('"replace": false', ["name", "context", "grabby:mood"], {"replace": False})):
+                with self.subTest(f"{label} keeps core's own"):
+                    headers, cells = await shown(columns, **extra)
+                    self.assertIn("Context", headers)
+                    self.assertNotIn("Estimate", headers)
+                    self.assertEqual(cells["worker"]["Context"], core)
+            with self.subTest("a view that places the plugin column itself"):
+                headers, cells = await shown(["name", "context", "estimator:context"])
+                self.assertEqual([header for header in headers if header in ("Context", "Estimate")],
+                                 ["Context", "Estimate"])
+                self.assertEqual((cells["worker"]["Context"], cells["worker"]["Estimate"]), (core, "~42k"))
+            with self.subTest("the Plugins screen says it, and names a key that is not a core column"):
+                item = next(item for item in plugins.listing(self.root) if item["name"] == "estimator")
+                self.assertIn("replaces the Context column", provided(item["provides"]))
+                screen = await d.open_plugins()
+                await d.until(lambda: "replaces contxt, which is not a core column" in str(
+                    screen.query_one("#plugin-details").render()), "the unknown-key problem")
+                await d.close_screen()
+            with self.subTest("two plugins replacing one column: neither does"):
+                self.enable("rival")
+                headers, _ = await shown(["name", "context"], settled=lambda headers: "Context" in headers)
+                self.assertIn("Context", headers)
+                self.assertFalse({"Estimate", "Rival"} & set(headers))
 
 
 if __name__ == "__main__":

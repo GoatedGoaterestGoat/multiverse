@@ -5,9 +5,11 @@ group (subverse) rows separately; add one by registering a Column, or a
 subclass that overrides `agent` or `group_value`, under a new key.
 
 Plugins add columns too (`mv.dashboard.column`). COLUMNS stays core only;
-`lookup` also finds the plugin columns the current view named. The backend
-resolves them into PLUGIN_COLUMNS and computes their cells (`plugin_cells`) off
-the event loop, so rendering only reads what a row already carries.
+`lookup` also finds the plugin columns the current view named, and a plugin
+column standing in for a core one (`replaces=`) where the view lists that core
+key. The backend resolves them into PLUGIN_COLUMNS and computes their cells
+(`plugin_cells`) off the event loop, so rendering only reads what a row already
+carries. `core:KEY` in a view is always core's own column.
 """
 from dataclasses import dataclass, field
 import threading
@@ -15,11 +17,14 @@ import threading
 from rich.text import Text
 
 from ..display import clean, live_label
+from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
 
 # Below this table width, columns that are not `compact` are hidden.
 COMPACT_WIDTH = 110
+# Columns no plugin column stands in for: they say whether an agent needs the person or is held.
+ATTENTION = frozenset(ATTENTION_COLUMNS)
 
 # Words that carry their own color wherever an agent cell shows them.
 STATE_COLORS = {"alive": theme.GREEN, "ending": theme.PEACH, "stopped": theme.OVERLAY1, "dormant": theme.OVERLAY1,
@@ -136,21 +141,28 @@ COLUMNS = {column.key: column for column in (
 
 @dataclass(frozen=True)
 class PluginColumn(Column):
-    """A plugin's column. Rows carry its cells in `plugin_cells`, computed by `cells` off the event loop.
+    """A plugin's column. Rows carry its cells in `plugin_cells`, computed by `fill_cells` off the event loop.
 
-    An agent whose universe has the plugin off, a failure, or a call that ran
-    out of time shows `—`; a failure counts as the plugin's error.
+    A row with no value (the plugin gave None, or is off in that row's universe) shows `—`, or the cell of the
+    core column `fallback` names. A row that made it raise shows `—` either way (a failure counts as the plugin's
+    error), and one still being computed shows `…`.
     """
     plugin: str = ""
     loaded: object = field(default=None, compare=False, repr=False)
     spec: object = field(default=None, compare=False, repr=False)
+    fallback: str = ""
 
     def agent(self, row):
         value = (row.get("plugin_cells") or {}).get(self.key)
+        if value is None and self.fallback in COLUMNS:
+            return COLUMNS[self.fallback].agent(row)
         return Text("—" if value is None else value, style=theme.SUBTEXT0)
 
     def group_value(self, row):
-        return (row.get("plugin_cells") or {}).get(self.key) or ""
+        value = (row.get("plugin_cells") or {}).get(self.key)
+        if value is None and self.fallback in COLUMNS:
+            return COLUMNS[self.fallback].group_value(row)
+        return value or ""
 
 
 @dataclass(frozen=True)
@@ -161,8 +173,10 @@ class MissingColumn(Column):
         return Text("—", style=theme.SUBTEXT0)
 
 
-# Plugin columns the current view names, by the key it names them with; replaced whole by the backend.
+# Plugin columns the current view names, by the key it names them with, and those standing in for a core
+# column, by that core key; replaced whole by the backend.
 PLUGIN_COLUMNS = {}
+FAILED = "—"  # a row whose value raised: kept apart from no value, which a fallback column fills in
 
 
 _runs = {}  # (id(loaded), key, group) -> {"run": a Run still going or None, "last": {row key: text}, "slow": bool}
@@ -216,7 +230,7 @@ def fill_cells(rows, group=False):
                         try:
                             value = function(dict(row))
                         except Exception as error:  # one row's trouble is not the others'
-                            failure, value = failure or error, None
+                            failure, value = failure or error, FAILED
                         run.partial[row_key(row, group)] = None if value is None else clean(str(value))
                     if failure is not None:
                         loader.record(column.loaded, what, failure, where)
@@ -258,22 +272,41 @@ def reset_plugin_caches():
     panels._plugin_panels.clear()
 
 
+def core_key(key):
+    """The core column a view's `core:KEY` names, or None."""
+    name = key[5:] if key.startswith("core:") else None
+    return name if name in COLUMNS else None
+
+
 def lookup(key):
-    """The column a view's key names: core first, then the plugin columns resolved for the view."""
-    return COLUMNS.get(key) or PLUGIN_COLUMNS.get(key) or MissingColumn(key, key.rpartition(":")[2][:12], 8)
+    """The column a view's key names: `core:KEY` is core's own; otherwise a plugin column the view names or one
+    standing in for a core column, then core, then a column no plugin here provides."""
+    if core_key(key):
+        return COLUMNS[core_key(key)]
+    return PLUGIN_COLUMNS.get(key) or COLUMNS.get(key) or MissingColumn(key, key.rpartition(":")[2][:12], 8)
 
 
-def resolve_plugin_columns(scopes, keys):
-    """PluginColumn (or MissingColumn) for each non-core key, from the plugins on in `scopes`.
+def replaceable(keys):
+    """Whether a view listing `keys` has a core column a plugin column could stand in for."""
+    return any(key in COLUMNS and key not in ATTENTION for key in keys)
+
+
+def resolve_plugin_columns(scopes, keys, replace=True):
+    """PluginColumn (or MissingColumn) for each non-core key, and each core key a plugin column stands in for,
+    from the plugins on in `scopes`.
 
     `plugin:key` comes from that plugin wherever in the tree it is on; a short
     key from the one plugin on in the first scope that registers it. Two
-    plugins with one short key make it a MissingColumn.
+    plugins with one short key make it a MissingColumn. A core key the view
+    lists is drawn as the one plugin column on in the tree that replaces it,
+    unless `replace` is false or the view names that plugin column itself; two
+    plugins replacing it means neither does (the Plugins screen says so). Name,
+    Live, Status and Focus are never stood in for.
     """
     from .. import plugins
-    wanted = [key for key in keys if key not in COLUMNS]
+    wanted = [key for key in keys if key not in COLUMNS and not core_key(key)]
     found = {}
-    if not wanted:
+    if not wanted and not (replace and replaceable(keys)):
         return found
     offered = [plugins.dashboard_columns(scope) for scope in scopes]
     for key in wanted:
@@ -289,5 +322,20 @@ def resolve_plugin_columns(scopes, keys):
             continue
         loaded, spec = owner
         found[key] = PluginColumn(key, spec.title, spec.width, spec.compact, spec.flexible,
-                                  plugin=loaded.name, loaded=loaded, spec=spec)
+                                  plugin=loaded.name, loaded=loaded, spec=spec, fallback=spec.fallback or "")
+    if replace:
+        standing = {}  # core key -> {plugin: (Loaded, its Column, its qualified key)}
+        for columns in offered:
+            for name, (loaded, spec) in columns.items():
+                if ":" in name and spec.replaces in COLUMNS and spec.replaces not in ATTENTION:
+                    standing.setdefault(spec.replaces, {})[loaded.name] = (loaded, spec, name)
+        for target, owners in standing.items():
+            if target not in keys or len(owners) != 1:
+                continue
+            loaded, spec, qualified = next(iter(owners.values()))
+            if qualified in keys or (spec.key not in COLUMNS and spec.key in keys):
+                continue  # the view places that column itself, so core's stays where it is
+            found[target] = PluginColumn(target, spec.title, spec.width, spec.compact, spec.flexible,
+                                         plugin=loaded.name, loaded=loaded, spec=spec,
+                                         fallback=spec.fallback or target)
     return found

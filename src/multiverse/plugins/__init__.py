@@ -205,6 +205,17 @@ def problems(root, reserved=(), wait=None):
     for found in usable:
         if found.name in now and now[found.name].state == "unusable":
             found_problems.append(now[found.name].problem)
+    replacing = {}  # what register(mv) asked for and could not have, and core columns two plugins stand in for
+    for found in usable:
+        loaded = now[found.name].loaded if found.name in now else None
+        if loaded is not None:
+            found_problems.extend(loaded.registrations.problems)
+            for column in loaded.registrations.columns.values():
+                if column.replaces and found.name not in replacing.setdefault(column.replaces, []):
+                    replacing[column.replaces].append(found.name)
+    for key, owners in sorted(replacing.items()):
+        if len(owners) > 1:
+            found_problems.append(f"{' and '.join(owners)} both replace the {key} column, so neither does")
     try:
         from .harness import item_conflicts
         found_problems.extend(item_conflicts(root))
@@ -851,9 +862,12 @@ def _provides(found):
     known = {"commands": sorted(manifest.commands), "statusline": [item.name for item in manifest.statusline],
              "events": list(manifest.events)}
     if found.loaded is None:
-        return {**known, "columns": None, "actions": None, "panels": None, "screens": None, "services": None}
+        return {**known, "columns": None, "replaces": None, "actions": None, "panels": None, "screens": None,
+                "services": None}
     registered = found.loaded.registrations
-    return {**known, "columns": sorted(registered.columns), "actions": sorted(registered.actions),
+    return {**known, "columns": sorted(registered.columns),
+            "replaces": sorted({column.replaces for column in registered.columns.values() if column.replaces}),
+            "actions": sorted(registered.actions),
             "panels": sorted({*registered.panels, *registered.data_panels}),
             "screens": sorted(registered.screens),
             "services": len(registered.services)}

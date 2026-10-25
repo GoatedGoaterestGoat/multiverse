@@ -75,7 +75,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `catalog` | No call. Ship `skills/NAME/`, `commands/NAME/` or `workflows/NAME/` laid out as in a universe | Entries for `mv2 catalog`. The universe's own entry of the same name wins, but `mv2 command NAME@my-plugin` always reaches the plugin's |
 | `bootstrap` | `mv.bootstrap.line("Run mv2 hello NAME to greet an agent.")` | A line in every agent's bootstrap: at most 2 lines and 300 characters per plugin |
 | `doctor` | `mv.doctor.check(fn)`: `fn(universe)` returns a list of sentences | Problems for `mv2 doctor`, prefixed with the plugin's name |
-| `dashboard.column` | `mv.dashboard.column("mood", "Mood", 6, value, compact=False, flexible=False, group=None)` | A column a view names as `mood` or `my-plugin:mood`. `value(row)` gets a copy of the agent's row and returns text, or `None` for `—`. `group(row)` fills subverse rows |
+| `dashboard.column` | `mv.dashboard.column("mood", "Mood", 6, value, compact=False, flexible=False, group=None, fallback=None, replaces=None)` | A column a view names as `mood` or `my-plugin:mood`. `value(row)` gets a copy of the agent's row and returns text, or `None` for `—`. `group(row)` fills subverse rows. It can also stand in for a core column; see [columns](#columns) |
 | `dashboard.panel` | `mv.dashboard.panel("greetings", render, title=None, auto=False)` | A widget type for a view's `widgets`. `render(context)` returns `api.Markdown(text)`, `api.Table(columns, rows)`, `api.Artifacts(items)` or a list of them. `auto=True` also shows it wherever the plugin is on, unless the view's `plugin_panels` (`"auto"`, `"none"` or a list of types) leaves it out |
 | `dashboard.inspector` | `mv.dashboard.inspector(fn)`: `fn(row)` returns a line or `None` | A line in the agent inspector |
 | `dashboard.action` | `mv.dashboard.action("Say hello", fn)`: `fn(context)` may return a status line | A palette entry, `my-plugin: Say hello`. `context.row` is a copy of the selected row or `None`, and `context.scope` is the selected universe's path |
@@ -89,6 +89,20 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `events` | `mv.events.on("agent.status", fn)`: `fn(event)` | A handler in the plugin host; see [events and the host](#events-and-the-host) |
 | `service` | `mv.service(start, stop=None)` | Long-running work in the plugin host |
 | `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `"$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`. `mv.helper.command("ping", *args)` gives that argv |
+
+### Columns
+
+`value(row)` gets a copy of the agent's listing row. These keys are promised for 1.x (1.13): `id`, `name`, `harness`, `universe` (the agent's universe's path), `live`, `status`, `phase`, `summary`, `task`, `focus` (its focus record, or `None`), `tokens`, `reason` (why it isn't running, when set), and `usage`: `state` (`ok`, `unavailable` or `error`) and `value`, whose `context` has `tokens`, `percent`, `window`, `responded_at` and `last_known`, as core measured them. Every other key is core's and may change.
+
+`value` runs on every refresh, off the dashboard's event loop and within 2 s, for every row. Keep it cheap: read the row, or a cache of your own, never `mv.universe(...).agent(...)` per row (about 25 ms each).
+
+Two keywords (1.13) let a column work with core's own:
+
+- **`fallback="KEY"`:** a row `value(row)` gives `None` for shows that core column's cell instead of `—`.
+- **`replaces="KEY"`:** the column stands in for that core column wherever a view lists it (or its alias: `tokens` for `context`, `activity` for `status`), where your plugin is on. It implies `fallback="KEY"` unless you give another. Rows whose universe has your plugin off show the core cell. A view keeps core's column with `core:KEY`, or with `"replace": false`; naming your column itself keeps both. Nothing is written to a view file.
+- **Not replaceable:** Name, Live, Status and Focus, which carry the focus, waiting and damaged markers. Asking is a problem `mv2 doctor` and the Plugins screen show, and the column loads under its own key without it.
+- **Two plugins** replacing one column cancel: neither does, and `mv2 doctor` says so.
+- `listing()`'s `provides.replaces` lists the core columns a loaded plugin stands in for.
 
 ### Launch additions
 
