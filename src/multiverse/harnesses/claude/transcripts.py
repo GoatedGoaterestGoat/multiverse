@@ -510,7 +510,7 @@ class History:
 
 
 def walk(entries, tip=None, labelled=None):
-    """The history (GOAT's walk, moved here): from `tip` when stored, else the newest leaf of the parent graph,
+    """The history: from `tip` when stored, else the newest leaf of the parent graph,
     back through parent links and across a boundary by its logical parent, plus every block of each response it
     passes and every result answering one of their calls (parallel tool results branch off their own call), and
     the typed /compact row a boundary answers (the boundary's logical parent is the row before it)."""

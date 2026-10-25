@@ -99,7 +99,7 @@ skipped; with no absolute workspace, every unreadable folder blocks. A dangling
 link in such a folder's place, or a folder gone before it was searched, counts as
 unreadable, while a link to a real folder is searched through it. The handle's
 workspace is the launch's own, so a recheck of a failed wake reads that launch's
-folder even after the agent moved on. GOAT applies the same rule to its search. The
+folder even after the agent moved on. The
 same scan answers core's `session_storage_evidence(session, home)` for each
 candidate home of an agent with no recorded storage: present, absent only when
 every folder that could hold the transcript was read, or unknown. An absent answer
@@ -447,8 +447,7 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `wake`, `stop`, `send_steer`, `send_follow_up`,
-`ask`, `get_usage`, `get_delivery`, and `compaction` (whether this session's
-`/compact` uses tree compaction; see [compaction](compaction.md)). The `session_name` capability describes
+`ask`, `get_usage` and `get_delivery`, plus any a plugin adds for its own feature. The `session_name` capability describes
 naming during spawn/resume, not a separate rename operation. Claude and Pi pass
 `--name` in both modes. Codex bridge calls `thread/name/set` after validating and
 binding the launch reply; plain Codex has no CLI naming flag. Legacy manifests
@@ -1436,27 +1435,15 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
-With the bridge, the `compaction` plugin ([compaction](compaction.md); the
-`plugins/compaction` submodule), where it is installed and on, adds tree
-compaction to Claude launches through its launch contribution:
-`MV2_COMPACTION=1`, a `PreCompact` command hook, and its own Claude plugin
-directory. That plugin answers the session's `/compact` with mv2's compacted
-turns from the compaction plugin's
-`install` helper action (`python -m multiverse.plugins run compaction
-install`), showing progress and every error in the status line, as notices and
-as toasts, and skips with the reason when it cannot. The `PreCompact` hook
-refuses Claude's own compaction should it not answer, so a session never falls
-back to it. Its `Stop` hook starts the background tree builder with the time the
-turn ended. The plugin's Claude source (`sources/claude/`) reads this harness's
-transcripts; the adapter itself has no compaction code. A Claude agent launched
-before compaction became a plugin still calls `python -m multiverse.compaction
-guard` from its settings: that module stays for a release and lets Claude
-compact (restart the agent for tree compaction), and `mv2 doctor` names the
-running agents that still use it. Compaction settings that cannot be used (invalid, or
-builder settings Claude rejects) never stop a launch: that launch runs without
-compaction, without the `PreCompact` guard, and records why as its
-`native_mode` fallback, which the inspector shows. The `compaction` capability then reports the error, and
-`mv2 doctor` names the file; `mv2 compaction` refuses until it is fixed.
+With the bridge, plugins extend Claude launches as they extend any harness
+([plugins](plugins.md)): a launch contribution adds environment variables,
+settings such as hooks, and its own Claude plugin directory, and a plugin reads
+the session through the transcript protocol
+([transcript protocols](transcript-protocols.md)). The adapter has no plugin's
+code. What a plugin can't do in a launch, such as settings it can't use, is
+recorded as that plugin's problem or mode in the launch's plugins record, which
+`mv2 inspect` and the inspector's Plugins line show; the harness's own
+`native_mode` never carries it.
 
 Claude usage is measured from the session's own transcript under Claude's
 `projects` directory, plus any subagent transcripts: each response's recorded

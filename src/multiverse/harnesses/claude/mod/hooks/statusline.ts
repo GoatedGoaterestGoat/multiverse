@@ -2,13 +2,12 @@
 // (a `$` cannot be passed across files) and the tests can call it directly.
 //
 // Claude allows one status line per plugin; this module's line is the normal
-// line below (the compaction plugin shows /compact's progress in its own).
+// line below (a plugin that shows progress does so in its own).
 //
 // The line's items come from `statusline.json` at the universe root (shipped in
 // every template, managed by `mv2 refresh`):
 //   {"schema": 1, "items": {"agent": false, "phase": true, "summary": false,
-//                           "inbox": true, "compaction": true}}
-// (`compaction` is the compaction plugin's item.)
+//                           "inbox": true}}
 // The order of the keys is the order on screen. A key that is missing keeps
 // its default, an unknown key is ignored, and an unreadable file means the
 // defaults.

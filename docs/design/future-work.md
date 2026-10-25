@@ -7,7 +7,6 @@ Ideas that have been discussed and agreed on but are not scheduled yet. Each ent
 - **Sandboxed plugins.** Plugin code runs inside mv2's processes, so effect classes and permissions are enforced only at mv2's API, plus a best-effort Python audit hook that is not a security boundary. Real isolation means running plugins in separate, sandboxed processes that reach mv2 only through an API. The plugin host's worker processes are the starting point. Until then, trust (`mv2 plugins trust`) is the security line.
 - **Numeric spend caps.** Access levels (observe, spend, act) are the main control. A cap on how much a plugin may spend (runs per hour, tokens, money) can be added later if someone needs it.
 - **Startup cost.** Built-in commands read plugin manifests only, never plugin code or the trust hash. After PR #20 they cost 20 to 30 ms more than with plugins off, measured with a 47 MB universe plugin. Agents call `send` and `report` constantly, so keep measuring it.
-- **The known-plugins table as data.** Core's table of known checkout plugins (`compaction` and its old `compaction.json`) moves to a data file kept with the submodules, so core never names a plugin. Planned for the first transcript-protocols PR.
 
 ## Harness adapter protocols
 

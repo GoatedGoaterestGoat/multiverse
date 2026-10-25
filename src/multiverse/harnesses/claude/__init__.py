@@ -17,11 +17,8 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-Tree compaction is the `compaction` plugin (the plugins/compaction submodule):
-its launch contribution loads its own Claude plugin, which answers the
-session's `/compact` with mv2's compacted conversation, and adds a PreCompact
-hook that refuses Claude's own compaction should that ever fail to answer. Its
-Claude source (sources/claude) reads this harness's transcripts.
+Plugins extend Claude launches through launch contributions and harness
+directories, and read its transcripts through the transcript protocol.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -52,10 +49,6 @@ from .transcripts import (  # every transcript reader reads through this one row
     measured_usage, DAMAGED, raw_rows, USAGE_KEYS)
 
 MOD = Path(__file__).parent / 'mod'
-# Typeahead for /multiverse is now the bundled `typeahead` mv2 plugin (multiverse/plugins/builtin/typeahead),
-# loaded like any plugin's Claude directory from Claude Code 2.1.292. This copy stays, unchanged, only for
-# agents launched before the move: Claude reloads a plugin from the path it was given. Remove it once no
-# live launch's request.json names it.
 # The mod acts only on text between these tags and removes them. The opening
 # tag names the delivery mode, which the mod honors, and the message ID for its
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
@@ -334,7 +327,7 @@ NO_STORAGE = "mv2 has no record of this agent's Claude storage; resume it once"
 def reading_storage(session):
     """(home, why) for reading a session's transcript: the recorded home only, never this process's.
 
-    One exception (draft 7 6.2, from GOAT c09b770): inside the agent's own session, whose MV2_AGENT_DIR is the
+    One exception (draft 7 6.2): inside the agent's own session, whose MV2_AGENT_DIR is the
     agent's folder, the inherited environment is the launch's own, so an agent launched before mv2 recorded its
     storage can read until its next resume: CLAUDE_CONFIG_DIR (a relative one against the workspace), else
     HOME/.claude, as its real path, the form session_home records.
@@ -1179,7 +1172,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
             context['tokens'] = reading[0]
         if reading and reading[1]:
-            # When the latest main-thread response came: a plugin's estimate (compaction's) stands only until one does.
+            # When the latest main-thread response came: a plugin's estimate stands only until one does.
             context['responded_at'] = reading[1]
         if context:
             reported['context'] = context

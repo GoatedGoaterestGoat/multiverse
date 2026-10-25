@@ -553,6 +553,45 @@ contribution, a settings screen or a harness extension need none of this.
 `multiverse`. Internals (`runtime`, `universe`, `tools`, `harnesses`) can then
 keep changing, as they did in PR #16, without breaking plugins.
 
+### The rule for plugins and protocols
+
+> **mv2's protocols are mv2's; a plugin's protocols are the plugin's.** mv2
+> defines its own protocols: the plugin API, and the adapter protocols each
+> harness implements (launching, messaging, usage, transcripts, models,
+> one-shot runs…). Plugins use them and contribute through mv2's extension
+> points.
+>
+> A plugin may define protocols of its own, such as a per-harness interface
+> it implements once for each harness it supports (compaction's
+> `CompactionSource`). It implements them itself, in its own code. mv2 core
+> and mv2's adapters never implement, call or name a plugin-defined protocol.
+> A plugin's implementation for a harness may use any mv2 protocol, and
+> should where that keeps it small. When several plugins, or core, would need
+> the same thing from a harness, it belongs in an mv2 adapter protocol
+> instead, designed with the adapter owners and reported as a capability
+> where a harness cannot provide it.
+>
+> **A plugin adds; it never alters mv2.** Installing, enabling, disabling or
+> uninstalling a plugin never changes mv2's own features. A plugin adds
+> commands, status items, capabilities, estimates, panels, settings screens
+> and contributions to the launches it takes part in; it never changes what
+> core measures, reports or does without it. Removed, it leaves mv2 as if it
+> had never been installed, apart from its own files and the notice that it
+> is missing. A plugin may change how a harness behaves only in launches it
+> takes part in, through its launch contribution and harness directories;
+> when it is off or gone, the next launch is the harness's normal one, and a
+> running session it extended fails open.
+
+Reviewers' test: uninstall the plugin. If any mv2 command, screen, status
+line, usage reading or launch behaves differently from a universe that never
+had it (apart from the plugin's own files and the missing-plugin notice), the
+plugin reaches into core.
+
+What core must still know of an optional plugin that may be missing, its
+harness families and its pre-plugin settings file, is data:
+`src/multiverse/plugins/known.json`, shipped with mv2, so core code names no
+plugin (1.13).
+
 ### Versioning
 
 - `api.VERSION` is `(1, 13)` today. Adding something raises the minor version.
@@ -1160,6 +1199,12 @@ feature gating need proof before `harnesses.codex.dir` is offered.
 
 #### Tree compaction for Codex: analysis only
 
+Where it stands with the transcript protocols ([transcript
+protocols](transcript-protocols.md)): reading a Codex conversation would go
+through the transcript protocol once Codex implements it (it reports
+unavailable today); a one-shot run, not until Codex can run a model with its
+tools off; installing a tree still has no native replacement, as below.
+
 Codex could implement `CompactionSource` one day, but lifecycle signals are not
 enough. It needs:
 
@@ -1500,7 +1545,7 @@ import paths changing in tests:
 Steps 1 to 7 happen in this repository so each is one commit that is easy to
 bisect. Only the finished plugin moves out.
 
-Everything in [compaction.md](compaction.md) is kept, and these points
+Everything in GOAT's [compaction.md](https://github.com/GoatedGoaterestGoat/GOAT/blob/main/docs/compaction.md) is kept, and these points
 specifically. `compaction` called them out, and each one has a test:
 
 - It never falls back to Claude's own summary while tree compaction is enabled

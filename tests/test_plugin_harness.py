@@ -1,4 +1,5 @@
 """The harness side of plugins: what launch plans may contribute, usage adjustments and version bounds."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -9,7 +10,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import harnesses
 from multiverse.harnesses.types import LaunchContext, NativeResult
-from multiverse.plugins import harness, loader
+from multiverse.plugins import harness, loader, manifest
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.runtime import native
 from multiverse.store import read
@@ -65,6 +66,21 @@ class LaunchPlanTest(PluginTestCase):
                   "bootstrap_file": "/launch/bootstrap.md", "task_file": "/launch/task.md", "workspace": str(self.work),
                   "model": "", "control_socket": "/tmp/owned/rpc.sock"}
         return harnesses.load(self.root, "pi").spawn(LaunchContext("spawn", values, resume_prompt="--hello"))
+
+    def test_a_plugin_item_the_template_does_not_name_shows_by_its_default(self):
+        """The base template's statusline.json names only core items, so a plugin's status item shows on the Claude
+        line by its manifest's default wherever the plugin takes part (the mod shows an item the file doesn't name):
+        a core template naming one would keep a plugin's item on, or off, after the plugin changed or went, unnoticed."""
+        import multiverse
+        template = json.loads((Path(multiverse.__file__).parent / "templates" / "base" / "statusline.json").read_text())
+        self.assertLessEqual(set(template["items"]) | set(template["tmux"]["items"]),
+                             manifest.CORE_ITEMS | manifest.LATER_CORE_ITEMS)
+        self.write_plugin("noted", {"module": "plugin", "extends": ["statusline"],
+                                    "statusline": {"noted": {"claude": True, "tmux": False}}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("noted")
+        self.assertIn({"name": "noted", "plugin": "noted", "claude": True, "tmux": False},
+                      harness.launch_plan(self.info()).status_items)
 
     def test_a_plugin_may_set_only_its_own_mv2_variables(self):
         """No plugin can set an identity or home variable (MV2_AGENT_ID, MV2_IDENTITY_MODE, CODEX_HOME,

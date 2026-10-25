@@ -30,7 +30,7 @@ ITEM_NAME_LENGTH = 40
 ITEM_READ_LIMIT = 1024
 FOCUS_LONGEST = 86400  # universe.focus.LONGEST: a later `until` is damage, not a focus
 ITEM_LENGTH = 200
-# Only the items this bar draws itself: `compaction`, a core item of the Claude line, is a plugin's here.
+# Only the items this bar draws itself; a plugin's items are the plugin's.
 CORE_ITEMS = frozenset(DEFAULTS['items'])
 SUMMARY_LENGTH = 60
 ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')

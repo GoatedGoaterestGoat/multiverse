@@ -134,6 +134,10 @@ Every entry takes `min_version` and `max_version`, which are inclusive `"MAJOR.M
 
 Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTHON`, `MV2_AGENT_DIR` and `MV2_UNIVERSE` set. Test a Claude directory with `claude plugin test DIR`.
 
+## The rule
+
+A plugin adds; it never alters mv2. It adds commands, columns, status items, capabilities and contributions to the launches it takes part in, and never changes what core measures, reports or does without it. Uninstalled, it leaves mv2 as if it had never been there, apart from its own files and the notice that it is missing. mv2's protocols (this API, the harness adapters' protocols) are mv2's; a protocol a plugin defines for itself, it implements in its own code. The full rule is in the [design](../design/plugins.md#the-rule-for-plugins-and-protocols).
+
 ## The `mv` API
 
 | Call | Gives | Needs |

@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "plugins": {
+    "compaction": {"families": ["claude"], "legacy": "compaction.json"}
+  }
+}

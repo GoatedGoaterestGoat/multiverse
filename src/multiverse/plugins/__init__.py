@@ -366,7 +366,22 @@ def _pending_legacy(root):
 # Plugins mv2 knows by name although they live outside it (optional checkout submodules): their pre-plugin
 # settings file, and the harness families they took part in. With these, an old file is never silently ignored
 # while its plugin is not installed (a checkout without the submodule, or without access to it).
-KNOWN = {"compaction": {"legacy": "compaction.json", "families": ("claude",)}}
+def _known():
+    """{name: {"families": (...), "legacy": FILE}} from known.json, shipped as package data: the optional plugins
+    mv2's checkout ships as submodules that core must know of while one is missing here (the harness families it
+    extends, its pre-plugin settings file), so mv2 refresh never puts a template's settings in front of that file
+    and a launch says the plugin isn't installed, in an installed mv2 too. Data, so core code names no plugin."""
+    try:
+        data = json.loads(Path(__file__).with_name("known.json").read_text())
+        listed = data["plugins"] if data.get("schema") == 1 else {}
+        return {name: {"families": tuple(entry["families"]), "legacy": entry["legacy"]}
+                for name, entry in listed.items()
+                if isinstance(entry.get("legacy"), str) and all(isinstance(item, str) for item in entry["families"])}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+KNOWN = _known()
 
 
 def waiting_settings(root):

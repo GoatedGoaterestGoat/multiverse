@@ -15,7 +15,6 @@ Everything lives in `src/multiverse/`.
 | `terminal/` | tmux: commands, pane tags, liveness from panes, and the status line script tmux runs. |
 | `harnesses/` | Adapters. `types.py` is the contract and `base.py` holds the shared argv rendering. There is one package each for `claude`, `codex` and `pi`, plus `legacy` for schema-1 definitions. See [harness adapters](harness-adapters.md). |
 | `plugins/` | The plugin system: discovery, manifests, trust, `plugins.json` and per-plugin settings, the loader and its failure boundaries, the `mv` API, launch contributions (`harness.py`), the event journal (`events.py`) and the plugin host (`host.py`). Bundled plugins live in `plugins/builtin/`. See [plugins](plugins.md). |
-| `compaction/` | Only a stub for Claude agents launched before tree compaction became a plugin. Compaction itself is the `plugins/compaction` submodule. |
 | `ui/` | The dashboard. See [below](#how-the-dashboard-is-built). |
 | `templates/` | The bundled `base` template. See [templates](templates.md). |
 | `store.py` | Atomic JSON writes, file locks, IDs and timestamps. |
@@ -55,7 +54,6 @@ mv2 has no daemon of its own. State is kept in files in the universe. Processes 
 | Codex app-server daemon | `codex app-server daemon start`, from `lifecycle` | Shared by Codex agents using the same Codex home. mv2 starts or reuses it, and never stops or restarts it. |
 | Status line (`terminal/statusline.py`) | tmux, while a client is attached | Renders the agent's tmux bar. It is read-only and uses only the standard library. |
 | Wrapper cleanup and recovery worker | The runner, detached | The cleanup removes the pane after the native process exits. The worker reconnects an idle Codex terminal after a relay loss. |
-| `python -m multiverse.compaction` | The Claude mod and its hooks, in launches from before compaction became a plugin | A stub. It passes the call to the compaction plugin, or lets Claude compact and says to restart the agent. |
 
 ## How a launch flows
 
