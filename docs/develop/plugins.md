@@ -92,7 +92,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 
 ### Columns
 
-`value(row)` gets a copy of the agent's listing row. These keys are promised for 1.x (1.13): `id`, `name`, `harness`, `universe` (the agent's universe's path), `live`, `status`, `phase`, `summary`, `task`, `focus` (its focus record, or `None`), `tokens`, `reason` (why it isn't running, when set), and `usage`: `state` (`ok`, `unavailable` or `error`) and `value`, whose `context` has `tokens`, `percent`, `window`, `responded_at` and `last_known`, as core measured them. Every other key is core's and may change.
+`value(row)` gets a copy of the agent's listing row of its own, nested records included: changing it changes nothing in the dashboard. An inspector line, a palette action's `context.row` and a data panel's `agent.record` are copies the same way. These keys are promised for 1.x (1.13): `id`, `name`, `harness`, `universe` (the agent's universe's path), `live`, `status`, `phase`, `summary`, `task`, `focus` (its focus record, or `None`), `tokens`, `reason` (why it isn't running, when set), and `usage`: `state` (`ok`, `unavailable` or `error`) and `value`, whose `context` has `tokens`, `percent`, `window`, `responded_at` and `last_known`, as core measured them. Every other key is core's and may change.
 
 `value` runs on every refresh, off the dashboard's event loop and within 2 s, for every row. Keep it cheap: read the row, or a cache of your own, never `mv.universe(...).agent(...)` per row (about 25 ms each).
 

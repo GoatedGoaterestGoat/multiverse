@@ -204,8 +204,9 @@ class Dashboard(_Points):
         """An agent column views can name as KEY (while unique) or PLUGIN:KEY.
 
         value(row) -> str for an agent row; group(row) -> str for a subverse row
-        (blank without it). `compact` keeps it in narrow tables. The row is the agent's listing row, read-only;
-        the keys promised for 1.x are listed in docs/develop/plugins.md. value runs on every refresh, off the
+        (blank without it). `compact` keeps it in narrow tables. The row is a copy of the agent's listing row
+        of its own, nested records included, so changing it changes nothing in the dashboard; the keys promised
+        for 1.x are listed in docs/develop/plugins.md. value runs on every refresh, off the
         dashboard's event loop and within 2 s, so keep it cheap.
 
         fallback="KEY" (1.13): a row value(row) gives None for draws that core column's cell instead.

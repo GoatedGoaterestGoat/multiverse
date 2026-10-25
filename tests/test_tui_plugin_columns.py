@@ -405,5 +405,75 @@ class StandInTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertFalse({"Estimate", "Rival"} & set(headers))
 
 
+SPOILER = """
+from multiverse.plugins import api
+
+def spoil(row):
+    for name in ("usage", "damaged", "runtime"):
+        if isinstance(row.get(name), dict):
+            row[name].clear()
+    if isinstance(row.get("harnesses"), list):
+        row["harnesses"].clear()
+    return "spoiled"
+
+def register(mv):
+    mv.dashboard.column("spoil", "Spoil", 8, spoil, group=spoil)
+    mv.dashboard.inspector(spoil)
+    mv.dashboard.action("Spoil", lambda context: spoil(context.row), effect="observe")
+
+    @mv.dashboard.panel("spoiler")
+    def panel(context):
+        for agent in context.agents:
+            spoil(agent.record)
+        return api.Markdown("spoiled")
+"""
+
+
+class RowCopyTests(PluginTestCase):
+    def test_plugin_code_changing_the_row_it_was_given_never_changes_the_dashboards(self):
+        """A plugin column's value and group functions, an inspector line, a palette action and a data panel each
+        get a row of their own, so changing what they were given (its usage, its damage record, its runtime) leaves
+        core's row whole and the Name cell's warning in place; fragile because a shallow copy shares every nested
+        record, and a plugin that edits one silently changes core's context and hides an agent's damage."""
+        self.write_plugin("spoiler", {"module": "plugin", "api": "1.13", "permissions": ["agents.read"],
+                                      "extends": ["dashboard.column", "dashboard.inspector", "dashboard.action",
+                                                  "dashboard.panel"]}, {"plugin.py": SPOILER})
+        self.enable("spoiler")
+        self.addCleanup(columns.reset_plugin_caches)
+        from multiverse.ui import plugin_panels
+        from multiverse.ui.plugin_service import PluginService
+
+        def agent_row():
+            return {"kind": "agent", "id": "0e0e0e0e-0000-4000-8000-0000000000aa", "name": "worker", "accent": "#ffffff",
+                    "guides": [], "expanded": False, "universe": str(self.root), "plugins": ["spoiler"],
+                    "usage": {"state": "ok", "value": {"context": {"tokens": 25}}},
+                    "damaged": {"file": "runtime.json", "reason": "broken"},
+                    "runtime": {"native_mode": {"mode": "bridge"}}}
+
+        group = {"kind": "group", "name": "ops", "path": str(self.root), "plugins": ["spoiler"], "harnesses": ["claude"],
+                 "accent": "#ffffff"}
+        service = PluginService()
+        loaded = self.loaded("spoiler")
+        action = ("spoiler", "Spoil", loaded, loaded.registrations.actions["Spoil"])
+        _, spec = next((found, spec) for found, kind, spec in plugins.dashboard_panels(self.root) if kind == "spoiler")
+        for route, run in (
+                ("a column's value", lambda row: (setattr(columns, "PLUGIN_COLUMNS",
+                                                          columns.resolve_plugin_columns([self.root], ["spoiler:spoil"])),
+                                                  columns.fill_cells([row]))),
+                ("an inspector line", lambda row: service.facts(self.root, row)),
+                ("a palette action", lambda row: service.run_action(self.root, action, row)),
+                ("a data panel", lambda row: plugin_panels.render(self.root, loaded, spec, {}, "Spoiler", [row]))):
+            with self.subTest(route):
+                row = agent_row()
+                run(row)
+                self.assertEqual({key: row[key] for key in ("usage", "damaged", "runtime")},
+                                 {key: agent_row()[key] for key in ("usage", "damaged", "runtime")})
+                self.assertIn("⚠", columns.COLUMNS["name"].render(row).plain)
+        with self.subTest("a column's group value"):
+            columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns([self.root], ["spoiler:spoil"])
+            columns.fill_cells([group], group=True)
+            self.assertEqual(group["harnesses"], ["claude"])
+
+
 if __name__ == "__main__":
     unittest.main()

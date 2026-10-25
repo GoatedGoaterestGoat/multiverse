@@ -11,6 +11,7 @@ key. The backend resolves them into PLUGIN_COLUMNS and computes their cells
 (`plugin_cells`) off the event loop, so rendering only reads what a row already
 carries. `core:KEY` in a view is always core's own column.
 """
+import copy
 from dataclasses import dataclass, field
 import threading
 
@@ -190,6 +191,13 @@ class Run:
         self.finished = threading.Event()
 
 
+def plugin_row(row):
+    """A dashboard row of its own for plugin code: nested records copied too, so a plugin that changes what it was
+    given can never change core's row (its usage, its damage record, the Name cell's markers); other plugins' cells
+    left out."""
+    return copy.deepcopy({key: value for key, value in row.items() if key != "plugin_cells"})
+
+
 def row_key(row, group):
     return str(row.get("path") if group else row.get("id") or row.get("name"))
 
@@ -222,16 +230,18 @@ def fill_cells(rows, group=False):
             entry["last"], entry["run"], run = dict(run.partial), None, None
         if run is None:
             run = Run()
+            # Copied here, before the pass starts: it may outlive this refresh, while core's rows go on being used.
+            given = [(row_key(row, group), plugin_row(row)) for row in wanted]
 
-            def answer(rows=wanted, function=function, what=what, where=where, run=run):
+            def answer(rows=given, function=function, what=what, where=where, run=run):
                 failure = None
                 try:
-                    for row in rows:
+                    for key_of_row, row in rows:
                         try:
-                            value = function(dict(row))
+                            value = function(row)
                         except Exception as error:  # one row's trouble is not the others'
                             failure, value = failure or error, FAILED
-                        run.partial[row_key(row, group)] = None if value is None else clean(str(value))
+                        run.partial[key_of_row] = None if value is None else clean(str(value))
                     if failure is not None:
                         loader.record(column.loaded, what, failure, where)
                 finally:

@@ -16,6 +16,7 @@ from textual.worker import WorkerFailed
 
 from .. import plugins, universe
 from ..plugins import host, loader
+from .columns import plugin_row
 
 async def in_daemon(function, *args):
     """Run function(*args) in a daemon thread and await its result.
@@ -235,7 +236,7 @@ class PluginService:
         lines, deadline = [], time.monotonic() + budget
         for loaded, fact in plugins.inspector_facts(Path(root)):
             left = max(0.05, min(loader.SYNCHRONOUS_BUDGET, deadline - time.monotonic()))
-            outcome = loader.guarded(loaded, "inspector", fact, dict(row), root=root, timeout=left,
+            outcome = loader.guarded(loaded, "inspector", fact, plugin_row(row), root=root, timeout=left,
                                      key=("inspector", getattr(fact, "__qualname__", id(fact))))
             if outcome.state != "ok":
                 lines.append((loaded.name, "unavailable"))
@@ -255,7 +256,7 @@ class PluginService:
         scope = Path(scope)
         if plugin not in plugins.on_here(scope):
             raise ValueError(f"{plugin} is off in {universe_name(scope)}: turn it on from the Plugins screen (P)")
-        context = SimpleNamespace(row=dict(row) if row else None, scope=scope, app=None)
+        context = SimpleNamespace(row=plugin_row(row) if row else None, scope=scope, app=None)
         outcome = loader.guarded(loaded, f"action {name}", function, context, root=scope, timeout=ACTION_TIMEOUT)
         if outcome.state == "timeout":
             raise RuntimeError(f"{plugin}: {name} took longer than {ACTION_TIMEOUT:g} s")
