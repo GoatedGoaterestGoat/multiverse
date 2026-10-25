@@ -204,6 +204,15 @@ For a model you use often, add a harness profile. A profile is a second director
 
 Then run `mv2 spawn --name planner --harness claude-opus`. The dashboard's harness selector lists every profile.
 
+### Claude's models
+
+Claude Code has no command that lists its models, so mv2 keeps a table of them, `harnesses/claude/models.json`. It comes from the catalog built into Claude Code, of the version in the [compatibility table](../reference/compatibility.md), and is updated with each Claude Code version check. Plugins read it through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)).
+
+- **Provider.** An alias names a different model on each provider: `sonnet` is Sonnet 5.5 on the Anthropic API and Sonnet 4.5 on Amazon Bedrock. mv2 picks the provider as Claude Code does, from the first of `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE` and `_VERTEX` that is set to `1`, `true`, `yes` or `on`, else the Anthropic API. It reads them as a launch from mv2 would see them: the harness's settings `env` over the environment mv2 runs in.
+- **Efforts.** Claude Code never refuses an effort: it uses the model's default instead. `harness.check()` refuses an effort the model doesn't take, such as `xhigh` for Sonnet 4.6, and the `[1m]` suffix on a model that doesn't take it.
+- **Models mv2 doesn't know.** Claude also takes models the table doesn't list, such as ones only your account has. `harness.check()` lets those through, marked as unverified.
+- **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
+
 ## The tmux status bar
 
 Each agent's tmux bar shows a short live line instead of tmux's session list and clock:

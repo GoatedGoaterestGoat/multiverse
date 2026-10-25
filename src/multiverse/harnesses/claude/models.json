@@ -1,0 +1,646 @@
+{
+  "schema": 1,
+  "claude_code": "2.1.310",
+  "models": [
+    {
+      "id": "claude-3-5-haiku",
+      "name": "Haiku 3.5",
+      "family": "haiku",
+      "provider_ids": {
+        "first_party": "claude-3-5-haiku-20241022",
+        "bedrock": "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        "vertex": "claude-3-5-haiku@20241022",
+        "foundry": "claude-3-5-haiku",
+        "anthropic_aws": "claude-3-5-haiku-20241022",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-3-5-haiku-20241022"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "long_context_window": null,
+      "max_output_tokens": 8192
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "name": "Haiku 4.5",
+      "family": "haiku",
+      "provider_ids": {
+        "first_party": "claude-haiku-4-5-20251001",
+        "bedrock": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "vertex": "claude-haiku-4-5@20251001",
+        "foundry": "claude-haiku-4-5",
+        "anthropic_aws": "claude-haiku-4-5-20251001",
+        "anthropic_google_cloud": "claude-haiku-4-5-20251001",
+        "mantle": "anthropic.claude-haiku-4-5",
+        "gateway": "claude-haiku-4-5-20251001"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 200000,
+      "max_output_tokens": 64000
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "name": "Haiku 5.5",
+      "family": "haiku",
+      "provider_ids": {
+        "first_party": "claude-haiku-5-5",
+        "bedrock": "us.anthropic.claude-haiku-5-5",
+        "vertex": "claude-haiku-5-5",
+        "foundry": "claude-haiku-5-5",
+        "anthropic_aws": "claude-haiku-5-5",
+        "anthropic_google_cloud": "claude-haiku-5-5",
+        "mantle": "anthropic.claude-haiku-5-5",
+        "gateway": null
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-3-5-sonnet",
+      "name": "Sonnet 3.5",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-3-5-sonnet-20241022",
+        "bedrock": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "vertex": "claude-3-5-sonnet-v2@20241022",
+        "foundry": "claude-3-5-sonnet",
+        "anthropic_aws": "claude-3-5-sonnet-20241022",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-3-5-sonnet-20241022"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "long_context_window": null,
+      "max_output_tokens": 8192
+    },
+    {
+      "id": "claude-3-7-sonnet",
+      "name": "Sonnet 3.7",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-3-7-sonnet-20250219",
+        "bedrock": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "vertex": "claude-3-7-sonnet@20250219",
+        "foundry": "claude-3-7-sonnet",
+        "anthropic_aws": "claude-3-7-sonnet-20250219",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-3-7-sonnet-20250219"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "long_context_window": null,
+      "max_output_tokens": 64000
+    },
+    {
+      "id": "claude-sonnet-4-0",
+      "name": "Sonnet 4",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-sonnet-4-20250514",
+        "bedrock": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        "vertex": "claude-sonnet-4@20250514",
+        "foundry": "claude-sonnet-4",
+        "anthropic_aws": "claude-sonnet-4-20250514",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-sonnet-4-20250514"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 64000
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "name": "Sonnet 4.5",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-sonnet-4-5-20250929",
+        "bedrock": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "vertex": "claude-sonnet-4-5@20250929",
+        "foundry": "claude-sonnet-4-5",
+        "anthropic_aws": "claude-sonnet-4-5-20250929",
+        "anthropic_google_cloud": "claude-sonnet-4-5-20250929",
+        "mantle": null,
+        "gateway": "claude-sonnet-4-5-20250929"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 64000
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "name": "Sonnet 4.6",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-sonnet-4-6",
+        "bedrock": "us.anthropic.claude-sonnet-4-6",
+        "vertex": "claude-sonnet-4-6",
+        "foundry": "claude-sonnet-4-6",
+        "anthropic_aws": "claude-sonnet-4-6",
+        "anthropic_google_cloud": "claude-sonnet-4-6",
+        "mantle": null,
+        "gateway": "claude-sonnet-4-6"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "Sonnet 5",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-sonnet-5",
+        "bedrock": "us.anthropic.claude-sonnet-5",
+        "vertex": "claude-sonnet-5",
+        "foundry": "claude-sonnet-5",
+        "anthropic_aws": "claude-sonnet-5",
+        "anthropic_google_cloud": "claude-sonnet-5",
+        "mantle": "anthropic.claude-sonnet-5",
+        "gateway": "claude-sonnet-5"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Sonnet 5.5",
+      "family": "sonnet",
+      "provider_ids": {
+        "first_party": "claude-sonnet-5-5",
+        "bedrock": "us.anthropic.claude-sonnet-5-5",
+        "vertex": "claude-sonnet-5-5",
+        "foundry": "claude-sonnet-5-5",
+        "anthropic_aws": "claude-sonnet-5-5",
+        "anthropic_google_cloud": "claude-sonnet-5-5",
+        "mantle": "anthropic.claude-sonnet-5-5",
+        "gateway": "claude-sonnet-5-5"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-opus-4-0",
+      "name": "Opus 4",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-20250514",
+        "bedrock": "us.anthropic.claude-opus-4-20250514-v1:0",
+        "vertex": "claude-opus-4@20250514",
+        "foundry": "claude-opus-4",
+        "anthropic_aws": "claude-opus-4-20250514",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-opus-4-20250514"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 200000,
+      "max_output_tokens": 32000
+    },
+    {
+      "id": "claude-opus-4-1",
+      "name": "Opus 4.1",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-1-20250805",
+        "bedrock": "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        "vertex": "claude-opus-4-1@20250805",
+        "foundry": "claude-opus-4-1",
+        "anthropic_aws": "claude-opus-4-1-20250805",
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": "claude-opus-4-1-20250805"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 200000,
+      "max_output_tokens": 32000
+    },
+    {
+      "id": "claude-opus-4-5",
+      "name": "Opus 4.5",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-5-20251101",
+        "bedrock": "us.anthropic.claude-opus-4-5-20251101-v1:0",
+        "vertex": "claude-opus-4-5@20251101",
+        "foundry": "claude-opus-4-5",
+        "anthropic_aws": "claude-opus-4-5-20251101",
+        "anthropic_google_cloud": "claude-opus-4-5-20251101",
+        "mantle": null,
+        "gateway": "claude-opus-4-5-20251101"
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 200000,
+      "max_output_tokens": 64000
+    },
+    {
+      "id": "claude-opus-4-6",
+      "name": "Opus 4.6",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-6",
+        "bedrock": "us.anthropic.claude-opus-4-6-v1",
+        "vertex": "claude-opus-4-6",
+        "foundry": "claude-opus-4-6",
+        "anthropic_aws": "claude-opus-4-6",
+        "anthropic_google_cloud": "claude-opus-4-6",
+        "mantle": null,
+        "gateway": "claude-opus-4-6"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 200000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-opus-4-7",
+      "name": "Opus 4.7",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-7",
+        "bedrock": "us.anthropic.claude-opus-4-7",
+        "vertex": "claude-opus-4-7",
+        "foundry": "claude-opus-4-7",
+        "anthropic_aws": "claude-opus-4-7",
+        "anthropic_google_cloud": "claude-opus-4-7",
+        "mantle": "anthropic.claude-opus-4-7",
+        "gateway": "claude-opus-4-7"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "xhigh",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-opus-4-8",
+      "name": "Opus 4.8",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-4-8",
+        "bedrock": "us.anthropic.claude-opus-4-8",
+        "vertex": "claude-opus-4-8",
+        "foundry": "claude-opus-4-8",
+        "anthropic_aws": "claude-opus-4-8",
+        "anthropic_google_cloud": "claude-opus-4-8",
+        "mantle": "anthropic.claude-opus-4-8",
+        "gateway": "claude-opus-4-8"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Opus 5",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-5",
+        "bedrock": "us.anthropic.claude-opus-5",
+        "vertex": "claude-opus-5",
+        "foundry": "claude-opus-5",
+        "anthropic_aws": "claude-opus-5",
+        "anthropic_google_cloud": "claude-opus-5",
+        "mantle": "anthropic.claude-opus-5",
+        "gateway": "claude-opus-5"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-opus-5-5",
+      "name": "Opus 5.5",
+      "family": "opus",
+      "provider_ids": {
+        "first_party": "claude-opus-5-5",
+        "bedrock": "us.anthropic.claude-opus-5-5",
+        "vertex": "claude-opus-5-5",
+        "foundry": "claude-opus-5-5",
+        "anthropic_aws": "claude-opus-5-5",
+        "anthropic_google_cloud": "claude-opus-5-5",
+        "mantle": "anthropic.claude-opus-5-5",
+        "gateway": "claude-opus-5-5"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": 1000000,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-fable-5",
+      "name": "Fable 5",
+      "family": "fable",
+      "provider_ids": {
+        "first_party": "claude-fable-5",
+        "bedrock": "us.anthropic.claude-fable-5",
+        "vertex": "claude-fable-5",
+        "foundry": "claude-fable-5",
+        "anthropic_aws": "claude-fable-5",
+        "anthropic_google_cloud": "claude-fable-5",
+        "mantle": "anthropic.claude-fable-5",
+        "gateway": "claude-fable-5"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-fable-5-1",
+      "name": "Fable 5.1",
+      "family": "fable",
+      "provider_ids": {
+        "first_party": "claude-fable-5-1",
+        "bedrock": "us.anthropic.claude-fable-5-1",
+        "vertex": "claude-fable-5-1",
+        "foundry": "claude-fable-5-1",
+        "anthropic_aws": "claude-fable-5-1",
+        "anthropic_google_cloud": "claude-fable-5-1",
+        "mantle": "anthropic.claude-fable-5-1",
+        "gateway": "claude-fable-5-1"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-mythos-5",
+      "name": "Mythos 5",
+      "family": "mythos",
+      "provider_ids": {
+        "first_party": "claude-mythos-5",
+        "bedrock": null,
+        "vertex": null,
+        "foundry": null,
+        "anthropic_aws": null,
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": null
+      },
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    },
+    {
+      "id": "claude-mythos-5-1",
+      "name": "Mythos 5.1",
+      "family": "mythos",
+      "provider_ids": {
+        "first_party": "claude-mythos-5-1",
+        "bedrock": null,
+        "vertex": null,
+        "foundry": null,
+        "anthropic_aws": null,
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": null
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000
+    }
+  ],
+  "aliases": {
+    "opus": {
+      "default": "claude-opus-5-5",
+      "per_provider": {
+        "bedrock": "claude-opus-5-5",
+        "vertex": "claude-opus-5-5",
+        "foundry": "claude-opus-4-6",
+        "mantle": "claude-opus-5-5",
+        "anthropic_aws": "claude-opus-5-5",
+        "gateway": "claude-opus-4-7"
+      }
+    },
+    "sonnet": {
+      "default": "claude-sonnet-5-5",
+      "per_provider": {
+        "bedrock": "claude-sonnet-4-5",
+        "vertex": "claude-sonnet-4-5",
+        "foundry": "claude-sonnet-4-5",
+        "mantle": "claude-sonnet-4-5",
+        "anthropic_aws": "claude-sonnet-4-6",
+        "gateway": "claude-sonnet-4-6"
+      }
+    },
+    "haiku": {
+      "default": "claude-haiku-5-5",
+      "per_provider": {
+        "bedrock": "claude-haiku-4-5",
+        "vertex": "claude-haiku-4-5",
+        "foundry": "claude-haiku-4-5",
+        "mantle": "claude-haiku-4-5",
+        "anthropic_aws": "claude-haiku-4-5",
+        "anthropic_google_cloud": "claude-haiku-4-5",
+        "gateway": "claude-haiku-4-5"
+      }
+    },
+    "fable": {
+      "default": "claude-fable-5-1",
+      "per_provider": {
+        "gateway": "claude-fable-5"
+      }
+    }
+  }
+}

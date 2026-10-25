@@ -972,6 +972,11 @@ class Universe:
         from .. import universe as universes
         return [Universe(child, self._plugin) for child in universes.children(self.path)]
 
+    def harness(self, name):
+        """A harness configured here (1.13): .info is what mv.harness_info(universe, name) gives, and
+        .models() and .check() say which models it takes. An unknown name raises api.Error."""
+        return Harness(self, name, self._plugin.harness_info(self, name))
+
     def agents(self, recursive=False):
         """Agents with their state and reported work (needs agents.read)."""
         self._plugin._need("agents.read")
@@ -1153,6 +1158,104 @@ class TurnPage:
     gap: str | None = None
 
 
+class ModelsUnavailable(Error):
+    """A harness that doesn't provide its models, or whose models can't be read now (1.13). A settings screen
+    catches it and offers a free-form model field instead."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Model:
+    """A model a harness takes, for the provider its launches use (1.13)."""
+    id: str                          # the ID the harness sends for this provider
+    name: str                        # display name
+    family: str | None = None        # "opus", "sonnet", "haiku", "fable"
+    aliases: tuple = ()              # names that resolve to it for this provider ("sonnet")
+    efforts: tuple = ()              # the efforts it takes, low to high; () when it takes none
+    default_effort: str | None = None
+    inputs: tuple = ("text",)        # "text", plus "image" where it takes images
+    context_window: int | None = None
+    long_context_window: int | None = None   # with the "[1m]" suffix, where the model supports it
+    max_output_tokens: int | None = None
+    default: bool = False            # the model the harness uses when none is given, where known
+    hidden: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCatalog:
+    """A harness's models (1.13). Treat a source, provider, input or effort you don't know as an opaque name:
+    later minors may add them."""
+    models: tuple                    # Model; only those offered on `provider`
+    free_form: bool                  # the harness also takes model IDs it doesn't list
+    source: str                      # "table" (kept by mv2) or "native" (asked of the harness)
+    version: str | None = None       # "table": the harness version it was taken from ("2.1.310")
+    provider: str | None = None      # Claude: "first-party", "bedrock", "vertex", "foundry", "mantle", ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCheck:
+    """Whether a harness takes a model and effort, without spending anything (1.13)."""
+    ok: bool
+    model: str | None = None         # the resolved ID, when it resolves
+    effort: str | None = None        # the effort a run would use: the given one when the model takes it, the
+                                     # model's default_effort when none was given, None when it takes none
+    verified: bool = False           # True when the model is in the catalog; False when ok only because the
+                                     # harness also takes models it doesn't list (reason says so)
+    reason: str | None = None        # why not ok, or why ok is unverified
+
+
+class Harness:
+    """A harness configured in a universe (1.13): mv.universe(root).harness(NAME)."""
+
+    def __init__(self, universe, name, info):
+        self._universe, self.name, self.info = universe, name, info
+
+    def __repr__(self):
+        return f"Harness({self.name!r} in {str(self._universe.path)!r})"
+
+    def models(self):
+        """The models this harness takes, for a launch from this process (observe)."""
+        return _from_core(ModelCatalog, self._ask("models"))
+
+    def check(self, model, *, effort=None):
+        """Whether this harness takes `model` (an ID or alias) at `effort`, for a launch from this process,
+        without spending anything (observe). An effort the model doesn't take is not ok: Claude Code would
+        silently use another."""
+        if not isinstance(model, str) or not model.strip():
+            raise Error("model must be a model ID or alias")
+        if effort is not None and (not isinstance(effort, str) or not effort):
+            raise Error("effort must be an effort name or None")
+        return _from_core(ModelCheck, self._ask("check_model", model, effort=effort))
+
+    def _ask(self, method, *args, **kwargs):
+        from .. import harnesses
+        from ..harnesses import types
+        from ..runtime import effects
+        plugin, root = self._universe._plugin, self._universe.path
+        with _acting(plugin._loaded, "observe", self._universe, f"reading {self.name}'s models"):
+            adapter = _call(harnesses.load, root, self.name)
+            if not callable(getattr(adapter, method, None)):
+                later = (": not implemented for this harness yet"
+                         if getattr(adapter, "family", "") in ("codex", "pi") else "")
+                raise ModelsUnavailable(f"{self.name} does not provide its models{later}")
+            _call(effects.require, method, self.name)
+            try:  # an adapter's failure never reaches the plugin as text with a file's content in it
+                result = getattr(adapter, method)(*args, environment=_launch_environment(adapter), **kwargs)
+            except Exception:
+                raise ModelsUnavailable(f"{self.name}'s models could not be read") from None
+        if not isinstance(result, types.ModelCatalog if method == "models" else types.ModelCheck):
+            raise ModelsUnavailable(f"{self.name}'s models could not be read")
+        return result
+
+
+def _launch_environment(adapter):
+    """What a launch of `adapter` from this process gets: this process's environment without mv2's own MV2_*
+    variables, with what the harness removes mapped to None and its settings env on top."""
+    spec = getattr(adapter, "spec", {}) or {}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
+    environment.update(dict.fromkeys(spec.get("unset_env") or (), None))
+    environment.update(spec.get("env") or {})
+    return environment
+
 def _from_core(kind, value):
     """An API result from core's result of the same shape: core imports no API types, so a field core adds later
     is one line here."""
@@ -1164,6 +1267,8 @@ def _from_core(kind, value):
         values["rows"] = tuple(_from_core(Row, item) for item in values.get("rows") or ())
     elif kind is TurnPage:
         values["turns"] = tuple(_from_core(Turn, item) for item in values.get("turns") or ())
+    elif kind is ModelCatalog:
+        values["models"] = tuple(_from_core(Model, item) for item in values.get("models") or ())
     return kind(**values)  # a row's data is already a fresh copy: core re-reads each body per call
 
 

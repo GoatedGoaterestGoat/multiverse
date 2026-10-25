@@ -18,6 +18,7 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
+        'models', 'check_model',
     ), 'observe'),
     'ask': 'spend',
     **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
@@ -428,3 +429,48 @@ class TranscriptProvider(Protocol):
                           indexes: Sequence[int], *, max_bytes: int,
                           reader: TranscriptReader | None = None) -> list[dict | None]: ...
     def transcript_readable(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelInfo:
+    """A model a harness takes, for one provider (api.Model is copied from it field by field)."""
+    id: str                          # the ID the harness sends for this provider
+    name: str                        # display name
+    family: str | None = None        # "opus", "sonnet", "haiku", "fable"
+    aliases: tuple = ()              # names that resolve to it for this provider ("sonnet")
+    efforts: tuple = ()              # the efforts it takes, low to high; () when it takes none
+    default_effort: str | None = None
+    inputs: tuple = ('text',)        # "text", plus "image" where it takes images
+    context_window: int | None = None
+    long_context_window: int | None = None   # with the "[1m]" suffix, where the model supports it
+    max_output_tokens: int | None = None
+    default: bool = False            # the model the harness uses when none is given, where known
+    hidden: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCatalog:
+    models: tuple                    # ModelInfo; only those offered on `provider`
+    free_form: bool                  # the harness also takes model IDs it doesn't list
+    source: str                      # "table" (kept by mv2) or "native" (asked of the harness)
+    version: str | None = None       # "table": the harness version it was taken from
+    provider: str | None = None      # Claude: "first-party", "bedrock", "vertex", "foundry", "mantle", ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCheck:
+    ok: bool
+    model: str | None = None         # the resolved ID, when it resolves
+    effort: str | None = None        # the effort a run would use: the given one when the model takes it, the
+                                     # model's default_effort when none was given, None when it takes none
+    verified: bool = False           # the model is in the catalog; False when ok only because it is free-form
+    reason: str | None = None        # why not ok, or why ok is unverified
+
+
+class ModelProvider(Protocol):
+    """Optional: a harness's models and a model/effort check (observe). `environment` is what a launch would
+    get, a variable mapped to None where the launch removes it; the adapter reads only what it needs from it,
+    never os.environ."""
+    def models(self, *, environment: Mapping[str, str | None]) -> ModelCatalog: ...
+    def check_model(self, model: str, *, effort: str | None = None,
+                    environment: Mapping[str, str | None]) -> ModelCheck: ...

@@ -43,6 +43,7 @@ from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read
+from . import models as model_table
 from . import transcripts as rows_source
 from .transcripts import (  # every transcript reader reads through this one row source
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
@@ -1131,6 +1132,14 @@ class ClaudeAdapter(ConfiguredAdapter):
                     value = None
                 out.append(value if isinstance(value, dict) else None)
         return out
+
+    def models(self, *, environment):
+        """The models offered on the provider a launch with `environment` uses, from mv2's table (models.py)."""
+        return model_table.catalog(environment)
+
+    def check_model(self, model, *, effort=None, environment):
+        """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
+        return model_table.check(model, effort, environment)
 
     def transcript_readable(self, session, *, reader=None):
         """Whether an earlier generation's transcript can still be found under its recorded home; None: can't tell."""
