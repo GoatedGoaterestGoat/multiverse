@@ -191,8 +191,9 @@ class ClaudeTranscriptReadingTest(BaseTest):
             self.assertEqual(([t.position_of(item) for item in index.entries][:len(kept)], index.rewrites), (kept, 2))
 
     def test_usage_checks_a_tail_and_a_transcript_read_proves_the_rest(self):
-        """Usage reads the shared index on every listing; fragile because proving the whole prefix there costs a full
-        read per change and goes unnoticed, while a transcript read must still catch an earlier same-length edit."""
+        """Usage reads the shared index on every listing; fragile because proving the whole prefix on every change
+        there costs a full read and goes unnoticed, while an earlier same-length edit must still be seen: by usage
+        when the change added no bytes or a minute has passed, and at once by a transcript read."""
         rows = [{'type': 'assistant', 'uuid': f'u{n}', 'message': {'id': f'm{n}', 'usage': {'input_tokens': n},
                  'content': 'x' * 500}} for n in range(400)]  # well over TAIL
         self.write(rows)
@@ -208,16 +209,27 @@ class ClaudeTranscriptReadingTest(BaseTest):
             self.path.write_bytes(text[:-10] + b'y' * 9 + b'\n')  # same size, new modification time
             os.utime(self.path, ns=(self.path.stat().st_atime_ns, self.path.stat().st_mtime_ns + 1000))
             self.assertEqual(index.read().rewrites, 1)
-        with self.subTest('a transcript read proves what usage only tail-checked'):
+        with self.subTest('a change that adds no bytes is proved in full, even by usage'):
             self.read()
             text = self.path.read_bytes()
             changed = text.replace(b'"input_tokens": 3}', b'"input_tokens": 4}', 1)  # same length, before the tail
             self.assertEqual((len(changed), changed != text), (len(text), True))
             self.path.write_bytes(changed)
             os.utime(self.path, ns=(self.path.stat().st_atime_ns, self.path.stat().st_mtime_ns + 2000))
-            index.read()  # usage: the edit is before the tail, so it is not seen here
-            self.assertEqual(index.rewrites, 1)
-            self.assertEqual(self.read()[0].rewrites, 2)  # the transcript read, through newest_copy
+            self.assertEqual((index.read().rewrites, index.responses['m3']['input_tokens']), (2, 4))
+        with self.subTest('a growing file: a transcript read proves it at once, usage within a minute'):
+            self.read()
+            text = self.path.read_bytes()
+            self.path.write_bytes(text.replace(b'"input_tokens": 5}', b'"input_tokens": 6}', 1)
+                                  + (json.dumps(rows[0] | {'uuid': 'grown'}) + '\n').encode())
+            index.read()  # the edit is before the tail, and the file grew: the tail check alone, for now
+            self.assertEqual(index.rewrites, 2)
+            self.assertEqual(self.read()[0].rewrites, 3)  # the transcript read, through newest_copy
+            text = self.path.read_bytes()
+            self.path.write_bytes(text.replace(b'"input_tokens": 7}', b'"input_tokens": 8}', 1)
+                                  + (json.dumps(rows[0] | {'uuid': 'grown again'}) + '\n').encode())
+            with patch.object(t, 'monotonic', return_value=index.proven_at + t.PROOF_INTERVAL):
+                self.assertEqual((index.read().rewrites, index.responses['m7']['input_tokens']), (4, 8))
 
     def test_a_damaged_field_never_breaks_usage_or_the_index(self):
         """Usage reads every row through the shared index; fragile because one malformed field on an unrelated row

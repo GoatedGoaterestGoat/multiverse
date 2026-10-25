@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import threading
+from time import monotonic
 import unicodedata
 
 from ..types import Usage
@@ -205,7 +206,8 @@ def has_saved_conversation(native_id, environment=None, workspaces=()):
         return True
 
 
-TAIL = 1 << 16  # how much of what an index already read it checks again when the file changed
+TAIL = 1 << 16  # how much of what an index already read it checks again when the file grew
+PROOF_INTERVAL = 60  # seconds: a file that keeps growing is proved in full at least this often, even for usage
 
 
 class Transcript:
@@ -219,12 +221,14 @@ class Transcript:
     response.
 
     Claude isn't append-only: it truncates a file at a tombstoned row and writes the rest back in place, and can
-    rewrite a whole file. So whenever the file changed since the last read (its size or modification time), the index
-    checks the last `TAIL` bytes it already read, which such a rewrite moves, and starts over when they differ (or on
-    a new inode, or a smaller file). That keeps usage, which reads on every listing, at one parse per new byte. A
-    transcript read (`read(prove=True)`) also proves every byte already indexed unchanged, against a running hash of
-    them, once per change of the file, so a position's chained hash stays exact. `rewrites` counts the restarts. An
-    unchanged file costs no read, and an append never changes an earlier row's position.
+    rewrite a whole file. The index starts over on a new inode or a smaller file, and otherwise, when the file
+    changed since the last read (its size or modification time), proves what it already read against a running hash
+    of those bytes, starting over when they differ. A transcript read (`read(prove=True)`) proves every byte, once per
+    change, so a position's chained hash stays exact. Usage, which reads on every listing, proves every byte when a
+    change added no bytes (no append, so something rewrote it) or when `PROOF_INTERVAL` has passed since the last
+    proof; for the ordinary append in between it checks only the last `TAIL` bytes, which a tombstone always moves,
+    so it stays at one parse per new byte. `rewrites` counts the restarts. An unchanged file costs no read, and an
+    append never changes an earlier row's position.
     """
 
     def __init__(self, path):
@@ -234,6 +238,7 @@ class Transcript:
     def _reset(self, inode):
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
+        self.proven_at = None  # monotonic() at the last full proof (or whole read)
 
     def _tail_intact(self, handle):
         """Whether the last bytes already indexed are still exactly what was read."""
@@ -258,14 +263,20 @@ class Transcript:
         with open_regular(self.path) as handle:
             status = os.fstat(handle.fileno())
             stamp = (status.st_mtime_ns, status.st_size)
+            proved = False
             if status.st_ino != self.inode or status.st_size < self.offset:
                 stale = True
             elif not self.offset:
                 stale = False
             elif prove and stamp != self.proven:
-                stale = not self._intact(handle)
+                stale, proved = not self._intact(handle), True
+            elif stamp == self.stamp:
+                stale = False
+            elif (status.st_size == self.stamp[1] or self.proven_at is None
+                  or monotonic() - self.proven_at >= PROOF_INTERVAL):
+                stale, proved = not self._intact(handle), True  # no append to explain the change, or due a proof
             else:
-                stale = stamp != self.stamp and not self._tail_intact(handle)
+                stale = not self._tail_intact(handle)
             if stale:
                 if self.inode is not None:
                     self.rewrites += 1
@@ -292,8 +303,8 @@ class Transcript:
         self.tail = (self.tail + data[:end])[-TAIL:]
         self.offset += end
         self.stamp = stamp
-        if prove or not start:
-            self.proven = stamp
+        if prove or proved or not start:
+            self.proven, self.proven_at = stamp, monotonic()
         return self
 
 
