@@ -222,6 +222,14 @@ class ConfigTest(PluginTestCase):
                 path.unlink()  # missing, not damaged: the defaults
                 loader.reset()
                 self.assertTrue(plugins.entry(self.root, "deft").on)
+        with self.subTest("torn between reading the plugin and deciding its access"):
+            path.write_text(json.dumps({"schema": 1, "enabled": {"tool": True}, "access": {"tool": "observe"}}))
+            loader.reset()
+            found = plugins.entry(self.root, "tool")  # read while the file was whole: on, at observe
+            path.write_text('{"schema": 1, "enabled": {"tool": tr')  # then torn before the decision reads it
+            self.assertIsNone(loader.access_level(self.root, found))  # never the request (act) from an empty read
+            path.write_text(json.dumps({"schema": 1, "enabled": {"tool": False}}))  # or turned off meanwhile
+            self.assertIsNone(loader.access_level(self.root, found))
         with self.subTest("unusable"):
             for text in ('{"enabled": {"a": "yes"}}', '{"schema": 1, "access": {}, "enabled": {"a": "yes"}}'):
                 path.write_text(text)

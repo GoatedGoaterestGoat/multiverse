@@ -533,11 +533,17 @@ def entry(root, name):
 def access_level(root, found):
     """The access level plugin `found` has in universe `root`: None where it is off; else the level granted there
     (none recorded: what it requests), never above its request, capped by the universe's access_ceiling and by
-    MV2_EFFECTS for this process."""
+    MV2_EFFECTS for this process.
+
+    Decided from one read of plugins.json, whether it is on included, not from what `found` was read with: a
+    file torn or changed since then never hands back access (an unusable read is off, so no access, while a
+    missing file means the defaults)."""
     if found is None or not found.on or found.manifest is None:
         return None
-    request = found.manifest.access.request
     settings = config.load(root) if root is not None else config.Config()
+    if not settings.is_on(found.name, found.manifest.default if found.source == "bundled" else "off"):
+        return None
+    request = found.manifest.access.request
     granted = settings.access.get(found.name, request)
     return levels.lowest(*(level for level in (granted, request, settings.ceiling, levels.process_ceiling())
                            if level is not None))
