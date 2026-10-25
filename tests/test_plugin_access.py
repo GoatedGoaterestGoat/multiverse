@@ -1,4 +1,5 @@
 """Access levels (API 1.13): what a plugin may do in a universe is the level the user grants it there."""
+import asyncio
 import contextlib
 import io
 import json
@@ -198,7 +199,8 @@ class AccessTest(PluginTestCase):
         """A contribution runs under the class it declared (undeclared: act) and only where the plugin's level
         reaches it: an observe column or @mv.effect("observe") function can't send, an act command is refused
         before it runs, and launch contributions need act, the launch saying why; fragile because these run
-        unattended (every refresh, every launch), where a break goes unnoticed."""
+        unattended (every refresh, every launch), where a break goes unnoticed; an async observe function stays
+        observe after its awaits, and a generator, whose body would run outside the limit, is refused."""
         self.planner()
         self.enable("planner")
         config.set_grant(self.root, "planner", "observe")
@@ -214,10 +216,24 @@ class AccessTest(PluginTestCase):
             send.assert_not_called()
         with self.subTest("an observe function"), mock.patch("multiverse.tools.send.run") as send:
             config.set_grant(self.root, "planner", "act")  # even with act granted
+            self.addCleanup(config.set_grant, self.root, "planner", "observe")  # whatever this row finds
             with self.assertRaisesRegex(api.AccessDenied, "planner's peek is declared observe; send needs act"):
                 [item for item in module.RAN if callable(item)][0](self.root)
+            mv = self.mv("planner")
+
+            @mv.effect("observe")
+            async def wander(universe):  # the limit must still hold after an await
+                await asyncio.sleep(0)
+                return mv.universe(universe).agent("worker").send("from an observe coroutine")
+            with self.assertRaisesRegex(api.AccessDenied, "planner's wander is declared observe; send needs act"):
+                asyncio.run(wander(self.root))
             send.assert_not_called()
-            config.set_grant(self.root, "planner", "observe")
+
+            def pages():
+                yield mv.universe(self.root).agent("worker").send("from an observe generator")
+            with self.assertRaisesRegex(api.Error, "can't declare planner's pages, a generator"):
+                mv.effect("observe")(pages)
+        config.set_grant(self.root, "planner", "observe")
         with self.subTest("commands"):
             module.RAN.clear()
             self.assertEqual(registered.commands["planner"].run(self.root), {"agents": ["worker"]})

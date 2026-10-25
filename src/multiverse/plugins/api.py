@@ -22,6 +22,7 @@ are not covered.
 """
 from contextlib import contextmanager, ExitStack
 import functools
+import inspect
 from dataclasses import dataclass, field, fields
 import os
 from pathlib import Path
@@ -823,10 +824,22 @@ class _Effect:
         self._stack = []
 
     def __call__(self, function):
+        label = f"{self._loaded.name}'s {getattr(function, '__name__', 'code')}"
+        if inspect.isgeneratorfunction(function) or inspect.isasyncgenfunction(function):
+            # Its body runs a step at a time, between the caller's own code: a limit held across those pauses
+            # would limit the caller too, and one released between them wouldn't limit the body at all.
+            raise Error(f"mv.effect can't declare {label}, a generator: declare the function that uses it, or wrap "
+                        f"its body in `with mv.effect(...)`")
+        if inspect.iscoroutinefunction(function):
+            @functools.wraps(function)
+            async def awaited(*arguments, **keywords):  # the limit holds until the coroutine's body ends
+                with levels.within(self.level, label, declared=True):
+                    return await function(*arguments, **keywords)
+            return awaited
+
         @functools.wraps(function)
         def declared(*arguments, **keywords):
-            with levels.within(self.level, f"{self._loaded.name}'s {getattr(function, '__name__', 'code')}",
-                               declared=True):
+            with levels.within(self.level, label, declared=True):
                 return function(*arguments, **keywords)
         return declared
 
@@ -888,7 +901,9 @@ class Plugin:
     def effect(self, level):
         """Declare the class of the plugin's own code (1.13): `@mv.effect("observe")` on a function, or
         `with mv.effect("observe"):`. An API call above it, made inside, is refused. It follows a context
-        variable, not threads the plugin starts itself."""
+        variable, not threads the plugin starts itself. An async function stays declared until its body ends,
+        across its awaits; a generator can't be declared, since its body runs between the caller's own code
+        (wrap its body in `with mv.effect(...)` instead)."""
         return _Effect(self._loaded, level)
 
     def universe(self, path=None):
