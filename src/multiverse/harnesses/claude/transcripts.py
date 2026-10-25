@@ -227,7 +227,8 @@ class Transcript:
     change, so a position's chained hash stays exact. Usage, which reads on every listing, proves every byte when a
     change added no bytes (no append, so something rewrote it) or when `PROOF_INTERVAL` has passed since the last
     proof; for the ordinary append in between it checks only the last `TAIL` bytes, which a tombstone always moves,
-    so it stays at one parse per new byte. `rewrites` counts the restarts. An unchanged file costs no read, and an
+    so it stays at one parse per new byte, and the due proof still runs once the file has gone quiet after such
+    a change. `rewrites` counts the restarts. An unchanged file costs no read, and an
     append never changes an earlier row's position.
     """
 
@@ -239,6 +240,7 @@ class Transcript:
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
+        self.unproved = False  # a change was accepted on the tail check alone since that proof
 
     def _tail_intact(self, handle):
         """Whether the last bytes already indexed are still exactly what was read."""
@@ -263,20 +265,21 @@ class Transcript:
         with open_regular(self.path) as handle:
             status = os.fstat(handle.fileno())
             stamp = (status.st_mtime_ns, status.st_size)
-            proved = False
+            proved = tail_only = False
             if status.st_ino != self.inode or status.st_size < self.offset:
                 stale = True
             elif not self.offset:
                 stale = False
             elif prove and stamp != self.proven:
                 stale, proved = not self._intact(handle), True
-            elif stamp == self.stamp:
-                stale = False
-            elif (status.st_size == self.stamp[1] or self.proven_at is None
-                  or monotonic() - self.proven_at >= PROOF_INTERVAL):
-                stale, proved = not self._intact(handle), True  # no append to explain the change, or due a proof
             else:
-                stale = not self._tail_intact(handle)
+                due = self.proven_at is None or monotonic() - self.proven_at >= PROOF_INTERVAL
+                if stamp == self.stamp and not (self.unproved and due):
+                    stale = False  # unchanged since a read that proved it, or not due yet
+                elif stamp == self.stamp or status.st_size == self.stamp[1] or due:
+                    stale, proved = not self._intact(handle), True  # no append to explain the change, or due a proof
+                else:
+                    stale, tail_only = not self._tail_intact(handle), True
             if stale:
                 if self.inode is not None:
                     self.rewrites += 1
@@ -304,7 +307,9 @@ class Transcript:
         self.offset += end
         self.stamp = stamp
         if prove or proved or not start:
-            self.proven, self.proven_at = stamp, monotonic()
+            self.proven, self.proven_at, self.unproved = stamp, monotonic(), False
+        elif tail_only:
+            self.unproved = True
         return self
 
 

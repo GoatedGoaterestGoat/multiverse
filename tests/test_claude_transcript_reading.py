@@ -230,6 +230,18 @@ class ClaudeTranscriptReadingTest(BaseTest):
                                   + (json.dumps(rows[0] | {'uuid': 'grown again'}) + '\n').encode())
             with patch.object(t, 'monotonic', return_value=index.proven_at + t.PROOF_INTERVAL):
                 self.assertEqual((index.read().rewrites, index.responses['m7']['input_tokens']), (4, 8))
+        with self.subTest('a file that went quiet after a tail-only read is still proved once due'):
+            text = self.path.read_bytes()
+            self.path.write_bytes(text.replace(b'"input_tokens": 9}', b'"input_tokens": 1}', 1)
+                                  + (json.dumps(rows[0] | {'uuid': 'last'}) + '\n').encode())
+            index.read()  # tail only, and then the file stops changing
+            self.assertEqual(index.responses['m9']['input_tokens'], 9)
+            with patch.object(t, 'monotonic', return_value=index.proven_at + 2 * t.PROOF_INTERVAL):
+                self.assertEqual((index.read().rewrites, index.responses['m9']['input_tokens']), (5, 1))
+        with self.subTest('a fully proved, unchanged file still costs no read'):
+            with patch.object(t, 'monotonic', return_value=index.proven_at + 10 * t.PROOF_INTERVAL), \
+                    patch.object(t.Transcript, '_intact', side_effect=AssertionError('proved an unchanged file')):
+                index.read()
 
     def test_a_damaged_field_never_breaks_usage_or_the_index(self):
         """Usage reads every row through the shared index; fragile because one malformed field on an unrelated row
