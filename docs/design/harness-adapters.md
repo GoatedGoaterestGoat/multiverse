@@ -58,8 +58,9 @@ when every transcript that could hold it was read whole without either, else unk
 For an older record that kept only the body, a body match stays unknown. It never confirms
 falsely: each stored copy of a text counts once (by its row uuid, across copies of the
 transcript, and once however many paths reach a file), and among the session's acceptances of
-the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt
-receipt the copy stored just before it, a mid-turn receipt none. The remaining copies go to the
+the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt or
+peer-prompt receipt the copy stored just before it (a peer row that lost its `msg_id` is just text
+then), a mid-turn receipt none. The remaining copies go to the
 others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
 a copy left to another identical message makes the answer unknown. So does an identical message the
 current live launch accepted that has no receipt yet, since it may still write one for a copy, and

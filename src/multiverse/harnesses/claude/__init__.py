@@ -498,6 +498,9 @@ SENT = re.compile(r'[0-9][0-9T:.+\-Z]*')  # the send time the mod's tag pattern 
 
 
 RECEIPT_ROUTES = ('prompt', 'mid-turn', 'peer-prompt')  # where a delivered message's row was stored
+# Routes whose row is a user row, one of the copies identical texts share: its receipt owns one. (A peer prompt's row
+# normally carries its msg_id too, but one that lost it is just text, and its receipt must still hold its copy.)
+COPY_ROUTES = ('prompt', 'peer-prompt')
 
 
 def mod_receipt(path, identifier):
@@ -544,9 +547,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once, by its row
     uuid across transcript copies. `cohort` holds the session's other acceptances as (message_id, framed text,
     since). Among those with our text, an exact receipt (the mod's file in `directory`, else the ledger's in
-    `receipts`) first takes its own copy: a prompt receipt the one unused copy stored between its accept time
-    and it, within a minute (none, or more than one, leaves this unknown); a mid-turn receipt none, being a
-    queued_command row. The remaining copies go to the others from their accept
+    `receipts`) first takes its own copy: a prompt or peer-prompt receipt the one unused copy stored between its
+    accept time and it, within a minute (none, or more than one, leaves this unknown; a peer prompt's row that
+    kept its msg_id is an ID row instead); a mid-turn receipt none, being a queued_command row. The remaining copies go to the others from their accept
     times on, oldest first. False only when every transcript that could hold it was read whole and no copy is
     left from our accept time on. With `framed` False, `text` is only the body (older records): a match is not
     proof, since another message can share it; its absence still is. An identical acceptance in `active` (accepted by
@@ -626,9 +629,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         if directory is None and not receipts:
             return None, "Another acceptance of the same text can't be checked for a receipt: no agent folder"
         receipt = _receipt(directory, receipts, other)
-        if receipt is False or receipt and receipt[0] == 'prompt' and receipt[1] is None:
+        if receipt is False or receipt and receipt[0] in COPY_ROUTES and receipt[1] is None:
             return None, "Another acceptance of the same text has a receipt that can't be placed in time"
-        if receipt and receipt[0] == 'prompt':
+        if receipt and receipt[0] in COPY_ROUTES:
             holders.append((receipt[1], accepted))
         elif not receipt and other in (active or ()):
             return None, ("An identical message the live launch accepted may still be stored and confirmed: check again "

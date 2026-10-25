@@ -739,6 +739,7 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
         a wrong True hides a lost one (LC-30)."""
         earlier = (str(uuid4()), self.TEXT, '2026-10-19T09:59:58.000000+00:00')  # the same text, accepted first
         later = (str(uuid4()), self.TEXT, '2026-10-19T10:00:02.000000+00:00')
+        owner = str(uuid4())  # another acceptance of the same text, whose receipt names the one stored copy
         rows = [
             ('a mid-turn steer, matched by its id', [self.steer(prompt='other text')], '', {}, ('ok', True)),
             ('a follow-up typed in after the accept', [self.prompt()], '', {}, ('ok', True)),
@@ -751,6 +752,12 @@ class ClaudeAcceptedMessageEvidenceTest(BaseTest):
             ('one copy, two identical acceptances: the older takes it', [self.prompt()], '', {'cohort': [later]},
              ('ok', True)),
             ('one copy, two identical acceptances: the newer is left unknown', [self.prompt()], '', {'cohort': [earlier]},
+             ('unknown', None)),
+            # A peer-prompt receipt owns its copy as a prompt receipt does, even when the row lost its msg_id: else the
+            # older identical message is confirmed by the other attempt's row (reviewer, 3ccc675).
+            ('a peer-prompt receipt for another acceptance reserves its copy', [{**self.prompt(), 'origin': {'kind': 'peer'}}],
+             '', {'cohort': [(owner, self.TEXT, self.SINCE)],
+                  'ledger': {owner: {'transcript_confirmed': True, 'route': 'peer-prompt', 'delivered_at_ms': 1792404006000}}},
              ('unknown', None)),
             ('two copies, two identical acceptances', [self.prompt(), self.prompt(at='2026-10-19T10:00:06.000Z')], '',
              {'cohort': [earlier]}, ('ok', True)),
