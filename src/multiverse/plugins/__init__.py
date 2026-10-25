@@ -134,7 +134,8 @@ def problems(root, reserved=(), wait=None):
     usable = []
     settings_problem = config.load(root).problem
     if settings_problem:
-        found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
+        found_problems.append(f"plugins.json cannot be used, so every plugin is off here until it is repaired: "
+                              f"{settings_problem}")
     waiting_uninstalled = dict(not_installed(root))
     found_problems.extend(not_installed_message(name, legacy) for name, legacy in waiting_uninstalled.items())
     for name, failure in sorted(_failed_conversions(root).items()):

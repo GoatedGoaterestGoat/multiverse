@@ -37,6 +37,10 @@ class Config:
     ceiling: str | None = None  # access_ceiling: no plugin here has more
 
     def is_on(self, name, default="off"):
+        if self.problem:
+            # A plugins.json that is here but can't be used turns every plugin off, never back to its default: a
+            # torn file must not turn on a plugin a person turned off, or give back access a person took away.
+            return False
         value = self.enabled.get(name)
         return default == "on" if value is None else value
 
@@ -100,7 +104,8 @@ def parse(data, where=FILE):
 
 
 def load(root):
-    """This universe's Config. Never raises: an unusable file reads as the defaults with `problem` set."""
+    """This universe's Config. Never raises: an unusable file reads with `problem` set, and every plugin off
+    (is_on); a missing file means the defaults."""
     try:
         data = _raw(root)
         if data is None:

@@ -83,7 +83,7 @@ These files record which plugins are on, their settings and their state. See [pl
 
 This file says which plugins are on in this universe. A missing file, or a plugin it doesn't name, means the plugin's default. The default is off, except for bundled plugins marked on, such as typeahead.
 
-Subverses don't inherit the file. `mv2 plugins enable`, `disable` and `grant` and the dashboard's `P` write it. An unusable file stops nothing: every plugin is at its default, and `mv2 doctor` says why.
+Subverses don't inherit the file. `mv2 plugins enable`, `disable` and `grant` and the dashboard's `P` write it. An unusable file turns every plugin off in that universe until it's repaired, so a torn file never turns on a plugin you turned off or gives back access you took away; `mv2 doctor` says why. A missing file means the defaults.
 
 ```json
 {"schema": 1, "enabled": {"compaction": true, "remote": false}, "access": {"compaction": "spend"},

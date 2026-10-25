@@ -180,9 +180,10 @@ class DiscoveryTest(PluginTestCase):
 
 class ConfigTest(PluginTestCase):
     def test_plugins_json_keeps_unknown_keys_and_survives_damage(self):
-        """Writing plugins.json keeps keys from newer and older mv2, and an unusable file reads as defaults and is
-        never rewritten; a break goes unnoticed because older runners sharing the universe silently turn every
-        plugin off or the next write drops the newer fields."""
+        """Writing plugins.json keeps keys from newer and older mv2, and an unusable file is never rewritten and turns
+        every plugin off (a missing one means the defaults); a break goes unnoticed because older runners sharing the
+        universe silently turn every plugin off, the next write drops the newer fields, or a torn file turns a
+        plugin a person turned off back on, or gives back the access a person took away."""
         path = config.path(self.root)
         with self.subTest("an older mv2's keys"):
             # "keys" is from before plugins lost their dashboard keys: still read, and kept.
@@ -203,6 +204,24 @@ class ConfigTest(PluginTestCase):
             self.assertTrue(any("layout, sandbox" in note for note in plugins.notes(self.root)))
             config.set_enabled(self.root, "tool", False)  # writing it keeps what a newer mv2 put there
             self.assertEqual(json.loads(path.read_text())["layout"], {"tool": "left"})
+        with self.subTest("unusable, after a person turned a default-on plugin off and lowered a grant"):
+            bundled = self.work / "bundled"
+            self.write_plugin("deft", {"default": "on"}, where=bundled)
+            with mock.patch.object(loader, "BUNDLED", bundled):
+                path.write_text(json.dumps({"schema": 1, "enabled": {"deft": False, "tool": True},
+                                            "access": {"tool": "observe"}}))
+                loader.reset()
+                self.assertEqual((plugins.entry(self.root, "deft").on, loader.access_level(
+                    self.root, plugins.entry(self.root, "tool"))), (False, "observe"))
+                path.write_text('{"schema": 1, "enabled": {"deft": false, "tool": tr')  # torn mid-write
+                loader.reset()
+                for name in ("deft", "tool"):
+                    found = plugins.entry(self.root, name)
+                    self.assertEqual((found.on, loader.access_level(self.root, found)), (False, None), name)
+                self.assertIn("every plugin is off here until it is repaired", plugins.problems(self.root)[0])
+                path.unlink()  # missing, not damaged: the defaults
+                loader.reset()
+                self.assertTrue(plugins.entry(self.root, "deft").on)
         with self.subTest("unusable"):
             for text in ('{"enabled": {"a": "yes"}}', '{"schema": 1, "access": {}, "enabled": {"a": "yes"}}'):
                 path.write_text(text)
