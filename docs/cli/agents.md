@@ -35,7 +35,7 @@ mv2 list --columns name,phase   # only these columns, in this order
 mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, status and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
 `--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at. `--json` always gives every field.
 

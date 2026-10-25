@@ -16,7 +16,7 @@ COLUMNS = {
     "universe": lambda row, root, wide: place(row, root) or ".",
     "id": lambda row, root, wide: row.get("id") or "",
 }
-DEFAULT_COLUMNS = ("name", "status", "summary")
+DEFAULT_COLUMNS = ("name", "status", "phase", "summary")
 
 
 def configure(parser):

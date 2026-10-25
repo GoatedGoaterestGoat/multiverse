@@ -193,11 +193,13 @@ class DamagedListingTests(PluginTestCase):
                 self.assertIn("damaged: properties.json", list_agents.run(self.root))
 
     def test_list_columns_prints_what_was_asked_and_one_column_prints_only_values(self):
-        """mv2 list --columns with one column prints one value per agent, a damaged one included, and nothing else,
-        several columns keep the ! problem lines, and a list that names nothing, has an empty entry or names a column
-        twice is refused; fragile because scripts loop over the one-column form ($(mv2 list --columns name)), so a
-        padded value, a problem line or the whole table (from --columns "$EMPTY") read as agents' names sends to agents
-        that do not exist, and a problem line lost from the table hides it unnoticed."""
+        """mv2 list shows name, status, phase and summary; with --columns, one column prints one value per agent, a
+        damaged one included, and nothing else, several columns keep the ! problem lines, and a list that names
+        nothing, has an empty entry or names a column twice is refused; fragile because agents and leads are told to
+        read the phase in the plain listing (the bootstrap, the coordination skill), and scripts loop over the
+        one-column form ($(mv2 list --columns name)), so a padded value, a problem line or the whole table (from
+        --columns "$EMPTY") read as agents' names sends to agents that do not exist, and a lost phase or problem line
+        goes unnoticed."""
         (self.victim / "properties.json").write_text("[]")
         names = sorted(row["name"] for row in self.rows().values())
 
@@ -208,6 +210,9 @@ class DamagedListingTests(PluginTestCase):
                 cli.main()
             return out.getvalue()
 
+        with self.subTest("the default listing: name, status, phase and summary"):
+            healthy = next(line for line in listed().splitlines() if line.startswith("healthy"))
+            self.assertEqual(healthy.split(), ["healthy", "dormant", "working", "HEALTHY-MARKER"])
         with self.subTest("one column"):
             self.assertEqual(sorted(listed("--columns", "name").splitlines()), names)
         with self.subTest("several columns, in the order asked"):

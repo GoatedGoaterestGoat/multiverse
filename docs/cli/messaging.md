@@ -66,7 +66,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
 | `Not sent: NAME is focused until …` | The agent is [focused](#focus-an-agent), so nothing was saved | Send it again with `--delivery inbox-only`, or wait until it unfocuses |
 
-A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list --columns name,phase`.
+A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
 Failed delivery and check lines go to stderr and exit nonzero; successful lines
 go to stdout. With `--json`, the result stays on stdout.
@@ -225,7 +225,7 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The summary shows in `mv2 list`, the phase with `mv2 list --columns name,phase,summary`, and both in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
 
 ## Inside Claude and Pi sessions
 
