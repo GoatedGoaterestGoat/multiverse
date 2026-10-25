@@ -1363,7 +1363,10 @@ prompt alike, and the mod strips the tag where Claude stores the row: a row is
 credited only by the tag in its own text, never by its text alone, since
 identical texts can't be told apart once stored and the mod forgets what is
 waiting when it reloads. `get_delivery` counts a receipt only when it names the
-requested ID in the shape the mod writes. Claude also stamps a peer row (a
+requested ID in the shape the mod writes. It reads receipts (and `ask` answers) without waiting on
+the file and with a size bound: core holds the agent's launch and delivery locks
+while it reads, so a FIFO at a receipt's name, or anything too large to be one,
+reads as unknown at once. Claude also stamps a peer row (a
 mid-turn steer's queued command, or the peer prompt one runs as after an
 interruption) with the attempt's ID, so delivery evidence matches it exactly.
 

@@ -521,13 +521,26 @@ def mod_receipt(path, identifier):
     return 'delivered', value['route'], at if type(at) is int and at > 0 else None
 
 
-def _json_record(path):
-    """A small JSON object file: the dict, None when there is no file, False when it can't be read or isn't one."""
+RECEIPT_BYTES = 1 << 16  # a receipt is a few short fields; anything larger isn't one
+ANSWER_BYTES = 1 << 22  # an ask answer holds the model's text
+
+
+def _json_record(path, limit=RECEIPT_BYTES):
+    """A small JSON object file: the dict, None when there is no file, False when it can't be read, isn't a regular
+    file, is over `limit` bytes or isn't a JSON object. It is opened without waiting (open_regular): core reads
+    receipts while holding the agent's launch and delivery locks, so a FIFO at its name must never block."""
     try:
-        value = json.loads(Path(path).read_text())
+        with open_regular(path) as handle:
+            data = handle.read(limit + 1)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError):
+    except (OSError, Unreadable):
+        return False
+    if len(data) > limit:
+        return False
+    try:
+        value = json.loads(data)
+    except ValueError:
         return False
     return value if isinstance(value, dict) else False
 
@@ -1276,9 +1289,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             return written
         deadline = time.monotonic() + ASK_TIMEOUT
         while time.monotonic() < deadline:
-            try:
-                record = json.loads(answer.read_text())
-            except (OSError, ValueError):  # not written yet, or mid-write
+            record = _json_record(answer, ANSWER_BYTES)
+            if not record:  # not written yet, mid-write, or not an answer file
                 time.sleep(0.2)
                 continue
             answer.unlink(missing_ok=True)

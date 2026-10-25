@@ -2,6 +2,7 @@
 from dataclasses import replace
 import hashlib
 import json
+import threading
 import re
 import os
 from pathlib import Path
@@ -354,7 +355,10 @@ class ClaudeBridgeTest(BaseTest):
                     ({'id': message_id, 'delivered': 'false', 'route': 'prompt', 'at': 1}, None, ('unknown', None, None)),
                     ({'id': message_id.upper(), 'route': 'peer-prompt', 'at': 1}, None, ('native_queued', True, None)),
                     # The refusal's write can finish after the row was stored: the delivery wins.
-                    ({'id': message_id, 'route': 'prompt', 'at': 2}, refused | {'definite': True}, ('native_queued', True, None))):
+                    ({'id': message_id, 'route': 'prompt', 'at': 2}, refused | {'definite': True}, ('native_queued', True, None)),
+                    # A damaged delivery file never falls through to the refusal beside it: that would authorize a
+                    # retry of a message that may have arrived (lifecycle).
+                    ('{"id": ', refused | {'definite': True}, ('unknown', None, None))):
                 with self.subTest(delivered=delivered, refusal=refusal):
                     for name, record in ((f'{message_id}.json', delivered), (f'{message_id}.not-delivered.json', refusal)):
                         (folder / name).unlink(missing_ok=True)
@@ -363,6 +367,49 @@ class ClaudeBridgeTest(BaseTest):
                     result = adapter.get_delivery(session, message_id)
                     value = result.value or {}
                     self.assertEqual((result.state, value.get('transcript_confirmed'), value.get('definite_failure')), expected)
+        with self.subTest('a receipt name that is a FIFO, or a receipt too large to be one'):
+            # get_delivery runs while core holds the agent's launch and delivery locks (native.deliver), so a FIFO at a
+            # receipt's name must read as unknown at once: an open that waits for a writer would hold stop, resume
+            # and every later delivery (reviewer, 3ccc675).
+            for name, beside in ((f'{message_id}.json', None), (f'{message_id}.not-delivered.json', None),
+                                 (f'{message_id}.json', refused | {'definite': True})):
+                with self.subTest(fifo=name, beside=beside):
+                    for other in (f'{message_id}.json', f'{message_id}.not-delivered.json'):
+                        (folder / other).unlink(missing_ok=True)
+                    if beside is not None:  # an unreadable delivery file never yields to the refusal
+                        (folder / f'{message_id}.not-delivered.json').write_text(json.dumps(beside))
+                    os.mkfifo(folder / name)
+                    found = []
+                    worker = threading.Thread(target=lambda: found.append(adapter.get_delivery(session, message_id)), daemon=True)
+                    worker.start()
+                    worker.join(2)
+                    blocked = worker.is_alive()
+                    if blocked:  # release only this FIFO, so no reader is left behind
+                        with (folder / name).open('w') as writer:
+                            writer.write('{}')
+                        worker.join(2)
+                    (folder / name).unlink()
+                    (folder / f'{message_id}.not-delivered.json').unlink(missing_ok=True)
+                    self.assertFalse(blocked, f'get_delivery waited on the FIFO {name}')
+                    self.assertEqual(found[0].state, 'unknown')
+            (folder / f'{message_id}.json').write_text(json.dumps({'id': message_id, 'route': 'prompt', 'at': 1, 'pad': 'x' * (1 << 17)}))
+            self.assertEqual(adapter.get_delivery(session, message_id).state, 'unknown')
+            # The read itself is bounded, not only the verdict on what came back: an unbounded read would load a huge
+            # file into memory before refusing it (lifecycle).
+            from multiverse.harnesses import claude as claude_adapter
+            sizes, real = [], claude_adapter.open_regular
+
+            class Recording:
+                def __init__(self, handle): self.handle = handle
+                def __enter__(self): return self
+                def __exit__(self, *_): self.handle.close()
+                def read(self, size=-1):
+                    sizes.append(size)
+                    return self.handle.read(size)
+            with patch.object(claude_adapter, 'open_regular', lambda path: Recording(real(path))):
+                adapter.get_delivery(session, message_id)
+            self.assertEqual(sizes, [claude_adapter.RECEIPT_BYTES + 1])
+            (folder / f'{message_id}.json').unlink()
         with self.subTest("a side question's answer"):
             # The mod's answer() writes claude-asks/<question id>.json beside the agent's session file.
             source = (MOD / 'hooks/index.ts').read_text()
