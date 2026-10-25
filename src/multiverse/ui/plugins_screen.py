@@ -58,6 +58,15 @@ def provided(provides):
     return " · ".join(shown)
 
 
+def file_stamp(path):
+    """(modified time, size, inode) of a file, or None when it is missing: a change by any writer changes it."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_mtime_ns, info.st_size, info.st_ino
+
+
 def levels(item):
     """The access levels a person may grant this plugin when turning it on here, highest first; empty when there is
     nothing to choose (it asks for what it needs at least, or the universe allows no more)."""
@@ -165,15 +174,20 @@ class PluginsScreen(ModalScreen):
     def on_mount(self):
         self.service = self.service or self.app.plugin_service
         self.query_one("#plugins-table", DataTable).add_columns("Plugin", "Here", "State", "Version", "Errors")
-        self.generation = loader.generation()
+        self.generation, self.stamp = loader.generation(), file_stamp(self.root / "plugins.json")
         self.load()
-        self.set_interval(1.0, self.follow_loading)
+        self.set_interval(1.0, self.follow)
 
-    def follow_loading(self):
-        """A plugin that finished loading (or failed to) since the list was read changes its state here."""
-        if loader.generation() != self.generation and not self.busy:
-            self.generation = loader.generation()
-            self.load()
+    def follow(self):
+        """Read the list again when a plugin finished loading (or failed to), or plugins.json changed from outside
+        (a grant, an access_ceiling, a plugin turned on or off), since it was read. Never while a chooser or a
+        screen of its own is open on top, or a change it started is under way: the next tick catches up."""
+        if self.busy or self.opening or self.app.screen is not self:
+            return
+        stamp = file_stamp(self.root / "plugins.json")
+        if loader.generation() != self.generation or stamp != self.stamp:
+            self.generation, self.stamp = loader.generation(), stamp
+            self.load(keep=(self.selected() or {}).get("name"))
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))

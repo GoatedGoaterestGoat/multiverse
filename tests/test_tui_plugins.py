@@ -500,5 +500,52 @@ class GrantedPermissionTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn("access_ceiling", text)  # the process's cap is not the universe's
 
 
+class FollowingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_an_open_plugins_screen_follows_plugins_json_changed_elsewhere(self):
+        """An open Plugins screen shows a grant or an access_ceiling changed from outside (mv2 plugins grant, an edit)
+        on its next tick, without being closed, and never while a chooser is open on top of it; fragile because the
+        screen read plugins.json once, so it kept saying a level the plugin no longer has until it was reopened."""
+        for name in ("watcher", "chooser"):
+            self.write_plugin(name, {"module": "plugin", "api": "1.13", "access": {"request": "act", "minimum": "observe"}},
+                              {"plugin.py": GRANTED})
+        plugins.set_enabled(self.root, "watcher", True, grant="observe")
+        async with self.dashboard() as d:
+            shown = await d.open_plugins()
+
+            def details():
+                return " ".join(str(shown.query_one("#plugin-details").render()).split())
+
+            async def select(name):
+                await d.until(lambda: name in [item["name"] for item in shown.items], f"{name} in the list")
+                shown.query_one("#plugins-table", DataTable).move_cursor(
+                    row=[item["name"] for item in shown.items].index(name), animate=False)
+                await d.until(lambda: details().startswith(name), f"{name}'s details")
+
+            await select("watcher")
+            self.assertIn("Access here: observe", details())
+            with self.subTest("a grant changed from outside"):
+                plugins.set_grant(self.root, "watcher", "spend")
+                await d.until(lambda: "Access here: spend" in details(), "the new grant on the open screen")
+            with self.subTest("an access_ceiling changed from outside"):
+                data = json.loads((self.root / "plugins.json").read_text())
+                (self.root / "plugins.json").write_text(json.dumps({**data, "access_ceiling": "observe"}))
+                await d.until(lambda: "access_ceiling allows at most observe" in details(), "the ceiling on the open screen")
+            with self.subTest("a chooser open on top is left alone, and the screen catches up after it"):
+                (self.root / "plugins.json").write_text(json.dumps(data))  # no ceiling again
+                await d.until(lambda: "access_ceiling" not in details(), "the ceiling gone")
+                await select("chooser")
+                await d.press("space")
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the chooser")
+                chooser = d.screen
+                plugins.set_grant(self.root, "watcher", "act")
+                await asyncio.sleep(1.5)  # more than one tick of the screen's follow
+                await d.settle()
+                self.assertIs(d.screen, chooser)
+                self.assertTrue(shown.busy)  # the toggle it opened for still waits for the person's answer
+                await d.press("escape")
+                await select("watcher")
+                await d.until(lambda: "Access here: act" in details(), "the change made while the chooser was open")
+
+
 if __name__ == "__main__":
     unittest.main()
