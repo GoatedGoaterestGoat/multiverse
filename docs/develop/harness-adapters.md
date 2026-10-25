@@ -187,6 +187,15 @@ prevent core from calling the hook. A proved loss is retained
 as a final cancelled record with `final_reason: lost`, reported once by `--check`,
 and never retried automatically.
 
+The Claude adapter reads transcripts in one place, `harnesses/claude/transcripts.py`.
+It finds a session's copies under the recorded storage, with the folder rule,
+opens each through `open_regular`, and raises `Unreadable` when part of the
+storage that could hold the session can't be read. Usage reads the newest copy
+incrementally (`Transcript`). The evidence readers use `raw_rows`: every copy,
+every non-empty line parsed or marked `DAMAGED`, fields as stored and never
+deduplicated, because they look for copies of one row that disagree. A new
+reader goes through the same module.
+
 ## Command harnesses
 
 A schema-1 `harness.json` runs any CLI without Python code:
