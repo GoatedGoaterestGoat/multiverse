@@ -48,13 +48,15 @@ def plugin_module(directory, name):
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
-# The guard: no test writes under the real ~/.multiverse, or under the .multiverse of the mv2 checkout it runs
-# from. An audit hook (in native_safety's style) refuses
+# The guard: no test writes under the real ~/.multiverse, ~/.claude or ~/.codex, to ~/.claude.json, or under the
+# .multiverse of the mv2 checkout it runs from. An audit hook (in native_safety's style) refuses
 # writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
 # changed, and records each one, so the test fails (check(), which PluginTestCase calls when it ends) or, for a
 # thread that outlived its test, the process exits 1 at its end.
 
 _protected = set()  # absolute directories no test may change
+_protected_files = set()  # absolute files no test may change, nor the copies named after them (FILE.tmp…)
+_harness = set()  # those of them that are Claude's or Codex's home, not mv2's: no bytecode exemption there
 _exempt = set()  # directories inside them that are not mv2's state: the plugin under test (PluginTestCase.plugin)
 _violations = []  # {"path", "event", "test", "thread", "unreported"}
 _current = None  # the test running now
@@ -65,6 +67,12 @@ _open_context = threading.local()  # the dir_fd of the os.open call running in t
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
+# The user's real Claude Code and Codex homes, captured the same way: tests run the harnesses only in homes of their
+# own, so a write here would change the person's real Claude or Codex state.
+_HARNESS_HOMES = [os.path.join(os.path.expanduser("~"), name) for name in (".claude", ".codex")]
+# Claude Code's account and per-folder trust state, a file beside ~/.claude, which it writes by way of temporary and
+# backup copies beside it.
+_HARNESS_FILES = [os.path.join(os.path.expanduser("~"), ".claude.json")]
 # The universe of the mv2 checkout this module runs from (src/multiverse/plugins/testing.py), when it runs from
 # one: there, it is the universe agents run in, which a test finding a universe from its directory would change.
 _SOURCE = Path(__file__).resolve().parents[3]
@@ -73,8 +81,9 @@ _CHECKOUT_STATE = str(_SOURCE / ".multiverse") if (_SOURCE / "src" / "multiverse
 
 def install(home=None, strict=True):
     """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
-    ~/.multiverse as it was when this module was imported and the .multiverse of the mv2 checkout this module runs
-    from. Returns the directory now protected (the real ~/.multiverse by default).
+    ~/.multiverse, ~/.claude, ~/.claude.json (and its ~/.claude.json.* copies) and ~/.codex as they were when this
+    module was imported, and the .multiverse of the mv2 checkout this module runs from. Returns the directory now
+    protected (the real ~/.multiverse by default).
 
     A refused write counts against the test it came from: the test running then, or for a thread the test that
     started it. Strict (the default): writes that no check() reported (no test named itself, or a thread outlived
@@ -82,10 +91,16 @@ def install(home=None, strict=True):
     makes a process that another caller installed strict lenient again."""
     global _installed, _strict
     _strict = _strict or strict
-    homes = [home] if home is not None else [_REAL_HOME] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE else [])
+    homes = [home] if home is not None else [_REAL_HOME, *_HARNESS_HOMES] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE
+                                                                            else [])
     for each in homes:
         given = os.path.normpath(os.path.abspath(each))
         _protected.update({given, os.path.realpath(given)})  # as written and as resolved (/tmp, /var are links)
+        if home is None and each in _HARNESS_HOMES:
+            _harness.update({given, os.path.realpath(given)})
+    for each in _HARNESS_FILES if home is None else []:
+        given = os.path.normpath(os.path.abspath(each))
+        _protected_files.update({given, os.path.realpath(given)})
     directory = os.path.realpath(os.path.normpath(os.path.abspath(homes[0])))
     if not _installed:
         _installed = True
@@ -119,8 +134,9 @@ def check(test=None):
     for item in found:
         item["unreported"] = False
     if found:
-        raise AssertionError("a test wrote mv2's real state, under ~/.multiverse or this checkout's .multiverse "
-                             "(refused): " + "; ".join(
+        raise AssertionError("a test wrote mv2's real state, or the user's Claude or Codex home: under ~/.multiverse, "
+                             "~/.claude, ~/.claude.json, ~/.codex or this checkout's .multiverse (refused): "
+                             + "; ".join(
             f"{item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})" for item in found))
 
 
@@ -157,11 +173,13 @@ def _hook(event, args):
         for candidate in dict.fromkeys((where, os.path.realpath(where))):
             if _guarded(candidate):
                 _record(event, candidate)
-                raise PermissionError(f"a test may not change mv2's real state: {candidate}")
+                raise PermissionError(f"a test may not change mv2's real state or the user's Claude or Codex home: "
+                                      f"{candidate}")
 
 
 def _guarded(where):
-    return any(where == top or where.startswith(top + os.sep) for top in _protected) and not _allowed(where)
+    return (any(where == top or where.startswith(top + os.sep) for top in _protected)
+            or any(where == name or where.startswith(name + ".") for name in _protected_files)) and not _allowed(where)
 
 
 def _open_with_context(real):
@@ -180,12 +198,13 @@ def _open_with_context(real):
 
 def _allowed(where):
     """Not mv2's state although inside the home: the plugin under test's own directory, and Python's bytecode in
-    a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs."""
+    a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs;
+    never in Claude's or Codex's home, whose plugins folders are theirs."""
     if any(where == top or where.startswith(top + os.sep) for top in _exempt):
         return True
     parts = where.split(os.sep)
     return ("__pycache__" in parts or where.endswith((".pyc", ".pyo"))) and any(
-        where.startswith(os.path.join(top, "plugins") + os.sep) for top in _protected)
+        where.startswith(os.path.join(top, "plugins") + os.sep) for top in _protected - _harness)
 
 
 def _writes(mode, flags):

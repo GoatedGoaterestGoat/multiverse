@@ -65,11 +65,13 @@ class StandInHome(PluginTestCase):
 
 class GuardTest(StandInHome):
     def test_a_write_under_the_protected_home_is_refused_and_recorded(self):
-        """The home guard refuses and records writes into the protected ~/.multiverse, and into the .multiverse of
-        the mv2 checkout the tests run from, by direct path, HOME, a relative name, a dir_fd, a symlink or a chained
-        symlink, and allows fd-relative removal elsewhere and the plugin under test; fragile because audit events
-        carry no dir_fd and do not resolve links, so a miss silently writes the live user's home or the live
-        checkout's universe (PR #23 review #11 and (b), reviewer item 4, Shao's re-review)."""
+        """The home guard refuses and records writes into the protected ~/.multiverse, the user's real ~/.claude,
+        ~/.claude.json (and its ~/.claude.json.* siblings) and ~/.codex, and the .multiverse of the mv2 checkout the
+        tests run from, by direct path, HOME, a relative name, a
+        dir_fd, a symlink or a chained symlink, and allows fd-relative removal elsewhere and the plugin under test;
+        fragile because audit events carry no dir_fd and do not resolve links, so a miss silently writes the live
+        user's mv2, Claude or Codex state or the live checkout's universe (PR #23 review #11 and (b), reviewer item 4,
+        Shao's re-review)."""
         home = self.real / ".multiverse"
         with self.subTest("by its path and through HOME"):
             with self.assertRaises(PermissionError):
@@ -91,6 +93,31 @@ class GuardTest(StandInHome):
             with self.assertRaises(PermissionError):
                 os.mkdir(probe)
             self.assertEqual([item["path"] for item in self.new_violations()], [str(probe)])
+        for harness in (".claude", ".codex"):
+            with self.subTest(f"the user's real ~/{harness}"):
+                testing.install()
+                # The home as the guard captured it at import, before any test moved HOME; probed, as above, under
+                # a directory that is never there, so even a guard that let it through writes nothing.
+                real = Path(testing._REAL_HOME).parent / harness
+                never = f"mv2-guard-probe-{os.getpid()}-{time.monotonic_ns()}"
+                # Bytecode too: the exemption for a personal mv2 plugin's __pycache__ is not for Claude's or Codex's
+                # own plugins folder.
+                probes = [real / never / "probe", real / "plugins" / never / "__pycache__"]
+                for probe in probes:
+                    with self.assertRaises(PermissionError):
+                        os.mkdir(probe)
+                self.assertEqual([item["path"] for item in self.new_violations()], [str(probe) for probe in probes])
+        with self.subTest("the user's real ~/.claude.json, and the temporary and backup copies beside it"):
+            testing.install()
+            real = Path(testing._REAL_HOME).parent / ".claude.json"
+            # Claude's account and per-folder trust state. Probed by renaming a file that is not there onto it, so a
+            # guard that let it through gets FileNotFoundError and changes nothing, whether the file exists or not.
+            missing = self.work / f"mv2-guard-probe-{os.getpid()}-{time.monotonic_ns()}"
+            targets = [real, real.with_name(f".claude.json.tmp.{os.getpid()}.{time.monotonic_ns()}")]
+            for target in targets:
+                with self.assertRaises(PermissionError):
+                    os.rename(missing, target)
+            self.assertEqual([item["path"] for item in self.new_violations()], [str(target) for target in targets])
         with self.subTest("check raises once for what is not reported"):
             testing._record("open", str(self.protected / "late.json"))
             with self.assertRaisesRegex(AssertionError, "late.json"):
