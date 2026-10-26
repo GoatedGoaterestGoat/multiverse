@@ -194,6 +194,13 @@ class ClaudeTranscriptReadingTest(BaseTest):
         """Usage reads the shared index on every listing; fragile because proving the whole prefix on every change
         there costs a full read and goes unnoticed, while an earlier same-length edit must still be seen: by usage
         when the change added no bytes or a minute has passed, and at once by a transcript read."""
+        # The index's clock is the test's, in whole seconds: a test step never becomes due by itself on a slow
+        # machine, and `proven_at + PROOF_INTERVAL` is exact (on the real clock, just below a power of two, the sum
+        # rounds and comes out a hair short of due).
+        clock = [1000.0]
+        patcher = patch.object(t, 'monotonic', lambda: clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         rows = [{'type': 'assistant', 'uuid': f'u{n}', 'message': {'id': f'm{n}', 'usage': {'input_tokens': n},
                  'content': 'x' * 500}} for n in range(400)]  # well over TAIL
         self.write(rows)
@@ -228,19 +235,19 @@ class ClaudeTranscriptReadingTest(BaseTest):
             text = self.path.read_bytes()
             self.path.write_bytes(text.replace(b'"input_tokens": 7}', b'"input_tokens": 8}', 1)
                                   + (json.dumps(rows[0] | {'uuid': 'grown again'}) + '\n').encode())
-            with patch.object(t, 'monotonic', return_value=index.proven_at + t.PROOF_INTERVAL):
-                self.assertEqual((index.read().rewrites, index.responses['m7']['input_tokens']), (4, 8))
+            clock[0] = index.proven_at + t.PROOF_INTERVAL
+            self.assertEqual((index.read().rewrites, index.responses['m7']['input_tokens']), (4, 8))
         with self.subTest('a file that went quiet after a tail-only read is still proved once due'):
             text = self.path.read_bytes()
             self.path.write_bytes(text.replace(b'"input_tokens": 9}', b'"input_tokens": 1}', 1)
                                   + (json.dumps(rows[0] | {'uuid': 'last'}) + '\n').encode())
             index.read()  # tail only, and then the file stops changing
             self.assertEqual(index.responses['m9']['input_tokens'], 9)
-            with patch.object(t, 'monotonic', return_value=index.proven_at + 2 * t.PROOF_INTERVAL):
-                self.assertEqual((index.read().rewrites, index.responses['m9']['input_tokens']), (5, 1))
+            clock[0] = index.proven_at + 2 * t.PROOF_INTERVAL
+            self.assertEqual((index.read().rewrites, index.responses['m9']['input_tokens']), (5, 1))
         with self.subTest('a fully proved, unchanged file still costs no read'):
-            with patch.object(t, 'monotonic', return_value=index.proven_at + 10 * t.PROOF_INTERVAL), \
-                    patch.object(t.Transcript, '_intact', side_effect=AssertionError('proved an unchanged file')):
+            clock[0] = index.proven_at + 10 * t.PROOF_INTERVAL
+            with patch.object(t.Transcript, '_intact', side_effect=AssertionError('proved an unchanged file')):
                 index.read()
 
     def test_a_damaged_field_never_breaks_usage_or_the_index(self):
