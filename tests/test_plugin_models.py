@@ -54,8 +54,16 @@ class HarnessModelsTest(PluginTestCase):
             self.assertIsNone(environment["CLAUDECODE"])                   # the harness removes it
             self.assertFalse([key for key in environment if key.startswith("MV2_")])
 
+        codex = mv.universe(self.root).harness("codex")
+        catalog = codex.models()
+        self.assertEqual((catalog.source, catalog.version), ("table", "0.164.0"))
+        for item in catalog.models:
+            check = codex.check(item.id)
+            self.assertEqual((check.ok, check.verified, check.model, check.effort),
+                             (True, True, item.id, item.default_effort))
+
         for name, change, raised, text in (
-                ("codex has none yet", "codex", api.ModelsUnavailable, "codex does not provide its models: not "
+                ("pi has none yet", "pi", api.ModelsUnavailable, "pi does not provide its models: not "
                                                                        "implemented for this harness yet"),
                 ("an adapter failure", "fails", api.ModelsUnavailable, "claude's models could not be read"),
                 ("an unknown harness", "nowhere", api.Error, "nowhere"),
@@ -68,7 +76,7 @@ class HarnessModelsTest(PluginTestCase):
                     if change == "off":
                         self.enable("picker", on=False)
                         loader.reset()
-                    target = {"codex": "codex", "nowhere": "nowhere"}.get(change, "claude")
+                    target = {"pi": "pi", "nowhere": "nowhere"}.get(change, "claude")
                     with self.assertRaises(raised) as caught:
                         if target == "nowhere":
                             mv.universe(self.root).harness(target)

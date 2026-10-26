@@ -33,8 +33,8 @@ class NativeSharedIdentityTest(PluginTestCase):
         install()
         executable = shutil.which('codex')
         version = subprocess.check_output([executable, '--version'], text=True).strip()
-        if version != 'codex-cli 0.163.0':
-            self.skipTest('native shared identity evidence pinned to 0.163.0')
+        if version != 'codex-cli 0.164.0':
+            self.skipTest('native shared identity evidence pinned to 0.164.0')
         asyncio.run(self.probe(executable))
 
     async def probe(self, executable):

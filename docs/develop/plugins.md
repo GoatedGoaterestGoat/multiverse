@@ -190,7 +190,7 @@ Like permissions, this guards against mistakes and makes a plugin's reach readab
 
 ### Transcripts
 
-A Claude agent's conversation reads by cursor (1.13). The design is [transcript-protocols](../design/transcript-protocols.md).
+A Claude or Codex agent's conversation reads by cursor (1.13). The design is [transcript-protocols](../design/transcript-protocols.md).
 
 ```python
 info = agent.transcript()                     # cheap: counts, cursors, info.earlier
@@ -207,7 +207,7 @@ rows = agent.transcript_turn(turns.turns[-1].id)
 - **Filters:** `labels` and `kinds` keep only those rows; the others are neither counted against `limit` and `max_bytes` nor read. `limit` is 1–2000 (turn pages 1–500) and `max_bytes` 1 KiB–16 MiB; a row over 16 MiB comes with `data` `None`.
 - **When the transcript changed** under a cursor, a read raises `api.TranscriptChanged` with `reason` (`replaced` after a `/clear`, `rewritten`, `diverged`; treat one you don't know as `replaced`) and `resume`, where to continue. `api.TranscriptUnavailable` says why it can't be read now; with `retry` true, try again soon.
 - **Generations:** without `generation=`, every read is of the agent's current session, and a cursor from an earlier one raises `TranscriptChanged` (`replaced`, resuming at the current start). `info.earlier` lists the sessions it was on before (a `/clear`, a fresh start); `generation=TOKEN` reads one of those while it's `readable`, and only with its own cursors. Malformed generation syntax raises `api.Error`, including in `transcript()`. For a well-formed unknown or unreadable token, `transcript()` returns `state` (`unavailable`, or `error` for a provider error) and `reason`; row and turn reads raise `TranscriptUnavailable` with `retry=False`.
-- Codex and Pi say `unavailable` for now.
+- Codex reads recorded rollout files. Ephemeral threads such as `/btw` have none and read as `unavailable`. Pi does not implement transcript reading.
 
 ### Models
 
@@ -223,8 +223,9 @@ if not check.ok:
 
 - **The answer is for a launch from this process**: its provider (`catalog.provider`: first-party, Bedrock, Vertex, ...) decides the aliases and IDs.
 - **`check()`** gives the resolved ID as `model`, and as `effort` what a run would use: the one given, or the model's default. An effort the model doesn't take is not ok, since Claude Code would silently use another.
-- **`verified` false** means the model isn't in mv2's table (`catalog.free_form` is true for Claude) and is taken unchecked; `reason` says so.
-- **`api.ModelsUnavailable`** comes from a harness without models (Codex and Pi for now), or whose models can't be read. Catch it to offer a free-form model field.
+- **`verified` false** means the model isn't in mv2's table (`catalog.free_form` is true for Claude and Codex) and is taken unchecked; `reason` says so.
+- **`api.ModelsUnavailable`** comes from a harness without models (Pi for now), or whose models can't be read. Catch it to offer a free-form model field.
+- **Codex** uses its release's bundled model table, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
 - Treat a `source`, `provider`, input or effort you don't know as an opaque name: later minors may add them.
 
 ### Permissions

@@ -27,8 +27,8 @@ class NativeRefusalTest(TerminalBase):
         delivery and wait_ready, attachment-only kill spares the other writer, and only a fresh resume clears them;
         fragile because it depends on Codex's exact refusal strings and screen, and a miss leaves mv2 saying ready while
         messages go nowhere."""
-        if subprocess.check_output(['codex', '--version'], text=True).strip() != 'codex-cli 0.163.0':
-            self.skipTest('native ownership widget evidence pinned to 0.163.0')
+        if subprocess.check_output(['codex', '--version'], text=True).strip() != 'codex-cli 0.164.0':
+            self.skipTest('native ownership widget evidence pinned to 0.164.0')
         home = isolated_home(self.work / 'native-home', config=
             'model="fixture"\nmodel_provider="fixture"\n'
             '[model_providers.fixture]\nname="Private fixture"\n'

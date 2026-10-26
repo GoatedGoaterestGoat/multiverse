@@ -1,4 +1,6 @@
 """Reading an agent's transcript through the plugin API (1.13), end to end over a real Claude transcript."""
+import json
+from uuid import uuid4
 from pathlib import Path
 import sys
 
@@ -52,6 +54,39 @@ class TranscriptApiTest(PluginTestCase):
                          [("prompt", "First task", True), ("prompt", "Second task", False)])  # no end row yet
         rows = self.agent_.transcript_turn(turns.turns[0].id)
         self.assertEqual(len(rows.rows), 5)
+
+    def test_codex_rollout_turns_and_rollback_use_the_same_public_cursor_api(self):
+        """Codex's event echoes and rollback markers must produce one public turn per native input, with diverged cursors."""
+        from test_codex_transcript_reading import event, message
+        native = str(uuid4())
+        home = self.work / "codex-home"
+        self.agent("codex-worker", harness="codex", native_id=native, native_session_home=str(home))
+        path = home / "sessions/2026/10/25" / f"rollout-2026-10-25T10-00-00-{native}.jsonl"
+        path.parent.mkdir(parents=True)
+        rows = [{"type": "session_meta", "payload": {"id": native, "cli_version": "0.164.0"}},
+                event("task_started", turn_id="a"), message("first", id="first"),
+                event("user_message", message="first"), message("done", "assistant"),
+                event("task_complete", turn_id="a"), event("task_started", turn_id="b"),
+                message("second", id="second"), event("user_message", message="second")]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        agent = self.mv.universe(self.root).agent("codex-worker")
+        info = agent.transcript()
+        self.assertEqual((info.state, info.format), ("supported", "codex-jsonl"))
+        turns = agent.transcript_turns().turns
+        self.assertEqual([(turn.kind, turn.finished) for turn in turns],
+                         [("preamble", None), ("prompt", True), ("prompt", False)])
+        page = agent.transcript_rows(history=True, labels={"prompt"})
+        self.assertEqual([row.ref for row in page.rows], ["first", "second"])
+        saved = page.rows[-1].cursor
+        with path.open("a") as stream:
+            stream.write(json.dumps(event("thread_rolled_back", num_turns=1)) + "\n")
+        current = agent.transcript_rows(history=True, labels={"prompt"})
+        self.assertEqual([row.ref for row in current.rows], ["first"])
+        with self.assertRaises(api.TranscriptChanged) as caught:
+            agent.transcript_rows(after=saved, history=True)
+        self.assertEqual(caught.exception.reason, "diverged")
+        raw = agent.transcript_rows(labels={"prompt"})
+        self.assertEqual([row.abandoned for row in raw.rows], [False, True])
 
     def test_reads_need_access_and_say_why_they_cannot_go_on(self):
         """A transcript read needs transcripts.read and observe where the plugin is on, checked for every page;

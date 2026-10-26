@@ -62,8 +62,8 @@ class LaunchConnection:
     def _fork(self, value):
         identifier = value.get('id')
         if (not request_id(identifier) or not self.owns_primary() or not self.root.bound
-                or self.root.launch_refusal or self.version != (0, 163, 0)):
-            raise local_error('Native /btw requires the owning, bound Codex 0.163.0 terminal; '
+                or self.root.launch_refusal or self.version != (0, 164, 0)):
+            raise local_error('Native /btw requires the owning, bound Codex 0.164.0 terminal; '
                               'otherwise use a separate Multiverse launch', identifier)
         params = object_field(value, 'params')
         if (self.fork_request is not None or self.side_id is not None or self._pending(identifier)

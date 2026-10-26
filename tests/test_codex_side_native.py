@@ -32,8 +32,8 @@ class NativeSideTest(TerminalBase):
         fork must leave mv2's messages on the primary conversation, and fake frames can agree while the real TUI is
         rejected or the main receipts and usage quietly move."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
-                                   text=True).strip() != 'codex-cli 0.163.0':
-            self.skipTest('native side evidence pinned to 0.163.0')
+                                   text=True).strip() != 'codex-cli 0.164.0':
+            self.skipTest('native side evidence pinned to 0.164.0')
         work = self.work
         requests, counts = [], {'primary': 0, 'side': 0}
 

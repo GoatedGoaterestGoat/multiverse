@@ -1201,9 +1201,8 @@ feature gating need proof before `harnesses.codex.dir` is offered.
 #### Tree compaction for Codex: analysis only
 
 Where it stands with the transcript protocols ([transcript
-protocols](transcript-protocols.md)): reading a Codex conversation would go
-through the transcript protocol once Codex implements it (it reports
-unavailable today); a one-shot run, not until Codex can run a model with its
+protocols](transcript-protocols.md)): reading a Codex conversation goes
+through the rollout transcript protocol; a one-shot run, not until Codex can run a model with its
 tools off; installing a tree still has no native replacement, as below.
 
 Codex could implement `CompactionSource` one day, but lifecycle signals are not

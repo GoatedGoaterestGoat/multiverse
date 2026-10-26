@@ -16,9 +16,22 @@ mv2's requirements and the harness versions it was checked against are listed he
 
 | Harness | Version | What was checked |
 | --- | --- | --- |
-| Codex CLI | 0.163.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
+| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
 | Claude Code | 2.1.310 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
+
+The Codex check compared generated experimental app-server schemas and the
+versioned config schema with the previous checked release, including mv2's
+plugin allowlist. Private native fixtures covered plain and connected launches,
+permissions and read-only retry, shared identity, refusals, status, usage,
+steering, queued messages, side conversations and daemon recovery. They used
+isolated homes with updates disabled and local scripted providers; no account or
+real model calls were needed. Existing CLI flags and config keys remain valid.
+The new image-generation item fields do not change mv2's delivery or status
+protocol. See the [Codex release notes](https://github.com/openai/codex/releases/tag/rust-v0.164.0).
+
+When checking a new Codex release, also regenerate the adapter's bundled model
+catalog from that release's source and review changes to the rollout format.
 
 Other releases may behave differently. The Claude Code mod API is early access and can change between releases.
 

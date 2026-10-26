@@ -31,8 +31,8 @@ class NativeQueueContinuationTest(TerminalBase):
     def test_native_interrupt_pauses_across_resume_until_new_input_then_drains_fifo(self):
         """Native interrupt pause must survive attachment resume and restart FIFO exactly once for typed or mv2 input; queue-state races otherwise lose or reorder accepted messages silently."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
-                                   text=True).strip() != 'codex-cli 0.163.0':
-            self.skipTest('native queue continuation evidence pinned to 0.163.0')
+                                   text=True).strip() != 'codex-cli 0.164.0':
+            self.skipTest('native queue continuation evidence pinned to 0.164.0')
         work = self.work
         requests = []
 

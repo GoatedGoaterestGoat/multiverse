@@ -23,6 +23,26 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
+    def transcript_view(self, session, *, tip=None, reader=None):
+        from .transcripts import view
+        return view(session, tip=tip, reader=reader)
+
+    def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
+        from .transcripts import bodies
+        return bodies(session, view, indexes, max_bytes=max_bytes, reader=reader)
+
+    def transcript_readable(self, session, *, reader=None):
+        from .transcripts import readable
+        return readable(session, reader=reader)
+
+    def models(self, *, environment):
+        from .models import catalog
+        return catalog(environment)
+
+    def check_model(self, model, *, effort=None, environment):
+        from .models import check
+        return check(model, effort, environment)
+
     def session_home(self, environment):
         from .storage import session_home
         return session_home(environment)

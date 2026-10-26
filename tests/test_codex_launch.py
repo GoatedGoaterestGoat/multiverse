@@ -74,8 +74,8 @@ class CodexLaunchTest(unittest.TestCase):
                         self.assertEqual(settings[source], flags)
 
         with self.subTest('unchecked CLI cannot silently disable pinned native features'):
-            for version, relation in (((0, 154, 0), 'older'), ((0, 162, 1), 'older'), ((0, 163, 0), None),
-                                      ((0, 164, 0), 'newer'), (None, None)):
+            for version, relation in (((0, 154, 0), 'older'), ((0, 162, 1), 'older'), ((0, 163, 0), 'older'),
+                                      ((0, 164, 0), None), ((0, 165, 0), 'newer'), (None, None)):
                 with patch('multiverse.harnesses.codex.plugins.codex_version', return_value=version):
                     for mode in ('spawn', 'resume'):
                         adapter = CodexAdapter.configured('codex', {})

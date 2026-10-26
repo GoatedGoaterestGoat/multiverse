@@ -1,0 +1,22 @@
+{
+  "codex": "0.164.0",
+  "fixture": "test_codex_timing.CodexTimingTest.test_native_tui_steering_and_after_turn_queue",
+  "provider": "local scripted HTTP; no login or model service",
+  "sanitization": "Temporary paths and username replaced; session_meta base instructions/dynamic tool payloads and system/developer instruction text omitted. Event ordering, identifiers, timestamps and other payload fields retained.",
+  "files": [
+    {
+      "file": "rollout-0.164.0.jsonl",
+      "raw_sha256": "c5b43ef2687cbcecf8974a9047dd489531b70c286d911710c64af1bf1341cab0",
+      "rows": 111,
+      "types": [
+        "event_msg",
+        "response_item",
+        "session_meta",
+        "token_usage_record",
+        "turn_context",
+        "world_state"
+      ],
+      "captured_file": "primary-0.jsonl"
+    }
+  ]
+}

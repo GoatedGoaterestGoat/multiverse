@@ -67,7 +67,7 @@ class PlainRefusalTest(unittest.TestCase):
         lines.extend(textwrap.wrap('Close it there and press R to continue here.', width))
         lines.append('')
         lines.extend(textwrap.wrap('r retry   f fork   esc/⌃c/q exit   ⌃t transcript', width))
-        return {'cli_version': '0.163.0', 'text': '\n'.join(lines) + '\n\n',
+        return {'cli_version': '0.164.0', 'text': '\n'.join(lines) + '\n\n',
                 'cursor_visible': False, 'native_id': str(uuid4())}
 
     def classify(self, evidence):
@@ -79,11 +79,11 @@ class PlainRefusalTest(unittest.TestCase):
         it scrapes Codex's TUI text, and a false positive marks a healthy agent refused (3a83ea2, 661fc41)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
-        for version in ('0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
+        for version in ('0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0]):
             with self.subTest(version=version):
                 self.assertTrue(adapter.supports_launch_refusal(version))
                 self.assertIsNotNone(adapter.launch_refusal({**captures[0], 'cli_version': version}))
-        for version in (None, '', '0.162.1', '0.164.0', 'codex-cli 0.163.0-dev',
+        for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev',
                         {}, [0, 163], [False, 163, False], (0, '163', 0), True):
             with self.subTest(version=version):
                 self.assertFalse(adapter.supports_launch_refusal(version))
@@ -96,7 +96,7 @@ class PlainRefusalTest(unittest.TestCase):
                 self.assertEqual(refusal['source'], 'native-screen')
         for capture in captures:
             with self.subTest(captured_width=capture['width']):
-                evidence = {**capture, 'cli_version': '0.163.0', 'native_id': str(uuid4())}
+                evidence = {**capture, 'cli_version': '0.164.0', 'native_id': str(uuid4())}
                 self.assertEqual(adapter.launch_refusal(evidence)['source'], 'native-screen')
                 evidence['text'] += '\n› quoted native refusal above; normal composer below\n'
                 self.assertIsNone(adapter.launch_refusal(evidence))
@@ -106,7 +106,7 @@ class PlainRefusalTest(unittest.TestCase):
             {**evidence, 'cursor_visible': True},
             {**evidence, 'text': evidence['text'].replace('🔒 ', '> ')},
             {**evidence, 'text': evidence['text'].replace('f fork', 'quoted prose')},
-            {**evidence, 'cli_version': '0.164.0'},
+            {**evidence, 'cli_version': '0.165.0'},
             {**evidence, 'cli_version': None},
         ]
         for value in variants:
@@ -115,13 +115,13 @@ class PlainRefusalTest(unittest.TestCase):
 
 
 class PlainStartupTest(unittest.TestCase):
-    """Actual empty composers from an isolated, model-free 0.163.0 TUI."""
+    """Recorded 0.163.0 layouts, retained by the checked CLI and verified natively."""
     def setUp(self):
         self.adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         self.fixtures = Path(__file__).parent / 'fixtures/codex'
 
     def capture(self, name):
-        return [{**frame, 'cli_version': '0.163.0'}
+        return [{**frame, 'cli_version': '0.164.0'}
                 for frame in json.loads((self.fixtures / name).read_text())]
 
     def test_startup_detector_on_real_0163_frames(self):
@@ -182,7 +182,7 @@ class PlainStartupTest(unittest.TestCase):
         for index, value in enumerate(variants):
             with self.subTest(malformed=index):
                 self.assertFalse(self.adapter.launch_started(value))
-        for version in (None, '', '0.162.1', '0.164.0', [False, 163, False], {'version': '0.163.0'}):
+        for version in (None, '', '0.162.1', '0.165.0', [False, 163, False], {'version': '0.163.0'}):
             with self.subTest(version=version):
                 self.assertFalse(self.adapter.launch_started({**frame, 'cli_version': version}))
 
@@ -298,7 +298,7 @@ class SharedIdentityTest(unittest.TestCase):
                             if mode == 'fork':
                                 protocol.native_id, protocol.bound = session.native_id, True
                                 protocol = protocol.for_connection('storage-test', lambda: True)
-                                protocol.version = (0, 163, 0)
+                                protocol.version = (0, 164, 0)
                                 method = 'thread/fork'
                                 params.update(ephemeral=True, excludeTurns=True)
                             request = protocol.outgoing({'id': 1, 'method': method, 'params': params})

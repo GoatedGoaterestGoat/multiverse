@@ -13,6 +13,7 @@ from websockets.asyncio.server import unix_serve
 
 from multiverse.harnesses import types
 from multiverse.harnesses.codex.launch import LaunchProtocol
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.runtime import rpc
 
 
@@ -111,7 +112,7 @@ def codex_launch(native_id):
 def codex_view(protocol, name, owner):
     view = protocol.for_connection(name, owner)
     view.outgoing({'id': 1, 'method': 'initialize', 'params': {}})
-    view.incoming({'id': 1, 'result': {'userAgent': 'codex/0.163.0'}})
+    view.incoming({'id': 1, 'result': {'userAgent': 'codex/' + version_text(CHECKED_VERSION)}})
     return view
 
 

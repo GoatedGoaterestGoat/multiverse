@@ -5,6 +5,7 @@ import subprocess
 import sys
 from uuid import uuid4
 
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.runtime import lifecycle
 from multiverse.store import read, write
 from test_multiverse import TerminalBase, ROOT, until
@@ -16,10 +17,12 @@ class LaunchNoticeCliTest(TerminalBase):
         not the caller's, keeps the conversation and names both ignored overrides in its result; the caller's
         override looks legitimate, and a break silently resumes into an empty home as a new conversation (0fe24aa,
         473392e, e22da69, CODEX-01)."""
+        # This storage fixture does not draw a native Codex composer.
+        unchecked_version = version_text((*CHECKED_VERSION[:2], CHECKED_VERSION[2] + 1))
         executable = self.work / 'codex-stand-in'
         executable.write_text(f'#!{sys.executable}\n'
             'import os,sys,time,json\nfrom pathlib import Path\n'
-            'if sys.argv[1:] == ["--version"]: print("codex-cli 0.164.0"); sys.exit()\n'
+            f'if sys.argv[1:] == ["--version"]: print("codex-cli {unchecked_version}"); sys.exit()\n'
             'Path(os.environ["MV2_AGENT_DIR"], "seen.json").write_text(json.dumps(\n'
             '    {k: os.environ.get(k) for k in ("CODEX_HOME", "CODEX_SQLITE_HOME")}))\n'
             'print("STAND-IN READY", flush=True)\nwhile True: time.sleep(1)\n')
@@ -49,6 +52,8 @@ class LaunchNoticeCliTest(TerminalBase):
                                          capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
                 self.assertEqual(process.returncode, 0, process.stderr)
                 result = json.loads(process.stdout)
+                self.assertTrue(result['ready'], result)
+                self.assertEqual(result['runtime']['native_startup_observation']['state'], 'unsupported')
                 self.assertEqual(result['native_session_id'], properties['native_session_id'])
                 for key in requested:
                     notice = next((notice for notice in result['notices'] if f'{key}=' in notice), '')

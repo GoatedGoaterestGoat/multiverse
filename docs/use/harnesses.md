@@ -215,6 +215,14 @@ Claude Code has no command that lists its models, so mv2 keeps a table of them, 
 - **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
 - **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
 
+### Codex's models and transcripts
+
+Plugins read Codex's models through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)). The table comes from the checked release's bundled model catalog and is regenerated at each version check. It includes efforts, defaults, input types, context windows and hidden models. A known model's unsupported effort fails the check; an unknown ID passes as unverified.
+
+The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
+
+Plugins also read a Codex agent's transcript from its recorded rollout files, for connected and launch-only agents. Inputs, steers, tool results, compactions and native turn endings carry the same public labels as Claude's. Ephemeral threads such as `/btw` have no rollout and read as unavailable. Compressed-only rollouts, conflicting copies and referenced rollout segments (such as native `thread/revert` histories) are reported as unreadable. See the [reading rules](../design/transcript-protocols.md#codex-rollout-rules).
+
 ## The tmux status bar
 
 Each agent's tmux bar shows a short live line instead of tmux's session list and clock:

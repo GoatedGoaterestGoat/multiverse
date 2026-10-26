@@ -7,9 +7,8 @@ models with a check of a model and effort. The one-shot run and
 harness-neutral conversation entries come later (see [Later](#later)).
 
 The protocols are mv2's own. A plugin uses them; it never defines what an
-adapter implements ([plugins](plugins.md)). Reading is implemented for Claude.
-Codex and Pi report it unavailable ("not implemented for this harness yet")
-until they get their own implementation.
+adapter implements ([plugins](plugins.md)). Reading is implemented for Claude and Codex. Pi reports it unavailable
+("not implemented for this harness yet") until it gets its own implementation.
 
 ## Rules
 
@@ -119,6 +118,18 @@ Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
   row with `toolUseResult`. That finds the rows a `session.compact` hook
   installed, which carry no field of their own, without knowing the plugin
   that wrote them.
+
+### Codex rollout rules
+
+Codex reads the exact recorded thread's rollout under its recorded `CODEX_HOME`, including `archived_sessions`. These are read-only file operations for plain and bridge agents alike. Draft 7 proposed native paged reads; those could come later if the reader contract gains an executor. Ephemeral threads such as `/btw` have no rollout, so their transcript is unavailable.
+
+- Every complete JSONL line is one row. An unfinished last line waits for its newline. Damaged rows remain as `meta` with no body. Refs are native item IDs from response items or inter-agent communication only; session metadata, turn context and events have no item ref. A missing item ID leaves `ref=None`. `call_id` separately correlates a call and its output. Positions chain the hashes of all preceding line bytes. A ref-less prompt gets core's cursor-based turn ID.
+- A user-role `response_item/message` whose content metadata has native `provenance.type=user` is `prompt`, or `mid_turn` after the first input in the same native turn. Native harness/skill/AGENTS.md provenance stays `injected`, as do inherited parent messages. For older rows without provenance, an ordered exact plain-text matching `event_msg/user_message` or `item_completed` with a `UserMessage` item authenticates the input. These event echoes are `meta`. Unpaired or ambiguous legacy inputs stay `injected`; fewer echoes than indistinguishable inputs cannot authenticate one occurrence. Legacy media inputs need native provenance because their UI echoes are not exact model-input copies. Old and new echo streams are counted separately to avoid double counting an input. Unmatched user messages and developer/system messages are `injected`. Message framing never proves provenance, so ordinary input has `source=None`.
+- Native `inter_agent_communication` is `prompt` with source `peer` when `trigger_turn` is true, and `mid_turn` otherwise. Assistant messages, reasoning and tool calls are `response`. Tool outputs are `tool_result`, with their native `call_id`. Other events are `meta`; `turn_aborted` is `injected`.
+- `task_complete` (also read as `turn_complete`) and `turn_aborted` end the active native turn only when their `turn_id` matches its recorded start. A final assistant message alone proves no end. Core still requires a usable timestamp at or after the prompt.
+- A `compacted` row and a response marked `metadata.compaction_output` are `compaction`. Its replacement history remains nested in its body and never creates prompts. Context starts at the latest surviving `compacted` boundary.
+- `thread_rolled_back.num_turns` removes the newest non-contextual native input boundaries and their following rows, including steers within one public prompt turn. These boundaries are tracked separately from public turn grouping. The cut moves backward over immediately preceding contextual developer/user model messages, as native `trim_pre_turn_context_updates` does; rollout bookkeeping and response records filtered by native `is_api_message` (system messages, unowned configuration updates, compaction triggers and `Other`) do not block it. Harness-authored configuration updates and other actual model items still act as barriers. Context before the first ordinary input and context separated by a non-context model item stay. An unknown fragment or malformed context shape makes trimming unreadable rather than preserving guessed instructions. Supported native input/context predicates, ordinary-user provenance and unambiguous plain-text legacy echoes establish the boundaries; native inter-agent items also count. Context-looking legacy text cannot gain a rollback boundary from its echo alone. Uncertain input boundaries make a rollback history unreadable rather than deleting an earlier proven prompt. A compaction checkpoint whose tail cannot be proved a non-context barrier is also unreadable when trimming would reach it, because its replacement history is one stored row. Raw reads retain these abandoned rows. A native item ref can select the stored history before that rollback. An unknown tip falls back to the current history with its actual tip and no gap. An in-place rewrite changes positions instead.
+- Copies must agree byte for byte through the older copy's complete rows. The newest copy is read only when each older copy is its prefix. Every identity-bearing session header must name the recorded thread under the same strict duplicate-key parsing as the first header; an ambiguous later header remains an invalid identity record. Other ambiguous records remain unreadable metadata and cannot supply rollback or model-membership proof. A completed metadata scan is validated before publication or caching; a changed file needs a stable open-file prefix proof, so mixed scans never release previews. Conflicting copies, unreadable storage, links, unsupported matching filenames, compressed rollouts without a plain sibling, and non-null `session_meta.history_base` report an error rather than guessed history. Body reads permit concurrent appends, re-proving the indexed prefix on the opened file when its signature changes; a rewrite hidden by growth still fails. Native `thread/revert` can create a referenced child rollout under the same thread ID; even a lone child is refused because its ancestor ranges are not implemented. Earlier-generation readability uses these same consistency and history checks, returning unknown for unsupported or inconsistent storage.
 
 ## History and context
 
@@ -234,7 +245,8 @@ settings screen checks a model before a run would fail on it.
   saying the table doesn't know them; Claude decides at the request.
 - **`effort`** in a check is what a run would use: the one given, the model's
   default when none was given, or none for a model that takes none.
-- **Unavailable.** A harness without models (Codex and Pi for now, a custom
+- **Codex's release table.** `harnesses/codex/models.json` is generated by `scripts/gen_codex_models.py` from the official release's `codex-rs/models-manager/models.json`, with its version and source hash. It never reads an account cache, a running daemon or `model/list`. The table supplies IDs, display names, efforts, default effort, input modalities, context windows and picker visibility. The first picker-visible model by native priority is the release default. Account defaults and custom providers can differ, so `provider=None` and a verified check means the release table knows the ID and effort, not that an account offers it. Unknown IDs remain free-form and unverified. No environment variable alone proves Codex's configured provider or login mode.
+- **Unavailable.** A harness without models (Pi for now, a custom
   command harness) raises `api.ModelsUnavailable`, so a settings screen can
   offer a free-form field. An adapter's own failure becomes the same error
   with a fixed reason, never with what the adapter read.
@@ -250,4 +262,4 @@ adapter reads only the variables it needs from it.
   supplies, with no tools and nothing saved.
 - **Conversation entries** (API 1.15): each row's content in one form for
   every harness.
-- **Codex and Pi** ([future work](future-work.md)).
+- **Pi reading and models; Codex and Pi one-shot runs** ([future work](future-work.md)).
