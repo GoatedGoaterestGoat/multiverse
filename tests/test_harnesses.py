@@ -38,8 +38,12 @@ class HarnessLaunchTest(TerminalBase):
             "    native = str(uuid.uuid4())\n"
             "    for _ in range(2):\n"
             "        subprocess.run([os.environ['MV2_CLI'], 'session-bind', '--session-id', native], check=True)\n"
-            "Path(os.environ['MV2_AGENT_DIR'], 'seen.json').write_text(json.dumps({'argv': args, "
+            # Existence is the reader's ready signal; publish only after the JSON file is complete.
+            "seen = Path(os.environ['MV2_AGENT_DIR'], 'seen.json')\n"
+            "pending = seen.with_suffix('.tmp')\n"
+            "pending.write_text(json.dumps({'argv': args, "
             "'parent_markers': [key for key in ('CODEX_THREAD_ID', 'CLAUDECODE') if key in os.environ]}))\n"
+            "pending.replace(seen)\n"
             "print('HARNESS READY', flush=True)\nwhile True: time.sleep(1)\n")
         executable.chmod(0o755)
         spec = read(directory / "harness.json")
