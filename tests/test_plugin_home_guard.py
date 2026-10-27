@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -218,7 +219,7 @@ class GuardTest(StandInHome):
         with self.subTest("a load that times out after its test"):
             release = self.work / "release"
             os.environ["HANG_RELEASE"] = str(release)
-            self.addCleanup(release.touch)
+            self.addCleanup(self.end_hang, release, "slow")
             self.write_plugin("slow", {"module": "plugin"}, {"plugin.py": HANGS})
             self.enable("slow")
             with mock.patch.object(loader, "LOAD_SECONDS", 0.4), mock.patch.dict(os.environ):
@@ -229,7 +230,7 @@ class GuardTest(StandInHome):
             self.assertEqual(self.new_violations(), [], "the late timeout wrote into the real home")
             self.assertFalse((self.real / ".multiverse").exists())
             self.assertTrue((self.home / ".multiverse" / loader.LOAD_TIMEOUTS).is_file())  # where it started
-            release.touch()
+            self.end_hang(release, "slow")
         # plugin_module() at a test module's import, before any test has a home, loads exactly the plugin it is
         # given: no plugin discovery, so no installed-plugins scan and no cache write to the home it finds
         # (compaction's measurement: test_tui_compaction's import wrote ~/.multiverse/installed-plugins.json).
@@ -259,6 +260,14 @@ class GuardTest(StandInHome):
                 checkout_suites(unittest.TestLoader(), plugins=plugins, own=own)
             self.assertEqual(self.new_violations(), [], "a plugin test module wrote the home it found at import")
             self.assertFalse((self.real / ".multiverse").exists())
+
+    def end_hang(self, release, name):
+        """Let a hanging load end, and wait for its thread: what it records when it lands is written before this
+        test's directories are removed, never during their removal."""
+        release.touch()
+        for thread in [thread for thread in threading.enumerate() if thread.name == f"plugin {name}: load"]:
+            thread.join(10)
+            self.assertFalse(thread.is_alive(), f"{name}'s load did not end after its hang was released")
 
     def forget(self, directory):
         """discover() leaves its top level on sys.path and its modules imported: undo that for `directory`."""
