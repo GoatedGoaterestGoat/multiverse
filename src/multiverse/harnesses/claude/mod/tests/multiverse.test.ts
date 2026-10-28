@@ -29,7 +29,7 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
-function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void> } = {}) {
+function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void>; holdUnsure?: Promise<void> } = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
   const clock = mock.clock(on, { now: options.now ?? 0 })
   // Claude's core for the engine events the tests raise: each passes through.
@@ -48,6 +48,10 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
   on('fs.write', async ($, e) => {
     // A refusal write the test holds finishes only when it says so: after a delivery, say.
     if (options.holdRefusals !== undefined && e.path.endsWith('.not-delivered.json')) await options.holdRefusals
+    // An unsure refusal's write the test holds: one still running when Claude's own refusal comes.
+    if (options.holdUnsure !== undefined && e.path.endsWith('.not-delivered.json') && JSON.parse(e.text).definite === false) {
+      await options.holdUnsure
+    }
     files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -431,6 +435,26 @@ describe('delivery', () => {
     await w.clock.advance(5000)
     expect(refusal()).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: false }))
     release()
+    await w.clock.settle()
+    expect(refusal()).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: true, reason }))
+  })
+
+  test("a timeout's write still running when Claude refuses never ends up over Claude's refusal", async ($, on) => {
+    // The writes finish in any order. Left that way, a slow unsure write lands last and a message Claude refused
+    // stays unconfirmed for good: the drop forgot it, so nothing writes its receipt again.
+    let releaseSubmit = () => {}
+    let releaseUnsure = () => {}
+    const reason = 'the session was stopped and nobody has sent input since'
+    const w = world(on, { refuse: reason, holdSubmits: new Promise<void>((resolve) => { releaseSubmit = resolve }),
+      holdUnsure: new Promise<void>((resolve) => { releaseUnsure = resolve }) })
+    const refusal = () => JSON.parse(w.files.get(`/agent/claude-receipts/${STEER}.not-delivered.json`) ?? 'null')
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
+    await w.clock.settle()
+    await w.clock.advance(5000)  // the timeout's unsure write starts, and is held
+    releaseSubmit()  // Claude refuses the held submit meanwhile
+    await w.clock.settle()
+    releaseUnsure()
     await w.clock.settle()
     expect(refusal()).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: true, reason }))
   })

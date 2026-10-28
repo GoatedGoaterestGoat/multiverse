@@ -1357,7 +1357,9 @@ Only Claude's own refusal is `definite: true`. The timeout and the turn-end chec
 write `definite: false`, because Claude holds a taken message while a local
 command such as `/compact`, or a dialog, holds its turn, and stores it afterwards;
 a retry then would run it twice. Claude refusing the held submit later replaces
-an unsure receipt with a definite one, never the other way round. A row stored
+an unsure receipt with a definite one, never the other way round: the mod writes
+one attempt's refusals one at a time, in that order, so an unsure write still
+running when Claude refuses can't land after it. A row stored
 later still writes the delivery receipt, which wins wherever both exist,
 whichever write finished last. Nothing is ever resubmitted.
 `get_delivery` reads it: delivered is accepted and transcript-confirmed, not

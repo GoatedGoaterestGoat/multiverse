@@ -286,7 +286,7 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
 // A message Claude has but hasn't stored yet: its ID (one delivery attempt), for its not-delivered receipt. A
 // refused one stays waiting, so a row that turns up after all still marks it delivered. `refused` is "unsure" after
 // a timeout and "definite" after Claude's own refusal.
-type Waiting = { id?: string; refused?: "unsure" | "definite" }
+type Waiting = { id?: string; refused?: "unsure" | "definite"; written?: Promise<void> }
 
 // How long an idle session may leave a taken message unstored before it counts as not delivered. Idle means an
 // observed one (idle()): a session just loaded, or still starting, has shown no turn boundary yet.
@@ -336,11 +336,19 @@ function waitingFor(id: string | undefined): Waiting | undefined {
 async function refuse($: EngineInterface, entry: Waiting, reason: string, definite = true) {
   if (entry.id === undefined || entry.refused === "definite" || (!definite && entry.refused)) return
   entry.refused = definite ? "definite" : "unsure"
-  const directory = await $.env.get("MV2_AGENT_DIR")
-  if (!directory) return
-  const at = await $.clock.now()
-  await $.fs.write(`${directory}/claude-receipts/${entry.id}.not-delivered.json`,
-    JSON.stringify({ id: entry.id, delivered: false, definite, reason, at }) + "\n")
+  const id = entry.id
+  const write = async () => {
+    const directory = await $.env.get("MV2_AGENT_DIR")
+    if (!directory) return
+    const at = await $.clock.now()
+    await $.fs.write(`${directory}/claude-receipts/${id}.not-delivered.json`,
+      JSON.stringify({ id, delivered: false, definite, reason, at }) + "\n")
+  }
+  // One write at a time per attempt, in the order decided here: writes finish in any order, and an unsure one
+  // still running when Claude refuses would otherwise land last, leaving a refused message unconfirmed for good.
+  const previous = entry.written ?? Promise.resolve()
+  entry.written = previous.then(write, write)
+  await entry.written
 }
 
 // A taken message must be stored within a few seconds of the session being idle.
