@@ -328,14 +328,17 @@ function waitingFor(id: string | undefined): Waiting | undefined {
 // Not delivered, as far as the mod can tell: Claude refused it or never stored it. A receipt names one attempt.
 // It has a file of its own beside the delivery receipt, and a delivery wins wherever both exist, so a refusal
 // whose write finishes after the row was stored, even across a reload, never hides the delivery.
-async function refuse($: EngineInterface, entry: Waiting, reason: string) {
+// Only Claude's own refusal is definite, and so retryable. A row still missing after a timeout may yet come:
+// Claude holds a taken message while a local command such as /compact, or a dialog, holds its turn, and stores
+// it afterwards, so a retry then would run it twice. Core reports that one as not confirmed.
+async function refuse($: EngineInterface, entry: Waiting, reason: string, definite = true) {
   if (entry.id === undefined || entry.refused) return
   entry.refused = true
   const directory = await $.env.get("MV2_AGENT_DIR")
   if (!directory) return
   const at = await $.clock.now()
   await $.fs.write(`${directory}/claude-receipts/${entry.id}.not-delivered.json`,
-    JSON.stringify({ id: entry.id, delivered: false, definite: true, reason, at }) + "\n")
+    JSON.stringify({ id: entry.id, delivered: false, definite, reason, at }) + "\n")
 }
 
 // A taken message must be stored within a few seconds of the session being idle.
@@ -344,7 +347,7 @@ function expireLater($: EngineInterface, entries: Waiting[]) {
   $.clock.after(STORE_GRACE_MS, () => {
     if (!idle()) return  // the end of the turn running decides
     for (const entry of entries) {
-      if (pending().includes(entry)) void refuse($, entry, `Claude didn't store it within ${STORE_GRACE_MS / 1000} seconds while idle`)
+      if (pending().includes(entry)) void refuse($, entry, `Claude didn't store it within ${STORE_GRACE_MS / 1000} seconds while idle`, false)
     }
   })
 }
@@ -450,7 +453,7 @@ export const register: Register = (on) => {
       if (e.isAborted) interrupted = true
       const still = pending()
       for (const entry of takenBeforeTurn) {
-        if (still.includes(entry)) void refuse($, entry, "Claude ended a turn without storing it")
+        if (still.includes(entry)) void refuse($, entry, "Claude ended a turn without storing it", false)
       }
       takenBeforeTurn = []
       expireLater($, pending())

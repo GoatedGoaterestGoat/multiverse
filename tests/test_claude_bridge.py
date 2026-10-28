@@ -339,14 +339,18 @@ class ClaudeBridgeTest(BaseTest):
                              ('native_queued', True, 'mid-turn'))
             self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
         with self.subTest('a not-delivered receipt'):
-            # Only Claude's definite drop, or a row never stored, fails the message so --retry may send it again;
-            # an unsure or damaged one must never become permission to resend, and a receipt counts only for the ID
-            # it names in the shape the mod writes ({} or another attempt's would confirm, or fail, this one).
+            # Only Claude's definite drop fails the message so --retry may send it again; an unsure or damaged one
+            # must never become permission to resend, and a receipt counts only for the ID it names in the shape the
+            # mod writes ({} or another attempt's would confirm, or fail, this one).
             folder = agent_dir / 'claude-receipts'
             refused = {'id': message_id, 'delivered': False, 'reason': 'the session was stopped', 'at': 1}
             for delivered, refusal, expected in (
                     (None, refused | {'definite': True}, ('error', False, True)),
                     (None, refused, ('unknown', None, None)),
+                    # The mod's timeout: Claude may still hold the message behind a /compact or a dialog, and a
+                    # retry would then run it twice.
+                    (None, refused | {'definite': False, 'reason': "Claude didn't store it within 5 seconds while idle"},
+                     ('unknown', None, None)),
                     (None, '{"id": ', ('unknown', None, None)),
                     (None, refused | {'definite': True, 'id': str(uuid4())}, ('unknown', None, None)),
                     ({}, None, ('unknown', None, None)),

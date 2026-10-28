@@ -428,10 +428,11 @@ describe('delivery', () => {
     expect(w.files.has(`/agent/claude-receipts/${STEER}.json`)).toBe(false)
   })
 
-  // A timeout is retryable, so the retry has an ID of its own; whichever of the late first copy and the retry is
-  // stored first, each row marks only its own message.
+  // A timeout is only "not confirmed": Claude may still hold the message (a /compact or a dialog holds its turn) and
+  // store it later, so it is never definite. A retry the person sends anyway has an ID of its own; whichever of the
+  // late first copy and the retry is stored first, each row marks only its own message.
   for (const order of ['the late first copy first', 'the retry first'] as const) {
-    test(`a row that never comes is refused after a few idle seconds, and a retry is told apart from it, ${order}`, async ($, on) => {
+    test(`a row that hasn't come after a few idle seconds is left unconfirmed, and a retry is told apart from it, ${order}`, async ($, on) => {
       const w = world(on)
       await $.turn.complete(turnComplete('t0'))  // an observed idle moment
       const receipt = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.json`) ?? 'null')
@@ -443,7 +444,7 @@ describe('delivery', () => {
       await w.clock.advance(4000)
       expect(refusal(STEER)).toBe(null)
       await w.clock.advance(1000)
-      expect(refusal(STEER)).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: true }))
+      expect(refusal(STEER)).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: false }))
       await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${RETRY}>>Hello.<</MV2>>` })
       await w.clock.settle()
       const [late, retry] = w.submitted.map((submitted) => submitted.text)
@@ -548,11 +549,12 @@ describe('delivery', () => {
     await w.clock.advance(4000)
     expect(refusal(FOLLOW_UP)).toBe(null)
     await w.clock.advance(1000)
-    expect(refusal(FOLLOW_UP)).toEqual(expect.objectContaining({ delivered: false, definite: true }))
+    expect(refusal(FOLLOW_UP)).toEqual(expect.objectContaining({ delivered: false, definite: false }))
   })
 
-  test("a turn that ends without the message's row refuses it", async ($, on) => {
-    // Claude ran something else and dropped ours; the end of that turn is the proof point.
+  test("a turn that ends without the message's row leaves it unconfirmed, never definitely refused", async ($, on) => {
+    // Claude ran something else first. Ours may still be queued behind it, and is stored seconds later, so the end
+    // of that turn can't prove it was dropped: a definite refusal would invite a duplicate retry.
     const w = world(on)
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
     await w.clock.settle()
@@ -560,7 +562,7 @@ describe('delivery', () => {
     await $.turn.complete(turnComplete('t1'))
     await w.clock.settle()
     expect(JSON.parse(w.files.get(`/agent/claude-receipts/${STEER}.not-delivered.json`) ?? 'null'))
-      .toEqual(expect.objectContaining({ delivered: false, definite: true }))
+      .toEqual(expect.objectContaining({ delivered: false, definite: false }))
   })
 
   test('untagged peer messages keep Claude’s handling', async ($, on) => {

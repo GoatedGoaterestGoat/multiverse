@@ -137,19 +137,21 @@ setting; accepted and uncertain deliveries are never reopened.
 
 `--retry` resends only messages recorded as failed. It never resends an acceptance that remains unconfirmed or uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
 
-For Claude, a consumed message is reported failed and retryable when Claude
-explicitly drops it, or when its row has not been stored after a few seconds
-while idle or by the end of a turn that started after it was taken. Nothing is resubmitted
-automatically. A manual `--retry` after that timeout may duplicate the message
-if Claude stores the first copy late. Before retrying, mv2 checks that attempt's
-receipt again: a late confirmation prevents a resend, and unreadable evidence
-keeps it from retrying. If this retry wakes a stopped agent, it first resumes the
+For Claude, a consumed message is reported failed and retryable only when Claude
+explicitly drops it. When its row has not been stored after a few seconds while
+idle, or by the end of a turn that started after it was taken, it is reported
+not confirmed instead, and `--retry` leaves it alone. Claude holds a taken message
+while a local command such as `/compact`, or a dialog, holds its turn, and stores
+it afterwards, so a retry then would run it twice. Its row confirms it when it
+comes. Nothing is resubmitted automatically. Before retrying a failed message,
+mv2 checks that attempt's receipt again: a late confirmation prevents a resend,
+and unreadable evidence keeps it from retrying. If this retry wakes a stopped agent, it first resumes the
 bridge and then submits through the native queue with a fresh attempt ID. Each
 actual submission has its own receipt ID, so an old failure cannot fail the new
 attempt, and a late old row confirms only the attempt that produced it. History
-keeps every attempt. If Claude is waiting at a resume-confirmation dialog, finish
-that dialog before retrying: queued delivery may have timed out while it waited,
-and the original message may still arrive afterward.
+keeps every attempt. If Claude is waiting at a resume-confirmation dialog, a
+message sent meanwhile shows as not confirmed until you finish the dialog and
+Claude stores it.
 
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
 until its message is confirmed in the conversation. The check reports an entry
