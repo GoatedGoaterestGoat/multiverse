@@ -13,7 +13,7 @@ from ..types import ModelCatalog, ModelCheck, ModelInfo
 
 TABLE = Path(__file__).with_name('models.json')
 SUFFIX = '[1m]'
-# Claude Code's own order (2.1.310): the first of these set to 1, true, yes or on, in any case, else the Anthropic API.
+# Claude Code's own order (2.1.312): the first of these set to 1, true, yes or on, in any case, else the Anthropic API.
 CHOICE = (('CLAUDE_CODE_USE_BEDROCK', 'bedrock'), ('CLAUDE_CODE_USE_FOUNDRY', 'foundry'),
           ('CLAUDE_CODE_USE_ANTHROPIC_AWS', 'anthropic_aws'),
           ('CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD', 'anthropic_google_cloud'),

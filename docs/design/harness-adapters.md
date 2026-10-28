@@ -1352,9 +1352,14 @@ seconds while idle (idle as the mod has seen it: after a load, a hot reload
 included, it knows of no turn until one starts or ends, so a session just loaded,
 perhaps mid-turn, never times a message out) or by the end of a turn that
 started after the mod took it,
-the mod writes `claude-receipts/<id>.not-delivered.json` (`delivered: false`,
-`definite: true`); a row stored later still writes the delivery receipt, which
-wins wherever both exist, whichever write finished last. Nothing is ever resubmitted.
+the mod writes `claude-receipts/<id>.not-delivered.json` (`delivered: false`).
+Only Claude's own refusal is `definite: true`. The timeout and the turn-end check
+write `definite: false`, because Claude holds a taken message while a local
+command such as `/compact`, or a dialog, holds its turn, and stores it afterwards;
+a retry then would run it twice. Claude refusing the held submit later replaces
+an unsure receipt with a definite one, never the other way round. A row stored
+later still writes the delivery receipt, which wins wherever both exist,
+whichever write finished last. Nothing is ever resubmitted.
 `get_delivery` reads it: delivered is accepted and transcript-confirmed, not
 delivered is a definite failure that `--retry` may send again, and no file, or
 one that can't be read or isn't definite, stays `unknown`. An earlier attempt's
@@ -1485,7 +1490,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.310; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.312; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

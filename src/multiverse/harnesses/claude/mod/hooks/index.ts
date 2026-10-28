@@ -284,8 +284,9 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
 }
 
 // A message Claude has but hasn't stored yet: its ID (one delivery attempt), for its not-delivered receipt. A
-// refused one stays waiting, so a row that turns up after all still marks it delivered.
-type Waiting = { id?: string; refused?: boolean }
+// refused one stays waiting, so a row that turns up after all still marks it delivered. `refused` is "unsure" after
+// a timeout and "definite" after Claude's own refusal.
+type Waiting = { id?: string; refused?: "unsure" | "definite" }
 
 // How long an idle session may leave a taken message unstored before it counts as not delivered. Idle means an
 // observed one (idle()): a session just loaded, or still starting, has shown no turn boundary yet.
@@ -330,10 +331,11 @@ function waitingFor(id: string | undefined): Waiting | undefined {
 // whose write finishes after the row was stored, even across a reload, never hides the delivery.
 // Only Claude's own refusal is definite, and so retryable. A row still missing after a timeout may yet come:
 // Claude holds a taken message while a local command such as /compact, or a dialog, holds its turn, and stores
-// it afterwards, so a retry then would run it twice. Core reports that one as not confirmed.
+// it afterwards, so a retry then would run it twice. Core reports that one as not confirmed. Claude refusing the
+// held submit afterwards is the proof, so its refusal replaces an unsure one; an unsure one never replaces it.
 async function refuse($: EngineInterface, entry: Waiting, reason: string, definite = true) {
-  if (entry.id === undefined || entry.refused) return
-  entry.refused = true
+  if (entry.id === undefined || entry.refused === "definite" || (!definite && entry.refused)) return
+  entry.refused = definite ? "definite" : "unsure"
   const directory = await $.env.get("MV2_AGENT_DIR")
   if (!directory) return
   const at = await $.clock.now()

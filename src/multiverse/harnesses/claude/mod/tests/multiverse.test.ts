@@ -29,7 +29,7 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
-function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void> } = {}) {
+function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void> } = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
   const clock = mock.clock(on, { now: options.now ?? 0 })
   // Claude's core for the engine events the tests raise: each passes through.
@@ -73,6 +73,8 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
   const submitted: Submitted[] = []
   on('prompt.submit', async ($, e) => {
     submitted.push({ text: e.text, asUser: e.origin.kind === 'plugin' && e.origin.asUser === true })
+    // A submit the test holds is answered only when it says so: after a /compact, say.
+    if (options.holdSubmits !== undefined) await options.holdSubmits
     // Claude refusing a plugin's prompt, as after an interruption.
     if (options.refuse !== undefined && e.origin.kind === 'plugin') return { drop: options.refuse }
     return { text: e.text, origin: e.origin }
@@ -414,6 +416,23 @@ describe('delivery', () => {
     expect(w.logs.some((line) => line.includes('the session was stopped'))).toBe(true)
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${FOLLOW_UP}>>Second.<</MV2>>` }))
       .toEqual({ text: handed(FOLLOW_UP, 'Second.') })
+  })
+
+  test("Claude's own refusal after the idle timeout makes the receipt definite", async ($, on) => {
+    // The timeout only says the row hasn't come. Claude answering the held submit with a refusal afterwards is the
+    // proof, so --retry may send it again; left unsure, the message would stay unconfirmed and never be retried.
+    let release = () => {}
+    const reason = 'the session was stopped and nobody has sent input since'
+    const w = world(on, { refuse: reason, holdSubmits: new Promise<void>((resolve) => { release = resolve }) })
+    const refusal = () => JSON.parse(w.files.get(`/agent/claude-receipts/${STEER}.not-delivered.json`) ?? 'null')
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
+    await w.clock.settle()
+    await w.clock.advance(5000)
+    expect(refusal()).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: false }))
+    release()
+    await w.clock.settle()
+    expect(refusal()).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: true, reason }))
   })
 
   test('a refused message gets a not-delivered receipt', async ($, on) => {

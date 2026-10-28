@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "description": "Claude Code; prompt-led coordination and an assigned native session UUID.",
-  "checked_cli_version": "2.1.310",
+  "checked_cli_version": "2.1.312",
   "session": "assigned",
   "spawn": [
     "claude",

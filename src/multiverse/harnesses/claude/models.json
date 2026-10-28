@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "claude_code": "2.1.310",
+  "claude_code": "2.1.312",
   "models": [
     {
       "id": "claude-3-5-haiku",
@@ -241,7 +241,6 @@
         "first_party",
         "foundry",
         "gateway",
-        "mantle",
         "vertex"
       ]
     },
@@ -376,8 +375,7 @@
       "max_output_tokens": 32000,
       "default": false,
       "picker": [
-        "bedrock",
-        "vertex"
+        "bedrock"
       ]
     },
     {
@@ -441,7 +439,6 @@
         "first_party",
         "foundry",
         "gateway",
-        "mantle",
         "vertex"
       ]
     },
