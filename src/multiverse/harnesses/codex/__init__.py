@@ -103,7 +103,7 @@ class CodexAdapter(ConfiguredAdapter):
         if version is not None and version not in SCREEN_VERSIONS:  # their screen checks and /btw stay on
             relation = 'older' if version < CHECKED_VERSION else 'newer'
             note = (f'Codex {version_text(version)} is {relation} than the checked release {version_text(CHECKED_VERSION)}; '
-                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
+                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and a supported daemon release.')
             command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
