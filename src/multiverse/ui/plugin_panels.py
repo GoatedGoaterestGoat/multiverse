@@ -10,6 +10,7 @@ plugin code, and a failing panel becomes one line of text and a count against it
 from .. import plugins
 from ..plugins import api, loader
 from ..plugins.loader import DataPanel
+from .columns import plugin_row
 from .panels import PANELS, error_widget
 
 FAILED = object()
@@ -36,7 +37,8 @@ def placeholder(loaded, spec, widget, title):
 
 def render(root, loaded, spec, widget, title, rows):
     """The widget dicts one data panel gives right now: its blocks, or one line saying why not."""
-    context = plugins.panel_context(loaded, root, widget, rows, plugins.on_here(root))
+    # Rows of its own: a panel that changes an agent's record must not change core's rows.
+    context = plugins.panel_context(loaded, root, widget, [plugin_row(row) for row in rows], plugins.on_here(root))
     result = loader.guard(loaded, f"panel {spec.kind}", spec.render, context, root=root, default=FAILED,
                           timeout=loader.SYNCHRONOUS_BUDGET)
     if result is FAILED:

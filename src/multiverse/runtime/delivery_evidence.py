@@ -68,6 +68,12 @@ def check(directory, adapter, session, executor, message, tracking):
             return None
         # Keep the accepting launch's workspace/framing even after later renames.
         evidence_session = replace(session, workspace=workspace, launch_id=old)
+        evidence_id = attempt.get('native_message_id') or message['id']
+        if attempt.get('native_message_id'):
+            # A late copy of an earlier retry carries the same text. Only this
+            # attempt's receipt or native ID may confirm it; a body match stays
+            # unknown, including when an older mod stored no row identity.
+            text, framed = message['text'], False
         # Final/confirmed acceptances still consume their stored text row. Saved
         # exact receipts reserve occurrences before anonymous text allocation,
         # even when the adapter's original receipt file has disappeared.
@@ -77,7 +83,7 @@ def check(directory, adapter, session, executor, message, tracking):
         cohort, receipts, active = (mailbox.acceptance_contexts(directory, native_id, home, message['text'],
                                                                current_launch=session.launch_id)
                                     if framed else ((), {}, ()))
-        result = hook(evidence_session, message['id'], text, since, home,
+        result = hook(evidence_session, evidence_id, text, since, home,
                       framed=framed, cohort=cohort, receipts=receipts, active_acceptances=active)
         delivered = result.value.get('delivered') if isinstance(result.value, dict) else None
         if result.state != 'ok' or type(delivered) is not bool:

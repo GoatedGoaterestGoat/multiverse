@@ -1,12 +1,13 @@
 """Definite failures remain visible, launch-only refusals stay final, and neither leaks message text."""
 from dataclasses import replace
+import fcntl
 import json
 import os
 from pathlib import Path
 import sys
 from unittest.mock import Mock, patch
-from multiverse.runtime import lifecycle, native
-from multiverse.store import read, uid, write
+from multiverse.runtime import attachments, lifecycle, native
+from multiverse.store import now, read, uid, write
 from multiverse.tools import deliver, doctor, inspect, list_agents, send
 from multiverse.universe import mailbox, templates
 from multiverse import harnesses
@@ -59,26 +60,36 @@ class DeliveryProblemTest(BaseTest):
         self.assertEqual(row['delivery_problem'], expected)
         self.assertNotIn('PRIVATE BODY', expected)
 
-    def test_dismissed_failures_stay_in_history_and_can_never_be_resent(self):
-        """Dismissing a failure must remove its warning without replaying it or hiding uncertain acceptance."""
-        selected = [self.message(state) for state in ('failed', 'launch-only')]
-        untouched = [self.message(state) for state in ('accepted', 'unknown', 'submitting', 'pending', 'cancelled')]
+    def test_dismissed_messages_stay_in_history_and_can_never_be_resent(self):
+        """Dismissal must close uncertainty without replaying it, hiding confirmation, or cancelling pending startup input."""
+        selected = [self.message(state) for state in ('failed', 'launch-only', 'accepted', 'unknown', 'submitting')]
+        untouched = [self.message(state) for state in ('pending', 'cancelled')]
+        mailbox.update_message(self.directory, untouched[0]['id'], deferred_launch_id='startup')
+        for evidence in ({'native_receipt': {'transcript_confirmed': True}},
+                         {'transcript_confirmed_at': '2026-10-28T12:00:00+00:00'}):
+            confirmed = self.message('accepted')
+            mailbox.update_message(self.directory, confirmed['id'], **evidence)
+            untouched.append(confirmed)
+        # Dismissing a queued native acceptance does not cancel the native queue or erase its receipt.
+        mailbox.update_message(self.directory, selected[2]['id'],
+                               native_receipt={'queued_submission_id': 'held-by-native', 'paused': True})
         before = {item['id']: mailbox.message_record(self.directory, item['id'])[1]
                   for item in selected + untouched}
         with patch.object(native, 'send_or_wake', side_effect=AssertionError('dismiss must not submit')), \
-                patch.object(harnesses, 'load', side_effect=AssertionError('dismiss needs no adapter')):
+                patch.object(lifecycle, 'start', side_effect=AssertionError('dismiss must not wake')):
             lines = []
             result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
             self.assertTrue(result['ok'])
-            self.assertEqual(result['dismissed'], 2)
-            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.'])
-            self.assertIn('2 delivery failures dismissed', lines[0])
+            self.assertEqual(result['dismissed'], 5)
+            self.assertEqual((result['dismissed_failures'], result['dismissed_unconfirmed']), (2, 3))
+            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.',
+                                    'recipient: 3 unconfirmed messages dismissed; they may still have arrived. Kept in history. Nothing resent.'])
             self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
         self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
         history = mailbox.inbox(self.directory, all_messages=True)['messages']
-        self.assertEqual(len(history), 7)
+        self.assertEqual(len(history), len(selected) + len(untouched))
         for message in history:
-            state = message['tracking']
+            state = dict(message['tracking'])
             if message['id'] in {item['id'] for item in selected}:
                 self.assertTrue(state.pop('dismissed_at'))
             self.assertEqual(state, before[message['id']])
@@ -86,6 +97,16 @@ class DeliveryProblemTest(BaseTest):
             for message in selected:
                 self.assertTrue(native.deliver(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
                 self.assertTrue(native.send_or_wake(self.root, self.directory.name, message['id'], retry=True)['value']['dismissed'])
+        # A late receipt is evidence in history, never a reason to list or replay a dismissed message.
+        for message in selected:
+            write(self.directory / 'claude-receipts' / (message['id'] + '.json'),
+                  {'id': message['id'], 'route': 'prompt', 'at': 123})
+            with patch.object(native, 'context', side_effect=AssertionError('dismissed input needs no receipt read')):
+                self.assertTrue(native.deliver(self.root, self.directory.name, message['id'], check=True)['value']['dismissed'])
+        dismissed_history = [message for message in history if message['id'] in {item['id'] for item in selected}]
+        with patch.object(mailbox, 'inbox', return_value={'messages': dismissed_history}), \
+                patch.object(native, 'deliver', side_effect=AssertionError('dismissed messages must stay out of checks')):
+            self.assertEqual(deliver.run(self.root, agent='recipient', check=True)['messages'], [])
         # A retry snapshot taken before dismissal must re-read the final marker under the delivery locks.
         stale = [{**item, 'tracking': before[item['id']]} for item in selected]
         with patch.object(mailbox, 'inbox', return_value={'messages': stale}), \
@@ -97,6 +118,96 @@ class DeliveryProblemTest(BaseTest):
         lines = []
         self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)['dismissed'], 1)
         self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent.'])
+        self.message('unknown')
+        lines = []
+        result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
+        self.assertEqual((result['dismissed_failures'], result['dismissed_unconfirmed']), (0, 1))
+        self.assertEqual(lines, ['recipient: 1 unconfirmed message dismissed; it may still have arrived. Kept in history. Nothing resent.'])
+
+        # Existing native evidence must settle an attempt before dismissal, without a prior --check.
+        for case, state in (('receipt', 'accepted'), ('receipt', 'unknown'), ('receipt', 'submitting'),
+                            ('receipt', 'failed'), ('transcript', 'accepted'), ('outside-lineage', 'accepted'),
+                            ('lost', 'accepted'), ('damaged-receipt', 'accepted'), ('startup-finishes', 'accepted')):
+            with self.subTest(evidence=case, state=state):
+                home = self.work / uid()
+                current, old, identifier = uid(), uid(), uid()
+                directory = self.recipient(self.root, {'launch_id': current, 'state': 'running', 'status': 'idle'},
+                                           native_session_home=str(home), native_session_provider='claude')
+                session_id = read(directory / 'properties.json')['native_session_id']
+                target = uid() if case == 'outside-lineage' else session_id
+                message = self.message(state, directory)
+                refusal = {'state': 'error', 'value': {'definite_failure': True, 'delivery_rejected': True}}
+                attempt = {'launch_id': old if case in ('transcript', 'lost') else current, 'native_session_id': target,
+                           'native_message_id': identifier, 'at': now(),
+                           **({'delivery_receipt': refusal} if state == 'failed' else {})}
+                mailbox.update_message(directory, message['id'], attempts=[attempt], target_session=target,
+                                       **({'last_receipt': refusal} if state == 'failed' else {}))
+                if case in ('receipt', 'startup-finishes'):
+                    write(directory / 'claude-receipts' / f'{identifier}.json',
+                          {'id': identifier, 'route': 'mid-turn', 'at': 123})
+                if case == 'damaged-receipt':
+                    write(directory / 'claude-receipts' / f'{identifier}.json', {})
+                if case in ('transcript', 'lost'):
+                    write(directory / 'launches' / old / 'request.json', {'env': {'CLAUDE_CONFIG_DIR': str(home)}, 'unset_env': []})
+                    write(directory / 'launches' / old / 'cleanup.json',
+                          {'schema': 1, 'launch_id': old, 'pid': 990001, 'child_pid': 990002})
+                    transcript = home / 'projects' / 'fixture' / (session_id + '.jsonl')
+                    transcript.parent.mkdir(parents=True)
+                    transcript.write_text(json.dumps({'type': 'attachment', 'uuid': uid(), 'sessionId': session_id,
+                        'timestamp': now(), 'attachment': {'type': 'queued_command', 'prompt': message['text'],
+                        'origin': {'kind': 'peer', 'msg_id': identifier if case == 'transcript' else uid()}}}) + '\n')
+                pending = self.message('pending', directory)
+                mailbox.update_message(directory, pending['id'], deferred_launch_id=current)
+                pending_before = mailbox.message_record(directory, pending['id'])[1]
+                original_get_delivery = harnesses.ClaudeAdapter.get_delivery
+                def receipt(adapter, session, message_id, executor=None):
+                    self.assertEqual(message_id, identifier)  # Never check pending startup input.
+                    for name in ('.send.lock', '.launch.lock', '.delivery.lock'):
+                        with (directory / name).open('a') as handle:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    answer = original_get_delivery(adapter, session, message_id, executor)
+                    if case == 'startup-finishes':
+                        # The runner can publish completion while dismiss reads another message's evidence.
+                        mailbox.update_message(directory, pending['id'], submission_state='accepted')
+                    return answer
+                lines = []
+                with patch.object(harnesses.ClaudeAdapter, 'get_delivery', new=receipt), \
+                        patch.object(native, 'send_or_wake' , side_effect=AssertionError('reconciliation must not send')), \
+                        patch.object(harnesses.ClaudeAdapter, 'send', side_effect=AssertionError('must not submit')), \
+                        patch.object(lifecycle, 'start', side_effect=AssertionError('must not wake')), \
+                        patch.object(lifecycle, 'launch_ready', return_value=True), \
+                        patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                        patch.object(attachments, 'recorded_process_problem', return_value=None), \
+                        patch.object(attachments, 'problem', return_value=None):
+                    result = deliver.run(self.root, agent=directory.name, dismiss=True, _present=lines.append)
+                    tracking = mailbox.message_record(directory, message['id'])[1]
+                    self.assertTrue(result['ok'])
+                    self.assertEqual(result.get('confirmed', 0), int(case not in ('outside-lineage', 'lost', 'damaged-receipt')))
+                    self.assertEqual(result['dismissed'], int(case == 'damaged-receipt'))
+                    self.assertEqual(bool(tracking.get('dismissed_at')), case == 'damaged-receipt')
+                    if case == 'lost':
+                        self.assertEqual(tracking['submission_state'], 'cancelled')
+                        self.assertTrue(tracking['cancelled_reported_at'])
+                        self.assertTrue(any('lost when the agent stopped' in line for line in lines), lines)
+                    elif case == 'damaged-receipt':
+                        self.assertEqual(lines, ['recipient: 1 unconfirmed message dismissed; it may still have arrived. Kept in history. Nothing resent.'])
+                    elif case == 'outside-lineage':
+                        self.assertTrue(tracking['uncheckable_reported_at'])
+                        self.assertTrue(any('outside' in line for line in lines), lines)
+                    else:
+                        self.assertTrue(tracking['native_receipt']['transcript_confirmed'])
+                        self.assertTrue(tracking['transcript_confirmed_at'])
+                        self.assertEqual(lines, ['recipient: 1 message confirmed in its conversation; not dismissed.'])
+                    pending_after = mailbox.message_record(directory, pending['id'])[1]
+                    self.assertEqual(pending_after, {**pending_before, **({'submission_state': 'accepted'} if case == 'startup-finishes' else {})})
+                    if case == 'startup-finishes':
+                        # Restore pending to leave this row's repeated-dismiss assertion about the original candidate.
+                        mailbox.update_message(directory, pending['id'], submission_state='pending')
+                    lines.clear()
+                    again = deliver.run(self.root, agent=directory.name, dismiss=True, _present=lines.append)
+                    self.assertEqual((again.get('confirmed', 0), again['dismissed']), (0, 0))
+                    self.assertEqual(lines, ['recipient: no failed or unconfirmed messages to dismiss.'])
 
     def test_launch_only_or_broken_connection_per_harness(self):
         """For each harness, mode and state an unavailable send or ask is classed launch-only (restarting cannot
@@ -289,8 +400,10 @@ class DeliveryProblemTest(BaseTest):
                         self.assertEqual(mailbox.message_record(directory, identifier)[1], tracking)
                     self.assertEqual(result.get('finalized'), 1)
                     self.assertIn('final', lines[-1])
-                    self.assertEqual(submit.call_args.args[1].id, message['id'])
-                    self.assertEqual(mailbox.message_record(directory, message['id'])[1]['submission_state'], 'accepted')
+                    tracking = mailbox.message_record(directory, message['id'])[1]
+                    self.assertEqual(submit.call_args.args[1].id, tracking['attempts'][-1]['native_message_id'])
+                    self.assertNotEqual(submit.call_args.args[1].id, message['id'])
+                    self.assertEqual(tracking['submission_state'], 'accepted')
                     deliver.run(root, agent='recipient', retry=True)
                     self.assertEqual(submit.call_count, 1)
 

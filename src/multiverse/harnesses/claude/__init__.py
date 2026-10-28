@@ -17,11 +17,8 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-Tree compaction is the `compaction` plugin (the plugins/compaction submodule):
-its launch contribution loads its own Claude plugin, which answers the
-session's `/compact` with mv2's compacted conversation, and adds a PreCompact
-hook that refuses Claude's own compaction should that ever fail to answer. Its
-Claude source (sources/claude) reads this harness's transcripts.
+Plugins extend Claude launches through launch contributions and harness
+directories, and read its transcripts through the transcript protocol.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -31,11 +28,9 @@ import os
 from pathlib import Path
 import re
 import stat
-import unicodedata
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from uuid import uuid4
 
@@ -43,14 +38,17 @@ from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
 from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
-from ..types import Usage
+from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read
+from . import models as model_table
+from . import transcripts as rows_source
+from .transcripts import (  # every transcript reader reads through this one row source
+    claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
+    holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
+    has_saved_conversation, Transcript, _transcripts, _transcripts_lock, counted, context_reading, context_usage,
+    measured_usage, DAMAGED, raw_rows, USAGE_KEYS)
 
 MOD = Path(__file__).parent / 'mod'
-# Typeahead for /multiverse is now the bundled `typeahead` mv2 plugin (multiverse/plugins/builtin/typeahead),
-# loaded like any plugin's Claude directory from Claude Code 2.1.292. This copy stays, unchanged, only for
-# agents launched before the move: Claude reloads a plugin from the path it was given. Remove it once no
-# live launch's request.json names it.
 # The mod acts only on text between these tags and removes them. The opening
 # tag names the delivery mode, which the mod honors, and the message ID for its
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
@@ -68,187 +66,6 @@ NO_KEY = 'Claude has not published the inbox key for this launch'
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
 NOT_RUNNING = "This agent isn't running: resume it first"
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
-USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
-
-
-def claude_home(environment=None):
-    """Claude's storage root: `environment` as a launch sees it, else this process's."""
-    source = environment or os.environ
-    if source.get('CLAUDE_CONFIG_DIR'):
-        return Path(source['CLAUDE_CONFIG_DIR'])
-    return (Path(source['HOME']) if source.get('HOME') else Path.home()) / '.claude'
-
-
-class Unreadable(Exception):
-    """A folder or file under Claude's storage that can't be read, so a lookup can't tell what is there."""
-
-    def __init__(self, path):
-        super().__init__(f"{path} can't be read")
-        self.path = str(path)
-
-
-def open_regular(path):
-    """`path` opened for reading, through any link, only when it is a regular file, and never waiting: a FIFO,
-    device or directory at a transcript's name raises Unreadable. The type is read from the opened descriptor, so a
-    file swapped in after a check can't slip past, and a FIFO with no writer can't hold the open (or a lock)."""
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise Unreadable(path)
-        os.set_blocking(descriptor, True)
-        return os.fdopen(descriptor, 'rb')
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
-def read_regular(path):
-    """The whole of a regular file (open_regular)."""
-    with open_regular(path) as handle:
-        return handle.read()
-
-
-PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
-
-
-def project_key(path):
-    """Claude's project folder name for a launch directory: the NFC path, every UTF-16 code unit that isn't
-    an ASCII letter or digit replaced by '-', as Bun does (so a character outside the BMP gives '--')."""
-    return ''.join(c if c.isascii() and c.isalnum() else '-' * (2 if ord(c) > 0xFFFF else 1)
-                   for c in unicodedata.normalize('NFC', str(path)))
-
-
-def could_hold(name, workspaces):
-    """Whether Claude could file a session launched in one of `workspaces` under the project folder `name`.
-
-    The name is lossy, so this errs towards yes: the folder's name, ignoring case, is a workspace's key or
-    starts with it plus '-' (Claude's own worktrees under the workspace, and the hashed form past 200 units).
-    With no absolute workspace to go by, any folder could.
-    """
-    return holds_name(name, project_keys(workspaces))
-
-
-def project_keys(workspaces):
-    """The folder keys of `workspaces` (each absolute one as recorded and as its real path), for holds_name; resolved
-    once per scan, since the listing scans a shared store per agent."""
-    return {project_key(form)[:PROJECT_KEY_LENGTH].casefold()
-            for workspace in workspaces if isinstance(workspace, str) and os.path.isabs(workspace)
-            for form in (workspace, os.path.realpath(workspace))}
-
-
-def holds_name(name, keys):
-    """could_hold, from the keys project_keys gave; no keys means any folder could."""
-    folded = name.casefold()
-    return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
-
-
-def session_transcripts(native_id, environment=None, workspaces=(), links=False):
-    """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
-
-    Raises Unreadable when a folder can't be listed or searched and could hold the session (a dangling link, or a
-    folder gone before it was searched, counts as one that can't be searched): Claude files it
-    under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
-    folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
-    that finds nothing would otherwise read as proof the transcript is absent.
-    """
-    return _scan_transcripts(native_id, environment, workspaces, links)[0]
-
-
-def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
-    """session_transcripts, and whether this call listed the projects folder itself (False when it is missing)."""
-    projects = claude_home(environment) / 'projects'
-    try:
-        entries = list(os.scandir(projects))
-    except FileNotFoundError:
-        return [], False
-    except OSError as error:
-        raise Unreadable(projects) from error
-    found, files, keys = [], set(), project_keys(workspaces)
-    for entry in entries:
-        candidate = Path(entry.path) / f'{native_id}.jsonl'
-        holds = holds_name(entry.name, keys)
-        try:
-            if holds:
-                # Resolved now, through any link, never from the listing's type: a dangling or looping link, or a
-                # folder gone since the listing, proves nothing; a link to a real folder is searched through it.
-                if not stat.S_ISDIR(os.stat(entry.path).st_mode):
-                    continue
-            elif not entry.is_dir():
-                continue
-            # `links` finds a link (even a dangling one) where a transcript should be, for readers that refuse it.
-            status = candidate.lstat() if links else candidate.stat()
-            if (status.st_dev, status.st_ino) in files:
-                continue  # the same file through another path (a linked project folder): read it once
-            files.add((status.st_dev, status.st_ino))
-            found.append((status.st_mtime, candidate))
-        except FileNotFoundError as error:
-            if holds and not os.path.isdir(entry.path):  # the folder itself is gone: a dangling link, or removed mid-scan
-                raise Unreadable(entry.path) from error
-            continue
-        except OSError as error:
-            if holds:  # a project folder that can't be searched could hold it
-                raise Unreadable(entry.path) from error
-    return [path for _, path in sorted(found)], True
-
-
-IDENTITY_BYTES = 1 << 20
-
-
-def transcript_identity(path, native_id):
-    """None when `path` is a regular file whose rows name session `native_id` (read within its first MiB), else
-    why it proves nothing: a link, a directory or other non-regular file, an unreadable or empty file, or rows of
-    no session or another one."""
-    try:
-        if stat.S_ISLNK(path.lstat().st_mode):
-            return f'{path} is a link, not a transcript'
-        if not stat.S_ISREG(path.lstat().st_mode):
-            return f'{path} is not a regular file'
-        with open_regular(path) as handle:
-            head = handle.read(IDENTITY_BYTES)
-    except Unreadable:
-        return f'{path} is not a regular file'
-    except OSError as error:
-        return f"{path} can't be read ({error.strerror or error})"
-    named = set()
-    for raw in head.split(b'\n')[:-1] if len(head) == IDENTITY_BYTES else head.split(b'\n'):
-        try:
-            row = json.loads(raw) if raw.strip() else None
-        except ValueError:
-            continue
-        if isinstance(row, dict) and isinstance(row.get('sessionId'), str):
-            named.add(row['sessionId'])
-    if named - {native_id}:
-        return f"{path} holds another session's rows"
-    if native_id not in named:
-        return f'{path} has no row naming this session'
-    return None
-
-
-def subagent_transcripts(main):
-    """The subagent transcripts beside a main transcript; Unreadable when part of that folder can't be read."""
-    folder = main.parent / main.stem / 'subagents'
-    found = []
-
-    def unreadable(error):
-        if not isinstance(error, FileNotFoundError):
-            raise Unreadable(error.filename or folder) from error
-
-    for directory, _, files in os.walk(folder, onerror=unreadable):
-        found.extend(Path(directory) / name for name in files if name.endswith('.jsonl'))
-    return sorted(found)
-
-
-def has_saved_conversation(native_id, environment=None, workspaces=()):
-    """Whether Claude has written a transcript for this session.
-
-    Claude writes nothing until the first message, so a session that was never
-    used has none, and `--resume` refuses it. When its storage can't be read this
-    says yes: resume then tries the conversation, and Claude says if it is gone.
-    """
-    try:
-        return bool(session_transcripts(native_id, environment, workspaces))
-    except Unreadable:
-        return True
 
 
 def peer_token(socket_path, home=None):
@@ -352,100 +169,12 @@ def unverified_relaunch(session):
     return isinstance(path, str) and os.path.abspath(path) != os.path.abspath(session.endpoint.address)
 
 
-class Transcript:
-    """Usage recorded in one transcript file, read once and then as it grows.
-
-    Claude writes one record per content block of a response, each with the
-    response's usage, so usage is counted once per response ID. A row with zero
-    usage is never a response: a compaction that keeps a row stores it again with
-    zero usage, and an installed compaction's rows arrive as new IDs with zero
-    usage (Claude's `<synthetic>` model). Neither replaces a real response's usage
-    or becomes the latest request, so `last` stays the latest real response.
-    """
-
-    def __init__(self, path):
-        self.path, self.inode, self.offset, self.responses, self.last = path, None, 0, {}, None
-
-    def read(self):
-        status = self.path.stat()
-        if status.st_ino != self.inode or status.st_size < self.offset:
-            self.inode, self.offset, self.responses, self.last = status.st_ino, 0, {}, None
-        with open_regular(self.path) as handle:
-            handle.seek(self.offset)
-            data = handle.read()
-        end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
-        for line in data[:end].splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            message = record.get('message') if isinstance(record, dict) and record.get('type') == 'assistant' else None
-            if isinstance(message, dict) and isinstance(message.get('usage'), dict) and message.get('id'):
-                if not any(counted(message['usage'], key) for key in USAGE_KEYS):
-                    continue
-                self.responses[message['id']] = message['usage']
-                self.last = record.get('timestamp') or self.last
-        self.offset += end
-        return self
-
-
-_transcripts = {}
-_transcripts_lock = threading.Lock()
-
-
-def counted(usage, key):
-    value = usage.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
-
-
-def context_reading(native_id, workspaces=(), environment=None):
-    """(tokens, timestamp) of the latest main-thread request, or None.
-
-    Tokens are input + cache written + cache read. Subagent transcripts are
-    excluded: they have their own context windows.
-    """
-    mains = session_transcripts(native_id, environment, workspaces)
-    if not mains:
-        return None
-    with _transcripts_lock:
-        transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
-        responses, stamp = transcript.responses, transcript.last
-    if not responses:
-        return None
-    latest = list(responses.values())[-1]
-    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')), stamp
-
-
-def context_usage(native_id):
-    """Tokens in the latest main-thread request, or None."""
-    reading = context_reading(native_id)
-    return reading[0] if reading else None
-
-
 def moment(text):
     """A timestamp as a datetime, or None."""
     try:
         return datetime.fromisoformat(text.replace('Z', '+00:00')) if isinstance(text, str) else None
     except ValueError:
         return None
-
-
-def measured_usage(native_id, workspaces=(), environment=None):
-    """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
-    than total a scan that skipped part of the storage."""
-    mains = session_transcripts(native_id, environment, workspaces)
-    if not mains:
-        return None
-    paths = [mains[-1], *subagent_transcripts(mains[-1])]
-    with _transcripts_lock:
-        transcripts = [_transcripts.setdefault(path, Transcript(path)).read() for path in paths]
-    responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
-    cached = sum(counted(usage, 'cache_read_input_tokens') for usage in responses)
-    written = sum(counted(usage, 'cache_creation_input_tokens') for usage in responses)
-    inputs = sum(counted(usage, 'input_tokens') for usage in responses) + cached + written
-    outputs = sum(counted(usage, 'output_tokens') for usage in responses)
-    last = max((transcript.last for transcript in transcripts if transcript.last), default='')
-    return Usage(native_id, inputs, outputs, inputs + outputs, 'claude-transcript', last, cached, written)
 
 
 # The oldest Claude Code the mod and the peer inbox were built and tested on.
@@ -540,11 +269,15 @@ def _stored_message(directory, native_id):
         if record.get('target_session') != native_id and not any(
                 isinstance(attempt, dict) and attempt.get('native_session_id') == native_id for attempt in attempts):
             continue
-        try:
-            if (directory / 'claude-receipts' / f'{normalize_session_id(message_id)}.json').is_file():
+        ids = [message_id, *(attempt.get('native_message_id') for attempt in attempts if isinstance(attempt, dict))]
+        for identifier in ids:
+            try:
+                path = directory / 'claude-receipts' / f'{normalize_session_id(identifier)}.json'
+            except (ValueError, TypeError, AttributeError):
+                continue
+            receipt = mod_receipt(path, identifier)
+            if receipt and receipt[0] == 'delivered':  # a refusal, or anything else, is no delivery
                 return True
-        except ValueError:
-            continue
     return False
 
 
@@ -591,6 +324,51 @@ def _typed_prompt(native_id, environment):
     return False
 
 
+BODY_LIMIT = 16 << 20  # a row over this comes without its data
+NO_STORAGE = "mv2 has no record of this agent's Claude storage; resume it once"
+
+
+def reading_storage(session):
+    """(home, why) for reading a session's transcript: the recorded home only, never this process's.
+
+    One exception (draft 7 6.2): inside the agent's own session, whose MV2_AGENT_DIR is the
+    agent's folder, the inherited environment is the launch's own, so an agent launched before mv2 recorded its
+    storage can read until its next resume: CLAUDE_CONFIG_DIR (a relative one against the workspace), else
+    HOME/.claude, as its real path, the form session_home records.
+    """
+    if session.home:
+        return (session.home, None) if os.path.isabs(session.home) else (None, NO_STORAGE)
+    agent = Path(session.session_file).parent if session.session_file else None
+    own = os.environ.get('MV2_AGENT_DIR')
+    if agent is None or not own or os.path.realpath(own) != os.path.realpath(agent):
+        return None, NO_STORAGE
+    value = os.environ.get('CLAUDE_CONFIG_DIR')
+    if value:
+        home = value if os.path.isabs(value) else os.path.join(session.workspace or '', value)
+    else:
+        home = os.path.join(os.environ.get('HOME') or str(Path.home()), '.claude')
+    return (os.path.realpath(home), None) if os.path.isabs(home) else (None, NO_STORAGE)
+
+
+def _check(reader):
+    """Core's deadline and snapshot check, between the steps of a read."""
+    if reader is not None:
+        reader.check()
+
+
+def _empty_view(state, reason):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(), context_from=0,
+                          tip=None, gap=None, history_version=0)
+
+
+def _fact(item, label, source):
+    command, args = rows_source.command_of(item.head) if label == 'command' else (None, None)
+    call = item.answers[0] if item.kind == 'user' and item.tool_result and item.answers else item.companion
+    return RowFact(position=rows_source.position_of(item), ref=item.ref, kind=item.kind, label=label, source=source,
+                   call_id=call, command=command, args=args, stop=item.stop, ends_turn=rows_source.ends_turn(item),
+                   at=item.at, size=item.size, preview=item.head[:200] if label in ('prompt', 'command') else '')
+
+
 def launch_storage(session, environment):
     """Where a launch's Claude keeps its transcripts, as an environment for claude_home, or None if unknown.
 
@@ -625,15 +403,11 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     damaged = None
     for path in paths:
         try:
-            lines = read_regular(path).split(b'\n')
+            rows = raw_rows(path)
         except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
-        for raw in lines:
-            if not raw.strip():
-                continue
-            try:
-                row = json.loads(raw)
-            except ValueError:  # damaged, or the last row cut short while it was being written
+        for row in rows:
+            if row is DAMAGED:  # damaged, or the last row cut short while it was being written
                 damaged = damaged or path
                 continue
             message = row.get('message') if isinstance(row, dict) and row.get('type') == 'user' else None
@@ -655,8 +429,9 @@ def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
 
 def _delivery_row(row):
     """What one transcript row says about mv2's deliveries: ('id', msg_id) for the queued_command a mid-turn steer
-    becomes, ('text', text, timestamp) for a prompt, None for any other row, or False when a row of either kind
-    is malformed (valid JSON in the wrong shape is damage, never an empty message)."""
+    becomes or the peer prompt one runs as after an interruption (both carry Claude's stamp of the message ID),
+    ('text', text, timestamp) for a prompt, None for any other row, or False when a row of either kind is
+    malformed (valid JSON in the wrong shape is damage, never an empty message)."""
     if not isinstance(row, dict):
         return False
     if row.get('type') == 'attachment':
@@ -673,6 +448,9 @@ def _delivery_row(row):
             return 'id', origin['msg_id']
         return 'text', attachment['prompt'], row.get('timestamp') or attachment.get('timestamp')
     if row.get('type') == 'user':
+        origin = row.get('origin')
+        if isinstance(origin, dict) and origin.get('kind') == 'peer' and 'msg_id' in origin:
+            return ('id', origin['msg_id']) if isinstance(origin['msg_id'], str) and origin['msg_id'] else False
         message = row.get('message')
         content = message.get('content') if isinstance(message, dict) else None
         if isinstance(content, str):
@@ -693,19 +471,17 @@ def _receipt(directory, receipts, message_id):
     when there is none; False when one exists but can't be read or isn't a receipt."""
     value = None
     if directory is not None:
-        path = Path(directory) / 'claude-receipts' / f'{message_id}.json'
-        try:
-            record = json.loads(path.read_text())
-            value = {'route': record.get('route'), 'delivered_at_ms': record.get('at')} if isinstance(record, dict) else False
-        except FileNotFoundError:
-            value = None
-        except (OSError, ValueError):
+        receipt = mod_receipt(Path(directory) / 'claude-receipts' / f'{message_id}.json', message_id)
+        if receipt is False:
             return False
+        # Not delivered is no receipt to place; the ledger's copy may still say.
+        if receipt and receipt[0] == 'delivered':
+            value = {'route': receipt[1], 'delivered_at_ms': receipt[2]}
     if value is None:
         value = (receipts or {}).get(message_id)
     if value is None:
         return None
-    if not isinstance(value, dict) or value.get('route') not in ('prompt', 'mid-turn'):
+    if not isinstance(value, dict) or value.get('route') not in RECEIPT_ROUTES:
         return False
     at = value.get('delivered_at_ms')
     when = datetime.fromtimestamp(at / 1000, timezone.utc) if type(at) is int and at > 0 else None
@@ -718,6 +494,55 @@ def _receipt(directory, receipts, message_id):
 AGED = re.compile(r' \(sent \d+ (?:min|hours?|days?) ago\)(?=:$)')
 SENDER = re.compile(r'^Message from .+:$')
 SENT = re.compile(r'[0-9][0-9T:.+\-Z]*')  # the send time the mod's tag pattern accepts
+
+
+
+RECEIPT_ROUTES = ('prompt', 'mid-turn', 'peer-prompt')  # where a delivered message's row was stored
+# Routes whose row is a user row, one of the copies identical texts share: its receipt owns one. (A peer prompt's row
+# normally carries its msg_id too, but one that lost it is just text, and its receipt must still hold its copy.)
+COPY_ROUTES = ('prompt', 'peer-prompt')
+
+
+def mod_receipt(path, identifier):
+    """The mod's receipt for one delivery attempt: ('delivered', route, time in ms or None), ('refused', definite,
+    reason), None when there is no file, or False when it can't be read or isn't a receipt for `identifier` in the
+    shape the mod writes."""
+    value = _json_record(path)
+    if value is None or value is False:
+        return value
+    if not isinstance(value.get('id'), str) or value['id'].lower() != str(identifier).lower():
+        return False
+    if value.get('delivered') is False:
+        reason = value.get('reason')
+        return ('refused', value.get('definite') is True, reason) if isinstance(reason, str) and reason else False
+    if 'delivered' in value or value.get('route') not in RECEIPT_ROUTES:
+        return False
+    at = value.get('at')
+    return 'delivered', value['route'], at if type(at) is int and at > 0 else None
+
+
+RECEIPT_BYTES = 1 << 16  # a receipt is a few short fields; anything larger isn't one
+ANSWER_BYTES = 1 << 22  # an ask answer holds the model's text
+
+
+def _json_record(path, limit=RECEIPT_BYTES):
+    """A small JSON object file: the dict, None when there is no file, False when it can't be read, isn't a regular
+    file, is over `limit` bytes or isn't a JSON object. It is opened without waiting (open_regular): core reads
+    receipts while holding the agent's launch and delivery locks, so a FIFO at its name must never block."""
+    try:
+        with open_regular(path) as handle:
+            data = handle.read(limit + 1)
+    except FileNotFoundError:
+        return None
+    except (OSError, Unreadable):
+        return False
+    if len(data) > limit:
+        return False
+    try:
+        value = json.loads(data)
+    except ValueError:
+        return False
+    return value if isinstance(value, dict) else False
 
 
 def without_age(text):
@@ -735,9 +560,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     framed text (a follow-up or idle steer the mod typed in, equal to it once stripped) counts once, by its row
     uuid across transcript copies. `cohort` holds the session's other acceptances as (message_id, framed text,
     since). Among those with our text, an exact receipt (the mod's file in `directory`, else the ledger's in
-    `receipts`) first takes its own copy: a prompt receipt the one unused copy stored between its accept time
-    and it, within a minute (none, or more than one, leaves this unknown); a mid-turn receipt none, being a
-    queued_command row. The remaining copies go to the others from their accept
+    `receipts`) first takes its own copy: a prompt or peer-prompt receipt the one unused copy stored between its
+    accept time and it, within a minute (none, or more than one, leaves this unknown; a peer prompt's row that
+    kept its msg_id is an ID row instead); a mid-turn receipt none, being a queued_command row. The remaining copies go to the others from their accept
     times on, oldest first. False only when every transcript that could hold it was read whole and no copy is
     left from our accept time on. With `framed` False, `text` is only the body (older records): a match is not
     proof, since another message can share it; its absence still is. An identical acceptance in `active` (accepted by
@@ -760,17 +585,12 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
     damaged, ids, versions, prints, conflicting = None, set(), {}, {}, set()
     for path in paths:
         try:
-            lines = read_regular(path).split(b'\n')
+            rows = raw_rows(path)
         except (OSError, Unreadable):
             return None, f"Claude's transcript {path} can't be read: restore read access to it"
-        for raw in lines:
-            if not raw.strip():
-                continue
-            try:
-                row = json.loads(raw)
-                seen = _delivery_row(row)
-            except ValueError:  # damaged, or the last row cut short while it was being written
-                row, seen = None, False
+        for row in rows:
+            # A damaged line, or the last row cut short while it was being written, is damage like a malformed row.
+            row, seen = (None, False) if row is DAMAGED else (row, _delivery_row(row))
             if seen is False:
                 damaged = damaged or path
                 continue
@@ -822,9 +642,9 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
         if directory is None and not receipts:
             return None, "Another acceptance of the same text can't be checked for a receipt: no agent folder"
         receipt = _receipt(directory, receipts, other)
-        if receipt is False or receipt and receipt[0] == 'prompt' and receipt[1] is None:
+        if receipt is False or receipt and receipt[0] in COPY_ROUTES and receipt[1] is None:
             return None, "Another acceptance of the same text has a receipt that can't be placed in time"
-        if receipt and receipt[0] == 'prompt':
+        if receipt and receipt[0] in COPY_ROUTES:
             holders.append((receipt[1], accepted))
         elif not receipt and other in (active or ()):
             return None, ("An identical message the live launch accepted may still be stored and confirmed: check again "
@@ -949,6 +769,7 @@ def unavailable(bridge):
 
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
+    delivery_attempt_ids = True  # each delivery attempt has its own message ID, so a receipt names one attempt
     package = Path(__file__).parent
     supports_bridge = True
     family = 'claude'
@@ -1012,15 +833,13 @@ class ClaudeAdapter(ConfiguredAdapter):
         proofs, found = {}, False
         for path in paths:
             try:
-                lines = read_regular(path).split(b'\n')
+                rows = raw_rows(path)
             except (OSError, Unreadable):
                 return NativeResult('unknown', f"Claude's transcript {path} can't be read: restore read access to it")
-            for raw in lines:
-                try:
-                    row = json.loads(raw)
-                    seen = _delivery_row(row)
-                except ValueError:
+            for row in rows:
+                if row is DAMAGED:
                     continue  # a damaged row elsewhere says nothing about this one
+                seen = _delivery_row(row)
                 uuid = row.get('uuid') if isinstance(row, dict) and isinstance(row.get('uuid'), str) and row['uuid'] else None
                 if uuid is not None:
                     # Every copy of a row, whatever it is, must agree on its session and what it proves (which
@@ -1137,13 +956,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         environment = {**command.environment, FUNCTION_HOOKS: '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
-        # The adapter's own settings and environment never change; problems and modes join the launch's own.
+        # The adapter's own settings and environment never change. Their problems and modes are the plugins'
+        # (plan.record()), never this harness's native_mode.
         plan = plugins.plan_for(context, 'claude', self.name, version=claude_version(command.argv[0]), bridge=True,
                                 base_settings=settings, base_environment=environment)
-        if plan.problems:
-            native_mode['fallback_reason'] = '; '.join(filter(None, [native_mode['fallback_reason'], *plan.problems]))
-        if plan.modes:
-            native_mode['mode'] = ' '.join([native_mode['mode'], *plan.modes])
         directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
@@ -1300,6 +1116,88 @@ class ClaudeAdapter(ConfiguredAdapter):
         result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
 
+    def transcript_view(self, session, *, tip=None, reader=None):
+        """The session's transcript as one view for core: every row's facts in stored order (never a body), the
+        history as indexes in conversation order from `tip` (or the newest leaf), and where the context starts."""
+        _check(reader)
+        if not session.native_id:
+            return _empty_view('unavailable', 'No Claude session ID recorded')
+        home, why = reading_storage(session)
+        if home is None:
+            return _empty_view('unavailable', why)
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+        except rows_source.CantTell as error:
+            return _empty_view('error', str(error))
+        if index is None:
+            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet')
+        _check(reader)  # indexing a large copy cold takes a moment
+        analysis = rows_source.analyse(index, tip)
+        entries = index.entries
+        facts = tuple(_fact(item, *labelled) for item, labelled in zip(entries, analysis.labels))
+        source = TranscriptSource(state='supported', home=home, format='claude-jsonl',
+                                  version=next((item.version for item in reversed(entries) if item.version), None),
+                                  size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
+        return TranscriptView(source=source, rows=facts, history=analysis.history.rows,
+                              context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
+                              gap=analysis.history.gap, history_version=analysis.version)
+
+    def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
+        """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for
+        a row over `max_bytes` (or 16 MiB) or one that isn't an object. Raises TranscriptRowsChanged when a row's
+        bytes changed since the view: its position names the offset after it and a hash chained over every line up
+        to it, so an earlier row changing changes it too."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)) if home else None
+        except rows_source.CantTell as error:  # the copies stopped agreeing since the view
+            raise TranscriptRowsChanged() from error
+        if index is None:
+            raise TranscriptRowsChanged()
+        out = []
+        with rows_source.open_regular(index.path) as handle:
+            for number in indexes:
+                _check(reader)
+                fact = view.rows[number]
+                # The index proved its prefix unchanged when it was read: the row must still have the view's position
+                # (its chained hash covers every earlier byte), and its own line's bytes, read now, must still match.
+                if number >= len(index.entries) or rows_source.position_of(index.entries[number]) != fact.position:
+                    raise TranscriptRowsChanged()
+                item = index.entries[number]
+                handle.seek(item.offset)
+                line = handle.read(item.size)
+                if len(line) != item.size or hashlib.sha256(line).hexdigest()[:16] != item.digest:
+                    raise TranscriptRowsChanged()
+                if fact.size > min(max_bytes, BODY_LIMIT):
+                    out.append(None)
+                    continue
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    value = None
+                out.append(value if isinstance(value, dict) else None)
+        return out
+
+    def models(self, *, environment):
+        """The models offered on the provider a launch with `environment` uses, from mv2's table (models.py)."""
+        return model_table.catalog(environment)
+
+    def check_model(self, model, *, effort=None, environment):
+        """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
+        return model_table.check(model, effort, environment)
+
+    def transcript_readable(self, session, *, reader=None):
+        """Whether an earlier generation's transcript can still be found under its recorded home; None: can't tell."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        if not home or not session.native_id:
+            return None
+        try:
+            return bool(session_transcripts(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)))
+        except Unreadable:
+            return None
+
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
         if not session.native_id:
@@ -1330,7 +1228,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
             context['tokens'] = reading[0]
         if reading and reading[1]:
-            # When the latest main-thread response came: a plugin's estimate (compaction's) stands only until one does.
+            # When the latest main-thread response came: a plugin's estimate stands only until one does.
             context['responded_at'] = reading[1]
         if context:
             reported['context'] = context
@@ -1391,9 +1289,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             return written
         deadline = time.monotonic() + ASK_TIMEOUT
         while time.monotonic() < deadline:
-            try:
-                record = json.loads(answer.read_text())
-            except (OSError, ValueError):  # not written yet, or mid-write
+            record = _json_record(answer, ANSWER_BYTES)
+            if not record:  # not written yet, mid-write, or not an answer file
                 time.sleep(0.2)
                 continue
             answer.unlink(missing_ok=True)
@@ -1409,15 +1306,33 @@ class ClaudeAdapter(ConfiguredAdapter):
         return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
 
     def get_delivery(self, session, message_id, executor=None):
-        """The mod's receipt, written when the message's row entered the conversation."""
+        """The mod's receipt for this delivery attempt (core gives each attempt its own message ID): delivered once
+        its row entered the conversation, or not delivered once Claude dropped it or left it unstored. A receipt
+        that is missing, can't be read or isn't definite leaves it unknown."""
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         try:
-            receipt = Path(session.session_file).parent / 'claude-receipts' / f'{normalize_session_id(message_id)}.json'
+            identifier = normalize_session_id(message_id)
         except ValueError:
             return NativeResult('error', 'Message ID must be a UUID')
-        if not receipt.is_file():
+        folder = Path(session.session_file).parent / 'claude-receipts'
+        # A delivery wins: the mod writes a refusal to a file of its own, which may finish after the row was stored.
+        receipt = mod_receipt(folder / f'{identifier}.json', identifier)
+        if receipt is None:
+            receipt = mod_receipt(folder / f'{identifier}.not-delivered.json', identifier)
+            if receipt is not None and receipt is not False and receipt[0] != 'refused':
+                receipt = False  # a delivery is never read from the refusal's file
+        elif receipt is not False and receipt[0] != 'delivered':
+            receipt = False  # nor a refusal from the delivery's
+        if receipt is None:
             return NativeResult('unknown', 'No delivery receipt from the multiverse mod yet')
-        value = json.loads(receipt.read_text())
+        if receipt is False:
+            return NativeResult('unknown', "Can't read the multiverse mod's delivery receipt for this message")
+        if receipt[0] == 'refused':
+            _, definite, reason = receipt
+            if definite:
+                return NativeResult('error', f'Not delivered: {reason}', {'transcript_confirmed': False,
+                                                                           'route': 'not-delivered', 'definite_failure': True})
+            return NativeResult('unknown', f'Not confirmed: {reason}')
         return NativeResult('native_queued', 'Delivered into the Claude conversation',
-                            {'transcript_confirmed': True, 'route': value.get('route'), 'delivered_at_ms': value.get('at')})
+                            {'transcript_confirmed': True, 'route': receipt[1], 'delivered_at_ms': receipt[2]})

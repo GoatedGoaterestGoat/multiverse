@@ -9,11 +9,13 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from multiverse import plugins
 from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import write
 from multiverse.ui import columns, panels
 from multiverse.ui.backend import LocalBackend
+from multiverse.ui.plugins_screen import provided
 from multiverse.ui.views import view
 from multiverse.universe import templates
 
@@ -141,7 +143,7 @@ class ColumnTests(PluginTestCase):
             self.agent(name, root=root)
         errors_before = sum(len(texts) for texts in loader.errors().values())
         snapshot = LocalBackend().snapshot(root)
-        self.assertEqual(self.cells(snapshot), {"a": "A", "b": "B", "bad": None, "c": "C"})
+        self.assertEqual(self.cells(snapshot), {"a": "A", "b": "B", "bad": "—", "c": "C"})  # a raising row: a dash
         self.assertEqual(sum(len(texts) for texts in loader.errors().values()) - errors_before, 1)
         calls = [call for call in self.mod(root).CALLS if call[0] == "agent"]
         self.assertEqual(sorted(call[1] for call in calls), ["a", "b", "bad", "c"])
@@ -278,7 +280,7 @@ class ColumnTests(PluginTestCase):
         row = {"kind": "agent", "name": "worker", "universe": str(child), "plugins": ["steady"]}
         off = {"kind": "agent", "name": "idle", "universe": str(root), "plugins": []}
         columns.fill_cells([row, off])
-        self.assertEqual(row["plugin_cells"], {"steady:shout": "WORKER"})  # broken has no value: shown as a dash
+        self.assertEqual(row["plugin_cells"], {"steady:shout": "WORKER", "steady:broken": "—"})  # it raised: a dash
         self.assertNotIn("plugin_cells", off)
         subverse = {"name": "child", "path": str(child), "plugins": ["steady"]}
         columns.fill_cells([subverse], group=True)
@@ -305,6 +307,172 @@ class ColumnTests(PluginTestCase):
         columns.reset_plugin_caches()
         self.assertEqual(columns.PLUGIN_COLUMNS, {})
         self.assertEqual(view(root)["widgets"][0]["count"], 0)
+
+
+ESTIMATE = """
+def register(mv):
+    def value(row):
+        if row["name"] == "broken":
+            raise RuntimeError("no estimate for broken")
+        return "~42k" if row["name"] == "worker" else None
+    mv.dashboard.column("context", "Estimate", 10, value, replaces="context")
+"""
+RIVAL = """
+def register(mv):
+    mv.dashboard.column("context", "Rival", 10, lambda row: "rival", replaces="context")
+"""
+GRABBY = """
+def register(mv):
+    mv.dashboard.column("mood", "Mood", 8, lambda row: "calm", replaces="status")
+    mv.dashboard.column("typo", "Typo", 8, lambda row: "t", replaces="contxt")
+"""
+
+
+class StandInTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_a_plugin_column_stands_in_for_a_core_one_only_where_the_view_lets_it(self):
+        """A plugin column with replaces= is drawn where the view lists that core key (or its old name), core's cell
+        filling the rows it has no value for and a raising row a dash, and never for core:KEY, a view with
+        "replace": false, a view that places the plugin column itself, two plugins replacing one key, or Status;
+        fragile because the rule spans the plugin API, the view and the table, and a break silently shows core's
+        figure where the plugin's belongs, or hides core's Status behind a plugin's; a key that is no core column
+        is named on the Plugins screen."""
+        for name, code in (("estimator", ESTIMATE), ("rival", RIVAL), ("grabby", GRABBY)):
+            self.write_plugin(name, {"module": "plugin", "api": "1.13", "extends": ["dashboard.column"]},
+                              {"plugin.py": code})
+        self.enable("estimator")
+        self.enable("grabby")
+        for name in ("worker", "quiet", "broken"):
+            self.agent(name)
+        self.agent("outside", root=self.subverse("elsewhere"))  # estimator is off there
+
+        async with self.dashboard(size=(170, 40)) as d:
+            async def shown(columns, settled=None, **extra):
+                """The table's headers and each agent's cells by header, once `settled(headers)` holds."""
+                write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": columns,
+                                                              **extra})
+                deadline = time.monotonic() + 8
+                while True:
+                    await d.refresh()
+                    headers, rows = d.table()
+                    if settled is None or settled(headers) or time.monotonic() > deadline:
+                        break
+                cells = {}
+                for row in rows:
+                    name = row[0].strip(" ├─╰│▾▸")
+                    for agent in ("worker", "quiet", "broken", "outside"):
+                        if name.startswith(agent):
+                            cells[agent] = dict(zip(headers, row))
+                return headers, cells
+
+            headers, cells = await shown(["name", "status", "context"], replace=False)
+            core = cells["worker"]["Context"]  # core's own cell for an agent with no usage
+            self.assertNotIn(core, ("—", "~42k", "…"))
+            with self.subTest("where the view lists the core key"):
+                headers, cells = await shown(["name", "status", "context"])
+                self.assertIn("Estimate", headers)
+                self.assertNotIn("Context", headers)
+                self.assertEqual({agent: cells[agent]["Estimate"] for agent in cells},
+                                 {"worker": "~42k", "quiet": core, "broken": "—", "outside": core})
+                self.assertIn("Status", headers)  # grabby's replaces="status" is refused
+                self.assertNotIn("Mood", headers)
+            with self.subTest("its old name"):
+                headers, _ = await shown(["name", "tokens"])
+                self.assertIn("Estimate", headers)
+            for label, columns, extra in (("core:context", ["name", "core:context"], {}),
+                                          # naming a plugin column too, so the plugin columns are resolved at all
+                                          ('"replace": false', ["name", "context", "grabby:mood"], {"replace": False})):
+                with self.subTest(f"{label} keeps core's own"):
+                    headers, cells = await shown(columns, **extra)
+                    self.assertIn("Context", headers)
+                    self.assertNotIn("Estimate", headers)
+                    self.assertEqual(cells["worker"]["Context"], core)
+            with self.subTest("a view that places the plugin column itself"):
+                headers, cells = await shown(["name", "context", "estimator:context"])
+                self.assertEqual([header for header in headers if header in ("Context", "Estimate")],
+                                 ["Context", "Estimate"])
+                self.assertEqual((cells["worker"]["Context"], cells["worker"]["Estimate"]), (core, "~42k"))
+            with self.subTest("the Plugins screen says it, and names a key that is not a core column"):
+                item = next(item for item in plugins.listing(self.root) if item["name"] == "estimator")
+                self.assertIn("replaces the Context column", provided(item["provides"]))
+                screen = await d.open_plugins()
+                await d.until(lambda: "replaces contxt, which is not a core column" in str(
+                    screen.query_one("#plugin-details").render()), "the unknown-key problem")
+                await d.close_screen()
+            with self.subTest("two plugins replacing one column: neither does"):
+                self.enable("rival")
+                headers, _ = await shown(["name", "context"], settled=lambda headers: "Context" in headers)
+                self.assertIn("Context", headers)
+                self.assertFalse({"Estimate", "Rival"} & set(headers))
+
+
+SPOILER = """
+from multiverse.plugins import api
+
+def spoil(row):
+    for name in ("usage", "damaged", "runtime"):
+        if isinstance(row.get(name), dict):
+            row[name].clear()
+    if isinstance(row.get("harnesses"), list):
+        row["harnesses"].clear()
+    return "spoiled"
+
+def register(mv):
+    mv.dashboard.column("spoil", "Spoil", 8, spoil, group=spoil)
+    mv.dashboard.inspector(spoil)
+    mv.dashboard.action("Spoil", lambda context: spoil(context.row), effect="observe")
+
+    @mv.dashboard.panel("spoiler")
+    def panel(context):
+        for agent in context.agents:
+            spoil(agent.record)
+        return api.Markdown("spoiled")
+"""
+
+
+class RowCopyTests(PluginTestCase):
+    def test_plugin_code_changing_the_row_it_was_given_never_changes_the_dashboards(self):
+        """A plugin column's value and group functions, an inspector line, a palette action and a data panel each
+        get a row of their own, so changing what they were given (its usage, its damage record, its runtime) leaves
+        core's row whole and the Name cell's warning in place; fragile because a shallow copy shares every nested
+        record, and a plugin that edits one silently changes core's context and hides an agent's damage."""
+        self.write_plugin("spoiler", {"module": "plugin", "api": "1.13", "permissions": ["agents.read"],
+                                      "extends": ["dashboard.column", "dashboard.inspector", "dashboard.action",
+                                                  "dashboard.panel"]}, {"plugin.py": SPOILER})
+        self.enable("spoiler")
+        self.addCleanup(columns.reset_plugin_caches)
+        from multiverse.ui import plugin_panels
+        from multiverse.ui.plugin_service import PluginService
+
+        def agent_row():
+            return {"kind": "agent", "id": "0e0e0e0e-0000-4000-8000-0000000000aa", "name": "worker", "accent": "#ffffff",
+                    "guides": [], "expanded": False, "universe": str(self.root), "plugins": ["spoiler"],
+                    "usage": {"state": "ok", "value": {"context": {"tokens": 25}}},
+                    "damaged": {"file": "runtime.json", "reason": "broken"},
+                    "runtime": {"native_mode": {"mode": "bridge"}}}
+
+        group = {"kind": "group", "name": "ops", "path": str(self.root), "plugins": ["spoiler"], "harnesses": ["claude"],
+                 "accent": "#ffffff"}
+        service = PluginService()
+        loaded = self.loaded("spoiler")
+        action = ("spoiler", "Spoil", loaded, loaded.registrations.actions["Spoil"])
+        _, spec = next((found, spec) for found, kind, spec in plugins.dashboard_panels(self.root) if kind == "spoiler")
+        for route, run in (
+                ("a column's value", lambda row: (setattr(columns, "PLUGIN_COLUMNS",
+                                                          columns.resolve_plugin_columns([self.root], ["spoiler:spoil"])),
+                                                  columns.fill_cells([row]))),
+                ("an inspector line", lambda row: service.facts(self.root, row)),
+                ("a palette action", lambda row: service.run_action(self.root, action, row)),
+                ("a data panel", lambda row: plugin_panels.render(self.root, loaded, spec, {}, "Spoiler", [row]))):
+            with self.subTest(route):
+                row = agent_row()
+                run(row)
+                self.assertEqual({key: row[key] for key in ("usage", "damaged", "runtime")},
+                                 {key: agent_row()[key] for key in ("usage", "damaged", "runtime")})
+                self.assertIn("⚠", columns.COLUMNS["name"].render(row).plain)
+        with self.subTest("a column's group value"):
+            columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns([self.root], ["spoiler:spoil"])
+            columns.fill_cells([group], group=True)
+            self.assertEqual(group["harnesses"], ["claude"])
 
 
 if __name__ == "__main__":

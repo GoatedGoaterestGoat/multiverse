@@ -14,7 +14,7 @@ mv2 -u .multiverse/subverses/review tui
 
 - **The list** is one tree. The universe and each subverse are folders, with their agents underneath. Folders fold and unfold.
 - **The header** counts live agents, agents waiting for you (an orange `●` marks them) and focused agents (a `◉` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
-- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a plugin the launch left out. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode and fallback reason.
+- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a `Plugins:` line with the plugins the launch left out and any it started with less. The fallback reason is the harness's own; what the plugins did is on the `Plugins:` line. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode, fallback reason and plugins.
 - **The bottom line** shows key hints and the result of your last action. The hints are clickable.
 
 In a narrow terminal, the optional columns are hidden first. The whole tree fits in 60×20. The dashboard respects `NO_COLOR`.
@@ -34,6 +34,8 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
+
+Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A plugin's column can also stand in for a core column. Where the view lists that core key, such as `context`, and the plugin is on, the dashboard shows the plugin's column there, and a row the plugin has no value for shows core's cell. To keep core's own column, list it as `core:context`, set `"replace": false` in the view, or name the plugin's column to place it yourself. Name, Live, Status and Focus always show core's own. The Plugins screen says when a plugin's column replaces a core one.
 
 ## Keys
 
@@ -55,7 +57,7 @@ Choose columns in the universe's `views/default.json` (see [views](#views)). [Co
 | `v` | Show full details of an agent or folder |
 | `x` | Move the selected agent or subverse |
 | `d` | Send the selected agent or subverse to the trash, after confirming |
-| `P` | Open the selected universe's plugins: turn each on or off, see what it adds, and Configure it; see [plugins](../use/plugins.md) |
+| `P` | Open the selected universe's plugins: turn each on or off (choosing its access when it can work with less than it asks for), see what it adds and its access, and Configure it; see [plugins](../use/plugins.md) |
 | `Tab` | Move between the list, a local view and its links |
 | `F5` | Refresh now |
 | `?` | Show all keys |
@@ -123,6 +125,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
 | `columns` | Agent columns, in order. The top universe's choice applies to the whole tree |
+| `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 
 Artifact paths are relative to the universe directory and must stay inside it. Text and Markdown files preview in the dashboard. Other files open in your system's viewer when you choose the link.

@@ -1,4 +1,5 @@
 """The harness side of plugins: what launch plans may contribute, usage adjustments and version bounds."""
+import json
 import os
 from pathlib import Path
 import sys
@@ -9,7 +10,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import harnesses
 from multiverse.harnesses.types import LaunchContext, NativeResult
-from multiverse.plugins import harness, loader
+from multiverse.plugins import harness, loader, manifest
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.runtime import native
 from multiverse.store import read
@@ -65,6 +66,21 @@ class LaunchPlanTest(PluginTestCase):
                   "bootstrap_file": "/launch/bootstrap.md", "task_file": "/launch/task.md", "workspace": str(self.work),
                   "model": "", "control_socket": "/tmp/owned/rpc.sock"}
         return harnesses.load(self.root, "pi").spawn(LaunchContext("spawn", values, resume_prompt="--hello"))
+
+    def test_a_plugin_item_the_template_does_not_name_shows_by_its_default(self):
+        """The base template's statusline.json names only core items, so a plugin's status item shows on the Claude
+        line by its manifest's default wherever the plugin takes part (the mod shows an item the file doesn't name):
+        a core template naming one would keep a plugin's item on, or off, after the plugin changed or went, unnoticed."""
+        import multiverse
+        template = json.loads((Path(multiverse.__file__).parent / "templates" / "base" / "statusline.json").read_text())
+        self.assertLessEqual(set(template["items"]) | set(template["tmux"]["items"]),
+                             manifest.CORE_ITEMS | manifest.LATER_CORE_ITEMS)
+        self.write_plugin("noted", {"module": "plugin", "extends": ["statusline"],
+                                    "statusline": {"noted": {"claude": True, "tmux": False}}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("noted")
+        self.assertIn({"name": "noted", "plugin": "noted", "claude": True, "tmux": False},
+                      harness.launch_plan(self.info()).status_items)
 
     def test_a_plugin_may_set_only_its_own_mv2_variables(self):
         """No plugin can set an identity or home variable (MV2_AGENT_ID, MV2_IDENTITY_MODE, CODEX_HOME,
@@ -178,23 +194,41 @@ class LaunchPlanTest(PluginTestCase):
                                 and "level must be 1 or 2" in problem for problem in plan.problems), plan.problems)
             self.assertEqual(plan.record()["problems"], plan.problems)  # recorded, so inspect can say it
 
+    def test_a_plugins_outcome_is_recorded_as_its_own(self):
+        """A contribution's problem and mode reach the launch's plugins record under the plugin's name, in its entry
+        and in the launch's lists: the harness's own mode no longer carries them, so a break would make a launch
+        that runs without a plugin's guard look normal in mv2 inspect and the inspector."""
+        self.write_plugin("warden", {"module": "plugin", "extends": ["launch"]}, {
+            "plugin.py": "from multiverse.plugins import api\n"
+                         "def register(mv): mv.launch.contribute('claude', lambda info: "
+                         "api.Contribution(problem='Launched without the guard: off here', mode='without the guard'))\n"})
+        self.enable("warden")
+        record = harness.launch_plan(self.info()).record()
+        self.assertEqual({key: record["plugins"]["warden"].get(key) for key in ("state", "problem", "mode")},
+                         {"state": "loaded", "problem": "Launched without the guard: off here",
+                          "mode": "without the guard"})
+        self.assertIn("Launched without the guard: off here", record["problems"])
+        self.assertEqual(record["modes"], [{"plugin": "warden", "mode": "without the guard"}])
+
     def test_usage_adjusters_never_change_what_they_were_given(self):
-        """Plugin usage adjusters get a copy, adjust only ok results, and mutation or exceptions never corrupt
-        measured usage; a break goes unnoticed because the Context numbers are just slightly wrong."""
+        """Plugin usage adjusters get a copy, adjust only ok results, never change core's measured context (1.13:
+        changes to it are dropped, the rest applies), and mutation or exceptions never corrupt measured usage; a
+        break goes unnoticed because the Context numbers are just slightly wrong."""
         for name, body in (("amutate", "usage['context']['tokens'] = 999; raise RuntimeError('half done')"),
                            ("bjunk", "return ['not', 'usage']"),
-                           ("cset", "return {**usage, 'context': {**usage['context'], 'estimated': True}}"),
+                           ("cset", "return {**usage, 'context': {'tokens': 1, 'estimated': True}, 'note': 'kept'}"),
                            ("dnone", "return None")):
             self.write_plugin(name, {"module": "plugin", "extends": ["usage"]}, {
                 "plugin.py": f"def adjust(info, usage):\n    {body}\ndef register(mv): mv.usage.adjust(adjust)\n"})
             self.enable(name)
         self.enable("guard", on=False)
         measured = {"context": {"tokens": 5}}
-        adjusted = {"context": {"tokens": 5, "estimated": True}}
-        with self.subTest("each adjuster gets a copy"):
+        adjusted = {"context": {"tokens": 5}, "note": "kept"}  # core's context as measured; the rest applies
+        with self.subTest("each adjuster gets a copy, and core's context stays as measured"):
             info = harness.SessionInfo(self.root, "a", "claude", "claude")
             self.assertEqual(harness.adjust_usage(info, measured), adjusted)
             self.assertEqual(measured, {"context": {"tokens": 5}})
+            self.assertEqual(harness.adjust_usage(info, {"cost": 2}), {"cost": 2, "note": "kept"})  # none added
             errors = loader.errors()
             self.assertIn("usage: RuntimeError: half done", errors["amutate"])
             self.assertIn("usage: TypeError: a usage adjustment returns the usage record (a dict) or None",

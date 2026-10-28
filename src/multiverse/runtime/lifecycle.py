@@ -20,7 +20,7 @@ from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import effects, native, attachments, agent_identity, registration, missing_runtime, storage_adoption
 
 TEARDOWN_TIMEOUT = 10
 
@@ -208,6 +208,7 @@ def plain_fallback(command, error):
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
           _queue_wake=False, _restart_queue=False, start_fresh=False):
+    effects.require('resume' if resume else 'spawn', resume or name or harness)
     if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
         raise ValueError('--start-fresh requires an explicit resume without a wake prompt')
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
@@ -374,7 +375,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices, ignored_settings, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
-        command = adapter.resume(session, context) if resume and not fresh else adapter.spawn(context)
+        command = effects.call(adapter, 'resume', session, context) if resume and not fresh else effects.call(adapter, 'spawn', context)
         # An adapter may resolve a saved path through a changed symlink. Compare
         # its effective selection with recorded strings, never re-resolve history.
         selected_storage = dict(storage)
@@ -511,7 +512,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                     agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
             if command.shared_service:
                 try:
-                    command = _storage_command(adapter.resume(session, context) if resume and not fresh else adapter.spawn(context), storage)
+                    command = _storage_command(effects.call(adapter, 'resume', session, context) if resume and not fresh else effects.call(adapter, 'spawn', context), storage)
                     if _recovery:
                         native.validate_recovery_command(command, session)
                         command = replace(command, fallback=None)
@@ -553,9 +554,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             selected_notices = display.notice_lines(notices, command.notices)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
-            if _queue_wake and (not endpoint or not command.attachment
-                    or command.attachment.readiness not in ('binding', 'legacy-binding')):
-                raise ValueError('Paused conversation requires its native bridge before queued wake delivery')
+            if _queue_wake:
+                bound_queue = command.attachment and command.attachment.readiness in ('binding', 'legacy-binding')
+                scoped_queue = (getattr(adapter, 'delivery_attempt_ids', False) is True
+                                and (command.native_mode or {}).get('mode') == 'bridge')
+                if not endpoint or not (bound_queue or scoped_queue):
+                    raise ValueError('Queued wake delivery requires its native bridge')
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,
@@ -1076,6 +1080,7 @@ def terminal_action(root, reference, action):
 
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
+    effects.require('stop', reference)
     agent_dir = directory(root, reference, allow_damaged=True)
     if agents.properties_missing(agent_dir):
         return missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)

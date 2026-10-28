@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from ..runtime import lifecycle
-from .. import compaction, universe
+from .. import universe
 from ..universe import agents, catalog
 from ..universe.mailbox import inbox_problem
 
@@ -35,7 +35,7 @@ def check(root, notes=None):
                                f"remove it with mv2 remove {item['id']}" if orphan else
                                f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}")
                     found.append((problem, problem))
-                    continue  # No inbox, compaction or process action on damaged records.
+                    continue  # No inbox or process action on damaged records.
                 workdir = item.get('workspace')
                 if isinstance(workdir, str) and workdir and not Path(workdir).is_dir():
                     problem = f"{item['name']}: missing workspace folder: {workdir}"
@@ -57,9 +57,6 @@ def check(root, notes=None):
                                    else "state is unknown: ") + one_line(reason) + "."))
                 elif item.get('recovery_note') and notes is not None:
                     notes.append(f"{item['name']} reconnected automatically.")
-                if compaction.old_guard(scope / "state" / "agents" / item["id"], runtime):
-                    problem = f"{item['name']} runs the compaction guard from before compaction became a plugin"
-                    found.append((problem, f"{problem}: restart it to use tree compaction."))
                 if problem := inbox_problem(scope / "state" / "agents" / item["id"]):
                     found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:

@@ -5,14 +5,17 @@ from collections.abc import Mapping
 
 OPEN_ELSEWHERE = 'This conversation is open in another app'
 CLOSE_ELSEWHERE = 'Close it there and press R to continue here.'
+# Releases whose native screens and unmanaged side-thread protocol were checked. 0.164.0 kept 0.163.0's
+# layouts, so dropping 0.163.0 would turn its refusal check and /btw off for nothing.
+SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0))
 
 
 def supports_plain_refusal(version):
     """Whether a current-pane refusal layout is known for this CLI version."""
     if isinstance(version, str):
-        return version in ('0.163.0', 'codex-cli 0.163.0')
+        return version.removeprefix('codex-cli ') in {'.'.join(map(str, known)) for known in SCREEN_VERSIONS}
     return (isinstance(version, (tuple, list)) and len(version) == 3
-            and all(type(part) is int for part in version) and tuple(version) == (0, 163, 0))
+            and all(type(part) is int for part in version) and tuple(version) in SCREEN_VERSIONS)
 
 
 def plain_started(evidence):
@@ -64,7 +67,7 @@ def plain_started(evidence):
 
 
 def plain_refusal(evidence):
-    """Recognize the active 0.163.0 read-only widget, never scrollback prose.
+    """Recognize the active 0.164.0 read-only widget, never scrollback prose.
 
     Core supplies only the current owned pane and its cursor visibility. The
     native widget hides the cursor and ends the visible content with its exact

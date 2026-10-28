@@ -24,7 +24,7 @@ class CodexSideTest(unittest.TestCase):
         factory = getattr(self.protocol, 'for_connection', None)
         return factory(name, owner) if factory else self.protocol
 
-    def initialize(self, view, version='codex/0.163.0'):
+    def initialize(self, view, version='codex/0.164.0'):
         view.outgoing({'id': 1, 'method': 'initialize', 'params': {}})
         view.incoming({'id': 1, 'result': {'userAgent': version}})
 
@@ -129,15 +129,19 @@ class CodexSideTest(unittest.TestCase):
             self.assertIsNone(self.view.usage(frame))
 
     def test_only_the_exact_fork_from_the_current_owner_is_allowed(self):
-        """Only the exact 0.163.0 thread/fork shape from the current owner is allowed, and any other request stays
+        """Only the exact checked thread/fork shape from the current owner is allowed, and any other request stays
         local; fragile because it pins Codex's fork parameters, and a looser check rebinds the primary."""
         before = self.primary_state()
-        for version in (None, 'unparseable', 'codex/0.162.1', 'codex/0.164.0'):
+        for version in (None, 'unparseable', 'codex/0.162.1', 'codex/0.165.0'):
             with self.subTest(version=version):
                 view = self.connection('unknown-' + str(version), lambda: True)
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
+        with self.subTest('0.163.0, the earlier checked release, keeps /btw'):
+            view = self.connection('checked-0.163.0', lambda: True)
+            self.initialize(view, 'codex/0.163.0')
+            self.assertEqual(view.outgoing(self.fork()), self.fork())
         for change in ({'ephemeral': None}, {'ephemeral': 1}, {'threadId': self.side},
                        {'path': '/other/rollout'}, {'lastTurnId': 'turn'}, {'beforeTurnId': 'turn'},
                        {'excludeTurns': False}, {'experimentalPredictionMode': True}, {'cwd': '/other/workspace'}):

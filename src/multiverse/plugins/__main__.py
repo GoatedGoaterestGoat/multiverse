@@ -16,6 +16,7 @@ import sys
 
 from .. import universe
 from . import PluginError, entry, loader, migrate_on_first_use
+from .api import AccessDenied
 
 
 class _Parser(argparse.ArgumentParser):
@@ -53,6 +54,9 @@ def main(argv=None):
         return 1
     try:
         code = action(list(args.arguments))
+    except AccessDenied as error:  # refused for access before it ran: 1, never the action's own 2
+        print(f"mv2 plugin {args.plugin} {args.action}: {error}", file=sys.stderr)
+        return 1
     except Exception as error:
         text = loader.record(loaded, f"helper {args.action}", error, root)
         print(f"mv2 plugin {args.plugin} {args.action}: {text}", file=sys.stderr)

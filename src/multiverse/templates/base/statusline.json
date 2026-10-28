@@ -4,8 +4,7 @@
     "agent": false,
     "phase": true,
     "summary": false,
-    "inbox": true,
-    "compaction": true
+    "inbox": true
   },
   "tmux": {
     "refresh_seconds": 2,

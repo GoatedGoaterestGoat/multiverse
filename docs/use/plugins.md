@@ -61,7 +61,7 @@ mv2 plugins disable notifier
 mv2 -u .multiverse/subverses/ops plugins enable remote   # a subverse
 ```
 
-`enable` lists what the plugin may do, installs its default settings when the universe has none, and says when the plugin needs the plugin host. In the dashboard, press `P`, select the plugin and press `Space`.
+`enable` lists what the plugin may do, installs its default settings when the universe has none, and says when the plugin needs the plugin host. In the dashboard, press `P`, select the plugin and press `Space`. If the plugin can work with less access than it asks for, the dashboard asks which access to grant it in that universe; `Esc` leaves it off.
 
 The switch lives in the universe's `plugins.json`, which you can also edit by hand:
 
@@ -72,6 +72,31 @@ The switch lives in the universe's `plugins.json`, which you can also edit by ha
 - A plugin that `plugins.json` doesn't name stays at its default. Every plugin is off by default, except typeahead.
 - Nothing is inherited. A subverse has its own `plugins.json`, so a plugin that is on in the root stays off in a subverse until you turn it on there.
 - Running agents keep the plugins they launched with, so a plugin you turn on reaches an agent at its next launch (`mv2 kill`, then `mv2 resume`). A plugin can react sooner to being turned off: with compaction off, a running agent's next `/compact` is Claude's own.
+
+### Access
+
+Each plugin works under an access level you grant it in each universe:
+
+| Level | The plugin |
+| --- | --- |
+| `observe` | Reads agents, messages and transcripts, and changes nothing |
+| `spend` | Also uses model tokens, money or time (side questions, one-shot runs), still changing nothing |
+| `act` | Also changes agents, inboxes and files: spawns, sends, stops |
+
+```sh
+mv2 plugins enable compaction                  # on a terminal, asks which level to grant
+mv2 plugins enable compaction --grant spend    # grants spend without asking
+mv2 plugins grant compaction observe           # changes it later
+```
+
+- **What it asks for:** `enable` and `info` say the level a plugin asks for and the least it can work with, with its own reason. You grant that level or a lower one, never below its least. A plugin with less than it asks for offers fewer features.
+- **What it can do here:** `info`, `enable` and the Plugins screen list what its level allows, then what that level holds back, each with the level it needs (`send messages ... (needs act)`). What a plugin's own code does, such as listening on a port, no level holds back. While it is off, they list what it asks to do.
+- **Without a terminal,** `enable` grants the plugin's least level and says how to grant more.
+- **No grant recorded** means the plugin has what it asks for, so plugins that were on before levels existed keep working.
+- **Agents can't raise a grant.** From an agent, `enable` grants at most the plugin's least level and `grant` won't raise one; both print the command a person runs. Like permissions, this guards against mistakes, not against an agent that edits `plugins.json`.
+- **Read-only:** `"access_ceiling": "observe"` in `plugins.json` caps every plugin in that universe, and `MV2_EFFECTS=observe` caps every plugin in one command or dashboard.
+
+A call above a plugin's level fails with a reason, such as `planner has observe access here; send needs act`, and a launch addition that needs more is left out, with the reason on the agent's `mv2 inspect` `Note:` line. Each says what holds the plugin back and how to change it: its grant (`mv2 plugins grant`), the universe's `access_ceiling`, or `MV2_EFFECTS` for that process. A plugin that is on but held below the least level it can work with is reported by `mv2 plugins` and `mv2 doctor`.
 
 ## Change a plugin's settings
 

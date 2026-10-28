@@ -229,19 +229,47 @@ def fallback(state, row):
         state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
 
 
-def plugin_problems(state, row):
-    """Plugins the launch left out, and why, from the launch's plugin record (any harness); what the fallback line
-    already says is not repeated."""
-    record = row.get("runtime", {}).get("plugins")
+def plugin_outcomes(row):
+    """(text, whether any is a problem): from the launch's plugin record, any harness, each plugin it left out and
+    why, each plugin's problem and its mode outcome, in name order; then the record's problems no plugin entry
+    says (a known plugin that is not installed has no entry), then its own error. What the harness's fallback
+    reason already says, as it did for launches recorded before plugin outcomes left it, is not repeated."""
+    record = (row.get("runtime") or {}).get("plugins")
     if not isinstance(record, dict):
-        return
-    said = str((row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason") or "")
+        return "", False
+    said = str(((row.get("runtime") or {}).get("native_mode") or {}).get("fallback_reason") or "")
+    parts, trouble, entries = [], False, []
     found = record.get("plugins") if isinstance(record.get("plugins"), dict) else {}
     for name, detail in sorted(found.items()):
-        if isinstance(detail, dict) and detail.get("state") == "skipped" and str(detail.get("reason") or "") not in said:
-            state.append(f"\nPlugin {clean(name)} left out: {clean(str(detail.get('reason') or 'no reason given'))}", style=theme.YELLOW)
+        if not isinstance(detail, dict):
+            continue
+        entries += [str(detail[key]) for key in ("reason", "problem") if detail.get(key)]
+        if detail.get("state") == "skipped":
+            reason = str(detail.get("reason") or "no reason given")
+            if reason not in said:
+                parts.append(f"{name} left out: {reason}")
+                trouble = True
+            continue
+        if detail.get("problem") and str(detail["problem"]) not in said:
+            parts.append(f"{name}: {detail['problem']}")
+            trouble = True
+        if detail.get("mode"):
+            parts.append(f"{name}: {detail['mode']}")
+    for problem in record.get("problems") if isinstance(record.get("problems"), list) else ():
+        if problem and not any(str(problem) in text or text in str(problem) for text in entries) and str(problem) not in said:
+            parts.append(str(problem))
+            trouble = True
     if record.get("error") and str(record["error"]) not in said:
-        state.append("\n" + clean(str(record["error"])), style=theme.YELLOW)
+        parts.append(str(record["error"]))
+        trouble = True
+    return " · ".join(clean(part) for part in parts), trouble
+
+
+def plugins_line(state, row):
+    """One line for what the launch's plugins came to: a problem in yellow, a plugin's reduced mode in plain text."""
+    text, trouble = plugin_outcomes(row)
+    if text:
+        state.append("\nPlugins: " + text, style=theme.YELLOW if trouble else theme.SUBTEXT0)
 
 
 def launch_error(state, row):
@@ -265,7 +293,7 @@ def versions(state, row):
 
 
 # What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
-AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugin_problems, progress, focused, context,
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugins_line, progress, focused, context,
                native_mode, versions)
 
 

@@ -23,6 +23,26 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
+    def transcript_view(self, session, *, tip=None, reader=None):
+        from .transcripts import view
+        return view(session, tip=tip, reader=reader)
+
+    def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
+        from .transcripts import bodies
+        return bodies(session, view, indexes, max_bytes=max_bytes, reader=reader)
+
+    def transcript_readable(self, session, *, reader=None):
+        from .transcripts import readable
+        return readable(session, reader=reader)
+
+    def models(self, *, environment):
+        from .models import catalog
+        return catalog(environment)
+
+    def check_model(self, model, *, effort=None, environment):
+        from .models import check
+        return check(model, effort, environment)
+
     def session_home(self, environment):
         from .storage import session_home
         return session_home(environment)
@@ -78,11 +98,12 @@ class CodexAdapter(ConfiguredAdapter):
         command = super()._launch_command(context)
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
+        from .refusal import SCREEN_VERSIONS
         version = codex_version(command.argv[0], context.values['workspace'])
-        if version is not None and version != CHECKED_VERSION:
+        if version is not None and version not in SCREEN_VERSIONS:  # their screen checks and /btw stay on
             relation = 'older' if version < CHECKED_VERSION else 'newer'
             note = (f'Codex {version_text(version)} is {relation} than the checked release {version_text(CHECKED_VERSION)}; '
-                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
+                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and a supported daemon release.')
             command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'

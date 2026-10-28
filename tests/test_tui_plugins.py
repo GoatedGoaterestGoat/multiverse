@@ -5,17 +5,23 @@ with a fake, so they need no plugin code, no filesystem and no tmux. FakeService
 is also the base of the fakes in GOAT's dashboard tests (plugins/compaction).
 """
 import asyncio
+import os
+import json
 from pathlib import Path
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, OptionList, Static
+from multiverse import plugins
+from multiverse.plugins.testing import PluginTestCase
 from multiverse.plugins.settings import DELETE
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, schema_fields
+from multiverse.ui.screens import ChoiceScreen
 from tui_demo import DemoBackend
 
 SCHEMA = {"type": "object", "properties": {
@@ -358,6 +364,187 @@ class SettingsScreenTests(DashboardCase):
                 edit.widgets["mode"].action_step(-2)  # back to the default option
                 self.assertEqual(await self.save(pilot, screen), ("alpha", {
                     ("default", "budget"): 9, ("loud",): True, ("mode",): DELETE}))
+
+
+GRANTED = """
+def register(mv):
+    pass
+"""
+
+
+class GrantPromptTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_turning_on_a_plugin_that_can_do_with_less_asks_which_access_to_grant(self):
+        """Space on a plugin that can work with less than it asks for asks which access to grant and records the
+        one chosen, Esc records nothing, a plugin with nothing to choose turns on at once, and Space twice in one turn
+        opens one chooser; fragile because the grant is a person's only say over a plugin's reach, and a prompt that
+        is skipped, stacked or answered for them records a level nobody chose."""
+        self.write_plugin("watcher", {"module": "plugin", "api": "1.13",
+                                      "access": {"request": "act", "minimum": "observe",
+                                                 "why": "observe shows the plan; act installs it"}},
+                          {"plugin.py": GRANTED})
+        self.write_plugin("plain", {"module": "plugin"}, {"plugin.py": GRANTED})  # no access: act, nothing to choose
+
+        def found(name):
+            return next(item for item in plugins.listing(self.root) if item["name"] == name)
+
+        async with self.dashboard() as d:
+            shown = await d.open_plugins()
+
+            async def select(name):
+                table = shown.query_one("#plugins-table", DataTable)
+                await d.until(lambda: name in [item["name"] for item in shown.items], f"{name} in the list")
+                table.move_cursor(row=[item["name"] for item in shown.items].index(name), animate=False)
+                await d.settle()
+
+            with self.subTest("Space twice in one turn opens one chooser, and Esc records nothing"):
+                await select("watcher")
+                shown.action_toggle()
+                shown.action_toggle()
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the access chooser")
+                self.assertEqual(sum(isinstance(screen, ChoiceScreen) for screen in d.app.screen_stack), 1)
+                choices = d.screen.query_one("#choices", OptionList)
+                self.assertEqual([choices.get_option_at_index(index).id for index in range(choices.option_count)],
+                                 ["act", "spend", "observe"])
+                self.assertIn("observe shows the plan", str(d.screen.query_one("#dialog-description").render()))
+                await d.press("escape")
+                await d.until(lambda: d.screen is shown and not shown.busy, "the Plugins screen again")
+                self.assertFalse(found("watcher")["on"])
+                self.assertIsNone(found("watcher")["access"]["granted"])
+            with self.subTest("the level chosen is the one recorded"):
+                await d.press("space")
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the access chooser")
+                await d.press("down", "enter")
+                await d.until(lambda: found("watcher")["on"] and not shown.busy, "watcher to be on")
+                self.assertEqual((found("watcher")["access"]["granted"], found("watcher")["access"]["level"]),
+                                 ("spend", "spend"))
+                await d.until(lambda: "Access here: spend (it asks for act" in str(
+                    shown.query_one("#plugin-details").render()), "the access line")
+            with self.subTest("a plugin with nothing to choose turns on at once"):
+                await select("plain")
+                await d.press("space")
+                await d.until(lambda: found("plain")["on"] and not shown.busy, "plain to be on")
+                self.assertIs(d.screen, shown)
+                self.assertIsNone(found("plain")["access"]["granted"])
+
+
+class GrantedPermissionTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_the_plugins_screen_says_what_its_access_allows_and_what_it_holds_back(self):
+        """The Plugins screen lists under 'Allowed to' only what a plugin's access level here permits, and the rest
+        as held back with the level each needs, at every level, and only what it asks for while it is off; fragile
+        because the permissions a plugin asks for read as allowed when a lowered grant holds them back, telling the
+        person a plugin can spawn agents and send messages when it can't (qa-dashboard, PR A)."""
+        self.write_plugin("watcher", {"module": "plugin", "api": "1.13",
+                                      "access": {"request": "act", "minimum": "observe"}}, {"plugin.py": GRANTED})
+
+        async with self.dashboard() as d:
+            async def details():
+                shown = await d.open_plugins()
+                await d.until(lambda: "watcher" in [item["name"] for item in shown.items], "watcher in the list")
+                shown.query_one("#plugins-table", DataTable).move_cursor(
+                    row=[item["name"] for item in shown.items].index("watcher"), animate=False)
+                await d.until(lambda: str(shown.query_one("#plugin-details").render()).startswith("watcher"),
+                              "watcher's details")
+                text = " ".join(str(shown.query_one("#plugin-details").render()).split())
+                await d.close_screen()
+                return text
+
+            with self.subTest("off: nothing is allowed yet, so it says what it asks for"):
+                text = await details()
+                self.assertIn("read this universe's agents", text.partition("Asks to:")[2])
+                self.assertIn("send messages to any agent", text.partition("Asks to:")[2])
+                self.assertNotIn("Allowed to", text)
+            for level, allowed, held in (
+                    ("observe", ["read this universe's agents"],
+                     ["ask agents side questions (needs spend)", "send messages to any agent in this universe, as this "
+                      "plugin (needs act)", "spawn, resume and kill agents in this universe (needs act)"]),
+                    ("spend", ["read this universe's agents", "ask agents side questions"],
+                     ["send messages to any agent in this universe, as this plugin (needs act)"]),
+                    ("act", ["read this universe's agents", "ask agents side questions", "send messages to any agent"],
+                     [])):
+                with self.subTest(granted=level):
+                    if plugins.entry(self.root, "watcher").on:
+                        plugins.set_grant(self.root, "watcher", level)
+                    else:
+                        plugins.set_enabled(self.root, "watcher", True, grant=level)
+                    text = await details()
+                    self.assertNotIn("change it with", text)  # the old, generic advice
+                    if level == "observe":
+                        self.assertIn("(a person can grant it with: mv2 plugins grant watcher act)", text)
+                    allowed_part, _, held_part = text.partition("Held back by its")
+                    for words in allowed:
+                        self.assertIn(words, allowed_part.partition("Allowed to:")[2])
+                    for words in held:
+                        self.assertIn(words, held_part)
+                    if held:
+                        self.assertIn(f"Held back by its {level} access (", text)
+                        self.assertNotIn(held[0].rpartition(" (needs")[0], allowed_part)
+                    else:
+                        self.assertIn("Access here: act (it asks for act, at least observe)", text)
+                        self.assertNotIn("Held back", text)
+            # Granted act but capped where a grant can't help: the line names the cap, and the advice how to lift it.
+            for cap, environment, settings, says, lift in (
+                    ("access_ceiling", {}, {"access_ceiling": "observe"},
+                     "this universe's access_ceiling allows at most observe",
+                     "this universe's plugins.json caps every plugin at observe (access_ceiling)"),
+                    ("MV2_EFFECTS", {"MV2_EFFECTS": "observe"}, {},
+                     "MV2_EFFECTS caps every plugin in this process at observe",
+                     "MV2_EFFECTS=observe caps every plugin in this process: run it without MV2_EFFECTS")):
+                with self.subTest(capped_by=cap), mock.patch.dict(os.environ, environment):
+                    (self.root / "plugins.json").write_text(json.dumps(
+                        {"schema": 1, "enabled": {"watcher": True}, "access": {"watcher": "act"}, **settings}))
+                    text = await details()
+                    self.assertIn("Access here: observe (it asks for act, at least observe); " + says, text)
+                    self.assertIn(f"Held back by its observe access ({lift}", text)
+                    self.assertNotIn("mv2 plugins grant", text)
+                    if cap == "MV2_EFFECTS":
+                        self.assertNotIn("access_ceiling", text)  # the process's cap is not the universe's
+
+
+class FollowingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_an_open_plugins_screen_follows_plugins_json_changed_elsewhere(self):
+        """An open Plugins screen shows a grant or an access_ceiling changed from outside (mv2 plugins grant, an edit)
+        on its next tick, without being closed, and never while a chooser is open on top of it; fragile because the
+        screen read plugins.json once, so it kept saying a level the plugin no longer has until it was reopened."""
+        for name in ("watcher", "chooser"):
+            self.write_plugin(name, {"module": "plugin", "api": "1.13", "access": {"request": "act", "minimum": "observe"}},
+                              {"plugin.py": GRANTED})
+        plugins.set_enabled(self.root, "watcher", True, grant="observe")
+        async with self.dashboard() as d:
+            shown = await d.open_plugins()
+
+            def details():
+                return " ".join(str(shown.query_one("#plugin-details").render()).split())
+
+            async def select(name):
+                await d.until(lambda: name in [item["name"] for item in shown.items], f"{name} in the list")
+                shown.query_one("#plugins-table", DataTable).move_cursor(
+                    row=[item["name"] for item in shown.items].index(name), animate=False)
+                await d.until(lambda: details().startswith(name), f"{name}'s details")
+
+            await select("watcher")
+            self.assertIn("Access here: observe", details())
+            with self.subTest("a grant changed from outside"):
+                plugins.set_grant(self.root, "watcher", "spend")
+                await d.until(lambda: "Access here: spend" in details(), "the new grant on the open screen")
+            with self.subTest("an access_ceiling changed from outside"):
+                data = json.loads((self.root / "plugins.json").read_text())
+                (self.root / "plugins.json").write_text(json.dumps({**data, "access_ceiling": "observe"}))
+                await d.until(lambda: "access_ceiling allows at most observe" in details(), "the ceiling on the open screen")
+            with self.subTest("a chooser open on top is left alone, and the screen catches up after it"):
+                (self.root / "plugins.json").write_text(json.dumps(data))  # no ceiling again
+                await d.until(lambda: "access_ceiling" not in details(), "the ceiling gone")
+                await select("chooser")
+                await d.press("space")
+                await d.until(lambda: isinstance(d.screen, ChoiceScreen) and d.screen.query("#choices"), "the chooser")
+                chooser = d.screen
+                plugins.set_grant(self.root, "watcher", "act")
+                await asyncio.sleep(1.5)  # more than one tick of the screen's follow
+                await d.settle()
+                self.assertIs(d.screen, chooser)
+                self.assertTrue(shown.busy)  # the toggle it opened for still waits for the person's answer
+                await d.press("escape")
+                await select("watcher")
+                await d.until(lambda: "Access here: act" in details(), "the change made while the chooser was open")
 
 
 if __name__ == "__main__":

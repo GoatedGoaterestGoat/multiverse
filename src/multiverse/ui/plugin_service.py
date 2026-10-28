@@ -16,6 +16,7 @@ from textual.worker import WorkerFailed
 
 from .. import plugins, universe
 from ..plugins import host, loader
+from .columns import plugin_row
 
 async def in_daemon(function, *args):
     """Run function(*args) in a daemon thread and await its result.
@@ -146,8 +147,8 @@ class PluginService:
     def listing(self, root):
         return plugins.listing(Path(root))
 
-    def set_enabled(self, root, name, on):
-        return plugins.set_enabled(Path(root), name, on)
+    def set_enabled(self, root, name, on, grant=None):
+        return plugins.set_enabled(Path(root), name, on, grant=grant)
 
     def edit_settings(self, root, name, changes):
         return plugins.edit_settings(Path(root), name, changes)
@@ -187,7 +188,21 @@ class PluginService:
     def problems(self, root):
         # A plugin still loading says so instead of holding up the Plugins screen; its real problem, if any,
         # shows when the screen reads again after the load ends (loader.generation() rises).
-        return plugins.problems(Path(root), wait=loader.REFRESH_WAIT)
+        return plugins.problems(Path(root), wait=loader.REFRESH_WAIT) + self.column_problems(root)
+
+    def column_problems(self, root):
+        """A plugin column whose replaces= or fallback= names no core column: it draws a dash and stands in for
+        nothing, so the Plugins screen says why. The dashboard holds the core keys, so it says it, not plugins/."""
+        from .columns import COLUMNS
+        said = []
+        for loaded in loader.active(Path(root), wait=0):  # plugins.problems above has already waited for them
+            for key, column in loaded.registrations.columns.items():
+                if column.replaces and column.replaces not in COLUMNS:
+                    said.append(f"{loaded.name}'s column {key} replaces {column.replaces}, which is not a core column")
+                elif column.fallback and column.fallback not in COLUMNS:
+                    said.append(f"{loaded.name}'s column {key} falls back to {column.fallback}, which is not a core "
+                                "column")
+        return said
 
     def error_count(self):
         """Plugin failures recorded in this process (cheap: no plugin code runs)."""
@@ -221,7 +236,7 @@ class PluginService:
         lines, deadline = [], time.monotonic() + budget
         for loaded, fact in plugins.inspector_facts(Path(root)):
             left = max(0.05, min(loader.SYNCHRONOUS_BUDGET, deadline - time.monotonic()))
-            outcome = loader.guarded(loaded, "inspector", fact, dict(row), root=root, timeout=left,
+            outcome = loader.guarded(loaded, "inspector", fact, plugin_row(row), root=root, timeout=left,
                                      key=("inspector", getattr(fact, "__qualname__", id(fact))))
             if outcome.state != "ok":
                 lines.append((loaded.name, "unavailable"))
@@ -241,7 +256,7 @@ class PluginService:
         scope = Path(scope)
         if plugin not in plugins.on_here(scope):
             raise ValueError(f"{plugin} is off in {universe_name(scope)}: turn it on from the Plugins screen (P)")
-        context = SimpleNamespace(row=dict(row) if row else None, scope=scope, app=None)
+        context = SimpleNamespace(row=plugin_row(row) if row else None, scope=scope, app=None)
         outcome = loader.guarded(loaded, f"action {name}", function, context, root=scope, timeout=ACTION_TIMEOUT)
         if outcome.state == "timeout":
             raise RuntimeError(f"{plugin}: {name} took longer than {ACTION_TIMEOUT:g} s")

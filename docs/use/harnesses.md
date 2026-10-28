@@ -80,6 +80,8 @@ Claude Code draws every plugin's status line in yellow, with `⚠` and the plugi
 
 **`/clear` and `/restart`.** `/clear` moves Claude to a new conversation. mv2 follows it, so messages, context use and resume go to the new conversation, and the earlier one stays recorded for the agent. Claude's own `/restart` relaunches without mv2's inbox. mv2 still delivers when it can confirm the relaunched process is the same agent; otherwise `mv2 inspect NAME` says to kill and resume it.
 
+**After an Esc.** Claude refuses a plugin's prompts after an interrupt until you type something, so until then each message runs as Claude's own message from another session, shown and stored as mv2's text alone. A message Claude refuses is reported not delivered, and `mv2 deliver NAME --retry` sends it again. One Claude has taken but not stored after a few idle seconds, or by the end of a later turn, is reported not confirmed instead, and `--retry` leaves it: Claude holds a taken message while `/compact` or a dialog holds its turn, and stores it afterwards. Its row confirms it when it comes, and Claude refusing it later makes it not delivered. While Claude is busy, a queued message shows a short `<<MV2 id=…>>` tag in Claude's queue line until Claude stores it; the tag is how mv2 tells which message a stored row is, and it comes off before the model reads it.
+
 **Permissions.** Claude's permission prompts, login and workspace trust stay native. The agent shows `waiting`, and you attach to answer. To run without prompts in a sandbox, pass Claude's own flags in `args`, for example `"args": ["--dangerously-skip-permissions"]`.
 
 ## Codex
@@ -120,7 +122,7 @@ Codex's public events report every aborted turn as interrupted, without its orig
 
 **Shared conversations.** Another Codex client on the same daemon can open an agent's conversation at the same time, for example `codex resume` in another window. It is still the same agent, so its `mv2 report` and `mv2 inbox` work from either client. While another client has it open, Codex keeps the conversation's current settings. A resume can't change its permissions then, and `mv2 inspect NAME` names the settings that differ. See [shared conversations](../design/shared-conversations.md).
 
-**Side conversations.** Connected Codex terminals on the [checked release](../reference/compatibility.md) support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent, but it can run unscoped mv2 commands as the operator. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. `mv2 ask` remains unavailable for Codex.
+**Side conversations.** Connected Codex terminals on the [checked release](../reference/compatibility.md), or on 0.163.0 before it, support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent, but it can run unscoped mv2 commands as the operator. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. `mv2 ask` remains unavailable for Codex.
 
 **Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it: a plain launch shows "This conversation is open in another app", and a connected one gets "thread … already has an active writer". mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
 
@@ -203,6 +205,23 @@ For a model you use often, add a harness profile. A profile is a second director
 ```
 
 Then run `mv2 spawn --name planner --harness claude-opus`. The dashboard's harness selector lists every profile.
+
+### Claude's models
+
+Claude Code has no command that lists its models, so mv2 keeps a table of them, `harnesses/claude/models.json`. It comes from the two model catalogs built into Claude Code, of the version in the [compatibility table](../reference/compatibility.md): the full list, and the release copy its `/model` picker shows, which gives the default model and some default efforts. It is updated with each Claude Code version check. Plugins read it through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)).
+
+- **Provider.** An alias names a different model on each provider: `sonnet` is Sonnet 5.5 on the Anthropic API and Sonnet 4.5 on Amazon Bedrock. mv2 picks the provider as Claude Code does, from the first of `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE` and `_VERTEX` that is set to `1`, `true`, `yes` or `on`, else the Anthropic API. It reads them as a launch from mv2 would see them: the harness's settings `env` over the environment mv2 runs in.
+- **Efforts.** Claude Code never refuses an effort: it uses the model's default instead. `harness.check()` refuses an effort the model doesn't take, such as `xhigh` for Sonnet 4.6, and the `[1m]` suffix on a model that doesn't take it.
+- **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
+- **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
+
+### Codex's models and transcripts
+
+Plugins read Codex's models through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)). The table comes from the checked release's bundled model catalog and is regenerated at each version check. It includes efforts, defaults, input types, context windows and hidden models. A known model's unsupported effort fails the check; an unknown ID passes as unverified.
+
+The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
+
+Plugins also read a Codex agent's transcript from its recorded rollout files, for connected and launch-only agents. Inputs, steers, tool results, compactions and native turn endings carry the same public labels as Claude's. Ephemeral threads such as `/btw` have no rollout and read as unavailable. Compressed-only rollouts, conflicting copies and referenced rollout segments (such as native `thread/revert` histories) are reported as unreadable. See the [reading rules](../design/transcript-protocols.md#codex-rollout-rules).
 
 ## The tmux status bar
 

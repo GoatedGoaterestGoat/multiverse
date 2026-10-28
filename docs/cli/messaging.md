@@ -62,7 +62,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME was stopped; resuming it with your message.` | The agent is starting with your message as its prompt | Nothing |
 | `NAME is starting; your message will be delivered when ready.` | It's waiting for the session to be ready | Nothing |
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
-| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
+| `Not delivered to NAME: REASON. Saved; …` | Submission was rejected or delivery was reported failed | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
 | `Not sent: NAME is focused until …` | The agent is [focused](#focus-an-agent), so nothing was saved | Send it again with `--delivery inbox-only`, or wait until it unfocuses |
 
@@ -82,15 +82,26 @@ already accepted by a native queue is not rewritten by checking or retrying it.
 
 ```sh
 mv2 deliver worker --check    # settle uncertain deliveries, record confirmations
-mv2 deliver worker --retry    # resend messages that definitely failed
-mv2 deliver worker --dismiss  # make failures final without resending
+mv2 deliver worker --retry    # retry messages reported failed
+mv2 deliver worker --dismiss  # close failures and unconfirmed messages without resending
 ```
 
-`--dismiss` makes definite delivery failures final, including launch-only
-refusals. It sends nothing, leaves accepted and uncertain messages unchanged,
-and keeps the original message and delivery evidence in history. Dismissed
-failures no longer appear in checks or count as delivery problems, and a later
-`--retry` cannot resend them. Send a new message if you need it delivered later.
+`--dismiss` first checks existing delivery evidence for each eligible message,
+using the same rules as `--check`. It records and counts any newly confirmed
+messages and leaves them confirmed, even if you never ran `--check`. It then
+makes remaining failures, launch-only refusals, accepted messages without
+confirmation, and uncertain submissions final. It counts failures and
+unconfirmed messages separately and warns that an unconfirmed message may
+still have arrived. It sends nothing, wakes nothing, and does not cancel a
+message already held by the native session. Pending startup deliveries and
+confirmed messages stay unchanged.
+
+Dismissal keeps the original message and receipt in history, with a dismissed
+marker. Dismissed messages no longer appear in `--check` or count as delivery
+problems, and a later `--retry` cannot resend them. A late row or receipt does
+not reopen them. For example: `1 unconfirmed message dismissed; it may still
+have arrived. Kept in history. Nothing resent.` Dismissal does not prove
+non-delivery; verify the conversation before deliberately sending a new copy.
 
 `--check` starts with one line of counts, such as `358 confirmed, 23 accepted
 without confirmation, 2 not delivered`, then shows details only for messages
@@ -108,7 +119,7 @@ by `--check` or `--retry`. Its saved delivery evidence remains unchanged, but it
 retry and no longer counts as a delivery problem in list, inspect or doctor.
 `--retry` counts these messages with earlier final refusals, including on their first report, and exits successfully unless another retry fails. It says they cannot be retried. For a conversation retired by `--start-fresh`, the one report says the message never reached the new conversation and advises sending a new message. For other out-of-lineage messages, verify the original conversation before sending a new one.
 
-`--check` also reports definite failures and exits nonzero while any checked
+`--check` also reports failures and exits nonzero while any checked
 message failed. A damaged session journal or unloadable harness gives each affected message its own error; the remaining messages are still checked. Record errors name their file. Back up and repair a damaged `sessions.jsonl`, or restore an intact copy, before retrying. A submission needs its authoritative journal even when the saved message targets the current session; mv2 cannot assume that a torn transition left that pointer current. Reading an already saved failure does not need that transition proof. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and advise `mv2 deliver NAME --retry or --dismiss`.
 
@@ -135,11 +146,27 @@ reopening the refusal. If delivery is still unavailable, the refusal stays final
 ordinary reads never reopen it. Older refusals that lack explicit final evidence are classified by the current harness
 setting; accepted and uncertain deliveries are never reopened.
 
-`--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
+`--retry` resends only messages recorded as failed. It never resends an acceptance that remains unconfirmed or uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
+
+For Claude, a consumed message is reported failed and retryable only when Claude
+explicitly drops it. When its row has not been stored after a few seconds while
+idle, or by the end of a turn that started after it was taken, it is reported
+not confirmed instead, and `--retry` leaves it alone. Claude holds a taken message
+while a local command such as `/compact`, or a dialog, holds its turn, and stores
+it afterwards, so a retry then would run it twice. Its row confirms it when it
+comes. Nothing is resubmitted automatically. Before retrying a failed message,
+mv2 checks that attempt's receipt again: a late confirmation prevents a resend,
+and unreadable evidence keeps it from retrying. If this retry wakes a stopped agent, it first resumes the
+bridge and then submits through the native queue with a fresh attempt ID. Each
+actual submission has its own receipt ID, so an old failure cannot fail the new
+attempt, and a late old row confirms only the attempt that produced it. History
+keeps every attempt. If Claude is waiting at a resume-confirmation dialog, a
+message sent meanwhile shows as not confirmed until you finish the dialog and
+Claude stores it.
 
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
 until its message is confirmed in the conversation. The check reports an entry
-that is still queued without resending it. `--retry` selects definite failures;
+that is still queued without resending it. `--retry` selects recorded failures;
 it never resends an accepted or uncertain submission. Checks normally cover the
 current launch. Across a resume, Codex keeps checking saved queue receipts for
 the same conversation; it does not search for other older acceptances. Harnesses

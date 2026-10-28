@@ -1,7 +1,28 @@
 """Adapter boundary: specifications and observations, never tmux or state writes."""
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Generator, Literal, Mapping, Protocol
+from typing import Any, Callable, Generator, Literal, Mapping, Protocol, Sequence
 from uuid import UUID
+
+
+Effect = Literal['observe', 'spend', 'act']
+# Effects belong to the protocol, not an adapter's implementation. Core checks
+# them before dispatch; launch/send also check before publishing any records.
+EFFECTS: Mapping[str, Effect] = {
+    **dict.fromkeys((
+        'capabilities', 'get_usage', 'get_delivery', 'observed_binding',
+        'session_home', 'session_storage_evidence', 'resume_notice',
+        'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
+        'attachment_ready', 'attachment_recovery', 'retained_usage',
+        'connection_problem', 'status_watch', 'supports_launch_refusal',
+        'launch_started', 'launch_refusal', 'startup_retryable',
+        'startup_prompt_evidence', 'startup_prompt_evidence_reason',
+        'accepted_message_evidence', 'message_id_evidence',
+        'transcript_view', 'transcript_bodies', 'transcript_readable',
+        'models', 'check_model',
+    ), 'observe'),
+    'ask': 'spend',
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
+}
 
 
 class BridgeUnavailable(ValueError):
@@ -284,7 +305,10 @@ class BindingObserver(Protocol):
 
 @dataclass(frozen=True)
 class Message:
-    """`framed` is recipient text; `id` is private receipt correlation metadata."""
+    """`framed` is recipient text; `id` is private receipt correlation metadata.
+
+    With delivery_attempt_ids, it names this submission, not the logical inbox message.
+    """
     id: str
     text: str
     sender: Mapping[str, Any] = field(default_factory=dict)
@@ -346,3 +370,110 @@ class Usage:
     cached_input_tokens: int | None = None
     cache_write_tokens: int | None = None
     complete: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class TranscriptSource:
+    state: Literal['supported', 'unavailable', 'error']
+    home: str | None = None
+    reason: str = ''
+    format: str | None = None
+    version: str | None = None
+    size: int | None = None
+    updated_at: str | None = None
+    stable_rows: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class RowFact:
+    """Provider metadata only; native row bodies never enter the core index."""
+    position: str
+    ref: str | None
+    kind: str
+    label: str
+    source: str | None = None
+    call_id: str | None = None
+    command: str | None = None
+    args: str | None = None
+    stop: str | None = None
+    ends_turn: bool = False
+    at: str | None = None
+    size: int = 0
+    preview: str = ''
+
+
+@dataclass(frozen=True, kw_only=True)
+class TranscriptView:
+    """One native generation at one tip, with history indexes in conversation order."""
+    source: TranscriptSource
+    rows: tuple[RowFact, ...]
+    history: tuple[int, ...]
+    context_from: int
+    tip: str | None
+    gap: str | None
+    history_version: int
+
+
+class TranscriptRowsChanged(ValueError):
+    """Selected bytes no longer match the metadata view; never carry row content."""
+    def __init__(self):
+        super().__init__('Transcript rows changed after the metadata snapshot')
+
+
+class TranscriptReader(Protocol):
+    deadline: float
+    def check(self) -> None: ...
+
+
+class TranscriptProvider(Protocol):
+    def transcript_view(self, session: SessionHandle, *, tip: str | None = None,
+                        reader: TranscriptReader | None = None) -> TranscriptView: ...
+    def transcript_bodies(self, session: SessionHandle, view: TranscriptView,
+                          indexes: Sequence[int], *, max_bytes: int,
+                          reader: TranscriptReader | None = None) -> list[dict | None]: ...
+    def transcript_readable(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelInfo:
+    """A model a harness takes, for one provider (api.Model is copied from it field by field)."""
+    id: str                          # the ID the harness sends for this provider
+    name: str                        # display name
+    family: str | None = None        # "opus", "sonnet", "haiku", "fable"
+    aliases: tuple = ()              # names that resolve to it for this provider ("sonnet")
+    efforts: tuple = ()              # the efforts it takes, low to high; () when it takes none
+    default_effort: str | None = None
+    inputs: tuple = ('text',)        # "text", plus "image" where it takes images
+    context_window: int | None = None
+    long_context_window: int | None = None   # with the "[1m]" suffix, where the model supports it
+    max_output_tokens: int | None = None
+    default: bool = False            # the model the harness uses when none is given, where known
+    hidden: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCatalog:
+    models: tuple                    # ModelInfo; only those offered on `provider`
+    free_form: bool                  # the harness also takes model IDs it doesn't list
+    source: str                      # "table" (kept by mv2) or "native" (asked of the harness)
+    version: str | None = None       # "table": the harness version it was taken from
+    provider: str | None = None      # Claude: "first-party", "bedrock", "vertex", "foundry", "mantle", ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelCheck:
+    ok: bool
+    model: str | None = None         # the resolved ID, when it resolves
+    effort: str | None = None        # the effort a run would use: the given one when the model takes it, the
+                                     # model's default_effort when none was given, None when it takes none
+    verified: bool = False           # the model is in the catalog; False when ok only because it is free-form
+    reason: str | None = None        # why not ok, or why ok is unverified
+
+
+class ModelProvider(Protocol):
+    """Optional: a harness's models and a model/effort check (observe). `environment` is what a launch would
+    get, a variable mapped to None where the launch removes it; the adapter reads only what it needs from it,
+    never os.environ."""
+    def models(self, *, environment: Mapping[str, str | None]) -> ModelCatalog: ...
+    def check_model(self, model: str, *, effort: str | None = None,
+                    environment: Mapping[str, str | None]) -> ModelCheck: ...

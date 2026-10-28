@@ -159,8 +159,9 @@ class PluginLaunchTest(PluginTestCase):
 
     def test_plain_claude_launches_load_no_plugin_directory_and_probe_no_version(self):
         """Bridged Claude launches get plugin dirs and settings merged beside mv2's own, and the plugin's problem and
-        mode joined to the launch's, while plain launches get none and never probe the version; fragile because plain
-        is the fallback for Claudes that cannot take these flags and is rarely exercised."""
+        mode recorded as the plugin's, never in the harness's own mode, while plain launches get none and never probe
+        the version; fragile because plain is the fallback for Claudes that cannot take these flags and is rarely
+        exercised."""
         self.enable("guard")
         with self.subTest("bridged"):
             command, _ = self.launch()
@@ -175,10 +176,12 @@ class PluginLaunchTest(PluginTestCase):
             self.assertEqual(command.environment["MV2_GUARD"], "1")
             self.assertEqual(command.environment["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"], "1")
             self.assertEqual(command.native_mode["mode"], "bridge")
-        with self.subTest("a plugin's problem and mode join the launch's"):
+        with self.subTest("a plugin's problem and mode are the plugin's, never the harness's"):
             command, _ = self.launch(version=(2, 1, 292))
-            self.assertEqual(command.native_mode["mode"], "bridge without guard")
-            self.assertEqual(command.native_mode["fallback_reason"], "Launched without guard: Claude too old")
+            self.assertEqual((command.native_mode["mode"], command.native_mode["fallback_reason"]), ("bridge", None))
+            entry = command.plugins["plugins"]["guard"]
+            self.assertEqual((entry["problem"], entry["mode"]), ("Launched without guard: Claude too old", "without guard"))
+            self.assertEqual(command.plugins["modes"], [{"plugin": "guard", "mode": "without guard"}])
         with self.subTest("plain"):
             command, probe = self.launch(bridge=False)
             probe.assert_not_called()

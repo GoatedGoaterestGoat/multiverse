@@ -429,8 +429,8 @@ def register(mv):
         install()
         executable = shutil.which('codex')
         version = subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
-        if version != 'codex-cli 0.163.0':
-            self.skipTest('native evidence requires checked Codex 0.163.0')
+        if version != 'codex-cli 0.164.0':
+            self.skipTest('native evidence requires checked Codex 0.164.0')
         mcp_output = self.work / 'mcp-env.json'
         helper = """import json, os, pathlib, sys
 keys = ('APP_TOKEN', 'OTHER_API_KEY', 'MV2_AGENT_ID')

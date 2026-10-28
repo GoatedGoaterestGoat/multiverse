@@ -67,4 +67,6 @@ Press `/` and type. The search covers every folder, including folded ones; `Esc`
 
 `P` lists the plugins for the selected universe, which ones are on, and what each adds. Select one and choose **Configure** to change its settings. See [plugins](plugins.md).
 
+A plugin's column can stand in for a core column, such as Context. The Plugins screen says so ("replaces the Context column"), and the [dashboard reference](../reference/dashboard.md#columns) explains how a view keeps core's own.
+
 ![The Plugins screen](../media/plugins.png)

@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import sys
+from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime
 from ..store import lock, now, read
@@ -24,6 +25,7 @@ def configure(parser):
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
         json=False, _present=None, _present_error=None):
+    access.require('act', f'send to {agent}')
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
     root = universe.resolve(root)
@@ -123,6 +125,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                             and missing_runtime.mismatch(directory, facts, native.observe(properties, facts)) is None):
                         properties, _ = native.session_snapshot(root, directory, properties, facts,
                                                                 launch_locked=True)
+                except access.Denied:
+                    raise
                 except Exception as error:
                     binding_error = str(error)
             target = properties.get('native_session_id')
@@ -146,6 +150,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                      'native_delivery': delivery_summary(receipt)}, receipt)
         try:
             receipt = native.send_or_wake(root, directory.name, message['id'], new_message=True)
+        except access.Denied:
+            raise
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
             try:

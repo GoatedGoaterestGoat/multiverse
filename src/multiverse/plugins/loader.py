@@ -32,9 +32,9 @@ import traceback
 import types
 
 from ..store import now
-from . import config, manifest as manifests, settings as settings_files, trust
+from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 12)
+API_VERSION = (1, 13)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -82,6 +82,14 @@ class Column:
     compact: bool = False
     flexible: bool = False
     group: object = None  # group(row) -> str, for subverse rows
+    fallback: str | None = None  # a core column key: a row without a value draws that column's cell (1.13)
+    replaces: str | None = None  # a core column key it stands in for wherever a view lists that column (1.13)
+
+
+# Core column names a view may use for another (ui/views.py reads them from here), and the columns no plugin may
+# stand in for: since focus mode they carry what core must always show (the focus, waiting and damaged markers).
+CORE_COLUMN_ALIASES = {"activity": "status", "tokens": "context"}
+ATTENTION_COLUMNS = ("name", "live", "status", "focus")
 
 
 @dataclass
@@ -116,6 +124,7 @@ class Registrations:
     helpers: dict = field(default_factory=dict)  # action -> fn(arguments) -> exit code
     handlers: list = field(default_factory=list)  # (event type pattern, fn(api.Event)), run in the host
     services: list = field(default_factory=list)  # (start(api.ServiceContext), stop or None), run in the host
+    problems: list = field(default_factory=list)  # what register(mv) asked for and could not have, said by doctor
 
 
 @dataclass
@@ -519,6 +528,59 @@ def entry(root, name):
         if found.name == name:
             return found
     raise PluginError(f"No plugin named {name} here. Run mv2 plugins to see the plugins this universe can use.")
+
+
+def access_level(root, found):
+    """The access level plugin `found` has in universe `root`: None where it is off; else the level granted there
+    (none recorded: what it requests), never above its request, capped by the universe's access_ceiling and by
+    MV2_EFFECTS for this process.
+
+    Decided from one read of plugins.json, whether it is on included, not from what `found` was read with: a
+    file torn or changed since then never hands back access (an unusable read is off, so no access, while a
+    missing file means the defaults)."""
+    if found is None or not found.on or found.manifest is None:
+        return None
+    settings = config.load(root) if root is not None else config.Config()
+    if not settings.is_on(found.name, found.manifest.default if found.source == "bundled" else "off"):
+        return None
+    request = found.manifest.access.request
+    granted = settings.access.get(found.name, request)
+    return levels.lowest(*(level for level in (granted, request, settings.ceiling, levels.process_ceiling())
+                           if level is not None))
+
+
+def limits(root, found):
+    """[(what, level)] of what caps plugin `found` below its request here, strongest first: ("MV2_EFFECTS", level)
+    for this process, ("access_ceiling", level) for the universe's plugins.json, ("grant", level) for its own
+    grant. Empty where nothing does, or it is off."""
+    if found is None or not found.on or found.manifest is None:
+        return []
+    request = found.manifest.access.request
+    settings = config.load(root) if root is not None else config.Config()
+    found_limits = [("MV2_EFFECTS", levels.process_ceiling()), ("access_ceiling", settings.ceiling),
+                    ("grant", settings.access.get(found.name))]
+    return [(what, level) for what, level in found_limits
+            if level is not None and levels.rank(level) < levels.rank(request)]
+
+
+def raise_hint(root, name, needs):
+    """How a person gives plugin `name` `needs` access here: the change that would actually do it, naming what
+    holds it below (MV2_EFFECTS, the universe's access_ceiling, its grant), or that it never asks for that much."""
+    try:
+        found = entry(root, name)
+    except (PluginError, OSError, ValueError):
+        found = None
+    request = found.manifest.access.request if found is not None and found.manifest is not None else None
+    if request is not None and levels.rank(request) < levels.rank(needs):
+        return f"it asks for at most {request}, so no grant gives it {needs}"
+    caps = [(what, level) for what, level in (limits(root, found) if found is not None else [])
+            if levels.rank(level) < levels.rank(needs)]
+    if caps and caps[0][0] == "MV2_EFFECTS":
+        return f"MV2_EFFECTS={caps[0][1]} caps every plugin in this process: run it without MV2_EFFECTS"
+    if caps and caps[0][0] == "access_ceiling":
+        return (f"this universe's plugins.json caps every plugin at {caps[0][1]} (access_ceiling): a person can "
+                f"raise or remove it there")
+    return f"a person can grant it with: mv2 plugins grant {name} {needs}"
 
 
 def _package_name(found):

@@ -48,8 +48,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
+    dismiss = (f' To stop checking it, use mv2 deliver {name} --dismiss; it may still have arrived.' if check else '')
     if value.get('dismissed') is True:
-        return f'{name}: delivery failure dismissed; kept in history. Nothing resent.'
+        return f'{name}: message dismissed; kept in history. Nothing resent.'
     if value.get('outside_lineage') is True:
         if value.get('retired_by_fresh_start') is True:
             return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
@@ -98,11 +99,11 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
         return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry or --dismiss."
     if state == 'unknown':
         if accepted:
-            return f'{name}: message accepted; no confirmation yet. Do not resend.'
+            return f'{name}: message accepted; no confirmation yet. Do not resend.' + dismiss
         if value.get('evidence_problem'):
             return (f"{name}: cannot yet tell whether it received the message. {clean(value['evidence_problem']).rstrip('.')}; "
-                    f"then run mv2 deliver {name} --check. Do not resend.")
-        return f"{name}: cannot yet tell whether it received the message. Saved; run mv2 deliver {name} --check before sending again."
+                    f"then run mv2 deliver {name} --check. Do not resend.") + dismiss
+        return f"{name}: cannot yet tell whether it received the message. Saved; run mv2 deliver {name} --check before sending again." + dismiss
     if value.get('transcript_confirmed') is True:
         return f'{name}: message confirmed in its conversation.'
     if wake or 'interactive starting prompt' in reason or 'interactive prompt' in reason:
@@ -112,7 +113,7 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     if check:
         if 'queue' in reason.lower():
             return f'{name}: message is queued for its next turn. Do not resend.'
-        return f'{name}: message accepted; no confirmation yet. Do not resend.'
+        return f'{name}: message accepted; no confirmation yet. Do not resend.' + dismiss
     if value.get('idle_start_error'):
         return f'{name} has your message queued; its next turn has not started. Run mv2 deliver {name} --check; do not resend.'
     if value.get('queued_submission_id') and not value.get('turn_id'):

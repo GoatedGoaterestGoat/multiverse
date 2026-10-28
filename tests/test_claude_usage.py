@@ -1,4 +1,4 @@
-"""Claude usage from its transcripts, and the compaction estimate that stands in for it."""
+"""Claude usage from its transcripts and the mod's reports."""
 import json
 import os
 from unittest.mock import patch
@@ -12,31 +12,11 @@ from multiverse import harnesses
 from test_multiverse import BaseTest
 
 
-def compaction_here():
-    """Whether this checkout has the compaction plugin (the plugins/compaction submodule), which makes the estimate."""
-    from multiverse.plugins import entry
-    from multiverse.plugins.loader import PluginError
-    try:
-        entry(None, 'compaction')  # raises only when no plugin by that name is found
-    except PluginError:
-        return False
-    return True
-
-
 class ClaudeUsageTest(BaseTest):
     def setUp(self):
         super().setUp()
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}))
-        # The compaction plugin makes the estimate after a compaction; the base template leaves it off.
-        from multiverse.plugins import config as plugins_config
-        plugins_config.set_enabled(self.root, 'compaction', True)
-
-    def needs_compaction(self):
-        """Skip unless the compaction plugin is found: checked as the test runs, under its own HOME (BaseTest isolates
-        it), never at import, where discovery would read and write the real one."""
-        if not compaction_here():
-            self.skipTest('needs the compaction plugin: mv2 plugins install compaction')
 
     def response(self, id, input_tokens, output_tokens, cache_read=0, cache_write=0, block='text'):
         usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,
@@ -147,83 +127,34 @@ class ClaudeUsageTest(BaseTest):
         return json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
             'id': str(uuid4()), 'model': '<synthetic>', 'usage': usage, 'content': [{'type': 'text', 'text': 'kept'}]}}) + '\n'
 
-    def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000, derived_at='2026-10-04T05:00:00+00:00'):
+    def reported(self):
+        """An agent whose last response (00:00, 150k) the mod reported at 00:05."""
         agent, directory = self.agent()
         native_id = str(uuid4())
         project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0))
-        install = str(uuid4())
-        write(directory / 'compaction' / 'installs' / f'{install}.json',
-              {'stats': {'tokens_after': estimate}, 'install_id': install, 'created_at': installed_at})
-        if recorded:
-            (directory / 'compaction' / 'installed.jsonl').write_text(json.dumps({'install': install, 'rows': [], 'at': derived_at}) + '\n')
         self.report(directory, {'tokens': 150010, 'window': 200000, 'percent': 75}, '2026-10-04T00:05:00+00:00')
         session = SessionHandle(agent, 'claude', str(self.work), launch_id='current', native_id=native_id,
                                 session_file=str(directory / 'session.jsonl'))
-        return harnesses.load(self.root, 'claude'), session, project, native_id, install
+        return harnesses.load(self.root, 'claude'), session, project, native_id
 
     def report(self, directory, context, at):
         facts = read(directory / 'runtime.json')
         write(directory / 'runtime.json', {**facts, 'usage': {'context': context, 'rate_limits': [], 'reported_at': at}})
 
-    def value(self, adapter, session):
-        """The usage record as mv2 reports it: the adapter's, after plugins' adjustments (compaction's estimate)."""
-        from multiverse.plugins import harness as plugin_harness
-        return plugin_harness.adjust_usage(plugin_harness.session_info(session, 'claude'), adapter.get_usage(session).value)
-
-    def context(self, adapter, session):
-        return self.value(adapter, session)['context']
-
-    def test_compaction_estimate_stands_in_until_a_real_response(self):
-        """After a compaction the plugin's estimate stands in until a real response arrives, and the rows the install
-        writes do not end it; a break goes unnoticed because the dashboard shows a stale but plausible pre-compaction
-        context (45b493d, 1c750f3)."""
-        with self.subTest('the estimate stands in until a real response'):
-            self.needs_compaction()
-            adapter, session, project, native_id, install = self.compacted()
-            context = self.context(adapter, session)
-            self.assertEqual((context['tokens'], context['window'], context['estimated'], context['estimated_from']),
-                             (22000, 200000, True, install))
-            self.assertNotIn('percent', context)
-            with (project / f'{native_id}.jsonl').open('a') as handle:
-                handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
-            context = self.context(adapter, session)
-            # The mod's report predates the new response, so the transcript has the real request size.
-            self.assertEqual(context['tokens'], 32005)
-            self.assertNotIn('estimated', context)
-        with self.subTest("the mod's newer report wins once it follows the response"):
-            adapter, session, project, native_id, install = self.compacted()
-            with (project / f'{native_id}.jsonl').open('a') as handle:
-                handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
-            self.report(self.root / 'state/agents' / session.agent_id,
-                        {'tokens': 32005, 'window': 200000, 'percent': 16}, '2026-10-04T00:12:00+00:00')
-            context = self.context(adapter, session)
-            self.assertEqual((context['tokens'], context['percent']), (32005, 16))
-            self.assertNotIn('estimated', context)
-        with self.subTest('a compaction never installed, or without an estimate, changes nothing'):
-            adapter, session, *_ = self.compacted(recorded=False)
-            self.assertEqual(self.context(adapter, session)['tokens'], 150010)
-            self.assertNotIn('estimated', self.context(adapter, session))
-            adapter, session, *_ = self.compacted(installed_at='not a time')
-            self.assertNotIn('estimated', self.context(adapter, session))
-        with self.subTest('the rows an install stores do not end the estimate'):
-            self.needs_compaction()
-            adapter, session, project, native_id, install = self.compacted()
-            # Claude stores the installed conversation as new rows half a second later, each with zero usage.
-            with (project / f'{native_id}.jsonl').open('a') as handle:
-                handle.write(self.built('2026-10-04T00:10:00.500Z') + self.built('2026-10-04T00:10:00.502Z'))
-            context = self.context(adapter, session)
-            self.assertEqual((context['tokens'], context['estimated'], context['estimated_from']),
-                             (22000, True, install))
-            with (project / f'{native_id}.jsonl').open('a') as handle:
-                handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
-            context = self.context(adapter, session)
-            self.assertEqual(context['tokens'], 32005)
-            self.assertNotIn('estimated', context)
-        with self.subTest('without the mod the estimate still replaces the stale reading'):
-            self.needs_compaction()
-            adapter, session, project, native_id, install = self.compacted()
-            stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,
-                                  session_file=session.session_file)
-            context = self.context(adapter, stale)
-            self.assertEqual((context['tokens'], context['estimated']), (22000, True))
-            self.assertNotIn('window', context)
+    def test_the_newer_of_the_mods_report_and_the_transcript_is_the_reading(self):
+        """An older report must never mask a newer response in the transcript, nor the transcript a newer report,
+        nor a report from another launch: each way the dashboard shows a stale but plausible size."""
+        adapter, session, project, native_id = self.reported()
+        stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,
+                              session_file=session.session_file)
+        self.assertNotIn('window', adapter.get_usage(stale).value['context'])  # another launch's report is never used
+        self.assertEqual(adapter.get_usage(session).value['context']['tokens'], 150010)
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+        context = adapter.get_usage(session).value['context']
+        self.assertEqual(context['tokens'], 32005)  # the report predates the new response
+        self.assertNotIn('percent', context)
+        self.report(self.root / 'state/agents' / session.agent_id,
+                    {'tokens': 32005, 'window': 200000, 'percent': 16}, '2026-10-04T00:12:00+00:00')
+        context = adapter.get_usage(session).value['context']
+        self.assertEqual((context['tokens'], context['percent']), (32005, 16))

@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 
+from . import access as levels
+
 FILE = "plugin.json"
 # The same rule as a bridge id: lowercase letters, digits and single hyphens.
 NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
@@ -49,6 +51,7 @@ PERMISSIONS = {
     "messages.send": "send messages to any agent in this universe, as this plugin",
     "messages.ask": "ask agents side questions",
     "messages.read": "read agents' messages",
+    "transcripts.read": "read agents' transcripts: their conversations, tool calls and results",
     "universe.write": "change this universe's definition files (refresh)",
     "network.listen": "listen for network connections",
     "process.spawn": "start other programs",
@@ -57,9 +60,18 @@ PERMISSIONS = {
     "harness.pi": "add to Pi launches",
 }
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
+# The permissions each access level carries, for a manifest with "access" and no "permissions" (1.13).
+# harness.*, process.spawn and network.listen are declarations of what the plugin's own code does: never derived.
+LEVEL_PERMISSIONS = {
+    "observe": frozenset({"agents.read", "messages.read", "transcripts.read"}),
+    "spend": frozenset({"agents.read", "messages.read", "transcripts.read", "messages.ask"}),
+    "act": frozenset({"agents.read", "messages.read", "transcripts.read", "messages.ask", "agents.control",
+                      "messages.send", "universe.write"}),
+}
+WHY_CHARACTERS = 300
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings", "harnesses", "statusline", "events"}
+                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -103,6 +115,16 @@ class HarnessEntry:
 
 
 @dataclass(frozen=True)
+class Access:
+    """The access level a plugin asks for, the least it can work with, and why (1.13). A manifest without
+    "access" asks for act with act as its least: exactly its reach before levels."""
+    request: str = "act"
+    minimum: str = "act"
+    why: str | None = None
+    declared: bool = False
+
+
+@dataclass(frozen=True)
 class Item:
     """A status-line item a plugin writes: its name and whether it shows by default on each line."""
     name: str
@@ -126,12 +148,52 @@ class Manifest:
     harnesses: dict = field(default_factory=dict)  # family -> tuple of HarnessEntry
     statusline: tuple = ()  # Item
     events: tuple = ()  # event type patterns it subscribes to: "agent.status", "message.*", "*"
+    access: Access = Access()
+
+    def permitted(self, permission):
+        """Whether the manifest asks for `permission`: listed, or, for one with "access" and no "permissions",
+        carried by the level it requests."""
+        if self.permissions or not self.access.declared:
+            return permission in self.permissions
+        if MODEL_PERMISSION.fullmatch(permission):
+            return levels.rank(self.access.request) >= levels.rank("spend")
+        return permission in LEVEL_PERMISSIONS[self.access.request]
 
     def permission_texts(self):
-        """Each permission as words, for `mv2 plugins enable` and `info`."""
-        return [PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
-                                          if MODEL_PERMISSION.fullmatch(name) else name)
-                for name in sorted(self.permissions)]
+        """Each permission it asks for, as words, for `mv2 plugins enable` and `info`."""
+        return [permission_text(name) for name in self._permission_names()]
+
+    def permissions_at(self, level):
+        """What it asked for, at access `level` here (None where it is off): (the texts that level allows,
+        [{"text", "needs"}] for the rest, each with the level it needs). A declaration no level gates stays
+        allowed while the plugin is on."""
+        allowed, held = [], []
+        for name in self._permission_names():
+            needs = permission_needs(name)
+            if level is not None and (needs is None or levels.rank(level) >= levels.rank(needs)):
+                allowed.append(permission_text(name))
+            else:
+                held.append({"text": permission_text(name), "needs": needs})
+        return allowed, held
+
+    def _permission_names(self):
+        return sorted(self.permissions or (LEVEL_PERMISSIONS[self.access.request] if self.access.declared else ()))
+
+
+def permission_text(name):
+    return PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
+                                     if MODEL_PERMISSION.fullmatch(name) else name)
+
+
+def permission_needs(name):
+    """The access level using a permission needs (1.13): the lowest level that carries it; spend for models.*; act
+    for harness.*, since a launch addition needs act; None for a declaration of what the plugin's own code does,
+    which no level gates (process.spawn, network.listen)."""
+    if MODEL_PERMISSION.fullmatch(name):
+        return "spend"
+    if name.startswith("harness."):
+        return "act"
+    return next((level for level in levels.LEVELS if name in LEVEL_PERMISSIONS[level]), None)
 
 
 def check_name(value, what="name"):
@@ -252,7 +314,23 @@ def _parse(directory, data):
         raise ValueError('events needs "events" in extends')
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
                     frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline,
-                    tuple(events))
+                    tuple(events), _access(data.get("access")))
+
+
+def _access(value):
+    if value is None:
+        return Access()
+    if not isinstance(value, dict) or set(value) - {"request", "minimum", "why"} or "request" not in value:
+        raise ValueError('access must be {"request": LEVEL, "minimum": LEVEL, "why": "..."}, with request')
+    request = levels.check(value["request"], "access.request")
+    minimum = levels.check(value.get("minimum", request), "access.minimum")
+    if levels.rank(minimum) > levels.rank(request):
+        raise ValueError("access.minimum must not be above access.request")
+    why = value.get("why")
+    if why is not None and (not isinstance(why, str) or not why.strip() or len(why) > WHY_CHARACTERS
+                            or "\n" in why or "\r" in why):
+        raise ValueError(f"access.why must be one line of at most {WHY_CHARACTERS} characters")
+    return Access(request, minimum, why.strip() if why else None, True)
 
 
 def _version(value, what):

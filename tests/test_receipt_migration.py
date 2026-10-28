@@ -45,17 +45,20 @@ class ReceiptMigrationTest(BaseTest):
         mailbox.update_message(self.directory, unknown['id'], submission_state='unknown')
         foreign = self.acceptance()
         mailbox.update_message(self.directory, foreign['id'], target_session=str(uuid4()))
-        self.transcript.write_text('\n'.join(json.dumps(self.row(item)) for item in (exact, receipt, wake, unknown, foreign))
+        retry = self.acceptance()
+        mailbox.update_message(self.directory, retry['id'], attempts=[{
+            'native_session_id': self.session, 'native_message_id': str(uuid4())}])
+        self.transcript.write_text('\n'.join(json.dumps(self.row(item)) for item in (exact, receipt, wake, unknown, foreign, retry))
                                    + '\n' + json.dumps({'type': 'user', 'message': {'content': 'identical body'}}) + '\n')
         before = {item['id']: mailbox.message_record(self.directory, item['id'])[1]
-                  for item in (exact, text_only, receipt, wake, unknown, foreign)}
+                  for item in (exact, text_only, receipt, wake, unknown, foreign, retry)}
         # This shipped updater entry runs the new checkout's migration command in a new process.
         result = update._convert_settings(ROOT, self.root)
         self.assertEqual(result['state'], 'none', result)
         confirmed = mailbox.message_record(self.directory, exact['id'])[1]
         self.assertIs(confirmed.get('native_receipt', {}).get('transcript_confirmed'), True)
         self.assertEqual(confirmed['attempts'], before[exact['id']]['attempts'])
-        for item in (text_only, receipt, wake, unknown, foreign):
+        for item in (text_only, receipt, wake, unknown, foreign, retry):
             self.assertEqual(mailbox.message_record(self.directory, item['id'])[1], before[item['id']])
         late = self.acceptance()
         with self.transcript.open('a') as stream:

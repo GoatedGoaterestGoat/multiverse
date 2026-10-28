@@ -10,6 +10,7 @@ import os
 import json
 import re
 
+from . import effects
 from .. import harnesses
 from ..harnesses.types import NativeResult
 from ..store import lock, now, read, write
@@ -320,7 +321,7 @@ def kill(root, directory, *, attachment_only=False):
                 session = SessionHandle.from_records(properties, facts, directory)
                 executor = ExactStopExecutor(properties['workspace'], properties, facts)
                 executor.stopping = True
-                cancellation = adapter.stop(session, executor)
+                cancellation = effects.call(adapter, 'stop', session, executor)
                 # Preserve partial native counters even when the operation did
                 # not finish. Only returned exact mailbox IDs are bookkeeping.
                 details = cancellation.value if isinstance(cancellation.value, dict) else {}

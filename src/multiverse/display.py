@@ -161,7 +161,7 @@ def _number(value):
 
 
 def usage_context(result):
-    """The latest request's size: {'tokens', 'window'?, 'percent'?} or None."""
+    """The latest request's size as core measured it: {'tokens', 'window', 'percent', 'last_known'} or None."""
     value = result.get('value') if result.get('state') == 'ok' else None
     found = value.get('context') if isinstance(value, dict) else None
     used = _number(found.get('tokens')) if isinstance(found, dict) else None
@@ -171,13 +171,7 @@ def usage_context(result):
     percent = _number(found.get('percent'))
     if percent is None and window:
         percent = used * 100 / window
-    reason = found.get('estimated_reason')
-    return {'tokens': used, 'window': window, 'percent': percent, 'estimated': found.get('estimated') is True,
-            # What the estimate is (the words after "estimated"); records from before plugins set it are compaction's.
-            # Plugin code sets it: one short line, so it cannot stretch the inspector.
-            'estimated_reason': ' '.join(reason.split())[:80] if isinstance(reason, str) and reason.strip()
-            else 'after compaction: conversation only',
-            'last_known': found.get('last_known') is True}
+    return {'tokens': used, 'window': window, 'percent': percent, 'last_known': found.get('last_known') is True}
 
 
 def context_display(result):
@@ -185,7 +179,7 @@ def context_display(result):
     found = usage_context(result)
     if found is None:
         return 'N/A'
-    return ('~' if found['estimated'] else '') + tokens(found['tokens']) + (f"/{tokens(found['window'])}" if found['window'] else '')
+    return tokens(found['tokens']) + (f"/{tokens(found['window'])}" if found['window'] else '')
 
 
 def context_level(result):
@@ -205,9 +199,7 @@ def context_line(result):
     found = usage_context(result)
     line = 'Context: ' + context_display(result)
     if found and found['percent'] is not None:
-        line += f" ({found['percent']:.0f}%" + (f", estimated {found['estimated_reason']})" if found['estimated'] else ')')
-    elif found and found['estimated']:
-        line += f" (estimated {found['estimated_reason']})"
+        line += f" ({found['percent']:.0f}%)"
     if found and found['last_known']:
         line += ' (last known)'
     cost = cost_display(result)

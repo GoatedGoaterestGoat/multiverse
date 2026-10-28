@@ -7,6 +7,8 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION
+
 from native_safety import PROTECTED_HOMES, check_connect, check_spawn, install, isolated_home, require_checked_codex
 
 install()
@@ -45,10 +47,11 @@ class NativeSafetyTest(unittest.TestCase):
         check_spawn(['codex', '--help'], {})
         check_connect('/tmp/isolated-test/rpc.sock')
         # Unsupported installed CLIs must never reach native fixture setup.
-        for version in (None, (0, 154, 0), (0, 162, 1), (0, 163, 0), (0, 164, 0)):
+        newer_version = (*CHECKED_VERSION[:2], CHECKED_VERSION[2] + 1)
+        for version in (None, (0, 154, 0), (0, 163, 0), CHECKED_VERSION, newer_version):
             with self.subTest(cli=version), patch('multiverse.harnesses.codex.plugins.codex_version',
                                                   return_value=version):
-                if version is None or version < (0, 163, 0):
+                if version is None or version < CHECKED_VERSION:
                     with self.assertRaisesRegex(unittest.SkipTest, 'require checked CLI'):
                         require_checked_codex(self)
                 else:

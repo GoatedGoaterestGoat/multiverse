@@ -96,7 +96,7 @@ class ManifestTest(PluginTestCase):
             self.write_plugin("future", {"api": "1.999"})
             self.enable("future")
             # Written for a newer API, with names this mv2 does not know yet: incompatible, never invalid.
-            self.write_plugin("newer", {"api": "1.999", "permissions": ["transcripts.read", "models.claude"],
+            self.write_plugin("newer", {"api": "1.999", "permissions": ["calendar.read", "models.claude"],
                                         "extends": ["transcripts"], "transcripts": {"rows": 10}})
             self.enable("newer")
             (self.plugins_dir / "bad").mkdir()
@@ -108,7 +108,7 @@ class ManifestTest(PluginTestCase):
             for name in ("future", "newer"):
                 self.assertEqual(states[name].state, "incompatible")
                 self.assertIn(f"needs plugin API 1.999; this mv2 has {have}; update mv2", states[name].problem)
-            self.assertIn("transcripts.read", states["newer"].manifest.permission_texts())
+            self.assertIn("calendar.read", states["newer"].manifest.permission_texts())
             self.assertEqual(states["bad"].state, "invalid")
             self.assertEqual(states["typo"].state, "invalid")
         with self.subTest("mv2 plugins new"):
@@ -180,9 +180,10 @@ class DiscoveryTest(PluginTestCase):
 
 class ConfigTest(PluginTestCase):
     def test_plugins_json_keeps_unknown_keys_and_survives_damage(self):
-        """Writing plugins.json keeps keys from newer and older mv2, and an unusable file reads as defaults and is
-        never rewritten; a break goes unnoticed because older runners sharing the universe silently turn every
-        plugin off or the next write drops the newer fields."""
+        """Writing plugins.json keeps keys from newer and older mv2, and an unusable file is never rewritten and turns
+        every plugin off (a missing one means the defaults); a break goes unnoticed because older runners sharing the
+        universe silently turn every plugin off, the next write drops the newer fields, or a torn file turns a
+        plugin a person turned off back on, or gives back the access a person took away."""
         path = config.path(self.root)
         with self.subTest("an older mv2's keys"):
             # "keys" is from before plugins lost their dashboard keys: still read, and kept.
@@ -194,15 +195,41 @@ class ConfigTest(PluginTestCase):
         with self.subTest("a newer mv2's keys"):
             self.write_plugin("tool")
             config.set_enabled(self.root, "tool", True)
-            path.write_text(json.dumps({**json.loads(path.read_text()), "access": {"tool": "spend"},
-                                        "access_ceiling": "observe"}))
+            path.write_text(json.dumps({**json.loads(path.read_text()), "layout": {"tool": "left"},
+                                        "sandbox": "strict"}))
             loaded = config.load(self.root)
             self.assertIsNone(loaded.problem)
             self.assertTrue(loaded.is_on("tool"))
             self.assertEqual(plugins.entry(self.root, "tool").state, "on")
-            self.assertTrue(any("access, access_ceiling" in note for note in plugins.notes(self.root)))
+            self.assertTrue(any("layout, sandbox" in note for note in plugins.notes(self.root)))
             config.set_enabled(self.root, "tool", False)  # writing it keeps what a newer mv2 put there
-            self.assertEqual(json.loads(path.read_text())["access"], {"tool": "spend"})
+            self.assertEqual(json.loads(path.read_text())["layout"], {"tool": "left"})
+        with self.subTest("unusable, after a person turned a default-on plugin off and lowered a grant"):
+            bundled = self.work / "bundled"
+            self.write_plugin("deft", {"default": "on"}, where=bundled)
+            with mock.patch.object(loader, "BUNDLED", bundled):
+                path.write_text(json.dumps({"schema": 1, "enabled": {"deft": False, "tool": True},
+                                            "access": {"tool": "observe"}}))
+                loader.reset()
+                self.assertEqual((plugins.entry(self.root, "deft").on, loader.access_level(
+                    self.root, plugins.entry(self.root, "tool"))), (False, "observe"))
+                path.write_text('{"schema": 1, "enabled": {"deft": false, "tool": tr')  # torn mid-write
+                loader.reset()
+                for name in ("deft", "tool"):
+                    found = plugins.entry(self.root, name)
+                    self.assertEqual((found.on, loader.access_level(self.root, found)), (False, None), name)
+                self.assertIn("every plugin is off here until it is repaired", plugins.problems(self.root)[0])
+                path.unlink()  # missing, not damaged: the defaults
+                loader.reset()
+                self.assertTrue(plugins.entry(self.root, "deft").on)
+        with self.subTest("torn between reading the plugin and deciding its access"):
+            path.write_text(json.dumps({"schema": 1, "enabled": {"tool": True}, "access": {"tool": "observe"}}))
+            loader.reset()
+            found = plugins.entry(self.root, "tool")  # read while the file was whole: on, at observe
+            path.write_text('{"schema": 1, "enabled": {"tool": tr')  # then torn before the decision reads it
+            self.assertIsNone(loader.access_level(self.root, found))  # never the request (act) from an empty read
+            path.write_text(json.dumps({"schema": 1, "enabled": {"tool": False}}))  # or turned off meanwhile
+            self.assertIsNone(loader.access_level(self.root, found))
         with self.subTest("unusable"):
             for text in ('{"enabled": {"a": "yes"}}', '{"schema": 1, "access": {}, "enabled": {"a": "yes"}}'):
                 path.write_text(text)
@@ -404,6 +431,37 @@ class LoadingTest(PluginTestCase):
         self.enable("long")
         self.assertEqual(catalog._plugin_lines(self.root), [])
         self.assertIn(f"{api.BOOTSTRAP_CHARACTERS} characters", self.entry("long").problem)
+
+
+    def test_a_column_stands_in_only_for_a_data_column_and_only_alone(self):
+        """replaces= naming Name, Live, Status or Focus (or an alias for one) is said as a problem and the column
+        loads without it, and two plugins replacing one column cancel, said too: a break would silently hide
+        core's focus, waiting and damaged markers, or let the dashboard flip between two plugins' columns."""
+        def column(key, replaces, fallback=None):
+            extra = f", fallback={fallback!r}" if fallback else ""
+            return (f"    mv.dashboard.column({key!r}, {key.title()!r}, 6, lambda row: None, "
+                    f"replaces={replaces!r}{extra})\n")
+        for name, lines in (("estimate", column("estimate", "tokens")),
+                            ("rival", column("rival", "context") + column("marker", "activity")),
+                            ("own", column("own", "phase", fallback="summary"))):
+            self.write_plugin(name, {"api": "1.13", "module": "plugin", "extends": ["dashboard.column"]},
+                              {"plugin.py": "def register(mv):\n" + lines})
+            self.enable(name)
+        problems = plugins.problems(self.root)  # loads them; listing() itself never imports a plugin
+        found = {item["name"]: item for item in plugins.listing(self.root)}
+        self.assertEqual((found["estimate"]["provides"]["replaces"], found["rival"]["provides"]["replaces"],
+                          found["own"]["provides"]["replaces"]), (["context"], ["context"], ["phase"]))
+        self.assertIn("estimate and rival both replace the context column, so neither does", problems)
+        self.assertIn("rival's column marker can't replace Status: Name, Live, Status and Focus always show core's "
+                      "own", problems)
+        registered = {item.name: item.loaded.registrations.columns for item in loader.entries(self.root)
+                      if item.loaded is not None and item.name in found}
+        marker, own, estimate = registered["rival"]["marker"], registered["own"]["own"], registered["estimate"]["estimate"]
+        self.assertEqual((marker.replaces, marker.fallback), (None, None))  # it still loads, under its own key
+        self.assertEqual((own.replaces, own.fallback), ("phase", "summary"))  # an explicit fallback wins
+        self.assertEqual((estimate.replaces, estimate.fallback), ("context", "context"))  # replaces implies it
+        self.enable("rival", on=False)
+        self.assertFalse([line for line in plugins.problems(self.root) if "replace" in line])
 
 
 class ApiTest(PluginTestCase):

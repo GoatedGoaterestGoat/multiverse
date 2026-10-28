@@ -191,6 +191,9 @@ class KillTest(TerminalBase):
             self.assertEqual(result['state'], 'dormant')
         with self.subTest('a pid that is not its child'):
             launched, directory = self.start('foreign-pid')
+            # The child writes seen.json before its runner publishes the PID.
+            # Wait for that write so it cannot overwrite our foreign-PID fixture.
+            until(lambda: agents.runtime(directory).get('pid'))
             facts = agents.runtime(directory)
             agents.update_runtime(directory, facts['launch_id'], pid=os.getpid())
             with self.assertRaisesRegex(ValueError, 'no longer belongs'):

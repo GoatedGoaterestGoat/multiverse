@@ -83,16 +83,19 @@ These files record which plugins are on, their settings and their state. See [pl
 
 This file says which plugins are on in this universe. A missing file, or a plugin it doesn't name, means the plugin's default. The default is off, except for bundled plugins marked on, such as typeahead.
 
-Subverses don't inherit the file. `mv2 plugins enable` and `disable` and the dashboard's `P` write it. An unusable file stops nothing: every plugin is at its default, and `mv2 doctor` says why.
+Subverses don't inherit the file. `mv2 plugins enable`, `disable` and `grant` and the dashboard's `P` write it. An unusable file turns every plugin off in that universe until it's repaired, so a torn file never turns on a plugin you turned off or gives back access you took away; `mv2 doctor` says why. A missing file means the defaults.
 
 ```json
-{"schema": 1, "enabled": {"compaction": true, "remote": false}, "theme": null, "events": {"retain_days": 7, "max_mb": 32}}
+{"schema": 1, "enabled": {"compaction": true, "remote": false}, "access": {"compaction": "spend"},
+ "access_ceiling": null, "theme": null, "events": {"retain_days": 7, "max_mb": 32}}
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `schema` | Always `1`. |
 | `enabled` | Plugin name to `true` (on) or `false` (off). |
+| `access` | Plugin name to the access level granted here: `observe`, `spend` or `act`. A plugin that is on with none recorded has what it asks for. |
+| `access_ceiling` | No plugin here has more than this level: `observe` makes the universe read-only for plugins. `null` (the default) sets no ceiling. |
 | `theme` | The plugin whose dashboard colors to use, or `null`. |
 | `events` | How long the event journal keeps closed segments: `retain_days` (default `7`) and `max_mb` (default `32`). |
 
@@ -244,14 +247,14 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
-| `inbox-state.json` | Delivery attempts and receipts per message. |
+| `inbox-state.json` | Delivery attempts and receipts per message. For an adapter using attempt IDs, each submission stores its `native_message_id` and checked `delivery_receipt`; the logical inbox message ID stays unchanged. |
 | `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
 | `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: verified native session changes, such as Claude's `/clear`, and explicit missing-conversation retirements. A retirement keeps the old ID owned and records the replacement storage before properties change; reported IDs remain unbound until the new conversation binds. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
-| `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. |
+| `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
 
 Each launch directory holds:

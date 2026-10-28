@@ -120,10 +120,10 @@ def refresh_plan(root, template=None, take=()):
     (universes installed before refresh existed), a file that differs from the
     template is `unknown` and changes only when named in `take`. While a
     plugin's pre-plugin settings file waits here to be converted, whatever the
-    plugin's state (installed or not: core knows compaction's), the template's
-    `plugin-settings/NAME.json` and `plugins.json` are `deferred`: the old file
-    decides both when it is converted. A plugin settings file the universe
-    wrote itself is `local`.
+    plugin's state (installed or not: core knows the optional plugins in
+    plugins/known.json), the template's `plugin-settings/NAME.json` and
+    `plugins.json` are `deferred`: the old file decides both when it is
+    converted. A plugin settings file the universe wrote itself is `local`.
     """
     root = Path(root)
     meta = read(root / "universe.json")

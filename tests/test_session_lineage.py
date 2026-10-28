@@ -73,6 +73,65 @@ class SessionLineageTest(BaseTest):
         agents.rebind_session(self.root, self.agent.name, target, self.old, 'resume', 'launch', home=self.home)
         self.assertEqual([row['to'] for row in self.rows()], [target, self.old])
 
+    def test_transcript_generations_keep_departed_scopes_without_repairing_records(self):
+        """Fresh starts and returns must not assign an old conversation the current home or invent an unbound generation."""
+        properties = read(self.agent / 'properties.json')
+        self.assertEqual(sessions.generations(self.agent, properties), ())
+        first, second, third = self.old, str(uuid4()), str(uuid4())
+        def transition(previous, target, home, stamp):
+            return {'schema': 1, 'id': str(uuid4()), 'at': stamp, 'harness': 'pi',
+                    'home': home, 'launch': 'launch', 'from': previous, 'to': target, 'reason': 'clear'}
+        def save(rows):
+            (self.agent / 'sessions.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        rows = [transition(first, second, self.home, 'first'),
+                transition(second, first, self.home, 'second'),
+                transition(first, third, self.home, 'latest')]
+        save(rows)
+        current = {**properties, 'native_session_id': third}
+        before = {path.name: path.read_bytes() for path in self.agent.iterdir() if path.is_file()}
+        with patch.object(sessions, 'write', side_effect=AssertionError('generation reads never repair')):
+            earlier = sessions.generations(self.agent, current)
+        self.assertEqual([(item['native_id'], item['ended_at']) for item in earlier],
+                         [(second, 'second'), (first, 'latest')])
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.agent.iterdir() if path.is_file()})
+        # Returning to second excludes its old departure from the earlier list.
+        rows.append(transition(third, second, self.home, 'returned'))
+        save(rows)
+        self.assertEqual([item['native_id'] for item in sessions.generations(self.agent,
+                         {**properties, 'native_session_id': second})], [first, third])
+        # Retirement's replacement scope is never assigned to the old ID.
+        replacement_home = self.home + '-new'
+        replacement = {key: None for key in sessions.FRESH_FIELDS}
+        replacement.update(native_session_home=replacement_home, native_storage_environment={}, native_fresh_pending=True)
+        retirement = {'schema': 2, 'kind': 'fresh-start', 'id': str(uuid4()), 'at': 'retired',
+                      'harness': 'pi', 'home': self.home, 'launch': str(uuid4()), 'from': second, 'to': None,
+                      'reason': 'missing-conversation', 'replacement': replacement}
+        rows.append(retirement)
+        save(rows)
+        pending = {**properties, **replacement, 'native_session_transition': retirement['id']}
+        self.assertEqual([(item['native_id'], item['home']) for item in sessions.generations(self.agent, pending)],
+                         [(first, self.home), (third, self.home), (second, self.home)])
+        bound = str(uuid4())
+        rows.append({**transition(None, bound, replacement_home, 'bound'), 'schema': 2, 'kind': 'bind'})
+        save(rows)
+        bound_properties = {**pending, 'native_session_id': bound}
+        self.assertEqual(len(sessions.generations(self.agent, bound_properties)), 3)
+        # A recorded unknown home stays unknown; no current-home fallback.
+        rows[-2]['home'] = None
+        rows = rows[-2:]
+        save(rows)
+        self.assertIsNone(sessions.generations(self.agent, bound_properties)[0]['home'])
+        # Historical strings are not canonicalized through a link changed later.
+        rows[0]['home'] = self.home
+        save(rows)
+        Path(self.home).symlink_to(self.work / 'moved', target_is_directory=True)
+        self.assertEqual(sessions.generations(self.agent, bound_properties)[0]['home'], self.home)
+        for content in ('{', '[]\n'):
+            with self.subTest(damaged=content):
+                (self.agent / 'sessions.jsonl').write_text(content)
+                with self.assertRaisesRegex(sessions.JournalError, 'sessions.jsonl.*repair'):
+                    sessions.generations(self.agent, bound_properties)
+
     def test_who_may_bind_or_rebind_a_native_session(self):
         """Only the owner may bind or rebind a native session id across the whole tree (stale launch, wrong previous
         id or home, foreign current or earlier generation, legacy provider, symlinked root, move import refused;

@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, loader, manifest as manifests, settings as settings_files
+from . import access as levels, config, loader, manifest as manifests, settings as settings_files
 from .loader import PluginError, entries, entry
 
 CATALOG_KINDS = ("skills", "commands", "workflows")
@@ -134,7 +134,8 @@ def problems(root, reserved=(), wait=None):
     usable = []
     settings_problem = config.load(root).problem
     if settings_problem:
-        found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
+        found_problems.append(f"plugins.json cannot be used, so every plugin is off here until it is repaired: "
+                              f"{settings_problem}")
     waiting_uninstalled = dict(not_installed(root))
     found_problems.extend(not_installed_message(name, legacy) for name, legacy in waiting_uninstalled.items())
     for name, failure in sorted(_failed_conversions(root).items()):
@@ -179,6 +180,8 @@ def problems(root, reserved=(), wait=None):
             found_problems.append(found.problem or f"{found.name} is {found.state}")
         elif found.on and found.state in ("on", "loaded"):
             usable.append(found)
+            if below_minimum(root, found):
+                found_problems.append(below_minimum(root, found))
     claimed = {}
     for found in usable:
         for name in found.manifest.commands:
@@ -205,6 +208,17 @@ def problems(root, reserved=(), wait=None):
     for found in usable:
         if found.name in now and now[found.name].state == "unusable":
             found_problems.append(now[found.name].problem)
+    replacing = {}  # what register(mv) asked for and could not have, and core columns two plugins stand in for
+    for found in usable:
+        loaded = now[found.name].loaded if found.name in now else None
+        if loaded is not None:
+            found_problems.extend(loaded.registrations.problems)
+            for column in loaded.registrations.columns.values():
+                if column.replaces and found.name not in replacing.setdefault(column.replaces, []):
+                    replacing[column.replaces].append(found.name)
+    for key, owners in sorted(replacing.items()):
+        if len(owners) > 1:
+            found_problems.append(f"{' and '.join(owners)} both replace the {key} column, so neither does")
     try:
         from .harness import item_conflicts
         found_problems.extend(item_conflicts(root))
@@ -289,6 +303,8 @@ def listing(root, wait=loader.REFRESH_WAIT):
             # The plugin's real settings wait in its old file: it is off here until that is converted (compaction
             # fails closed), and its defaults are never shown as its settings.
             state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
+        elif problem is None and state in ("on", "loaded", "loading"):
+            problem = below_minimum(root, found)  # on, but it can't work: said where the listing is read
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
@@ -300,6 +316,7 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 "permissions": manifest.permission_texts() if manifest else [],
                 "commands": dict(manifest.commands) if manifest else {},
                 "provides": _provides(found),
+                "access": _access_here(root, found),
                 "settings": None,
                 "shadowed": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed],
                 # A trusted universe copy that takes the place of another source's plugin says so: a cloned
@@ -354,7 +371,22 @@ def _pending_legacy(root):
 # Plugins mv2 knows by name although they live outside it (optional checkout submodules): their pre-plugin
 # settings file, and the harness families they took part in. With these, an old file is never silently ignored
 # while its plugin is not installed (a checkout without the submodule, or without access to it).
-KNOWN = {"compaction": {"legacy": "compaction.json", "families": ("claude",)}}
+def _known():
+    """{name: {"families": (...), "legacy": FILE}} from known.json, shipped as package data: the optional plugins
+    mv2's checkout ships as submodules that core must know of while one is missing here (the harness families it
+    extends, its pre-plugin settings file), so mv2 refresh never puts a template's settings in front of that file
+    and a launch says the plugin isn't installed, in an installed mv2 too. Data, so core code names no plugin."""
+    try:
+        data = json.loads(Path(__file__).with_name("known.json").read_text())
+        listed = data["plugins"] if data.get("schema") == 1 else {}
+        return {name: {"families": tuple(entry["families"]), "legacy": entry["legacy"]}
+                for name, entry in listed.items()
+                if isinstance(entry.get("legacy"), str) and all(isinstance(item, str) for item in entry["families"])}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {}
+
+
+KNOWN = _known()
 
 
 def waiting_settings(root):
@@ -779,6 +811,92 @@ def install(name):
     return {"name": name, "path": str(known[name]), "installed": (known[name] / "plugin.json").is_file()}
 
 
+def _access_here(root, found):
+    """listing()'s access: what the plugin asks for here and what it has."""
+    wanted = found.manifest.access if found.manifest is not None else manifests.Access()
+    settings = config.load(root)
+    level = loader.access_level(root, found)
+    # What that level lets it use of what it asked for, and what it holds back, each with the level it needs:
+    # None while it is off here, where it has no level.
+    allowed, held_back = found.manifest.permissions_at(level) if found.manifest is not None and level else (None, None)
+    return {"request": wanted.request, "minimum": wanted.minimum, "why": wanted.why,
+            "granted": settings.access.get(found.name), "level": level,
+            "allowed": allowed, "held_back": held_back,
+            # What holds it below its request, strongest first: MV2_EFFECTS, the universe's access_ceiling, its grant.
+            "limited_by": [{"by": what, "level": cap} for what, cap in loader.limits(root, found)],
+            # How a person gives it what it asks for, where it has less: the change that would actually do it.
+            "raise": (loader.raise_hint(root, found.name, wanted.request)
+                      if level is not None and levels.rank(level) < levels.rank(wanted.request) else None),
+            "ceiling": levels.lowest(*(level for level in (settings.ceiling, levels.process_ceiling())
+                                       if level is not None)) if (settings.ceiling or levels.process_ceiling())
+            else None}
+
+
+def below_minimum(root, found):
+    """The problem of a plugin that is on here but held below the least access it can work with, or None."""
+    if found is None or not found.on or found.manifest is None:
+        return None
+    level, minimum = loader.access_level(root, found), found.manifest.access.minimum
+    if level is None or levels.rank(level) >= levels.rank(minimum):
+        return None
+    return (f"{found.name} is on but held back below its minimum here: it has {level} access and needs at least "
+            f"{minimum}; {loader.raise_hint(root, found.name, minimum)}")
+
+
+def entry_access(root, name):
+    """listing()'s access for one plugin, without listing the others."""
+    return _access_here(Path(root), entry(Path(root), name))
+
+
+def from_agent():
+    """Whether this process runs for an agent: its launches and their children carry MV2_AGENT_ID or MV2_AGENT_DIR.
+    A guard against mistakes, not against an agent that unsets them."""
+    return bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+
+
+def _grant_for(root, found, grant):
+    """The grant to record when `found` is turned on here: `grant` checked against what the plugin asks for, or,
+    from an agent, at most its minimum. None records nothing (it has what it requests)."""
+    if found.manifest is None:
+        return grant
+    wanted = found.manifest.access
+    if grant is not None:
+        levels.check(grant, "grant")
+        if levels.rank(grant) > levels.rank(wanted.request):
+            raise PluginError(f"{found.name} asks for at most {wanted.request} access")
+        if levels.rank(grant) < levels.rank(wanted.minimum):
+            raise PluginError(f"{found.name} needs at least {wanted.minimum} access"
+                              + (f": {wanted.why}" if wanted.why else ""))
+    if from_agent():
+        if grant is not None and levels.rank(grant) > levels.rank(wanted.minimum):
+            raise PluginError(f"An agent can turn {found.name} on with at most {wanted.minimum} access. "
+                              f"For more, a person runs: mv2 plugins grant {found.name} {grant}")
+        if grant is None and wanted.minimum != wanted.request:
+            return wanted.minimum
+    return grant
+
+
+def set_grant(root, name, level):
+    """Record the access level `name` has here: between its minimum and its request. An agent may lower a
+    grant, never raise it. Returns {"name", "granted", "level"} (level: in effect now, None while it is off)."""
+    root = Path(root)
+    found = entry(root, name)
+    levels.check(level, "grant")
+    wanted = found.manifest.access if found.manifest is not None else manifests.Access()
+    if levels.rank(level) > levels.rank(wanted.request):
+        raise PluginError(f"{name} asks for at most {wanted.request} access")
+    if levels.rank(level) < levels.rank(wanted.minimum):
+        raise PluginError(f"{name} needs at least {wanted.minimum} access" + (f": {wanted.why}" if wanted.why else ""))
+    try:
+        # From an agent, compared with the grant recorded now and written in one locked step: a person who lowers
+        # it meanwhile is never overwritten.
+        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent() else None)
+    except config.WouldRaise as error:
+        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                          f"mv2 plugins grant {name} {level}") from None
+    return {"name": name, "granted": level, "level": loader.access_level(root, entry(root, name))}
+
+
 def _provides(found):
     """What a plugin adds: from its manifest, and once it is loaded in this process, from what it registered."""
     manifest = found.manifest
@@ -787,9 +905,12 @@ def _provides(found):
     known = {"commands": sorted(manifest.commands), "statusline": [item.name for item in manifest.statusline],
              "events": list(manifest.events)}
     if found.loaded is None:
-        return {**known, "columns": None, "actions": None, "panels": None, "screens": None, "services": None}
+        return {**known, "columns": None, "replaces": None, "actions": None, "panels": None, "screens": None,
+                "services": None}
     registered = found.loaded.registrations
-    return {**known, "columns": sorted(registered.columns), "actions": sorted(registered.actions),
+    return {**known, "columns": sorted(registered.columns),
+            "replaces": sorted({column.replaces for column in registered.columns.values() if column.replaces}),
+            "actions": sorted(registered.actions),
             "panels": sorted({*registered.panels, *registered.data_panels}),
             "screens": sorted(registered.screens),
             "services": len(registered.services)}
@@ -839,11 +960,14 @@ def universe_copy(root, name):
     return None
 
 
-def set_enabled(root, name, on):
-    """Turn a plugin on or off in this universe. Turning it on installs its default settings when there are none.
+def set_enabled(root, name, on, grant=None):
+    """Turn a plugin on or off in this universe. Turning it on installs its default settings when there are none,
+    and records `grant` (an access level between its minimum and its request) when given.
 
-    Returns {"name", "on", "installed": [paths]}. A plugin must be found to be
-    turned on, and a universe plugin must be trusted first.
+    Returns {"name", "on", "installed": [paths], "granted"}. A plugin must be found to be
+    turned on, and a universe plugin must be trusted first. From an agent, it is
+    turned on with at most its minimum access (recorded when that is below its
+    request). Turning a plugin off leaves its recorded grant alone.
     """
     root = Path(root)
     installed = []
@@ -852,12 +976,21 @@ def set_enabled(root, name, on):
         found = entry(root, name)
         if found.state in ("invalid", "untrusted", "changed", "incompatible"):
             raise PluginError(found.problem)
+        grant = _grant_for(root, found, grant)
         if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
             installed.append(str(settings_files.path(root, name)))
-    config.set_enabled(root, name, bool(on))
+    elif grant is not None:
+        raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
+    try:
+        config.set_enabled(root, name, bool(on), grant=grant if on else None,
+                           no_raise_from=found.manifest.access.request if on and from_agent() and found.manifest
+                           else None)
+    except config.WouldRaise as error:
+        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                          f"mv2 plugins grant {name} {grant}") from None
     if on and not was_on:
         anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
-    return {"name": name, "on": bool(on), "installed": installed}
+    return {"name": name, "on": bool(on), "installed": installed, "granted": grant if on else None}
 
 
 def anchor_events(root, name, again=False):

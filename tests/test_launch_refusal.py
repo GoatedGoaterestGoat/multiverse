@@ -14,7 +14,11 @@ from multiverse.universe import agents
 from multiverse.universe.mailbox import append_message, message_record, update_message
 from multiverse.tools import inspect, list_agents, doctor
 from multiverse.harnesses.codex import CodexAdapter
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from test_multiverse import BaseTest
+
+
+CHECKED_CLI = version_text(CHECKED_VERSION)
 
 
 class Clock:
@@ -147,15 +151,15 @@ class LaunchRefusalTest(BaseTest):
             self.assertFalse(self.directory.exists())
 
     def test_screen_observer_runs_only_where_it_can_be_right(self):
-        """The startup-screen observer runs only for Codex 0.163.0 plain launches and stops once a bridge binding is
-        validated or the relay is lost; fragile because it is pinned to one version, and a Codex change silently
+        """The startup-screen observer runs only for the checked Codex release on plain launches and stops once a
+        bridge binding is validated or the relay is lost; fragile because it is pinned to one version, and a Codex change silently
         disables or misfires refusal detection (995f8d9)."""
         for readiness, relay, observe in (('binding', 'ready', False), ('legacy-binding', 'ready', False),
                                            ('binding', 'starting', True), ('process', 'ready', True)):
             with self.subTest(readiness=readiness, relay=relay):
                 write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
                       'attachment': {'readiness': readiness}, 'native_relay': {'state': relay},
-                      'native_versions': {'cli': '0.163.0'}})
+                      'native_versions': {'cli': CHECKED_CLI}})
                 describe = Mock(return_value=self.evidence)
                 monitor = runner.RefusalMonitor(self.directory, self.launch, self.root,
                                                 SimpleNamespace(launch_refusal=describe), 'fixture')
@@ -166,8 +170,8 @@ class LaunchRefusalTest(BaseTest):
                 self.assertEqual(describe.called, observe)
                 self.assertEqual(owned.called, observe)
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
-        for version, relay in (('0.162.1', 'ready'), ('0.164.0', 'ready'), (None, 'ready'),
-                               ([], 'ready'), ('0.163.0', 'lost')):
+        for version, relay in (('0.162.1', 'ready'), ('0.165.0', 'ready'), (None, 'ready'),
+                               ([], 'ready'), (CHECKED_CLI, 'lost'), ('0.163.0', 'lost')):
             with self.subTest(version=version, relay=relay):
                 write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
                       'attachment': {'readiness': 'process'}, 'native_relay': {'state': relay},
@@ -192,7 +196,7 @@ class LaunchRefusalTest(BaseTest):
         clock = Clock()
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
               'startup_checked': True, 'attachment': {'readiness': 'process'},
-              'native_versions': {'cli': '0.163.0'}})
+              'native_versions': {'cli': CHECKED_CLI}})
         agents.update_runtime(self.directory, self.launch, native_startup_observation={'state': 'pending'})
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
@@ -257,7 +261,7 @@ class LaunchRefusalTest(BaseTest):
         refused = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
         with self.subTest('the plain observer stops after the startup window'):
             write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
-                  'attachment': {'readiness': 'process'}, 'native_versions': {'cli': '0.163.0'}})
+                  'attachment': {'readiness': 'process'}, 'native_versions': {'cli': CHECKED_CLI}})
             agents.update_runtime(self.directory, self.launch, native_startup_observation={'state': 'pending'})
             monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
             monitor.stopped = Clock()
@@ -275,7 +279,7 @@ class LaunchRefusalTest(BaseTest):
             attachment = {'readiness': 'process'}
             agents.update_runtime(self.directory, self.launch, state='running', pid=123,
                                   startup_checked=True, startup_delivery=None, attachment=attachment,
-                                  native_versions={'cli': '0.163.0'},
+                                  native_versions={'cli': CHECKED_CLI},
                                   native_startup_observation={'state': 'pending'})
             write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': attachment})
             monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
@@ -306,7 +310,7 @@ class LaunchRefusalTest(BaseTest):
             attachment = {'readiness': 'process'}
             agents.update_runtime(self.directory, self.launch, state='running', pid=123,
                                   startup_checked=True, startup_delivery=None, attachment=attachment,
-                                  native_versions={'cli': '0.163.0'},
+                                  native_versions={'cli': CHECKED_CLI},
                                   native_startup_observation={'state': 'pending'})
             write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': attachment})
             backend = Mock()
@@ -392,7 +396,7 @@ class LaunchRefusalTest(BaseTest):
         with self.subTest('a frame completed after the observation deadline cannot refuse startup'):
             elapsed = [0.]
             agents.update_runtime(self.directory, self.launch, state='running',
-                                  attachment={'readiness': 'process'}, native_versions={'cli': '0.163.0'},
+                                  attachment={'readiness': 'process'}, native_versions={'cli': CHECKED_CLI},
                                   native_startup_observation={'state': 'pending'})
             monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
             backend = Mock()

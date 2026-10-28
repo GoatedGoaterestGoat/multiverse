@@ -2,7 +2,7 @@
 from dataclasses import asdict
 
 from .. import harnesses, universe
-from ..runtime import native
+from ..runtime import effects, native
 from ..harnesses.types import SessionHandle
 
 
@@ -32,6 +32,7 @@ def cli_run(root=None, *, agent=None, harness=None, probe=False, json=False):
 
 
 def run(root=None, *, agent=None, harness=None, probe=False, json=False):  # `json`: presentation only
+    effects.require('capabilities', agent or harness)
     root = universe.resolve(root)
     if agent:
         return native.capabilities(root, agent, probe)
@@ -39,7 +40,7 @@ def run(root=None, *, agent=None, harness=None, probe=False, json=False):  # `js
     session = SessionHandle('', harness, str(universe.workspace(root)))
     missing = missing_executable(adapter) if probe else None
     executor = native.NativeExecutor(session.workspace) if probe and not missing else None
-    found = {name: asdict(value) for name, value in adapter.capabilities(session, executor).items()}
+    found = {name: asdict(value) for name, value in effects.call(adapter, 'capabilities', session, executor).items()}
     if missing:
         # As spawn refuses: nothing this harness does can run until its executable is found.
         found = {name: {**value, 'state': 'unavailable', 'reason': f'Harness executable not found: {missing}',

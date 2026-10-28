@@ -58,8 +58,9 @@ when every transcript that could hold it was read whole without either, else unk
 For an older record that kept only the body, a body match stays unknown. It never confirms
 falsely: each stored copy of a text counts once (by its row uuid, across copies of the
 transcript, and once however many paths reach a file), and among the session's acceptances of
-the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt
-receipt the copy stored just before it, a mid-turn receipt none. The remaining copies go to the
+the same text (the cohort core passes), an exact receipt first takes its own copy: a prompt or
+peer-prompt receipt the copy stored just before it (a peer row that lost its `msg_id` is just text
+then), a mid-turn receipt none. The remaining copies go to the
 others oldest first. A receipt that could match more than one copy, a copy without a row uuid, or
 a copy left to another identical message makes the answer unknown. So does an identical message the
 current live launch accepted that has no receipt yet, since it may still write one for a copy, and
@@ -99,7 +100,7 @@ skipped; with no absolute workspace, every unreadable folder blocks. A dangling
 link in such a folder's place, or a folder gone before it was searched, counts as
 unreadable, while a link to a real folder is searched through it. The handle's
 workspace is the launch's own, so a recheck of a failed wake reads that launch's
-folder even after the agent moved on. GOAT applies the same rule to its search. The
+folder even after the agent moved on. The
 same scan answers core's `session_storage_evidence(session, home)` for each
 candidate home of an agent with no recorded storage: present, absent only when
 every folder that could hold the transcript was read, or unknown. An absent answer
@@ -447,8 +448,7 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `wake`, `stop`, `send_steer`, `send_follow_up`,
-`ask`, `get_usage`, `get_delivery`, and `compaction` (whether this session's
-`/compact` uses tree compaction; see [compaction](compaction.md)). The `session_name` capability describes
+`ask`, `get_usage` and `get_delivery`, plus any a plugin adds for its own feature. The `session_name` capability describes
 naming during spawn/resume, not a separate rename operation. Claude and Pi pass
 `--name` in both modes. Codex bridge calls `thread/name/set` after validating and
 binding the launch reply; plain Codex has no CLI naming flag. Legacy manifests
@@ -1314,16 +1314,25 @@ framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`
 the mode, which the mod honors, and the message ID for its receipt. The mod acts
 only on tagged text and shows the model the text alone:
 
-- A steer arriving mid-turn loses its tags in `session.receive`, so the queued
-  message shows clean in the terminal. It merges at the next tool result as a
-  queued command, and `session.append` stores that row without Claude's peer
-  wrapper, so the model, the transcript and later resumes read the text alone.
+- A steer arriving mid-turn keeps only its ID tag in `session.receive` (Claude's
+  queue line shows it until the row is stored). It merges at the next tool result
+  as a queued command, and `session.append` stores that row without the tag or
+  Claude's peer wrapper, so the model, the transcript and later resumes read the
+  text alone.
 - A steer arriving while idle, and every follow-up, is taken in `session.receive`
   and submitted with `$.prompt.submit({ text, asUser: true })`: the model reads it
   bare, as the person's own words, in a turn of its own once the current turn has
   ended. A steer queued mid-turn that no tool result took would start its own turn
   as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
   The terminal shows these as ordinary prompts; the transcript names the plugin.
+- After an interruption (a main-loop turn that ended aborted, such as Esc),
+  Claude refuses a plugin's prompt ("the session was stopped and nobody has sent
+  input since") until the person types, but not a peer prompt. Until the person's
+  own input at the terminal, the mod leaves each message in Claude's queue
+  without its tags: it runs as Claude's own peer prompt, and `session.append`
+  stores that row without the wrapper. A submit Claude refuses (after a reload
+  forgot the interruption) sends later messages this way too. Other input may
+  not lift Claude's refusal, so only the terminal's ends this.
 
 The tag also carries the message's send time (`sent=`, the inbox record's). If
 the message reaches the model more than ten minutes after it was sent, the mod
@@ -1334,10 +1343,40 @@ long turn says so. An age core already put in the frame for a wake or a retry is
 replaced, never doubled. Delivery evidence compares framed texts without that
 age, since the saved text and the stored copy can differ there.
 
-When a message's row enters the conversation, the mod writes
-`claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
-reads it: `mv2 deliver --check` then records the message as accepted and
-transcript-confirmed. A message without a receipt stays `unknown`.
+Core gives each delivery attempt its own message ID (the adapter sets
+`delivery_attempt_ids`), so the tag's `id=`, the frame's `msg_id` and a receipt
+all name one attempt, and a retry is a new one. When the message's row enters the
+conversation, the mod writes `claude-receipts/<id>.json` in the agent's
+directory. When Claude refuses its submit, or doesn't store the row within five
+seconds while idle (idle as the mod has seen it: after a load, a hot reload
+included, it knows of no turn until one starts or ends, so a session just loaded,
+perhaps mid-turn, never times a message out) or by the end of a turn that
+started after the mod took it,
+the mod writes `claude-receipts/<id>.not-delivered.json` (`delivered: false`).
+Only Claude's own refusal is `definite: true`. The timeout and the turn-end check
+write `definite: false`, because Claude holds a taken message while a local
+command such as `/compact`, or a dialog, holds its turn, and stores it afterwards;
+a retry then would run it twice. Claude refusing the held submit later replaces
+an unsure receipt with a definite one, never the other way round: the mod writes
+one attempt's refusals one at a time, in that order, so an unsure write still
+running when Claude refuses can't land after it. A row stored
+later still writes the delivery receipt, which wins wherever both exist,
+whichever write finished last. Nothing is ever resubmitted.
+`get_delivery` reads it: delivered is accepted and transcript-confirmed, not
+delivered is a definite failure that `--retry` may send again, and no file, or
+one that can't be read or isn't definite, stays `unknown`. An earlier attempt's
+receipt names its own ID, so it never decides a retry. Every message goes to
+Claude tagged with its ID (and send time), as a queued steer and as a submitted
+prompt alike, and the mod strips the tag where Claude stores the row: a row is
+credited only by the tag in its own text, never by its text alone, since
+identical texts can't be told apart once stored and the mod forgets what is
+waiting when it reloads. `get_delivery` counts a receipt only when it names the
+requested ID in the shape the mod writes. It reads receipts (and `ask` answers) without waiting on
+the file and with a size bound: core holds the agent's launch and delivery locks
+while it reads, so a FIFO at a receipt's name, or anything too large to be one,
+reads as unknown at once. Claude also stamps a peer row (a
+mid-turn steer's queued command, or the peer prompt one runs as after an
+interruption) with the attempt's ID, so delivery evidence matches it exactly.
 
 `mv2 ask` sends the question tagged `<<MV2 ask id=UUID>>` over the same inbox.
 The mod consumes it in `session.receive`, so nothing enters the conversation,
@@ -1436,27 +1475,15 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
-With the bridge, the `compaction` plugin ([compaction](compaction.md); the
-`plugins/compaction` submodule), where it is installed and on, adds tree
-compaction to Claude launches through its launch contribution:
-`MV2_COMPACTION=1`, a `PreCompact` command hook, and its own Claude plugin
-directory. That plugin answers the session's `/compact` with mv2's compacted
-turns from the compaction plugin's
-`install` helper action (`python -m multiverse.plugins run compaction
-install`), showing progress and every error in the status line, as notices and
-as toasts, and skips with the reason when it cannot. The `PreCompact` hook
-refuses Claude's own compaction should it not answer, so a session never falls
-back to it. Its `Stop` hook starts the background tree builder with the time the
-turn ended. The plugin's Claude source (`sources/claude/`) reads this harness's
-transcripts; the adapter itself has no compaction code. A Claude agent launched
-before compaction became a plugin still calls `python -m multiverse.compaction
-guard` from its settings: that module stays for a release and lets Claude
-compact (restart the agent for tree compaction), and `mv2 doctor` names the
-running agents that still use it. Compaction settings that cannot be used (invalid, or
-builder settings Claude rejects) never stop a launch: that launch runs without
-compaction, without the `PreCompact` guard, and records why as its
-`native_mode` fallback, which the inspector shows. The `compaction` capability then reports the error, and
-`mv2 doctor` names the file; `mv2 compaction` refuses until it is fixed.
+With the bridge, plugins extend Claude launches as they extend any harness
+([plugins](plugins.md)): a launch contribution adds environment variables,
+settings such as hooks, and its own Claude plugin directory, and a plugin reads
+the session through the transcript protocol
+([transcript protocols](transcript-protocols.md)). The adapter has no plugin's
+code. What a plugin can't do in a launch, such as settings it can't use, is
+recorded as that plugin's problem or mode in the launch's plugins record, which
+`mv2 inspect` and the inspector's Plugins line show; the harness's own
+`native_mode` never carries it.
 
 Claude usage is measured from the session's own transcript under Claude's
 `projects` directory, plus any subagent transcripts: each response's recorded
@@ -1465,7 +1492,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.310; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.312; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

@@ -48,13 +48,15 @@ def plugin_module(directory, name):
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
-# The guard: no test writes under the real ~/.multiverse, or under the .multiverse of the mv2 checkout it runs
-# from. An audit hook (in native_safety's style) refuses
+# The guard: no test writes under the real ~/.multiverse, ~/.claude or ~/.codex, to ~/.claude.json, or under the
+# .multiverse of the mv2 checkout it runs from. An audit hook (in native_safety's style) refuses
 # writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
 # changed, and records each one, so the test fails (check(), which PluginTestCase calls when it ends) or, for a
 # thread that outlived its test, the process exits 1 at its end.
 
 _protected = set()  # absolute directories no test may change
+_protected_files = set()  # absolute files no test may change, nor the copies named after them (FILE.tmp…)
+_harness = set()  # those of them that are Claude's or Codex's home, not mv2's: no bytecode exemption there
 _exempt = set()  # directories inside them that are not mv2's state: the plugin under test (PluginTestCase.plugin)
 _violations = []  # {"path", "event", "test", "thread", "unreported"}
 _current = None  # the test running now
@@ -65,6 +67,12 @@ _open_context = threading.local()  # the dir_fd of the os.open call running in t
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
+# The user's real Claude Code and Codex homes, captured the same way: tests run the harnesses only in homes of their
+# own, so a write here would change the person's real Claude or Codex state.
+_HARNESS_HOMES = [os.path.join(os.path.expanduser("~"), name) for name in (".claude", ".codex")]
+# Claude Code's account and per-folder trust state, a file beside ~/.claude, which it writes by way of temporary and
+# backup copies beside it.
+_HARNESS_FILES = [os.path.join(os.path.expanduser("~"), ".claude.json")]
 # The universe of the mv2 checkout this module runs from (src/multiverse/plugins/testing.py), when it runs from
 # one: there, it is the universe agents run in, which a test finding a universe from its directory would change.
 _SOURCE = Path(__file__).resolve().parents[3]
@@ -73,8 +81,9 @@ _CHECKOUT_STATE = str(_SOURCE / ".multiverse") if (_SOURCE / "src" / "multiverse
 
 def install(home=None, strict=True):
     """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
-    ~/.multiverse as it was when this module was imported and the .multiverse of the mv2 checkout this module runs
-    from. Returns the directory now protected (the real ~/.multiverse by default).
+    ~/.multiverse, ~/.claude, ~/.claude.json (and its ~/.claude.json.* copies) and ~/.codex as they were when this
+    module was imported, and the .multiverse of the mv2 checkout this module runs from. Returns the directory now
+    protected (the real ~/.multiverse by default).
 
     A refused write counts against the test it came from: the test running then, or for a thread the test that
     started it. Strict (the default): writes that no check() reported (no test named itself, or a thread outlived
@@ -82,10 +91,16 @@ def install(home=None, strict=True):
     makes a process that another caller installed strict lenient again."""
     global _installed, _strict
     _strict = _strict or strict
-    homes = [home] if home is not None else [_REAL_HOME] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE else [])
+    homes = [home] if home is not None else [_REAL_HOME, *_HARNESS_HOMES] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE
+                                                                            else [])
     for each in homes:
         given = os.path.normpath(os.path.abspath(each))
         _protected.update({given, os.path.realpath(given)})  # as written and as resolved (/tmp, /var are links)
+        if home is None and each in _HARNESS_HOMES:
+            _harness.update({given, os.path.realpath(given)})
+    for each in _HARNESS_FILES if home is None else []:
+        given = os.path.normpath(os.path.abspath(each))
+        _protected_files.update({given, os.path.realpath(given)})
     directory = os.path.realpath(os.path.normpath(os.path.abspath(homes[0])))
     if not _installed:
         _installed = True
@@ -119,8 +134,9 @@ def check(test=None):
     for item in found:
         item["unreported"] = False
     if found:
-        raise AssertionError("a test wrote mv2's real state, under ~/.multiverse or this checkout's .multiverse "
-                             "(refused): " + "; ".join(
+        raise AssertionError("a test wrote mv2's real state, or the user's Claude or Codex home: under ~/.multiverse, "
+                             "~/.claude, ~/.claude.json, ~/.codex or this checkout's .multiverse (refused): "
+                             + "; ".join(
             f"{item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})" for item in found))
 
 
@@ -157,11 +173,13 @@ def _hook(event, args):
         for candidate in dict.fromkeys((where, os.path.realpath(where))):
             if _guarded(candidate):
                 _record(event, candidate)
-                raise PermissionError(f"a test may not change mv2's real state: {candidate}")
+                raise PermissionError(f"a test may not change mv2's real state or the user's Claude or Codex home: "
+                                      f"{candidate}")
 
 
 def _guarded(where):
-    return any(where == top or where.startswith(top + os.sep) for top in _protected) and not _allowed(where)
+    return (any(where == top or where.startswith(top + os.sep) for top in _protected)
+            or any(where == name or where.startswith(name + ".") for name in _protected_files)) and not _allowed(where)
 
 
 def _open_with_context(real):
@@ -180,12 +198,13 @@ def _open_with_context(real):
 
 def _allowed(where):
     """Not mv2's state although inside the home: the plugin under test's own directory, and Python's bytecode in
-    a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs."""
+    a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs;
+    never in Claude's or Codex's home, whose plugins folders are theirs."""
     if any(where == top or where.startswith(top + os.sep) for top in _exempt):
         return True
     parts = where.split(os.sep)
     return ("__pycache__" in parts or where.endswith((".pyc", ".pyo"))) and any(
-        where.startswith(os.path.join(top, "plugins") + os.sep) for top in _protected)
+        where.startswith(os.path.join(top, "plugins") + os.sep) for top in _protected - _harness)
 
 
 def _writes(mode, flags):
@@ -249,6 +268,130 @@ def _at_exit():
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
            "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
+
+
+class ClaudeRows:
+    """Claude transcript rows for a fake transcript (1.13): each joined to the one before by parentUuid, with rising
+    timestamps, in the shapes Claude Code stores. `prompt` and `command` start a turn; the rest belong to the
+    latest one. `rewind(row)` makes the next row a second child of an earlier one, as a rewind does: without a
+    tip, the history follows the newest leaf."""
+
+    def __init__(self):
+        from datetime import datetime, timezone
+        self.rows, self._parent, self._prompt = [], None, None
+        self._clock = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def add(self, kind, **fields):
+        """A row of `kind` with these fields; uuid, parentUuid, timestamp and the turn's promptId are filled in."""
+        from datetime import timedelta
+        from uuid import uuid4
+        self._clock += timedelta(seconds=1)
+        row = {"type": kind, "uuid": str(uuid4()), "parentUuid": self._parent, "timestamp": self._clock.isoformat(),
+               "sessionId": "fake", **({"promptId": self._prompt} if self._prompt and kind == "user" else {}),
+               **fields}
+        self.rows.append(row)
+        self._parent = row["uuid"]
+        return row
+
+    def prompt(self, text, source="human"):
+        from uuid import uuid4
+        self._prompt = str(uuid4())
+        return self.add("user", message={"role": "user", "content": text}, origin={"kind": source})
+
+    def response(self, text=None, *, tool=None, stop="end_turn"):
+        """The model's reply: `text`, or a tool call (`tool` = (call_id, name, input)), with its stop reason."""
+        from uuid import uuid4
+        block = ({"type": "tool_use", "id": tool[0], "name": tool[1], "input": tool[2]} if tool
+                 else {"type": "text", "text": text or ""})
+        return self.add("assistant", message={"id": "msg_" + uuid4().hex[:12], "role": "assistant", "model": "claude-test",
+                                              "content": [block], "stop_reason": "tool_use" if tool else stop,
+                                              "usage": {"input_tokens": 10, "output_tokens": 5}})
+
+    def tool_result(self, call_id, text):
+        return self.add("user", message={"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": call_id, "content": text}]}, toolUseResult={"stdout": text})
+
+    def turn_end(self, milliseconds=1000):
+        return self.add("system", subtype="turn_duration", durationMs=milliseconds)
+
+    def interrupted(self, tool=False):
+        """An Esc: Claude usually writes no turn_duration then, and this row ends the turn."""
+        text = "[Request interrupted by user" + (" for tool use]" if tool else "]")
+        return self.add("user", message={"role": "user", "content": [{"type": "text", "text": text}]})
+
+    def steer(self, text, source="peer"):
+        """A message the model sees before the running turn ends (a mid-turn steer)."""
+        return self.add("attachment", attachment={"type": "queued_command", "commandMode": "prompt", "prompt": text,
+                                                  "origin": {"kind": source}})
+
+    def command(self, name, args="", output=""):
+        """A typed slash command (name with its /, as "/model"), and its output."""
+        from uuid import uuid4
+        self._prompt = str(uuid4())
+        row = self.add("user", message={"role": "user", "content": f"{name} {args}".strip()})
+        self.add("user", message={"role": "user", "content": f"<local-command-stdout>{output}</local-command-stdout>"})
+        return row
+
+    def rewind(self, row):
+        """The next row hangs off `row`, an earlier one: a second branch."""
+        self._parent = row["uuid"]
+
+
+class FakeTranscript:
+    """A Claude transcript an agent reads, in a PluginTestCase (1.13): stored where the agent's records say its
+    Claude storage is, so a test reads it through the real API, core and Claude adapter."""
+
+    def __init__(self, case, agent_dir, rows):
+        from uuid import uuid4
+        self._case, self.agent_dir = case, Path(agent_dir)
+        self.native_id = str(uuid4())
+        self._bind(None, self.native_id, None)
+        self.rewrite(rows)
+
+    @property
+    def path(self):
+        from ..harnesses.claude.transcripts import project_key
+        from ..store import read
+        workspace = read(self.agent_dir / "properties.json")["workspace"]
+        return self._case.claude_config / "projects" / project_key(workspace) / f"{self.native_id}.jsonl"
+
+    def _bind(self, previous, native_id, reason):
+        from ..store import read, write
+        from ..universe import agents
+        home = os.path.realpath(self._case.claude_config)
+        if previous is None:
+            data = read(self.agent_dir / "properties.json")
+            data.update(native_session_id=native_id, native_session_home=home)
+            write(self.agent_dir / "properties.json", data)
+            return
+        launch = read(self.agent_dir / "runtime.json")["launch_id"]
+        agents.rebind_session(self.agent_dir.parent.parent.parent, self.agent_dir.name, previous, native_id, reason,
+                              launch, home=home)
+
+    def append(self, *rows):
+        """Rows Claude writes next."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as stream:
+            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+
+    def rewrite(self, rows):
+        """The same file, its bytes changed (as Claude does when it removes a row): same inode, new content."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w") as stream:
+            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+
+    def clear(self, rows=()):
+        """A /clear: the agent moves to a new session, the old one stays on disk and in its lineage."""
+        from uuid import uuid4
+        previous, self.native_id = self.native_id, str(uuid4())
+        self._bind(previous, self.native_id, "clear")
+        self.rewrite(rows)
+
+    def unreadable(self):
+        """The folder that holds the session can't be read: a read must say it can't tell, never 'empty'."""
+        folder = self.path.parent
+        folder.chmod(0)
+        self._case.addCleanup(folder.chmod, 0o755)
 
 
 class PluginTestCase(unittest.TestCase):
@@ -363,6 +506,12 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def transcript(self, agent, rows=()):
+        """A Claude transcript for `agent` (its directory, from agent(), or an api.Agent) that the API reads (1.13):
+        a FakeTranscript, with append, rewrite, clear and unreadable. Build rows with ClaudeRows."""
+        directory = agent.directory if hasattr(agent, "directory") and not isinstance(agent, Path) else agent
+        return FakeTranscript(self, directory, list(rows))
 
     def claude_transcript(self, native_id, records, project="project"):
         """Write a Claude session transcript (JSON lines) where Claude keeps it, under CLAUDE_CONFIG_DIR."""

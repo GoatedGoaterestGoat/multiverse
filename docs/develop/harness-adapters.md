@@ -15,16 +15,31 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 
 `HarnessAdapter` in `harnesses/types.py` is the contract. An adapter has four attributes: `name`, `session_mode`, `bootstrap` (extra text appended to the universe bootstrap) and `default_model`. Its methods are:
 
-| Method | Returns | Must |
-| --- | --- | --- |
-| `spawn(context)` | `CommandSpec` | Build the launch for a new session from `context.values` and `context.model`. |
-| `resume(session, context)` | `CommandSpec` | Reopen exactly `session`. Raise `ValueError` if the saved native ID or session file is missing or wrong, and never fall back to the latest session. When `context.resume_prompt` is set, pass it as the first interactive prompt (wake). |
-| `stop(session, executor)` | `NativeResult` | Cancel work running outside the terminal, such as on a shared server. Core then ends the process and the pane. Return `ok` when there is nothing to cancel. |
-| `capabilities(session, executor=None)` | `dict[str, Capability]` | Give one entry per name in `CAPABILITIES`, with a reason when not `supported`. Stay cheap without an executor. With one (`mv2 capabilities --probe`), you may ask the native side. |
-| `send(session, message, executor)` | `NativeResult` | Deliver `message.framed` to the exact session, at `message.delivery` (`steer` or `follow-up`). |
-| `get_delivery(session, message_id, executor)` | `NativeResult` | Look up the receipt for one message, without sending anything. |
-| `ask(session, question, executor)` | `NativeResult` | Answer a side question without adding it to the conversation, or return `unavailable`. |
-| `get_usage(session, executor=None)` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
+| Method | Effect | Returns | Must |
+| --- | --- | --- | --- |
+| `spawn(context)` | `act` | `CommandSpec` | Build the launch for a new session from `context.values` and `context.model`. |
+| `resume(session, context)` | `act` | `CommandSpec` | Reopen exactly `session`. Raise `ValueError` if the saved native ID or session file is missing or wrong, and never fall back to the latest session. When `context.resume_prompt` is set, pass it as the first interactive prompt (wake). |
+| `stop(session, executor)` | `act` | `NativeResult` | Cancel work running outside the terminal, such as on a shared server. Core then ends the process and the pane. Return `ok` when there is nothing to cancel. |
+| `capabilities(session, executor=None)` | `observe` | `dict[str, Capability]` | Give one entry per name in `CAPABILITIES`, with a reason when not `supported`. Stay cheap without an executor. With one (`mv2 capabilities --probe`), you may ask the native side. |
+| `send(session, message, executor)` | `act` | `NativeResult` | Deliver `message.framed` to the exact session, at `message.delivery` (`steer` or `follow-up`). |
+| `get_delivery(session, message_id, executor)` | `observe` | `NativeResult` | Look up the receipt for one message, without sending anything. |
+| `ask(session, question, executor)` | `spend` | `NativeResult` | Answer a side question without adding it to the conversation, or return `unavailable`. |
+| `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
+
+`EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+Core checks the current plugin access limit before calling the adapter, and
+before a launch or send writes records. Optional identity, storage, readiness,
+receipt and usage evidence methods are `observe`; launching a relay and
+continuing a native queue are `act`.
+
+An `observe` call may reconcile core's records with verified native evidence,
+such as recording a detected `/clear` in `sessions.jsonl` or a delivery receipt.
+It does not start or stop a process, switch a conversation, adopt the caller's
+storage, submit a message or mark an inbox read. `deliver --check` is observe;
+retrying or dismissing deliveries and consuming an inbox require act. A policy
+refusal raises the API's `AccessDenied`, rather than becoming a native delivery
+failure. These checks guard plugin API and dispatch mistakes; they are not a
+sandbox for Python code.
 
 Core also looks for these optional methods and attributes:
 
@@ -150,9 +165,29 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 
 A message cancelled by `mv2 kill` becomes `cancelled`. `mv2 deliver NAME --check` calls `get_delivery` for `pending`, `submitting` and `unknown` messages, and for messages any launch accepted without transcript confirmation. From `get_delivery`, return `native_queued` with `value={'transcript_confirmed': True}` when the conversation holds the message. Return `unknown` when there is no evidence.
 
+An adapter may report a retryable failure after acceptance with `error` and
+`value={'definite_failure': True, 'transcript_confirmed': False}`. Core records
+it as `failed` and keeps the check in `last_receipt`, without adding a submission
+attempt. A check error without that exact flag leaves the acceptance unchanged.
+An explicit retry rechecks the failed attempt before sending or waking; a late
+confirmation prevents another submission, and unreadable evidence blocks it.
+A stopped attempt-scoped recipient resumes with no interactive prompt; the durable startup queue submits the retry through `send` after its bridge is ready. This path disables launch fallback and requires a bridge. Nothing retries automatically. Claude also uses this failure result when its
+mod's row-storage deadline expires: this is a deliberate policy exception to
+proof of non-delivery, so a manual retry may duplicate a late stored copy.
+
+Adapters that set `delivery_attempt_ids = True` receive a fresh private UUID in
+`Message.id` for every actual submission. Core persists it as `native_message_id`
+on the attempt and its `delivery_context` before calling `send`, and passes the
+same UUID to `get_delivery`. The logical inbox message ID never changes. Old
+records without this field keep their original message ID. Each attempt keeps
+its submission context and checked `delivery_receipt`; a late confirmation of an older attempt cannot
+change the current attempt's state. Transcript fallback for these IDs accepts
+only exact-ID or receipt confirmation, never matching text from another attempt.
+Legacy text-allocation cohorts include every scoped acceptance under its native ID, including earlier retries, so their receipts reserve their own rows. Missing attempt context leaves same-body text proof unknown. The legacy receipt migration skips these newer records.
+
 | Harness | Receipt |
 | --- | --- |
-| Claude | The mod writes `claude-receipts/MESSAGE_ID.json` in the agent directory when the message enters the conversation |
+| Claude | The mod writes `claude-receipts/ATTEMPT_ID.json` for delivery and `ATTEMPT_ID.not-delivered.json` for failure. A valid delivery wins when both exist; older records use the message ID. |
 | Codex | The adapter searches the thread's queue (100 entries) and recent turns (20) |
 | Pi | The extension answers from its transcript metadata and in-process records |
 
@@ -186,6 +221,21 @@ transcripts must not become a negative answer; missing launch or process facts
 prevent core from calling the hook. A proved loss is retained
 as a final cancelled record with `final_reason: lost`, reported once by `--check`,
 and never retried automatically.
+
+The Claude adapter reads transcripts in one place, `harnesses/claude/transcripts.py`.
+It finds a session's copies under the recorded storage, with the folder rule,
+opens each through `open_regular`, and raises `Unreadable` when part of the
+storage that could hold the session can't be read. Usage reads the newest copy
+incrementally (`Transcript`). The evidence readers use `raw_rows`: every copy,
+every non-empty line parsed or marked `DAMAGED`, fields as stored and never
+deduplicated, because they look for copies of one row that disagree. A new
+reader goes through the same module.
+
+The Codex transcript provider reads rollouts through `harnesses/codex/transcripts.py`, independently of recovery's storage-absence proof. It validates every session identity header, checks copies by chained byte prefixes, and exposes only complete stored lines from a validated metadata snapshot. The native user-event echo authenticates a model-visible input without creating a duplicate prompt.
+
+Native turn IDs guard end evidence; rollback markers count ordinary native input boundaries, including steers, independently of public turns. Their cut also trims proven pre-input context updates, skipping rollout bookkeeping and native-filtered response rows but preserving the prefix before the first input and stopping at non-context model items. Uncertain rollback or context boundaries fail closed, and earlier-generation readability uses the same checks as a read.
+
+The release model table is generated by `scripts/gen_codex_models.py`; neither provider connects to the daemon or reads account caches. See [Codex's rules](../design/transcript-protocols.md#codex-rollout-rules).
 
 ## Command harnesses
 
@@ -225,3 +275,30 @@ A command harness has no bridge. Send it messages with `--delivery inbox-only`, 
 | Integration | The bridge's own offline tests | `claude plugin test` for the mod; `tests/pi_bridge_test.mjs` for Pi |
 
 Tests must never touch a person's own native state, and Codex tests use isolated homes. See [testing](testing.md).
+
+## Transcript reading
+
+The optional `TranscriptProvider` methods are observe: `transcript_view`,
+`transcript_bodies` and `transcript_readable`. Without them, transcript reads say
+that the harness does not implement the protocol yet. Core pins a reconciled
+`SessionHandle` and releases its locks before asking the provider. The supplied
+reader exposes only a deadline and `check()` for the pinned identity; it has no
+native transport or process controls.
+
+`transcript_view` returns a `TranscriptView`: row facts in stored order, history
+indexes in conversation order, the context boundary, tip and gap. Facts carry
+labels and positions, never bodies. A position changes if preceding bytes change
+and stays valid when rows are appended. `transcript_bodies` reads only requested
+indexes and raises the content-free `TranscriptRowsChanged` if their bytes no
+longer match the view. `transcript_readable` checks a recorded earlier generation.
+All reads use the pinned native ID and storage. An unrecorded home can be resolved
+from inherited values only inside that agent's own session.
+
+Core owns the opaque cursor envelope, generation selection, filters, page limits
+and turn grouping. Bodies larger than 16 MiB are metadata stubs; metadata-only
+pages never read bodies. A prompt finishes from a later prompt or timestamped
+native end evidence, never from runtime idle status. Commands retain their own
+output while later responses remain with the current prompt. Turns, including
+the preamble, are listed by their first row in history order. See the
+[transcript design](../design/transcript-protocols.md) for the history and
+replacement rules, and the [plugin API](plugins.md) for the public read methods.

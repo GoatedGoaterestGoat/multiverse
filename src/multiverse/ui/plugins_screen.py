@@ -1,7 +1,8 @@
 """The Plugins screen: which plugins are on in a scope, and each one's settings.
 
 `PluginsScreen` lists the plugins a scope sees with their state, turns them on
-and off (`plugins.json` of that scope) and opens their settings. A plugin that
+and off (`plugins.json` of that scope), asks which access to grant one that can
+work with less than it asks for, and opens their settings. A plugin that
 registered its own settings screen gets it; every other plugin gets
 `PluginSettingsScreen`, a field screen generated from the JSON Schema its
 manifest ships. All plugin work goes through the app's PluginService, off the
@@ -18,9 +19,11 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
-from ..plugins import loader
+from ..plugins import access as plugin_access, loader
 from ..plugins.settings import DELETE
+from .columns import COLUMNS
 from .plugin_service import universe_name
+from .screens import ChoiceScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
@@ -38,10 +41,14 @@ PROVIDES = (("columns", "columns"), ("panels", "widgets"), ("screens", "screens"
 
 
 def provided(provides):
-    """What a plugin adds, as `columns a, b · widgets c`; empty when nothing is known or it adds nothing."""
+    """What a plugin adds, as `columns a, b · widgets c`; empty when nothing is known or it adds nothing. A column
+    standing in for a core one is said by core's title ("replaces the Context column"), so it is never silent."""
     if not isinstance(provides, dict):
         return ""
     shown = []
+    replaced = [clean(COLUMNS[key].title) for key in provides.get("replaces") or () if key in COLUMNS]
+    if replaced:
+        shown.append(f"replaces the {' and '.join(replaced)} column{'s' if len(replaced) > 1 else ''}")
     for key, label in PROVIDES:
         value = provides.get(key)
         if isinstance(value, (list, tuple)) and value:
@@ -49,6 +56,66 @@ def provided(provides):
         elif isinstance(value, int) and not isinstance(value, bool) and value:
             shown.append(f"{value} {label}")  # a count, e.g. services
     return " · ".join(shown)
+
+
+def file_stamp(path):
+    """(modified time, size, inode) of a file, or None when it is missing: a change by any writer changes it."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_mtime_ns, info.st_size, info.st_ino
+
+
+def levels(item):
+    """The access levels a person may grant this plugin when turning it on here, highest first; empty when there is
+    nothing to choose (it asks for what it needs at least, or the universe allows no more)."""
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    order = plugin_access.LEVELS
+    request, minimum, ceiling = found.get("request"), found.get("minimum"), found.get("ceiling")
+    if request not in order or minimum not in order:
+        return []
+    top = min(order.index(request), order.index(ceiling)) if ceiling in order else order.index(request)
+    allowed = order[order.index(minimum):top + 1]
+    return list(reversed(allowed)) if len(allowed) > 1 else []
+
+
+def access_line(item):
+    """Its access here, or what it asks for while it is off, in mv2 plugins info's words, with what caps it here (the
+    process's MV2_EFFECTS, the universe's access_ceiling); None for a plugin that says nothing about access."""
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    request, minimum, level = found.get("request"), found.get("minimum"), found.get("level")
+    if not request:
+        return None
+    asks = f"it asks for {clean(request)}" + (f", at least {clean(minimum)}" if minimum and minimum != request
+                                              else ", and needs it")
+    if not level:
+        return f"Access: {asks}; it has none while it is off"
+    line = f"Access here: {clean(level)} ({asks})"
+    caps = {entry.get("by"): entry.get("level") for entry in found.get("limited_by") or () if isinstance(entry, dict)}
+    if caps.get("MV2_EFFECTS"):
+        line += f"; MV2_EFFECTS caps every plugin in this process at {clean(caps['MV2_EFFECTS'])}"
+    if caps.get("access_ceiling"):
+        line += f"; this universe's access_ceiling allows at most {clean(caps['access_ceiling'])}"
+    return line
+
+
+def permission_lines(item):
+    """What the plugin may do here: what its access level allows, then what that level holds back, each with the
+    level it needs. A plugin that is off has no level yet, so its line says what it asks for."""
+    texts = lambda values: "; ".join(clean(str(value)) for value in values)
+    found = item.get("access") if isinstance(item.get("access"), dict) else {}
+    if not item.get("on") or found.get("allowed") is None:  # off (no level), or a listing that doesn't say
+        if not item.get("permissions"):
+            return []
+        return [("Allowed to: " if item.get("on") and "allowed" not in found else "Asks to: ") + texts(item["permissions"])]
+    lines = ["Allowed to: " + texts(found["allowed"])] if found["allowed"] else []
+    held = [entry for entry in found.get("held_back") or () if isinstance(entry, dict)]
+    if held:  # with the one change that would give it what it asks for (a grant, the ceiling or MV2_EFFECTS)
+        hint = f" ({clean(str(found['raise']))})" if found.get("raise") else ""
+        lines.append(f"Held back by its {clean(str(found.get('level')))} access{hint}: "
+                     + "; ".join(f"{clean(str(entry.get('text')))} (needs {clean(str(entry.get('needs')))})" for entry in held))
+    return lines
 
 
 def describe(item):
@@ -65,8 +132,10 @@ def describe(item):
     adds = provided(item.get("provides"))
     if adds:
         lines.append("Adds here: " + adds)
-    if item.get("permissions"):
-        lines.append("Allowed to: " + "; ".join(clean(text) for text in item["permissions"]))
+    access = access_line(item)
+    if access:
+        lines.append(access)
+    lines += permission_lines(item)
     for shadow in item.get("shadowed") or ():
         if str(shadow.get("directory")) in overridden:
             continue
@@ -105,15 +174,20 @@ class PluginsScreen(ModalScreen):
     def on_mount(self):
         self.service = self.service or self.app.plugin_service
         self.query_one("#plugins-table", DataTable).add_columns("Plugin", "Here", "State", "Version", "Errors")
-        self.generation = loader.generation()
+        self.generation, self.stamp = loader.generation(), file_stamp(self.root / "plugins.json")
         self.load()
-        self.set_interval(1.0, self.follow_loading)
+        self.set_interval(1.0, self.follow)
 
-    def follow_loading(self):
-        """A plugin that finished loading (or failed to) since the list was read changes its state here."""
-        if loader.generation() != self.generation and not self.busy:
-            self.generation = loader.generation()
-            self.load()
+    def follow(self):
+        """Read the list again when a plugin finished loading (or failed to), or plugins.json changed from outside
+        (a grant, an access_ceiling, a plugin turned on or off), since it was read. Never while a chooser or a
+        screen of its own is open on top, or a change it started is under way: the next tick catches up."""
+        if self.busy or self.opening or self.app.screen is not self:
+            return
+        stamp = file_stamp(self.root / "plugins.json")
+        if loader.generation() != self.generation or stamp != self.stamp:
+            self.generation, self.stamp = loader.generation(), stamp
+            self.load(keep=(self.selected() or {}).get("name"))
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))
@@ -184,14 +258,33 @@ class PluginsScreen(ModalScreen):
         item = self.selected()
         if item is None or self.busy:
             return
-        self.busy = True
+        self.busy = True  # also while the access chooser is open, so a held Space opens one
         self.error("")
-        self.switch(item["name"], not item["on"])
+        offered = [] if item["on"] else levels(item)
+        if not offered:
+            self.switch(item["name"], not item["on"])
+            return
+        name, why = item["name"], (item.get("access") or {}).get("why")
+
+        def chosen(level):
+            if level is None:  # Esc: it stays off, and no grant is recorded
+                self.busy = False
+                return
+            self.switch(name, True, level)
+
+        rows = [(level, f"{level.capitalize()}: {plugin_access.MEANING[level]}"
+                 + (" (what it asks for)" if index == 0 else "")) for index, level in enumerate(offered)]
+        self.app.push_screen(ChoiceScreen(f"Turn on {name} here", rows, description=clean(
+            (f"{why} " if why else "") + f"Choose the access {name} gets in this universe; it uses only what fits. "
+            "Esc leaves it off.")), chosen)
 
     @work(group="plugins-toggle", exit_on_error=False)
-    async def switch(self, name, on):
+    async def switch(self, name, on, grant=None):
         try:
-            await asyncio.to_thread(self.service.set_enabled, self.root, name, on)
+            if grant is None:
+                await asyncio.to_thread(self.service.set_enabled, self.root, name, on)
+            else:
+                await asyncio.to_thread(self.service.set_enabled, self.root, name, on, grant=grant)
         except Exception as error:
             self.busy = False
             self.error(str(error))

@@ -25,8 +25,8 @@ class NativePlainPermissionsTest(TerminalBase):
     def test_native_policy_keeps_writable_agent_roots_and_retries_only_readonly(self):
         """Native permissions and inline rendering can silently defeat an outside agent root or its one-shot retry; real tool writes must survive spawn and resume."""
         version = subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL, text=True).strip()
-        if version != 'codex-cli 0.163.0':
-            self.skipTest('native permission resolver evidence requires checked Codex 0.163.0')
+        if version != 'codex-cli 0.164.0':
+            self.skipTest('native permission resolver evidence requires checked Codex 0.164.0')
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
 
         class Handler(BaseHTTPRequestHandler):

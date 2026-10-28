@@ -36,13 +36,26 @@ class LaunchModeTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         return " ".join(" ".join(visible_lines(state)).split())
 
     async def test_the_inspector_names_the_launch_mode_fallback_and_left_out_plugins(self):
-        """The inspector and the details show the launch mode, why it fell back to plain, and which plugins the launch
-        left out and why, in the smallest layout; kept because these were cut off or missing until fixed, and nothing
-        else shows an agent why it is launch-only (f7e6b38, e799872)."""
+        """The inspector and the details show the launch mode, why it fell back to plain, and on one Plugins: line
+        which plugins the launch left out and why and what each plugin's own outcome was, in the smallest layout,
+        never repeating what a launch recorded before that change put in its fallback reason; kept because these
+        were cut off or missing until fixed, and nothing else shows an agent why it is launch-only or reduced
+        (f7e6b38, e799872)."""
         why = "its settings cannot be used: k must be a whole number of at least 0"
-        self.agent("bridged", runtime={
+        self.agent("bridged", runtime={  # recorded before plugin outcomes left the harness's fallback reason
             "native_mode": {"policy": "auto", "mode": "bridge", "fallback_reason": f"plugin compaction was left out: {why}"},
             "plugins": {"plugins": {"compaction": {"version": "1", "state": "skipped", "reason": why}}, "status_items": []}})
+        self.agent("newer", runtime={  # the same launch now: the outcome is only in the plugin record
+            "native_mode": {"policy": "auto", "mode": "bridge", "fallback_reason": None},
+            "plugins": {"plugins": {"compaction": {"version": "1", "state": "skipped", "reason": why}}, "status_items": []}})
+        self.agent("unowned", runtime={  # a problem of no plugin entry (a known plugin not installed), and one that is
+            "native_mode": {"policy": "auto", "mode": "bridge", "fallback_reason": None},
+            "plugins": {"plugins": {"compaction": {"version": "1", "state": "skipped", "reason": why}}, "status_items": [],
+                        "problems": [why, "compaction.json is here but the compaction plugin isn't installed"]}})
+        self.agent("reduced", runtime={  # a plugin that loaded but launched with less: a mode outcome only
+            "native_mode": {"policy": "auto", "mode": "bridge", "fallback_reason": None},
+            "plugins": {"plugins": {"compaction": {"version": "1", "state": "loaded", "mode": "without its hook"}},
+                        "status_items": [], "modes": [{"plugin": "compaction", "mode": "without its hook"}]}})
         self.agent("other", harness="codex", runtime={
             "native_mode": {"policy": "auto", "mode": "plain", "fallback_reason": None},
             "plugins": {"plugins": {"tidy": {"version": "2", "state": "skipped", "reason": "needs Codex 0.170"},
@@ -51,10 +64,14 @@ class LaunchModeTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         async with self.dashboard(size=(60, 20)) as d:
             for name, shown, hidden in (
                     ("old", ["Fallback: Claude Code 2.1.100 is older", "which the multiverse mod needs"], []),
-                    ("bridged", ["Fallback: plugin compaction was left out: its settings cannot be used"], []),
+                    ("bridged", ["Fallback: plugin compaction was left out: its settings cannot be used"], ["Plugins:"]),
+                    ("newer", ["Plugins: compaction left out: its settings cannot be used"], ["Fallback"]),
+                    ("reduced", ["Plugins: compaction: without its hook"], ["Fallback", "left out"]),
+                    ("unowned", ["Plugins: compaction left out: its settings cannot be used: k must be a whole number of "
+                                 "at least 0 · compaction.json is here but the compaction plugin isn't installed"], []),
                     # A plugin that loaded is not a problem.
-                    ("other", ["Plugin tidy left out: needs Codex 0.170",
-                               "plugins were left out of this launch: RuntimeError: boom"], ["fine"]),
+                    ("other", ["Plugins: tidy left out: needs Codex 0.170 · plugins were left out of this launch: "
+                               "RuntimeError: boom"], ["fine"]),
                     ("fine", ["Mode: bridge (auto)"], ["Fallback"])):
                 with self.subTest(inspector=name):
                     state = await self.inspect(d, name)
@@ -62,8 +79,10 @@ class LaunchModeTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                         self.assertIn(text, state)
                     for text in hidden:
                         self.assertNotIn(text, state)
-            for name, shown, hidden in (("old", ["plain (auto)", "FALLBACK", REASON], []),
-                                        ("fine", ["bridge (auto)"], ["FALLBACK"])):
+            for name, shown, hidden in (("old", ["plain (auto)", "FALLBACK", REASON], ["PLUGINS"]),
+                                        ("reduced", ["bridge (auto)", "PLUGINS", "compaction: without its hook"],
+                                         ["FALLBACK"]),
+                                        ("fine", ["bridge (auto)"], ["FALLBACK", "PLUGINS"])):
                 with self.subTest(details=name):
                     d.select(name)
                     await d.press("v")

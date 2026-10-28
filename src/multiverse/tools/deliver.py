@@ -1,5 +1,6 @@
-"""Check deliveries, retry definite failures or dismiss them without resending."""
+"""Check deliveries, retry failures, or dismiss failures and uncertainty without resending."""
 import sys
+from ..plugins import access
 from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
@@ -12,28 +13,33 @@ def configure(parser):
     parser.add_argument('--json', action='store_true', help='Return the original delivery evidence as JSON')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
-                      help='Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting')
-    mode.add_argument('--dismiss', action='store_true', help='Make definite delivery failures final without resending; keep them in history')
-    mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
+                      help='Report failures and reconcile pending, uncertain or accepted deliveries, without submitting')
+    mode.add_argument('--dismiss', action='store_true', help='Check existing evidence, then dismiss failures and uncertainty without resending; leave pending or confirmed messages unchanged')
+    mode.add_argument('--retry', action='store_true', help='Retry reported failures; accepted or uncertain submissions are not resent')
 
 
 def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False, _present=None, _present_error=None):
     if sum(bool(value) for value in (retry, check, dismiss)) != 1:
         raise ValueError('Choose exactly one of --check, --retry or --dismiss')
+    access.require('observe' if check else 'act', f'deliver {agent}')
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
+    if dismiss:
+        # Serialize with send/retry, but let each read acquire its ordinary
+        # launch/delivery locks. Taking those here would deadlock native.deliver.
+        with store.lock(directory / '.send.lock'):
+            return _run(root, directory, check=True, dismiss=True, _present=_present, _present_error=_present_error)
+    return _run(root, directory, retry=retry, check=check, _present=_present, _present_error=_present_error)
+
+
+def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=None, _present_error=None):
     properties = store.read(directory / 'properties.json')
     name = properties['name']
-    if dismiss:
-        with store.lock(directory / '.send.lock'), store.lock(directory / '.launch.lock'), store.lock(directory / '.delivery.lock'):
-            dismissed = mailbox.dismiss_failures(directory)
-        if _present:
-            _present(f'{name}: {len(dismissed)} delivery {"failure" if len(dismissed) == 1 else "failures"} dismissed; kept in history. Nothing resent.'
-                     if dismissed else f'{name}: no delivery failures to dismiss.')
-        return {'messages': [], 'dismissed': len(dismissed), 'ok': True}
     launch_id = agents.runtime(directory).get('launch_id')
     native_id = properties.get('native_session_id')
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
+    if dismiss:
+        history = [message for message in history if mailbox.dismissible(message, message['tracking'])]
     held = focus.current(directory) if retry else None
     if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
                     and not message['tracking'].get('uncheckable_reported_at') and not message['tracking'].get('dismissed_at')
@@ -108,7 +114,7 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
                         finalized += 1
                         continue
                     receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
-            elif state == 'failed':
+            elif state == 'failed' and not native.receipt_failure(tracking):
                 previous = attempts[-1]
                 receipt = {**previous, 'state': 'error', 'ok': False,
                            'reason': previous.get('reason') or 'Message was not delivered',
@@ -116,6 +122,8 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
                                      'definite_failure': True}}
             else:
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
+        except access.Denied:
+            raise
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True,
                        **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
@@ -142,7 +150,7 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
         category = _check_state(receipt, accepted=accepted) if check else None
         if check:
             counts[category] = counts.get(category, 0) + 1
-        if _present and category != 'confirmed':
+        if _present and category != 'confirmed' and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
             _, current = mailbox.message_record(directory, message['id'])
             present = _present_error if summary.get('ok') is False and _present_error else _present
             line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
@@ -151,6 +159,28 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
                 details.append((present, line))
             else:
                 present(line)
+    if dismiss:
+        # A startup worker may finish while evidence is read. Never dismiss a
+        # message that was pending (or otherwise ineligible) in our snapshot.
+        with store.lock(directory / '.launch.lock'), store.lock(directory / '.delivery.lock'):
+            dismissed = mailbox.dismiss_messages(directory, {message['id'] for message in history})
+        failures, unconfirmed = len(dismissed['failures']), len(dismissed['unconfirmed'])
+        confirmed = counts.get('confirmed', 0)
+        if _present:
+            if confirmed:
+                _present(f'{name}: {confirmed} {"message" if confirmed == 1 else "messages"} confirmed in '
+                         f'{"its conversation" if confirmed == 1 else "their conversations"}; not dismissed.')
+            if failures:
+                _present(f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.')
+            if unconfirmed:
+                _present(f'{name}: {unconfirmed} unconfirmed {"message" if unconfirmed == 1 else "messages"} dismissed; '
+                         f'{"it" if unconfirmed == 1 else "they"} may still have arrived. Kept in history. Nothing resent.')
+            for present, line in details:
+                present(line)  # A proven loss or out-of-lineage diagnostic is still reported exactly once.
+            if not (confirmed or failures or unconfirmed or details):
+                _present(f'{name}: no failed or unconfirmed messages to dismiss.')
+        return {'messages': results, 'confirmed': confirmed, 'dismissed': failures + unconfirmed,
+                'dismissed_failures': failures, 'dismissed_unconfirmed': unconfirmed, 'ok': True}
     if _present and check and results:
         order = ('confirmed', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain', 'could not check')
         _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
@@ -171,6 +201,8 @@ def _check_state(receipt, *, accepted):
     state = receipt.get('state')
     if value.get('transcript_confirmed') is True:
         return 'confirmed'
+    if value.get('definite_failure') is True:
+        return 'not delivered'
     if value.get('check_error') or value.get('outside_lineage') or (accepted and state in ('error', 'unavailable')):
         return 'could not check'
     if state in ('cancelled', 'error', 'unavailable'):

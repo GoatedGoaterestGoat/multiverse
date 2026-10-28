@@ -54,6 +54,7 @@ To see the column, add `"shout"` to `columns` in `.multiverse/views/default.json
 | `default` | `"on"` or `"off"` (the default). Only a bundled plugin's `"on"` counts. |
 | `extends` | The extension points it uses. Registering for one it doesn't list raises `api.Error`. |
 | `permissions` | What it asks to do; see [permissions](#permissions). |
+| `access` | `{"request": LEVEL, "minimum": LEVEL, "why": "..."}` (1.13): the access level it asks for, the least it can work with, and one line on why; see [access levels](#access-levels). Without it, a plugin asks for `act` with `act` as its least. |
 | `commands` | `{"NAME": "help text"}` for each `mv2 NAME` it registers. Needs `cli`. |
 | `statusline` | `{"ITEM": {"claude": true, "tmux": false}}`: its status-line items, and whether each shows by default on Claude's line and the tmux bar. Needs `statusline`. An item can't take a name mv2 draws itself (`agent`, `harness`, `status`, `phase`, `summary`, `inbox`, `context`). An item named `focus`, which mv2 took after 1.8, isn't shown, and `mv2 doctor` says why. |
 | `events` | Event types it subscribes to: `"agent.status"`, `"message.*"`, `"*"`. Needs `events`. |
@@ -74,7 +75,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `catalog` | No call. Ship `skills/NAME/`, `commands/NAME/` or `workflows/NAME/` laid out as in a universe | Entries for `mv2 catalog`. The universe's own entry of the same name wins, but `mv2 command NAME@my-plugin` always reaches the plugin's |
 | `bootstrap` | `mv.bootstrap.line("Run mv2 hello NAME to greet an agent.")` | A line in every agent's bootstrap: at most 2 lines and 300 characters per plugin |
 | `doctor` | `mv.doctor.check(fn)`: `fn(universe)` returns a list of sentences | Problems for `mv2 doctor`, prefixed with the plugin's name |
-| `dashboard.column` | `mv.dashboard.column("mood", "Mood", 6, value, compact=False, flexible=False, group=None)` | A column a view names as `mood` or `my-plugin:mood`. `value(row)` gets a copy of the agent's row and returns text, or `None` for `—`. `group(row)` fills subverse rows |
+| `dashboard.column` | `mv.dashboard.column("mood", "Mood", 6, value, compact=False, flexible=False, group=None, fallback=None, replaces=None)` | A column a view names as `mood` or `my-plugin:mood`. `value(row)` gets a copy of the agent's row and returns text, or `None` for `—`. `group(row)` fills subverse rows. It can also stand in for a core column; see [columns](#columns) |
 | `dashboard.panel` | `mv.dashboard.panel("greetings", render, title=None, auto=False)` | A widget type for a view's `widgets`. `render(context)` returns `api.Markdown(text)`, `api.Table(columns, rows)`, `api.Artifacts(items)` or a list of them. `auto=True` also shows it wherever the plugin is on, unless the view's `plugin_panels` (`"auto"`, `"none"` or a list of types) leaves it out |
 | `dashboard.inspector` | `mv.dashboard.inspector(fn)`: `fn(row)` returns a line or `None` | A line in the agent inspector |
 | `dashboard.action` | `mv.dashboard.action("Say hello", fn)`: `fn(context)` may return a status line | A palette entry, `my-plugin: Say hello`. `context.row` is a copy of the selected row or `None`, and `context.scope` is the selected universe's path |
@@ -84,10 +85,24 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `statusline` | `mv.statusline.write(agent, "mood", "calm")` | A declared item's text for one agent (an `Agent` or its directory). The text is one line of up to 200 characters, and `""` removes it. People order and hide items in `statusline.json` |
 | `launch` | `mv.launch.contribute("claude", fn)`: `fn(info)` returns an `api.Contribution` or `None` | Additions to every launch of that family (`claude`, `codex` or `pi`); see [launch additions](#launch-additions) |
 | `capabilities` | `mv.capabilities.add("greeting", fn)`: `fn(session)` returns `api.Capability("supported", "why")` | A capability `mv2 capabilities` reports for each agent: `supported`, `unavailable` or `error`. Core's names are refused |
-| `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it |
+| `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it. Its changes to `context`, mv2's measured reading, are dropped (1.13): show an estimate in a [column](#columns) of your own |
 | `events` | `mv.events.on("agent.status", fn)`: `fn(event)` | A handler in the plugin host; see [events and the host](#events-and-the-host) |
 | `service` | `mv.service(start, stop=None)` | Long-running work in the plugin host |
 | `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `"$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`. `mv.helper.command("ping", *args)` gives that argv |
+
+### Columns
+
+`value(row)` gets a copy of the agent's listing row of its own, nested records included: changing it changes nothing in the dashboard. An inspector line, a palette action's `context.row` and a data panel's `agent.record` are copies the same way. These keys are promised for 1.x (1.13): `id`, `name`, `harness`, `universe` (the agent's universe's path), `live`, `status`, `phase`, `summary`, `task`, `focus` (its focus record, or `None`), `tokens`, `reason` (why it isn't running, when set), and `usage`: `state` (`ok`, `unavailable` or `error`) and `value`, whose `context` has `tokens`, `percent`, `window`, `responded_at` and `last_known`, as core measured them. Every other key is core's and may change.
+
+`value` runs on every refresh, off the dashboard's event loop and within 2 s, for every row. Keep it cheap: read the row, or a cache of your own, never `mv.universe(...).agent(...)` per row (about 25 ms each).
+
+Two keywords (1.13) let a column work with core's own:
+
+- **`fallback="KEY"`:** a row `value(row)` gives `None` for shows that core column's cell instead of `—`.
+- **`replaces="KEY"`:** the column stands in for that core column wherever a view lists it (or its alias: `tokens` for `context`, `activity` for `status`), where your plugin is on. It implies `fallback="KEY"` unless you give another. Rows whose universe has your plugin off show the core cell. A view keeps core's column with `core:KEY`, or with `"replace": false`; naming your column itself keeps both. Nothing is written to a view file.
+- **Not replaceable:** Name, Live, Status and Focus, which carry the focus, waiting and damaged markers. Asking is a problem `mv2 doctor` and the Plugins screen show, and the column loads under its own key without it.
+- **Two plugins** replacing one column cancel: neither does, and `mv2 doctor` says so.
+- `listing()`'s `provides.replaces` lists the core columns a loaded plugin stands in for.
 
 ### Launch additions
 
@@ -103,8 +118,9 @@ def launch(info):
 - `api.Contribution` has these fields:
   - `environment`.
   - `claude_settings`, merged into Claude Code's `--settings` (objects merge, lists such as hooks append). Only a connected Claude launch takes it.
-  - `problem`, shown as the launch's fallback reason.
-  - `mode`, appended to the launch's native mode.
+  - `problem`: why the plugin can't do its job in this launch.
+  - `mode`: how the launch runs for your plugin, such as `"without my-plugin"`.
+  - Both are shown as your plugin's, on the inspector's Plugins line and in `mv2 inspect`, and kept in the launch's `plugins` record. They never change the harness's own mode or fallback reason (1.13).
 - A plugin may set `MV2_<NAME>` and `MV2_<NAME>_*` (its name upper-cased, hyphens as underscores). It may also set any variable outside `MV2_` except `HOME`, `PATH`, `CODEX_HOME`, `CODEX_SQLITE_HOME`, `CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, `CODEX_THREAD_ID` and `CLAUDECODE`. A plugin that sets a variable the harness or another plugin already set is left out of that launch.
 - Additions are read at launch, so a running agent keeps what it started with.
 
@@ -117,6 +133,10 @@ def launch(info):
 Every entry takes `min_version` and `max_version`, which are inclusive `"MAJOR.MINOR.PATCH"` bounds. An entry that doesn't fit the harness's version or connection is left out. A plugin with no entry that fits is left out of the launch, contributions included.
 
 Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTHON`, `MV2_AGENT_DIR` and `MV2_UNIVERSE` set. Test a Claude directory with `claude plugin test DIR`.
+
+## The rule
+
+A plugin adds; it never alters mv2. It adds commands, columns, status items, capabilities and contributions to the launches it takes part in, and never changes what core measures, reports or does without it. Uninstalled, it leaves mv2 as if it had never been there, apart from its own files and the notice that it is missing. mv2's protocols (this API, the harness adapters' protocols) are mv2's; a protocol a plugin defines for itself, it implements in its own code. The full rule is in the [design](../design/plugins.md#the-rule-for-plugins-and-protocols).
 
 ## The `mv` API
 
@@ -132,6 +152,7 @@ Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTH
 | `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`. A steer or follow-up to a focused agent is refused and not saved: `ok` is false and `state` is `"focused"` | `messages.send` |
 | `agent.ask(question)` | The answer to a side question that never enters the conversation | `messages.ask` |
 | `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`; `inbox()` leaves them unread | `messages.read` |
+| `agent.transcript()`, `transcript_rows(...)`, `iter_transcript_rows(...)`, `transcript_turns(...)`, `transcript_turn(id, ...)` | The agent's conversation, by cursor (1.13); see [transcripts](#transcripts) | `transcripts.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |
 
 These need no permission:
@@ -147,6 +168,66 @@ These need no permission:
 
 A call that can't be done raises `api.Error` with a readable message. A filesystem or system failure (such as `EACCES` or `ENOSPC`) raises an `api.Error` that is also the `OSError` it was, with its `errno`, so `except OSError` catches it too.
 
+### Access levels
+
+Every call above has an effect class, and a plugin works under the access level a person grants it in each universe (1.13):
+
+| Class | Means | Calls |
+| --- | --- | --- |
+| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, the transcript reads, a harness's `models()` and `check()`, `harness_info(..., agent=)`, `session`, `agent_at`, `current_agent` |
+| `spend` | Uses model tokens, money or time, still changing nothing | `ask` |
+| `act` | Changes a session, a launch, an inbox or a universe's files | `spawn`, `resume`, `kill`, `send`, `refresh(apply=True)`, `mv.settings.edit`, launch contributions and harness extensions |
+
+A plugin writing its own state is outside the classes: `mv.state_dir`, `mv.agent_state_dir`, `api.files`, `mv.log`, `mv.statusline.write`, `mv.events.emit` and `mv.settings.read` never raise for access, so they stay safe in `finally` blocks. So are a universe's own facts that a plugin needs to configure itself before it is turned on there: `universe.id`, `.name`, `.parent`, `.subverses()` and `mv.harness_info(universe, name)` without `agent=`. With `agent=`, `harness_info` reads that agent's records and is `observe`.
+
+- **Its level here:** `mv.access(universe=None)` gives `"observe"`, `"spend"` or `"act"`, or `None` where the plugin is off. It's the level granted there (what it requests when nothing is recorded), never above its request, and capped by the universe's `access_ceiling` and by `MV2_EFFECTS` for the process. Register or offer only what fits it: compaction with `spend` could build trees but not install them.
+- **A call above it** raises `api.AccessDenied` (an `api.Error`, never an `OSError`), before core does anything: `planner has observe access here; send needs act`. A plugin that is off in a universe has no access there at all.
+- **Declared classes:** `mv.cli.command(..., effect=)`, `mv.dashboard.action(..., effect=)` and `mv.helper.action(..., effect=)` declare what each does; undeclared means `act`. One whose class is above the plugin's level there is refused before it runs. A call above the declared class, made inside it, is refused too. Columns, panels, inspector lines, capabilities, usage adjustments and settings checks run as `observe`.
+- **Your own functions:** `@mv.effect("observe")`, or `with mv.effect("observe"):`, declares the class of code of your own. It follows a context variable, so it doesn't follow threads your code starts. An async function stays declared across its awaits, until its body ends. A generator can't be declared, since its body runs between your caller's code: wrap its body in `with mv.effect(...)` instead.
+- **Permissions stay:** a manifest that lists `permissions` keeps them checked, and the level check comes on top. A manifest with `access` and no `permissions` gets the permissions of the level it requests: `agents.read`, `messages.read` and `transcripts.read` for `observe`, plus `messages.ask` and `models.*` for `spend`, plus `agents.control`, `messages.send` and `universe.write` for `act`. `harness.*`, `process.spawn` and `network.listen` stay declarations.
+
+Like permissions, this guards against mistakes and makes a plugin's reach readable. It isn't a sandbox: a plugin's code runs with your permissions.
+
+### Transcripts
+
+A Claude or Codex agent's conversation reads by cursor (1.13). The design is [transcript-protocols](../design/transcript-protocols.md).
+
+```python
+info = agent.transcript()                     # cheap: counts, cursors, info.earlier
+page = agent.transcript_rows(after=info.start, limit=200)
+tail = agent.transcript_rows(before=info.end, limit=50)                 # the newest 50, oldest first
+for row in agent.iter_transcript_rows(after=saved, history=True): ...   # a bounded page at a time
+turns = agent.transcript_turns(limit=50)      # prompt turns, command turns, a preamble
+rows = agent.transcript_turn(turns.turns[-1].id)
+```
+
+- **Cursors** are opaque. `after` and `before` take a cursor (`row.cursor`, `page.next`, `info.start`) or a row's `ref`; turn pages take a turn ID too. Keep `info.end` and `info.history_version` with what you parsed, and skip work while both are unchanged.
+- **Rows** carry `label` (`prompt`, `mid_turn`, `tool_result`, `command`, `command_output`, `injected`, `compaction`, `response`, `meta`; treat a label you don't know as `meta`), `source`, `call_id`, `abandoned`, `in_context`, `stop`, `ends_turn` and `data`, the row as stored (a fresh copy each call).
+- **History:** `history=True` reads only the conversation's rows, in its order, leaving out what a rewind abandoned. `tip=` (a row ref) starts the history there; `page.tip` and `page.gap` say which tip was used and which parent the harness never stored, and the page's refs are the walked history. `bodies=False` leaves `data` out and reads no bodies, to walk a whole history's refs cheaply.
+- **Filters:** `labels` and `kinds` keep only those rows; the others are neither counted against `limit` and `max_bytes` nor read. `limit` is 1–2000 (turn pages 1–500) and `max_bytes` 1 KiB–16 MiB; a row over 16 MiB comes with `data` `None`.
+- **When the transcript changed** under a cursor, a read raises `api.TranscriptChanged` with `reason` (`replaced` after a `/clear`, `rewritten`, `diverged`; treat one you don't know as `replaced`) and `resume`, where to continue. `api.TranscriptUnavailable` says why it can't be read now; with `retry` true, try again soon.
+- **Generations:** without `generation=`, every read is of the agent's current session, and a cursor from an earlier one raises `TranscriptChanged` (`replaced`, resuming at the current start). `info.earlier` lists the sessions it was on before (a `/clear`, a fresh start); `generation=TOKEN` reads one of those while it's `readable`, and only with its own cursors. Malformed generation syntax raises `api.Error`, including in `transcript()`. For a well-formed unknown or unreadable token, `transcript()` returns `state` (`unavailable`, or `error` for a provider error) and `reason`; row and turn reads raise `TranscriptUnavailable` with `retry=False`.
+- Codex reads recorded rollout files. Ephemeral threads such as `/btw` have none and read as `unavailable`. Pi does not implement transcript reading.
+
+### Models
+
+A harness's models and a check of a model and effort (1.13), observe and free of cost. The design is [transcript-protocols](../design/transcript-protocols.md#models).
+
+```python
+claude = mv.universe(root).harness("claude")  # .info is what mv.harness_info(root, "claude") gives
+catalog = claude.models()                     # catalog.models: api.Model(id, name, aliases, efforts, ...)
+check = claude.check("sonnet", effort="xhigh")
+if not check.ok:
+    print(check.reason)                       # "claude-sonnet-4-6 does not take effort xhigh"
+```
+
+- **The answer is for a launch from this process**: its provider (`catalog.provider`: first-party, Bedrock, Vertex, ...) decides the aliases and IDs.
+- **`check()`** gives the resolved ID as `model`, and as `effort` what a run would use: the one given, or the model's default. An effort the model doesn't take is not ok, since Claude Code would silently use another.
+- **`verified` false** means the model isn't in mv2's table (`catalog.free_form` is true for Claude and Codex) and is taken unchecked; `reason` says so.
+- **`api.ModelsUnavailable`** comes from a harness without models (Pi for now), or whose models can't be read. Catch it to offer a free-form model field.
+- **Codex** uses its release's bundled model table, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
+- Treat a `source`, `provider`, input or effort you don't know as an opaque name: later minors may add them.
+
 ### Permissions
 
 | Permission | Checked | Where |
@@ -154,6 +235,7 @@ A call that can't be done raises `api.Error` with a readable message. A filesyst
 | `agents.read` | By the API | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `agent_at`, `current_agent`; without it a panel's `context.agents` is empty |
 | `agents.control` | By the API | `spawn`, `resume`, `kill` |
 | `messages.send`, `messages.ask`, `messages.read` | By the API | `send`; `ask`; `inbox` and `history` |
+| `transcripts.read` | By the API | The transcript reads (1.13) |
 | `universe.write` | By the API | `refresh(apply=True)` |
 | `harness.claude`, `harness.codex`, `harness.pi` | By the manifest | A `harnesses` entry for that family; `mv.launch.contribute` doesn't check it |
 | `process.spawn` | By the manifest | A Codex entry's local MCP server; otherwise declared only |
@@ -263,7 +345,8 @@ Each test gets:
 - a temporary universe from the base template (`self.root`), with the plugin found and on;
 - a temporary home, `CLAUDE_CONFIG_DIR` and `bin/` first on `PATH`;
 - no inherited agent identity;
-- a guard on your real `~/.multiverse`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
+- `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`);
+- a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 
 Nothing starts an agent, tmux, a harness or the plugin host. A test sees only its own plugins unless the class sets `bundled = True`.
 
@@ -271,6 +354,7 @@ Nothing starts an agent, tmux, a harness or the plugin host. A test sees only it
 | --- | --- |
 | `loaded()`, `module(name)` | The plugin, loaded and registered. `registrations` holds what `register` added (`commands`, `columns`, `data_panels`, `actions`, `launch`, `handlers`, `helpers`, …), so you can call it directly. `module(name)` is one of its modules, as mv2 loaded it |
 | `agent(name, harness="claude", native_id=None, runtime=None, **properties)`, `claude_transcript(native_id, records)`, `executable(name, script)` | An agent's records, written without starting anything (returns its directory); a Claude transcript where Claude keeps it; a fake program on `PATH` |
+| `transcript(agent, rows=())`, `testing.ClaudeRows` | A Claude transcript the agent reads through the real API, core and Claude adapter (1.13), with `append`, `rewrite`, `clear` and `unreadable`; rows built with `prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command` and `rewind` |
 | `write_plugin(name, manifest, files)`, `enable(name, on=True)`, `subverse(name)`, `entry(name)` | Other plugins and scopes |
 | `dashboard(size=(120, 40))` | The real dashboard on `self.root`, in an `IsolatedAsyncioTestCase`. Drive it with `press`, `until`, `refresh`, `select`, `enter`, `back`, `open_plugins()`, `open_settings(name)`, `run_action(title)` and `close_screen()`. Read `table()`, `local_view()`, `palette()`, `status` and `header`. A plugin still loading adds its palette entries after the first refresh, so check for one with `until`; `run_action` waits for its own. `multiverse.plugins.dashboard_testing` lists what is promised |
 
