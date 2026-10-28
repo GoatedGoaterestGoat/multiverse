@@ -392,7 +392,7 @@ mv2 deliver [--json] (--check | --dismiss | --retry) agent
 | `agent` |  |  |  |
 | `--json` |  | Return the original delivery evidence as JSON |  |
 | `--check` |  | Report failures and reconcile pending, uncertain or accepted deliveries, without submitting |  |
-| `--dismiss` |  | Make failed or unconfirmed deliveries final without resending; keep history and leave pending or confirmed messages unchanged |  |
+| `--dismiss` |  | Check existing evidence, then dismiss failures and uncertainty without resending; leave pending or confirmed messages unchanged |  |
 | `--retry` |  | Retry reported failures; accepted or uncertain submissions are not resent |  |
 
 Use exactly one of `--check`, `--dismiss`, `--retry`.

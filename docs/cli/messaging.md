@@ -86,8 +86,11 @@ mv2 deliver worker --retry    # retry messages reported failed
 mv2 deliver worker --dismiss  # close failures and unconfirmed messages without resending
 ```
 
-`--dismiss` makes reported failures, launch-only refusals, accepted messages
-without confirmation, and uncertain submissions final. It counts failures and
+`--dismiss` first checks existing delivery evidence for each eligible message,
+using the same rules as `--check`. It records and counts any newly confirmed
+messages and leaves them confirmed, even if you never ran `--check`. It then
+makes remaining failures, launch-only refusals, accepted messages without
+confirmation, and uncertain submissions final. It counts failures and
 unconfirmed messages separately and warns that an unconfirmed message may
 still have arrived. It sends nothing, wakes nothing, and does not cancel a
 message already held by the native session. Pending startup deliveries and
