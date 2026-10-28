@@ -79,11 +79,13 @@ class PlainRefusalTest(unittest.TestCase):
         it scrapes Codex's TUI text, and a false positive marks a healthy agent refused (3a83ea2, 661fc41)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
-        for version in ('0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0]):
+        # 0.164.0 kept 0.163.0's layouts: both checked releases keep the refusal check.
+        for version in ('0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0],
+                        '0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
             with self.subTest(version=version):
                 self.assertTrue(adapter.supports_launch_refusal(version))
                 self.assertIsNotNone(adapter.launch_refusal({**captures[0], 'cli_version': version}))
-        for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev',
+        for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev', 'codex-cli codex-cli 0.163.0',
                         {}, [0, 163], [False, 163, False], (0, '163', 0), True):
             with self.subTest(version=version):
                 self.assertFalse(adapter.supports_launch_refusal(version))
@@ -94,9 +96,9 @@ class PlainRefusalTest(unittest.TestCase):
                 self.assertIn('This conversation is open in another app', refusal['message'])
                 self.assertIsNone(refusal['code'])
                 self.assertEqual(refusal['source'], 'native-screen')
-        for capture in captures:
-            with self.subTest(captured_width=capture['width']):
-                evidence = {**capture, 'cli_version': '0.164.0', 'native_id': str(uuid4())}
+        for capture, version in ((capture, version) for capture in captures for version in ('0.163.0', '0.164.0')):
+            with self.subTest(captured_width=capture['width'], version=version):
+                evidence = {**capture, 'cli_version': version, 'native_id': str(uuid4())}
                 self.assertEqual(adapter.launch_refusal(evidence)['source'], 'native-screen')
                 evidence['text'] += '\n› quoted native refusal above; normal composer below\n'
                 self.assertIsNone(adapter.launch_refusal(evidence))
@@ -131,6 +133,7 @@ class PlainStartupTest(unittest.TestCase):
         for frame in self.capture('started-0.163.0.json'):
             with self.subTest(ready=frame['width']):
                 self.assertTrue(self.adapter.launch_started(frame))
+                self.assertTrue(self.adapter.launch_started({**frame, 'cli_version': '0.163.0'}))  # its own release
                 self.assertIsNone(self.adapter.launch_refusal(frame))
         layouts = self.capture('started-layouts-0.163.0.json')
         self.assertEqual(len(layouts), 12)

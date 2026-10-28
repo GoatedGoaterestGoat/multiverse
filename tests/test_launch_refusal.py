@@ -170,8 +170,8 @@ class LaunchRefusalTest(BaseTest):
                 self.assertEqual(describe.called, observe)
                 self.assertEqual(owned.called, observe)
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
-        for version, relay in (('0.162.1', 'ready'), ('0.163.0', 'ready'), (None, 'ready'),
-                               ([], 'ready'), (CHECKED_CLI, 'lost')):
+        for version, relay in (('0.162.1', 'ready'), ('0.165.0', 'ready'), (None, 'ready'),
+                               ([], 'ready'), (CHECKED_CLI, 'lost'), ('0.163.0', 'lost')):
             with self.subTest(version=version, relay=relay):
                 write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
                       'attachment': {'readiness': 'process'}, 'native_relay': {'state': relay},

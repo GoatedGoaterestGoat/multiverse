@@ -138,6 +138,10 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
+        with self.subTest('0.163.0, the earlier checked release, keeps /btw'):
+            view = self.connection('checked-0.163.0', lambda: True)
+            self.initialize(view, 'codex/0.163.0')
+            self.assertEqual(view.outgoing(self.fork()), self.fork())
         for change in ({'ephemeral': None}, {'ephemeral': 1}, {'threadId': self.side},
                        {'path': '/other/rollout'}, {'lastTurnId': 'turn'}, {'beforeTurnId': 'turn'},
                        {'excludeTurns': False}, {'experimentalPredictionMode': True}, {'cwd': '/other/workspace'}):

@@ -29,6 +29,9 @@ isolated homes with updates disabled and local scripted providers; no account or
 real model calls were needed. Existing CLI flags and config keys remain valid.
 The new image-generation item fields do not change mv2's delivery or status
 protocol. See the [Codex release notes](https://github.com/openai/codex/releases/tag/rust-v0.164.0).
+0.164.0 kept 0.163.0's native screens and side-thread protocol, so on 0.163.0,
+the previous checked release, the startup screen checks and native `/btw` stay
+on, with no older-release notice.
 
 When checking a new Codex release, also regenerate the adapter's bundled model
 catalog from that release's source and review changes to the rollout format.
