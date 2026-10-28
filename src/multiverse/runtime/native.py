@@ -690,7 +690,7 @@ def reopen_launch_only(root, directory, message_id):
 
 def _dismissed_receipt(message_id):
     return {'state': 'unavailable', 'ok': True, 'message_id': message_id, 'reused': True,
-            'reason': 'This delivery failure was dismissed; it stays in history and will not be retried',
+            'reason': 'This message was dismissed; it stays in history and will not be retried',
             'value': {'dismissed': True, 'final': True}}
 
 

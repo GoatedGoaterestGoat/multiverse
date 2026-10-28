@@ -375,22 +375,27 @@ def confirm_message_id(agent_dir, message_id, expected):
     return True
 
 
-def dismiss_failures(agent_dir):
-    """Caller holds send, launch and delivery locks; preserve evidence while making failures final."""
+def dismiss_messages(agent_dir):
+    """Caller holds send, launch and delivery locks; close failures and uncertainty without changing evidence."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
         _, _, messages = _messages(agent_dir)
         states = _states(agent_dir)
-        dismissed = []
+        dismissed = {'failures': [], 'unconfirmed': []}
         for _, message in messages:
             state = states.get(message['id'], {})
+            receipt = state.get('native_receipt')
+            confirmed = (state.get('transcript_confirmed_at')
+                         or isinstance(receipt, dict) and receipt.get('transcript_confirmed') is True)
             if (message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up')
-                    or state.get('submission_state') not in ('failed', 'launch-only')
+                    or state.get('submission_state') not in ('failed', 'launch-only', 'accepted', 'unknown', 'submitting')
+                    or confirmed
                     or state.get('dismissed_at') or state.get('uncheckable_reported_at')):
                 continue
             states[message['id']] = {**state, 'dismissed_at': now()}
-            dismissed.append(message['id'])
-        if dismissed:
+            category = 'failures' if state['submission_state'] in ('failed', 'launch-only') else 'unconfirmed'
+            dismissed[category].append(message['id'])
+        if any(dismissed.values()):
             write(agent_dir / 'inbox-state.json', states)
     return dismissed
 

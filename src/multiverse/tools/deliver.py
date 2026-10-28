@@ -1,4 +1,4 @@
-"""Check deliveries, retry reported failures or dismiss them without resending."""
+"""Check deliveries, retry failures, or dismiss failures and uncertainty without resending."""
 import sys
 from ..plugins import access
 from .. import display, harnesses, store, universe
@@ -14,7 +14,7 @@ def configure(parser):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
                       help='Report failures and reconcile pending, uncertain or accepted deliveries, without submitting')
-    mode.add_argument('--dismiss', action='store_true', help='Make reported delivery failures final without resending; keep them in history')
+    mode.add_argument('--dismiss', action='store_true', help='Make failed or unconfirmed deliveries final without resending; keep history and leave pending or confirmed messages unchanged')
     mode.add_argument('--retry', action='store_true', help='Retry reported failures; accepted or uncertain submissions are not resent')
 
 
@@ -28,11 +28,18 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
     name = properties['name']
     if dismiss:
         with store.lock(directory / '.send.lock'), store.lock(directory / '.launch.lock'), store.lock(directory / '.delivery.lock'):
-            dismissed = mailbox.dismiss_failures(directory)
+            dismissed = mailbox.dismiss_messages(directory)
+        failures, unconfirmed = len(dismissed['failures']), len(dismissed['unconfirmed'])
         if _present:
-            _present(f'{name}: {len(dismissed)} delivery {"failure" if len(dismissed) == 1 else "failures"} dismissed; kept in history. Nothing resent.'
-                     if dismissed else f'{name}: no delivery failures to dismiss.')
-        return {'messages': [], 'dismissed': len(dismissed), 'ok': True}
+            if failures:
+                _present(f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.')
+            if unconfirmed:
+                _present(f'{name}: {unconfirmed} unconfirmed {"message" if unconfirmed == 1 else "messages"} dismissed; '
+                         f'{"it" if unconfirmed == 1 else "they"} may still have arrived. Kept in history. Nothing resent.')
+            if not failures and not unconfirmed:
+                _present(f'{name}: no failed or unconfirmed messages to dismiss.')
+        return {'messages': [], 'dismissed': failures + unconfirmed,
+                'dismissed_failures': failures, 'dismissed_unconfirmed': unconfirmed, 'ok': True}
     launch_id = agents.runtime(directory).get('launch_id')
     native_id = properties.get('native_session_id')
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']

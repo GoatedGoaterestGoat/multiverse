@@ -83,14 +83,22 @@ already accepted by a native queue is not rewritten by checking or retrying it.
 ```sh
 mv2 deliver worker --check    # settle uncertain deliveries, record confirmations
 mv2 deliver worker --retry    # retry messages reported failed
-mv2 deliver worker --dismiss  # make failures final without resending
+mv2 deliver worker --dismiss  # close failures and unconfirmed messages without resending
 ```
 
-`--dismiss` makes reported delivery failures final, including launch-only
-refusals. It sends nothing, leaves accepted and uncertain messages unchanged,
-and keeps the original message and delivery evidence in history. Dismissed
-failures no longer appear in checks or count as delivery problems, and a later
-`--retry` cannot resend them. Send a new message if you need it delivered later.
+`--dismiss` makes reported failures, launch-only refusals, accepted messages
+without confirmation, and uncertain submissions final. It counts failures and
+unconfirmed messages separately and warns that an unconfirmed message may
+still have arrived. It sends nothing, wakes nothing, and does not cancel a
+message already held by the native session. Pending startup deliveries and
+confirmed messages stay unchanged.
+
+Dismissal keeps the original message and receipt in history, with a dismissed
+marker. Dismissed messages no longer appear in `--check` or count as delivery
+problems, and a later `--retry` cannot resend them. A late row or receipt does
+not reopen them. For example: `1 unconfirmed message dismissed; it may still
+have arrived. Kept in history. Nothing resent.` Dismissal does not prove
+non-delivery; verify the conversation before deliberately sending a new copy.
 
 `--check` starts with one line of counts, such as `358 confirmed, 23 accepted
 without confirmation, 2 not delivered`, then shows details only for messages
