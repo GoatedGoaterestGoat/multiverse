@@ -226,14 +226,16 @@ describe('status', () => {
 
 describe('delivery', () => {
   test('a mid-turn steer shows without tags and is stored without Claude’s wrapper', async ($, on) => {
+    // Claude stores and draws queued text exactly as the mod hands it over, for good, so the steer goes clean: a
+    // tag left in it showed in the terminal and reached GOAT's reading of the transcript.
     const w = world(on)
     await $.turn.start({ text: 'work', turnId: 't1' })
     const text = 'Message from lead:\nRebase first.'
     const received = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>${text}<</MV2>>` })
-    expect(received).toEqual({ text: handed(STEER, text) })
+    expect(received).toEqual({ text })
     const stored = await append($, {
       message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
-                 content: [{ type: 'text', text: wrapped(handed(STEER, text)) }] },
+                 content: [{ type: 'text', text: wrapped(text) }] },
       door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-1' })
     expect(w.appended).toEqual([[{ type: 'text', text: `<system-reminder>\n${text}\n</system-reminder>` }]])
     expect(w.submitted).toEqual([])
@@ -266,9 +268,10 @@ describe('delivery', () => {
     }
   })
 
-  // Identical texts can't be told apart once stored, so each goes to Claude with its ID tag and the mod strips it
-  // where the row is stored: each row names exactly one message, in either order, and
-  // neither is left "accepted, no confirmation" while the agent is live (CLAUDE-14; lifecycle's review of CLAUDE-15).
+  // Identical texts can't be told apart once stored. A steer queues clean, and Claude stores its queue in order, so
+  // identical steers are credited oldest first. A prompt the mod submits keeps its ID tag, which Claude stores
+  // cleaned, so each such row names exactly one message in either order. Neither is left "accepted, no
+  // confirmation" while the agent is live (CLAUDE-14).
   for (const order of ['in the order sent', 'the newer one first'] as const) {
     test(`identical messages each get their own receipt, stored ${order}`, async ($, on) => {
       const w = world(on)
@@ -285,8 +288,8 @@ describe('delivery', () => {
         await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${id}>>Please continue.<</MV2>>` })
       }
       await w.clock.settle()
-      // Each goes to Claude with its own tag.
-      expect(steers).toEqual([handed(STEER, 'Rebase first.'), handed(second(STEER), 'Rebase first.')])
+      // The steers go clean; the submitted prompts carry their own tag.
+      expect(steers).toEqual(['Rebase first.', 'Rebase first.'])
       const prompts = w.submitted.map((submitted) => submitted.text)
       expect(prompts).toEqual([handed(FOLLOW_UP, 'Please continue.'), handed(second(FOLLOW_UP), 'Please continue.')])
       const steered = (handed: string) => append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
@@ -296,7 +299,7 @@ describe('delivery', () => {
       const [one, other] = order === 'in the order sent' ? [0, 1] : [1, 0]
       if (!(await steered((steers[one] ?? '')))) return  // a kit with no core to store rows writes no receipts
       await w.clock.settle()
-      expect(receipts()).toEqual(named([STEER, second(STEER)][one] ?? ''))
+      expect(receipts()).toEqual(named(STEER))  // Claude's queue order, whichever copy the test hands down first
       await steered((steers[other] ?? ''))
       await prompted((prompts[one] ?? ''))
       await w.clock.settle()
@@ -308,6 +311,25 @@ describe('delivery', () => {
       expect(JSON.stringify(w.appended).includes('<<MV2')).toBe(false)
     })
   }
+
+  test('a stored steer is the waiting one whose whole text it holds, the longest first', async ($, on) => {
+    // Queued steers are told by their text alone; a short one inside a longer one must not take its row, or the
+    // longer one is left unconfirmed and the shorter one confirmed before Claude stored it.
+    const w = world(on)
+    const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts')).sort()
+    const longer = STEER.slice(0, -1) + '7'
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Rebase.<</MV2>>` })
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${longer}>>Rebase. Then test.<</MV2>>` })
+    const steered = (text: string) => append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped(text) }] }, door: 'delivery', origin: { kind: 'peer' } })
+    if (!(await steered('Rebase. Then test.'))) return  // a kit with no core to store rows writes no receipts
+    await w.clock.settle()
+    expect(receipts()).toEqual([`/agent/claude-receipts/${longer}.json`])
+    await steered('Rebase.')
+    await w.clock.settle()
+    expect(receipts()).toEqual([`/agent/claude-receipts/${longer}.json`, `/agent/claude-receipts/${STEER}.json`].sort())
+  })
 
   // A late message read as current is acted on as though nothing had changed since it was written; the age is
   // added where each row is stored, on two paths, so a break on either goes unnoticed.
@@ -373,7 +395,8 @@ describe('delivery', () => {
     await $.turn.start({ text: 'work', turnId: 't1' })
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Late.<</MV2>>` })
     await $.turn.complete(turnComplete('t1'))
-    const own = await $.prompt.submit({ text: handed(STEER, 'Late.'), origin: { kind: 'peer' }, wait: false } as never)
+    // Claude runs the queued text, which is clean, as a peer prompt of its own.
+    const own = await $.prompt.submit({ text: 'Late.', origin: { kind: 'peer' }, wait: false } as never)
     expect(own).toEqual({ drop: expect.any(String) })
     await w.clock.settle()
     expect(w.submitted).toEqual([{ text: handed(STEER, 'Late.'), asUser: true }])
@@ -386,8 +409,8 @@ describe('delivery', () => {
     await $.turn.start({ text: 'work', turnId: 't1' })
     await $.turn.complete({ ...turnComplete('t1'), isAborted: true, reason: 'aborted' as const })
     const text = 'Message from lead:\nRebase first.'
-    // Left in Claude's queue with only its ID tag, not submitted.
-    const queuedText = handed(STEER, text)
+    // Left in Claude's queue as its clean text, not submitted.
+    const queuedText = text
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>${text}<</MV2>>` })).toEqual({ text: queuedText })
     // Claude runs it as a turn of its own, and the mod lets it.
     expect(await $.prompt.submit({ text: queuedText, origin: { kind: 'peer' }, wait: false } as never))
@@ -403,7 +426,7 @@ describe('delivery', () => {
     await $.turn.start({ text, turnId: 't2' })
     await $.turn.complete(turnComplete('t2'))
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>Then test.<</MV2>>` }))
-      .toEqual({ text: handed(FOLLOW_UP, 'Then test.') })
+      .toEqual({ text: 'Then test.' })
     // The person's own input lifts it; the next message is submitted as before.
     await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false } as never)
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${ASK}>>Again.<</MV2>>` })).toEqual({ consumed: expect.any(String) })
@@ -419,7 +442,7 @@ describe('delivery', () => {
     await w.clock.settle()
     expect(w.logs.some((line) => line.includes('the session was stopped'))).toBe(true)
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${FOLLOW_UP}>>Second.<</MV2>>` }))
-      .toEqual({ text: handed(FOLLOW_UP, 'Second.') })
+      .toEqual({ text: 'Second.' })
   })
 
   test("Claude's own refusal after the idle timeout makes the receipt definite", async ($, on) => {
@@ -509,10 +532,40 @@ describe('delivery', () => {
     })
   }
 
-  test('a message that itself mentions the tags keeps them: only the outer envelope comes off', async ($, on) => {
-    // Every message travels tagged, so a body discussing this protocol (a literal <</MV2>> in code) must survive.
+  test('an old tagged peer row does not confirm a new clean steer after reload', async ($, on) => {
+    // An older mod queued STEER inside its tag; a reload forgot it, and this instance queued RETRY, a separate message
+    // with the same text, clean. STEER's row names STEER by its outer tag, so it must not confirm RETRY (lifecycle's
+    // review of the clean queued route); RETRY stays waiting for its own row.
     const w = world(on)
-    const body = 'Message from lead:\nThe closing marker is `<</MV2>>`, as in `<<MV2 id=x>>hi<</MV2>>`.'
+    const body = 'Message from lead:\nSame text.'
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${RETRY}>>${body}<</MV2>>` })
+    const stored = await append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped(handed(STEER, body)) }] }, door: 'delivery', origin: { kind: 'peer' } })
+    if (stored) {
+      await w.clock.settle()
+      expect(w.files.has(`/agent/claude-receipts/${STEER}.json`)).toBe(true)
+      expect(w.files.has(`/agent/claude-receipts/${RETRY}.json`)).toBe(false)
+    }
+    // The same on the own-turn route: the old message's peer prompt is the old message, and RETRY still waits.
+    const older = STEER.slice(0, -1) + '0'
+    await $.turn.complete(turnComplete('t1'))
+    expect(await $.prompt.submit({ text: handed(older, body), origin: { kind: 'peer' }, wait: false } as never))
+      .toEqual({ drop: expect.any(String) })
+    await w.clock.settle()
+    expect(w.submitted.at(-1)).toEqual({ text: handed(older, body), asUser: true })
+    expect(await $.prompt.submit({ text: body, origin: { kind: 'peer' }, wait: false } as never)).toEqual({ drop: expect.any(String) })
+    await w.clock.settle()
+    expect(w.submitted.at(-1)).toEqual({ text: handed(RETRY, body), asUser: true })
+  })
+
+  test('a message that itself mentions the tags keeps them: only the outer envelope comes off', async ($, on) => {
+    // A body discussing this protocol must survive whole: a literal <</MV2>>, and even a whole valid tag with a real
+    // ID inside it, is the message's own text. A prompt the mod submits travels tagged; a queued steer goes clean, and
+    // its row must still be the steer's, not the inner example's (lifecycle's review of the clean queued route).
+    const w = world(on)
+    const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts'))
+    const body = `Message from lead:\nThe closing marker is \`<</MV2>>\`, as in \`<<MV2 id=${ASK}>>hi<</MV2>>\`.`
     const prompted = (content: { type: 'text'; text: string }[]) => append($, { message: { type: 'user', role: 'user', content },
       door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>${body}<</MV2>>` })
@@ -528,9 +581,20 @@ describe('delivery', () => {
     // A mid-turn steer's peer row keeps it too.
     await $.turn.start({ text: 'work', turnId: 't1' })
     const queuedText = (await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>${body}<</MV2>>` }) as { text: string }).text
+    expect(queuedText).toBe(body)
     await append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
       content: [{ type: 'text', text: wrapped(queuedText) }] }, door: 'delivery', origin: { kind: 'peer' } })
     expect(w.appended.at(-1)).toEqual([{ type: 'text', text: `<system-reminder>\n${body}\n</system-reminder>` }])
+    await w.clock.settle()
+    expect(receipts()).toContain(`/agent/claude-receipts/${STEER}.json`)
+    expect(receipts()).not.toContain(`/agent/claude-receipts/${ASK}.json`)
+    // So does a steer no tool result took, which Claude runs as its own peer prompt: it is submitted whole.
+    const own = STEER.slice(0, -1) + '9'
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${own}>>${body}<</MV2>>` })
+    await $.turn.complete(turnComplete('t1'))
+    expect(await $.prompt.submit({ text: body, origin: { kind: 'peer' }, wait: false } as never)).toEqual({ drop: expect.any(String) })
+    await w.clock.settle()
+    expect(w.submitted.at(-1)).toEqual({ text: handed(own, body), asUser: true })
   })
 
   test('a row is credited by its own tag alone, even after a reload forgot what was waiting', async ($, on) => {
@@ -581,7 +645,7 @@ describe('delivery', () => {
     await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
     // A steer takes the queued way, right whether a turn is running or not; a follow-up is submitted, to run after.
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Rebase first.<</MV2>>` }))
-      .toEqual({ text: handed(STEER, 'Rebase first.') })
+      .toEqual({ text: 'Rebase first.' })
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>Then test.<</MV2>>` })
     await w.clock.settle()
     await w.clock.advance(60_000)

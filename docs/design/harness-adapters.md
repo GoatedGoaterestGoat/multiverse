@@ -1314,11 +1314,12 @@ framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`
 the mode, which the mod honors, and the message ID for its receipt. The mod acts
 only on tagged text and shows the model the text alone:
 
-- A steer arriving mid-turn keeps only its ID tag in `session.receive` (Claude's
-  queue line shows it until the row is stored). It merges at the next tool result
-  as a queued command, and `session.append` stores that row without the tag or
-  Claude's peer wrapper, so the model, the transcript and later resumes read the
-  text alone.
+- A steer arriving mid-turn is queued as its clean text in `session.receive`.
+  Claude keeps queued text as given, in its queue line, the stored row and the
+  screen, so a tag left in it would show for good. It merges at the next tool
+  result as a queued command, and `session.append` hands the model that row
+  without Claude's peer wrapper; the model, the transcript and later resumes read
+  the text alone.
 - A steer arriving while idle, and every follow-up, is taken in `session.receive`
   and submitted with `$.prompt.submit({ text, asUser: true })`: the model reads it
   bare, as the person's own words, in a turn of its own once the current turn has
@@ -1365,12 +1366,21 @@ whichever write finished last. Nothing is ever resubmitted.
 `get_delivery` reads it: delivered is accepted and transcript-confirmed, not
 delivered is a definite failure that `--retry` may send again, and no file, or
 one that can't be read or isn't definite, stays `unknown`. An earlier attempt's
-receipt names its own ID, so it never decides a retry. Every message goes to
-Claude tagged with its ID (and send time), as a queued steer and as a submitted
-prompt alike, and the mod strips the tag where Claude stores the row: a row is
-credited only by the tag in its own text, never by its text alone, since
-identical texts can't be told apart once stored and the mod forgets what is
-waiting when it reloads. `get_delivery` counts a receipt only when it names the
+receipt names its own ID, so it never decides a retry. A prompt the mod submits
+goes to Claude tagged with its ID (and send time), and
+the mod strips the tag where Claude stores the row, so that row is credited by
+its own tag, even after a reload. A queued steer goes clean, and its row is
+credited to the waiting steer whose whole text it holds: the longest, so a short
+text inside a longer one doesn't take its row, then the oldest, which is Claude's
+own queue order. When the row holds a tag as well, containment decides: a tag
+inside that text is the message's own words (a message about this protocol may
+quote one), so the steer wins; a tag around it is the outer envelope an older
+mod wrote, which names its message exactly, so the tag wins. That's safe because a message Claude may still hold is never
+retried, and one Claude refused is never stored, so a late copy and its retry
+are never both waiting with one text. Two different steers with the same text
+both waiting, the first lost silently, would credit the second's row to the
+first: reported wrongly, never sent twice. After a reload, which forgets what
+is waiting, a clean row is nobody's, and its message stays unconfirmed. `get_delivery` counts a receipt only when it names the
 requested ID in the shape the mod writes. It reads receipts (and `ask` answers) without waiting on
 the file and with a size bound: core holds the agent's launch and delivery locks
 while it reads, so a FIFO at a receipt's name, or anything too large to be one,
