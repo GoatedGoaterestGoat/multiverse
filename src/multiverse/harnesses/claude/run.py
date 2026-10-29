@@ -102,9 +102,57 @@ def session(messages, *, session_id, cwd, model, at):
             seen.add(row['uuid'])
         rows += made
         parent = made[-1]['uuid']
+    rows = ordered(rows)
+    for index, row in enumerate(rows):  # one linear chain in the stored order, which ordered() may have changed
+        row['parentUuid'] = rows[index - 1]['uuid'] if index else None
     if rows:
         check(rows)
     return rows
+
+
+def _answers(row):
+    """The tool call IDs a user row answers, when it holds tool results and nothing else; else None."""
+    content = row.get('message', {}).get('content') if row.get('type') == 'user' else None
+    if not isinstance(content, list) or not content:
+        return None
+    if not all(isinstance(block, dict) and block.get('type') == 'tool_result' for block in content):
+        return None
+    return {block.get('tool_use_id') for block in content}
+
+
+def ordered(rows):
+    """`rows` with each response's rows first and then the results of its calls, as the API saw that turn.
+
+    Claude stores one response as a row per block and runs its tool calls as they stream in, storing each result as
+    soon as the call ends, so a response with several calls can be stored call, call, result, call, result... (with
+    forked parent links). Read in that order its calls and results don't pair. A result row moves only when it holds
+    results and nothing else, for calls of the response it sits inside; anything else (a prompt, another response,
+    a result for some other call) ends the response there, and check() then judges the rows as they are. The
+    response's own rows keep their order and content, so a thinking block's signature still holds."""
+    result, index = [], 0
+    while index < len(rows):
+        row = rows[index]
+        message_id = row.get('message', {}).get('id') if row.get('type') == 'assistant' else None
+        if not message_id:
+            result.append(row)
+            index += 1
+            continue
+        said, answers, calls = [], [], set()
+        while index < len(rows):
+            row = rows[index]
+            answered = _answers(row)
+            if row.get('type') == 'assistant' and row.get('message', {}).get('id') == message_id:
+                said.append(row)
+                content = row['message'].get('content')
+                calls |= {block.get('id') for block in content if isinstance(block, dict) and
+                          block.get('type') == 'tool_use'} if isinstance(content, list) else set()
+            elif answered is not None and answered <= calls:
+                answers.append(row)
+            else:
+                break
+            index += 1
+        result += said + answers
+    return result
 
 
 def _messages(rows):

@@ -12,6 +12,7 @@ from multiverse.harnesses.types import (RunDirectory, RunFailure, RunImage, RunM
                                         RunRequest, RunRow, RunText)
 
 
+FIXTURES = Path(__file__).parent / 'fixtures' / 'claude'
 SESSION, CWD, MODEL, AT = '11111111-1111-4111-8111-111111111111', '/runs/r1', 'claude-haiku-4-5', '2026-10-29T00:00:00Z'
 
 
@@ -90,6 +91,12 @@ class ClaudeRunTest(unittest.TestCase):
         cases = {
             'parallel calls answered in separate rows': ([u(text), a(call('c1'), mid='m1'), a(call('c2'), mid='m1'),
                                                           u(result('c1')), u(result('c2')), a(text, mid='m2')], True),
+            "one response's results stored between its calls": ([u(text), a(call('c1'), mid='m1'), a(call('c2'), mid='m1'),
+                                                                 u(result('c1')), a(call('c3'), mid='m1'),
+                                                                 u(result('c2')), u(result('c3')), a(text, mid='m2')],
+                                                                True),
+            "a prompt between one response's calls": ([u(text), a(call('c1'), mid='m1'), u(text), a(call('c2'), mid='m1'),
+                                                       u(result('c1')), u(result('c2')), a(text, mid='m2')], False),
             'ends with a user message': ([u(text), a(text), u(text)], False),
             'a call never answered': ([u(text), a(call('c1')), a(text, mid='m2')], False),
             'a call answered at the end': ([u(text), a(call('c1'))], False),
@@ -99,12 +106,32 @@ class ClaudeRunTest(unittest.TestCase):
             'one result twice': ([u(text), a(call('c1')), u(result('c1')), u(result('c1')), a(text, mid='m2')], False),
         }
         for name, (rows, fine) in cases.items():
-            with self.subTest(name):
+            with self.subTest(name):  # in the order the session file stores them (run.ordered), as session() checks
                 if fine:
-                    run.check(rows)
+                    run.check(run.ordered(rows))
                 else:
                     with self.assertRaises(run.Unusable):
-                        run.check(rows)
+                        run.check(run.ordered(rows))
+
+    def test_a_response_whose_calls_ran_as_they_streamed_is_stored_as_one_message(self):
+        """A real Claude 2.1.312 response (COMPACTION-9): its thinking and nine parallel Read calls stored one row
+        each, with each call's result stored as soon as it ran, so results sit between the calls; fragile because
+        read in the stored order the turn fails the pairing check and can never be compacted, and because moving
+        the response's own rows would break its thinking signature."""
+        stored = [json.loads(line) for line in (FIXTURES / 'parallel-calls.jsonl').read_text().splitlines()]
+        rows = run.session([RunRow(format='claude-jsonl', data=row) for row in stored], session_id=SESSION, cwd=CWD,
+                           model=MODEL, at=AT)
+        merged = run._messages(rows)
+        self.assertEqual([role for role, _ in merged], ['user', 'assistant', 'user', 'assistant'])
+        response, results = merged[1][1], merged[2][1]
+        calls = [block['id'] for block in response if block['type'] == 'tool_use']
+        self.assertEqual(response[0]['type'], 'thinking')
+        self.assertEqual(len(calls), 9)
+        self.assertEqual([block['tool_use_id'] for block in results], calls)  # each call's result, in call order
+        thinking = next(row for row in stored if isinstance(row['message']['content'], list)
+                        and row['message']['content'][0]['type'] == 'thinking')
+        self.assertEqual(rows[1]['message']['content'], thinking['message']['content'])  # signed content copied as is
+        self.assertTrue(chain(rows))
 
     def test_the_command_runs_one_tool_less_turn_on_the_given_prompt(self):
         """The run's command line; fragile because without --system-prompt-snapshot off a resumed session could

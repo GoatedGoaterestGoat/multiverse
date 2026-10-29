@@ -354,6 +354,12 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   recorded usage is cleared, since Claude sizes a resumed session from the last
   usage it finds and would refuse a small run as too long. Each keeps its
   recorded model: copied thinking carries the writing model's signature.
+  Claude runs a response's tool calls as they stream in and stores each
+  result as soon as its call ends, so one response with several calls can be
+  stored call, call, result, call, result. The session lays such a response
+  out as the API saw it: its own rows in their stored order, then the rows
+  holding the results of its calls. Only a row that holds nothing but results
+  for that response's calls moves; anything else ends the response there.
 - **Messages** (built) are stored the way Claude stores them: a user message
   as one row, images only there; an assistant message as one row per block,
   sharing one message ID, `end_turn` on the last only, on the run's model,
