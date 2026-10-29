@@ -340,8 +340,12 @@ are created exclusively with private permissions and a metadata-only ownership
 journal precedes their contents. Core removes only files with the recorded file
 identity and empty folders it created inside that run and its declared store
 path; shared nonempty store parents stay put. The plugin and owner namespace
-folders above the run directory are shared by concurrent runs and may remain
-empty after cleanup.
+folders above the run directory are removed once empty, only while their recorded
+identities still match. A short, bounded lock on the persistent run root coordinates
+namespace creation and removal so cleanup cannot unlink a new run's open parent;
+no lock spans the model call. Another run keeps these folders nonempty, and the
+last run removes them. Older journals without namespace identities leave those
+parents alone.
 
 A disposable supervisor owns the child's new process group. One deadline covers
 preparation, execution and interpretation; cancellation, timeout and the calling

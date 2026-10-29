@@ -1,5 +1,7 @@
 """Private one-shot files and content-free cleanup journals. Never repair an agent's directory."""
+from contextlib import contextmanager
 import errno
+import fcntl
 import json
 from itertools import islice
 import os
@@ -13,6 +15,7 @@ from .process import process_snapshot, start_matches, valid_start
 
 JOURNAL_BYTES = 128 << 10
 MAX_SWEEP = 128
+NAMESPACE_SECONDS = 1
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z')
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
@@ -117,15 +120,44 @@ def save(directory, record):
         os.close(descriptor)
 
 
-def create(directory, record):
-    parent = _mkdir(directory.parent, [])  # Shared namespace parents contain no run content.
+@contextmanager
+def _namespace_lock(directory, *, create=False):
+    """Serialize only namespace publication/removal; the persistent run root is the lock, not a new file."""
+    base = directory.parents[2]
+    descriptor = _mkdir(base, []) if create else _open_directory(base)
     try:
-        os.mkdir(directory.name, 0o700, dir_fd=parent)  # Never reuse even an empty run directory.
-        fd = os.open(directory.name, FLAGS, dir_fd=parent)
-        record['directory_identity'] = identity(os.fstat(fd))
-        os.close(fd)
+        deadline = time.monotonic() + NAMESPACE_SECONDS
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError('Run namespace is busy') from None
+                time.sleep(.01)
+        yield
     finally:
-        os.close(parent)
+        os.close(descriptor)
+
+
+def create(directory, record):
+    with _namespace_lock(directory, create=True):
+        parent = _mkdir(directory.parent, [])
+        try:
+            plugin = _open_directory(directory.parent.parent)
+            try:
+                record['namespaces'] = [
+                    {'path': str(directory.parent.parent), 'identity': identity(os.fstat(plugin))},
+                    {'path': str(directory.parent), 'identity': identity(os.fstat(parent))},
+                ]
+            finally:
+                os.close(plugin)
+            os.mkdir(directory.name, 0o700, dir_fd=parent)  # Never reuse even an empty run directory.
+            fd = os.open(directory.name, FLAGS, dir_fd=parent)
+            record['directory_identity'] = identity(os.fstat(fd))
+            os.close(fd)
+        finally:
+            os.close(parent)
     record.update(schema=1, phase='preparing', files=[], directories=[])
     save(directory, record)  # No content can precede this journal.
 
@@ -165,6 +197,14 @@ def _validate(directory, record):
             or not isinstance(record.get('files'), list) or not isinstance(record.get('directories'), list)
             or len(record['files']) > 16 or len(record['directories']) > 128):
         raise ValueError('Invalid run cleanup metadata')
+    namespaces = record.get('namespaces', [])  # Older journals cannot authorize pruning their parents.
+    if not isinstance(namespaces, list) or len(namespaces) not in (0, 2):
+        raise ValueError('Invalid run namespaces')
+    for item, path in zip(namespaces, (directory.parent.parent, directory.parent)):
+        if (not isinstance(item, dict) or item.get('path') != str(path)
+                or not isinstance(item.get('identity'), list) or len(item['identity']) != 2
+                or not all(type(n) is int and n >= 0 for n in item['identity'])):
+            raise ValueError('Invalid run namespace ownership')
     home = record.get('store')
     home = Path(home) if isinstance(home, str) and home else None
     if home is not None and (not home.is_absolute() or '..' in home.parts or home == Path('/')):
@@ -241,14 +281,20 @@ def cleanup(directory, record):
         # directory is left alone; a run's own final folder still needs a complete cleanup.
         shared = any(Path(entry['path']) in parent.parents for parent in parents)
         _unlink(entry, directory=True, shared_parent=shared)
-    descriptor = _open_directory(directory)
-    try:
-        if set(os.listdir(descriptor)) != {'run.json'}:
-            raise ValueError('Unrecorded files remain in the run directory')
-        os.unlink('run.json', dir_fd=descriptor)
-    finally:
-        os.close(descriptor)
-    _unlink({'path': str(directory), 'identity': record['directory_identity']}, directory=True)
+    with _namespace_lock(directory):
+        descriptor = _open_directory(directory)
+        try:
+            if set(os.listdir(descriptor)) != {'run.json'}:
+                raise ValueError('Unrecorded files remain in the run directory')
+            os.unlink('run.json', dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+        _unlink({'path': str(directory), 'identity': record['directory_identity']}, directory=True)
+        for entry in reversed(record.get('namespaces', [])):
+            try:
+                _unlink(entry, directory=True, shared_parent=True)
+            except (OSError, ValueError):
+                break  # Shared parents are best effort; never remove a replacement or anything nonempty.
     return True
 
 

@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 from dataclasses import replace
+import fcntl
 import io
 import json
 import os
@@ -79,6 +80,8 @@ class RunsTest(BaseTest):
     def no_content(self):
         self.assertEqual(list(runs.base().rglob('run.json')), [])
         self.assertEqual(list((self.work / 'store').rglob('*.jsonl')), [])
+        if runs.base().exists():
+            self.assertEqual(list(runs.base().iterdir()), [])
 
     def test_private_files_environment_and_parallel_calls_are_isolated(self):
         """Concurrent runs use separate private files and a scrubbed snapshot; a break can mix contexts or inherit
@@ -343,3 +346,107 @@ class RunsTest(BaseTest):
                     if condition == 'file replaced': self.assertEqual((directory/'input').read_text(), 'someone else')
                     if condition == 'symlink': self.assertTrue((directory/'input').is_symlink())
                     shutil.rmtree(directory)
+
+    def test_empty_namespaces_preserve_concurrent_starts_and_replacements(self):
+        """Empty namespaces must disappear without deleting a replacement or invalidating a concurrent start."""
+        def prepared(plugin='fixture', owner='fake'):
+            directory = runs.base() / plugin / owner / str(uuid4())
+            record = {'run_id': directory.name, 'directory': str(directory), 'universe': str(self.root),
+                      'store': None, 'declared': [], 'owner': None, 'supervisor': None, 'child': None}
+            run_files.create(directory, record)
+            return directory, record
+
+        for other in (('fixture', 'fake'), ('fixture', 'other'), ('other-plugin', 'fake')):
+            with self.subTest(sibling=other):
+                first, a = prepared()
+                second, b = prepared(*other)
+                run_files.cleanup(first, a)
+                self.assertTrue((second / 'run.json').is_file())
+                self.assertEqual(first.parent.exists(), first.parent == second.parent)
+                self.assertEqual(first.parent.parent.exists(), first.parent.parent == second.parent.parent)
+                run_files.cleanup(second, b)
+                self.assertEqual(list(runs.base().iterdir()), [])
+
+        for condition in ('legacy', 'replaced owner', 'replaced plugin', 'invalid namespace'):
+            with self.subTest(condition):
+                directory, record = prepared()
+                outside = self.work / ('outside-' + condition.replace(' ', '-'))
+                if condition == 'legacy':
+                    record.pop('namespaces')
+                elif condition.startswith('replaced'):
+                    parent = directory.parent if condition == 'replaced owner' else directory.parent.parent
+                    parent.rename(outside)
+                    directory.parent.mkdir(parents=True)
+                    old = outside / directory.name if condition == 'replaced owner' else outside / 'fake' / directory.name
+                    old.rename(directory)
+                else:
+                    outside.mkdir()
+                    record['namespaces'][0] = {'path': str(outside), 'identity': run_files.identity(outside.stat())}
+                run_files.save(directory, record)
+                if condition == 'invalid namespace':
+                    with self.assertRaises(ValueError): run_files.cleanup(directory, record)
+                    self.assertTrue((directory / 'run.json').is_file())
+                    self.assertTrue(outside.is_dir())
+                else:
+                    run_files.cleanup(directory, record)
+                    self.assertFalse(directory.exists())
+                self.assertTrue(directory.parent.is_dir())
+                shutil.rmtree(directory.parent.parent)
+
+        with self.subTest('a busy namespace lock leaves the cleanup journal intact'):
+            directory, record = prepared()
+            descriptor = os.open(runs.base(), os.O_RDONLY | os.O_DIRECTORY)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            with ThreadPoolExecutor(max_workers=1) as pool, patch.object(run_files, 'NAMESPACE_SECONDS', 0):
+                try:
+                    future = pool.submit(run_files.cleanup, directory, record)
+                    with self.assertRaisesRegex(ValueError, 'namespace is busy'): future.result(timeout=5)
+                    self.assertTrue((directory / 'run.json').is_file())
+                finally:
+                    os.close(descriptor)
+            run_files.cleanup(directory, record)
+
+        with self.subTest('cleanup waits while a new run holds its still-empty owner directory'):
+            first, a = prepared()
+            second = first.with_name(str(uuid4()))
+            b = {**a, 'run_id': second.name, 'directory': str(second)}
+            parent_open, release, cleanup_blocked = (threading.Event() for _ in range(3))
+            cleaning = []
+            mkdir, flock = run_files._mkdir, fcntl.flock
+
+            def held_parent(path, made):
+                descriptor = mkdir(path, made)
+                if path == second.parent:
+                    parent_open.set()
+                    if not release.wait(5):
+                        os.close(descriptor)
+                        raise TimeoutError('parent barrier was not released')
+                return descriptor
+
+            def observed_lock(descriptor, operation):
+                try:
+                    return flock(descriptor, operation)
+                except BlockingIOError:
+                    if threading.get_ident() in cleaning: cleanup_blocked.set()
+                    raise
+
+            def clean_first():
+                cleaning.append(threading.get_ident())
+                return run_files.cleanup(first, a)
+
+            with ThreadPoolExecutor(max_workers=2) as pool, patch.object(run_files, '_mkdir', held_parent), \
+                    patch.object(fcntl, 'flock', observed_lock), patch.object(run_files, 'NAMESPACE_SECONDS', 10):
+                starting = pool.submit(run_files.create, second, b)
+                try:
+                    self.assertTrue(parent_open.wait(5))
+                    finishing = pool.submit(clean_first)
+                    self.assertTrue(cleanup_blocked.wait(5))
+                    self.assertTrue(second.parent.is_dir())
+                finally:
+                    release.set()
+                starting.result(timeout=5)
+                finishing.result(timeout=5)
+            self.assertFalse(first.exists())
+            self.assertTrue((second / 'run.json').is_file())
+            run_files.cleanup(second, b)
+            self.assertEqual(list(runs.base().iterdir()), [])
