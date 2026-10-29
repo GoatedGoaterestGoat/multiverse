@@ -61,7 +61,7 @@ In the dashboard, press `n` to start an agent, `Enter` to open its terminal and 
 
 ## Contributing
 
-Start with [contributing](docs/develop/contributing.md) and the [architecture](docs/develop/architecture.md) notes. Coding agents working on this repository should follow [AGENTS.md](AGENTS.md).
+Start with [contributing](docs/develop/contributing.md) and the [architecture](docs/develop/architecture.md) notes.
 
 ## License
 
