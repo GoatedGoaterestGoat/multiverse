@@ -156,15 +156,18 @@ def check(rows):
 def command(executable, *, prompt, session_id, model, effort, system):
     """The run's command line: no tools, MCP servers, commands or project settings, one turn, JSON out, and the
     run's own system prompt fresh on every request (`--system-prompt-snapshot off`, 2.1.267 and newer). With no
-    `session_id` (a run without messages) there is nothing to resume, and Claude answers the prompt alone."""
+    `session_id` (a run without messages) there is nothing to resume, and Claude answers the prompt alone.
+
+    The prompt comes last, after `--`, so Claude reads it as text whatever it starts with: before `--`, a prompt
+    of `--version` or `--resume=ID` is an option, and the second makes the run read another conversation."""
     strip = lambda text: text.replace('\x00', '')
     resume = ['--resume', session_id] if session_id is not None else []
-    argv = [executable, '-p', strip(prompt), *resume, '--no-session-persistence', '--tools', '',
+    argv = [executable, '-p', *resume, '--no-session-persistence', '--tools', '',
             '--strict-mcp-config', '--disable-slash-commands', '--setting-sources', 'user', '--max-turns', '1',
             '--output-format', 'json', '--model', model]
     if effort is not None:
         argv += ['--effort', effort]
-    return argv + ['--system-prompt', strip(system), '--system-prompt-snapshot', 'off']
+    return argv + ['--system-prompt', strip(system), '--system-prompt-snapshot', 'off', '--', strip(prompt)]
 
 
 def environment(transport_retries):

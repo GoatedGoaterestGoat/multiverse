@@ -15,6 +15,14 @@ from multiverse.harnesses.types import (RunDirectory, RunFailure, RunImage, RunM
 SESSION, CWD, MODEL, AT = '11111111-1111-4111-8111-111111111111', '/runs/r1', 'claude-haiku-4-5', '2026-10-29T00:00:00Z'
 
 
+def stand_in(folder, version):
+    """A program named claude in `folder` that only answers --version, as Claude Code `version`."""
+    binary = Path(folder) / 'claude'
+    binary.write_text(f'#!/bin/sh\necho "{version} (Claude Code)"\n')
+    binary.chmod(0o700)
+    return binary
+
+
 def chain(rows):
     """Whether rows after the title form one linear parent chain."""
     talk = rows
@@ -103,12 +111,22 @@ class ClaudeRunTest(unittest.TestCase):
         answer under a prompt Claude recorded instead of the run's own, and a NUL in the prompt stops Claude."""
         argv = run.command('claude', prompt='Merge\x00 these', session_id=SESSION, model='haiku', effort=None,
                            system='Only JSON')
-        self.assertEqual(argv[:5], ['claude', '-p', 'Merge these', '--resume', SESSION])
+        self.assertEqual(argv[:4], ['claude', '-p', '--resume', SESSION])
         self.assertEqual(argv[argv.index('--tools') + 1], '')
-        self.assertEqual(argv[-4:], ['--system-prompt', 'Only JSON', '--system-prompt-snapshot', 'off'])
+        self.assertEqual(argv[-6:], ['--system-prompt', 'Only JSON', '--system-prompt-snapshot', 'off', '--', 'Merge these'])
         self.assertNotIn('--effort', argv)  # a model that takes no effort gets none
-        self.assertEqual(run.command('claude', prompt='p', session_id=SESSION, model='m', effort='low', system='s')
-                         [-6:-4], ['--effort', 'low'])
+        low = run.command('claude', prompt='p', session_id=SESSION, model='m', effort='low', system='s')
+        self.assertEqual(low[low.index('--effort'):low.index('--effort') + 2], ['--effort', 'low'])
+        # A prompt is text whatever it starts with: Claude reads anything after `--` as the prompt, so
+        # `--resume=ID` can never pick another conversation. A dash-led system prompt is --system-prompt's value.
+        for prompt in ('--version', '--resume=11111111-1111-4111-8111-111111111111', '-p'):
+            for session_id in (SESSION, None):
+                with self.subTest(prompt=prompt, session=session_id):
+                    argv = run.command('claude', prompt=prompt, session_id=session_id, model='haiku', effort=None,
+                                       system='--version')
+                    self.assertEqual(argv[-2:], ['--', prompt])
+                    self.assertEqual(argv.count('--'), 1)
+                    self.assertEqual(argv[argv.index('--system-prompt') + 1], '--version')
         self.assertEqual(run.environment(3)['CLAUDE_CODE_MAX_RETRIES'], '3')
         self.assertEqual(run.environment(0)['CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK'], '1')
         for bad in (-1, 16, True, '3'):
@@ -154,9 +172,13 @@ class ClaudeRunTest(unittest.TestCase):
     def test_the_plan_writes_the_session_claude_resumes_and_reads_its_reply(self):
         """What core writes and runs for a Claude run; fragile because the session file must sit in the selected
         store's project folder for the run directory's real path under the run's own ID, or Claude resumes nothing,
-        and messages Claude would refuse must fail before anything is written or spent."""
+        and messages Claude would refuse must fail before anything is written or spent; and the Claude whose version
+        is checked must be the one that runs, though the run's PATH (a harness setting) differs from this process's."""
         adapter = claude.ClaudeAdapter.configured('claude', {})
-        environment = {'PATH': os.environ.get('PATH', '')}
+        installed = tempfile.TemporaryDirectory()
+        self.addCleanup(installed.cleanup)
+        binary = stand_in(installed.name, '2.1.312')
+        environment = {'PATH': installed.name}
         with tempfile.TemporaryDirectory() as folder:
             directory = RunDirectory(path=Path(folder), id=SESSION)
             request = RunRequest(messages=(RunMessage(role='user', blocks=(RunText(text='Hi'),)),
@@ -169,6 +191,7 @@ class ClaudeRunTest(unittest.TestCase):
         rows = [json.loads(line) for line in file.content.decode().splitlines()]
         self.assertEqual({(r['sessionId'], r['cwd']) for r in rows}, {(SESSION, real)})
         argv = list(plan.command.argv)
+        self.assertEqual(argv[0], os.path.abspath(binary))  # the one run_options checked, not a name to look up
         self.assertEqual(argv[argv.index('--resume') + 1], SESSION)
         self.assertEqual(argv[argv.index('--model') + 1], 'claude-haiku-5-5')  # resolved for the provider
         self.assertEqual(plan.command.environment['CLAUDE_CODE_MAX_RETRIES'], '2')
@@ -219,10 +242,22 @@ class ClaudeRunTest(unittest.TestCase):
                                      run=RunDirectory(path=Path(folder), id=SESSION))
             self.assertEqual(alone.files, ())
             self.assertNotIn('--resume', alone.command.argv)
-            self.assertEqual(alone.command.argv[1:3], ('-p', 'Go on'))
-        with patch.object(claude, 'claude_version', return_value=(2, 1, 266)):
-            self.assertFalse(adapter.run_options(environment=environment).supported)
+            self.assertEqual((alone.command.argv[1], alone.command.argv[-2:]), ('-p', ('--', 'Go on')))
+        with tempfile.TemporaryDirectory() as old_folder, tempfile.TemporaryDirectory() as new_folder:
+            old, new = stand_in(old_folder, '2.1.266'), stand_in(new_folder, '2.1.312')
+            for name, inherited, selected, supported in (("the run's PATH has a Claude new enough", old, new, True),
+                                                         ("the run's PATH has one too old", new, old, False)):
+                with self.subTest(name), patch.dict(os.environ, {'PATH': str(inherited.parent)}), \
+                        tempfile.TemporaryDirectory() as folder:
+                    selected_environment = {'PATH': str(selected.parent)}
+                    self.assertEqual(adapter.run_options(environment=selected_environment).supported, supported)
+                    plan = adapter.run_plan(request, environment=selected_environment,
+                                            run=RunDirectory(path=Path(folder), id=SESSION))
+                    self.assertEqual(plan.command.argv[0], os.path.abspath(selected))
         self.assertFalse(adapter.run_options(environment={'PATH': ''}).supported)  # not installed
+        with tempfile.TemporaryDirectory() as folder, self.assertRaises(RunFailure) as failed:
+            adapter.run_plan(request, environment={'PATH': ''}, run=RunDirectory(path=Path(folder), id=SESSION))
+        self.assertEqual(failed.exception.kind, 'unavailable')
 
 
 def replace_messages(request, messages, **changes):

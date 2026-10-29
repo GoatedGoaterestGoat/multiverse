@@ -316,13 +316,20 @@ whose key would pass 200 characters gets Claude's own shortened name: its first
 200, `-`, and a base-36 hash of the path:
 
 ```text
-claude -p PROMPT --resume RUN_ID --no-session-persistence --tools ''
+CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   --strict-mcp-config --disable-slash-commands --setting-sources user
   --max-turns 1 --output-format json --model M [--effort E]
-  --system-prompt S --system-prompt-snapshot off
+  --system-prompt S --system-prompt-snapshot off -- PROMPT
 ```
 
-- **Command.** `--max-turns` is hidden in Claude Code's help but present.
+- **Command.** `CLAUDE` is the harness's `claude` looked up once on the
+  run's own `PATH`, as one absolute path: `run_options()` checks that
+  binary's version and the plan runs it, so a `PATH` from the harness's
+  settings can't make the check and the run use different Claudes. The
+  prompt comes last, after `--`, so Claude reads it as text whatever it
+  starts with; before `--`, a prompt such as `--resume=ID` would be an option
+  and read another conversation. `--max-turns` is hidden in Claude Code's
+  help but present.
   `--system-prompt-snapshot off` (2.1.267 and newer; `run_options()` refuses
   an older Claude) keeps a recorded prompt from replacing the run's own. The
   model and effort are the ones `check_model` resolved for the provider; a

@@ -1213,14 +1213,26 @@ class ClaudeAdapter(ConfiguredAdapter):
     def run_options(self, *, environment):
         """What a one-shot run can do (the run protocol, run.py): any Claude Code from 2.1.267 on, which takes
         --system-prompt-snapshot; images kept; rows of Claude's own transcripts passed through."""
-        executable = self.spec['spawn'][0]
-        if shutil.which(executable, path=environment.get('PATH')) is None:
-            return RunOptions(supported=False, reason=f'Claude Code is not installed ({executable} not found)')
+        executable = self._run_executable(environment)
+        if executable is None:
+            return RunOptions(supported=False,
+                              reason=f"Claude Code is not installed ({self.spec['spawn'][0]} not found)")
         version = claude_version(executable)
         if version is not None and version < SNAPSHOT_FLAG_VERSION:
             return RunOptions(supported=False, reason=f"Claude Code {'.'.join(map(str, version))} is older than "
                                                       f"{'.'.join(map(str, SNAPSHOT_FLAG_VERSION))}, which runs need")
         return RunOptions(supported=True, images=True, formats=(one_shot.FORMAT,), transport_retries=one_shot.RETRIES)
+
+    def _run_executable(self, environment):
+        """The Claude a run with `environment` starts, as one absolute path, or None when it isn't installed.
+
+        Looked up the way the run's own process looks it up (its PATH, else the system default), so the version
+        run_options checks and the binary run_plan runs are the same one; the name alone would be looked up
+        again on this process's PATH, which a harness's settings can change."""
+        exe_path = os.pathsep.join(os.get_exec_path({key: value for key, value in environment.items()
+                                                     if isinstance(value, str)}))
+        found = shutil.which(self.spec['spawn'][0], path=exe_path)
+        return os.path.abspath(found) if found else None
 
     def run_plan(self, request, *, environment, run):
         """The one-shot run for `request` in core's run directory `run`: Claude resumes a session file written in
@@ -1242,7 +1254,10 @@ class ClaudeAdapter(ConfiguredAdapter):
             raise RunFailure('invalid_request', str(error)) from None
         content = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
         # No messages: a question on its own, answered without a session to resume or a file to write.
-        argv = one_shot.command(self.spec['spawn'][0], prompt=request.prompt, session_id=run.id if rows else None,
+        executable = self._run_executable(environment)
+        if executable is None:
+            raise RunFailure('unavailable', f"Claude Code is not installed ({self.spec['spawn'][0]} not found)")
+        argv = one_shot.command(executable, prompt=request.prompt, session_id=run.id if rows else None,
                                 model=model, effort=effort, system=request.system)
 
         def interpret(outcome):
