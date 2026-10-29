@@ -265,7 +265,8 @@ adapter reads only the variables it needs from it.
 `harness.run_once(messages, prompt=, system=, model=, effort=, agent=,
 transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
 `models.FAMILY`) gets one model reply to a context the plugin supplies, with
-no tools and no saved conversation. `run_options()` (`observe`) says whether a
+no tools and no saved conversation. `run_options()` (`observe`, but it may start
+the harness once per process to read its version) says whether a
 harness runs at all and what it keeps. Claude implements it; Codex, Pi and
 custom harnesses report it unsupported.
 

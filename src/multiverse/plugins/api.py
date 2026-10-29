@@ -1328,7 +1328,9 @@ class Harness:
 
     def run_options(self):
         """What a one-shot run on this harness supports (1.14; observe): whether it runs at all and why not,
-        whether images are kept, the native row formats it takes and the transport_retries it accepts."""
+        whether images are kept, the native row formats it takes and the transport_retries it accepts. Not free:
+        its first call in a process may start the harness to read its version, so call it from a command, helper
+        or service thread, never from capability, usage, column, panel or doctor code."""
         from .. import harnesses
         from ..runtime import runs
         with _acting(self._universe._plugin._loaded, "observe", self._universe, f"reading {self.name}'s run options"):
