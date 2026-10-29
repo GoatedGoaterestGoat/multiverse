@@ -301,7 +301,7 @@ custom harnesses report it unsupported.
   `cancelled`, `unavailable`, `failed`) and `retry_after`, carrying the
   harness's own error text and never the run's input or reply.
 - **Records.** Each run appends its metadata (time, harness, model, agent,
-  tokens, cost, duration, outcome) to `state/plugins/NAME/runs.jsonl` in the
+  input, output and cache read and write tokens, cost, duration, outcome) to `state/plugins/NAME/runs.jsonl` in the
   run's universe, never content; `mv2 plugins info` sums the last day. The
   event journal is not that record: it is written only while a plugin
   subscribes, and pruned.

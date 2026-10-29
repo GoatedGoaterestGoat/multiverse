@@ -37,7 +37,7 @@ class RunApiTest(PluginTestCase):
             if isinstance(answer, Exception):
                 raise answer
             return answer or types.RunReply(text="Only the plugin sees this", model="claude-haiku-4-5", usage={"input": 3,
-                                            "output": 1}, cost_usd=0.0004, stop="end_turn", duration=1.5)
+                                            "output": 1, "cache_read": 40, "cache_write": 606}, cost_usd=0.0004, stop="end_turn", duration=1.5)
         return mock.patch.multiple(runs, run_once=run_once, options=lambda adapter, *, environment: options)
 
     def run_once(self, messages=(), **keywords):
@@ -131,7 +131,8 @@ class RunApiTest(PluginTestCase):
                              transport_retries=2, timeout=30, cancel=cancel)
             request, keywords = self.calls[-1]
             self.assertEqual((reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop),
-                             ("Only the plugin sees this", "claude-haiku-4-5", {"input": 3, "output": 1}, 0.0004,
+                             ("Only the plugin sees this", "claude-haiku-4-5",
+                              {"input": 3, "output": 1, "cache_read": 40, "cache_write": 606}, 0.0004,
                               "end_turn"))
             self.assertIsInstance(reply.usage, dict)
             self.assertEqual([type(item).__name__ for item in request.messages], ["RunRow", "RunRow", "RunMessage",
@@ -186,6 +187,7 @@ class RunApiTest(PluginTestCase):
         self.assertEqual([item["outcome"] for item in records], ["ok", "ok", "ok", "ok", "rate_limit", "cancelled"])
         self.assertEqual((records[0]["agent"], records[0]["input_tokens"], records[0]["cost_usd"], records[0]["duration"]),
                          (worker.id, 3, 0.0004, 1.5))
+        self.assertEqual((records[0]["cache_read_tokens"], records[0]["cache_write_tokens"]), (40, 606))
         written = run_records.path(self.root, "runner").read_text()
         for content in ("Hello there", "Summarise", "You summarise", "Look", "Seen", "Only the plugin sees"):
             self.assertNotIn(content, written)  # metadata only, never what was sent or answered

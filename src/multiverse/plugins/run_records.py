@@ -8,7 +8,8 @@ from pathlib import Path
 from . import loader
 
 FILE = "runs.jsonl"
-FIELDS = ("at", "harness", "model", "agent", "input_tokens", "output_tokens", "cost_usd", "duration", "outcome")
+FIELDS = ("at", "harness", "model", "agent", "input_tokens", "output_tokens", "cache_read_tokens",
+          "cache_write_tokens", "cost_usd", "duration", "outcome")
 
 
 def path(root, plugin):

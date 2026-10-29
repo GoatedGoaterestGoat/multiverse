@@ -254,7 +254,7 @@ reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop, reply.lost
 - **`cancel`**, a `threading.Event`, stops the run from another thread. `run_once` is safe from several threads at once and installs no signal handlers. Call it from a helper action, a service thread or the plugin host, not from a column, panel or settings check, which run as `observe` under a 2-second budget.
 - **`run_options()` takes a moment too:** it's `observe`, but its first call in a process may start the harness to read its version (Claude: `claude --version`, up to 10 seconds, then remembered per executable). Like `run_once()`, call it from a command, a helper action or a service thread, not from capability, usage, column, panel, settings-check or doctor code, where it would run past the 2-second budget and come back as "could not answer".
 - **What still loads:** your own Claude settings, so their enabled plugins' hooks, but no MCP servers, CLAUDE.md files or auto memory. The model gets no tools.
-- **Records:** each run's metadata (time, harness, model, agent, tokens, cost, duration, outcome), never its content, goes to `state/plugins/NAME/runs.jsonl` in the run's universe. `mv2 plugins info NAME` shows the last day's runs and cost.
+- **Records:** each run's metadata (time, harness, model, agent, input, output and cache read and write tokens, cost, duration, outcome), never its content, goes to `state/plugins/NAME/runs.jsonl` in the run's universe. `mv2 plugins info NAME` shows the last day's runs and cost.
 
 ### Permissions
 

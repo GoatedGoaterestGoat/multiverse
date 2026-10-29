@@ -1477,6 +1477,7 @@ class Harness:
         run_records.record(self._universe.path, self._universe._plugin.name, harness=self.name, model=model,
                            agent=agent.id if agent is not None else None,
                            input_tokens=usage.get("input"), output_tokens=usage.get("output"),
+                           cache_read_tokens=usage.get("cache_read"), cache_write_tokens=usage.get("cache_write"),
                            cost_usd=getattr(outcome, "cost_usd", None),
                            duration=round(getattr(outcome, "duration", 0.0) or 0.0, 3), outcome=kind)
 
