@@ -1338,7 +1338,7 @@ class Harness:
             environment = _absolute_storage(adapter, _launch_environment(adapter), os.getcwd())
             return _from_core(RunOptions, _call(runs.options, adapter, environment=environment))
 
-    def run_once(self, messages, *, prompt, system, model, effort=None, agent=None, transport_retries=None,
+    def run_once(self, messages=(), *, prompt, system, model, effort=None, agent=None, transport_retries=None,
                  timeout=600, cancel=None):
         """Run the model once, with no tools and no saved conversation, on `messages` then `prompt` (1.14; spend,
         needs models.FAMILY). `messages`: Rows of this harness's format with their bodies (the native passthrough,

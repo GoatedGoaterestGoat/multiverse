@@ -238,9 +238,9 @@ options = claude.run_options()                # observe: .supported, .reason, .i
 reply = claude.run_once(
     [*rows, api.Message("user", [api.TextBlock("Here is the change"), api.ImageBlock("image/png", data)]),
      api.Message("assistant", [api.TextBlock("Understood")])],
-    prompt="Summarise the conversation so far",  # the final user message
-    system=SYSTEM_PROMPT,                     # replaces the harness's own system prompt
-    model="haiku", effort="low",
+    prompt="Summarise the conversation so far",  # required: the final user message
+    system=SYSTEM_PROMPT,                     # required: replaces the harness's own system prompt ("" for none)
+    model="haiku", effort="low",              # model required; effort optional
     agent=agent,                              # optional: run with this agent's recorded storage (its login)
     transport_retries=3, timeout=600, cancel=event)
 reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop, reply.lost
@@ -248,7 +248,7 @@ reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop, reply.lost
 
 - **`reply.usage`** counts tokens under `input`, `output`, `cache_read` and `cache_write`, where the harness reports them; `reply.cost_usd` is the harness's own figure.
 - **Messages:** an `api.Row` is passed as stored, the native passthrough: it must be this harness's format (`options.formats`) and carry its body (a row read with `bodies=False` is refused). An `api.Message("user" or "assistant", blocks)` is built by the harness from `api.TextBlock(text)` and, in user messages, `api.ImageBlock(media_type, data)` (PNG, JPEG, GIF or WebP, at most 5 MB). Messages, when there are any, end with the model's, since `prompt` is the next user message; with none, the prompt runs alone. What the harness can't carry is listed in `reply.lost`.
-- **Checked before anything is sent:** the arguments, the messages, the model and effort (`check()`'s rules), access and permission. A refusal is `api.Error`, or `api.RunError` with kind `invalid_request` or `unavailable`, and nothing is spent.
+- **Checked before anything is sent:** the arguments (`prompt`, `system` and `model` are required; messages may be empty), the messages, the model and effort (`check()`'s rules), access and permission. A refusal is `api.Error`, or `api.RunError` with kind `invalid_request` or `unavailable`, and nothing is spent.
 - **`agent=`:** an agent of this universe running this harness. The run uses its recorded storage, so its login and settings; without a record it is refused ("resume it once"), except inside that agent's own session. A relative storage variable (`CLAUDE_CONFIG_DIR=relative`) is made absolute where it was set: the agent's recorded workspace, or this process's directory without `agent=`. Provider routing (Bedrock, Vertex and the like) comes from this process and the harness's settings, not the agent.
 - **`api.RunError`** has `kind`: `rate_limit` (retry after a while), `usage_limit` (the account's limit: stop), `refused`, `too_long` (the context doesn't fit, or is over 32 MiB; don't retry), `invalid_request`, `timeout`, `cancelled` (with `confirmed` false when the stop couldn't be proved), `unavailable` or `failed`. Treat a kind you don't know as `failed`. `retry_after` is seconds when the harness says. The message has the harness's own error text, never your messages or the reply.
 - **`cancel`**, a `threading.Event`, stops the run from another thread. `run_once` is safe from several threads at once and installs no signal handlers. Call it from a helper action, a service thread or the plugin host, not from a column, panel or settings check, which run as `observe` under a 2-second budget.

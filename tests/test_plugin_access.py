@@ -152,6 +152,21 @@ class AccessTest(PluginTestCase):
                     self.assertNotIn("Held back", info)
         listed = {item["name"]: item for item in plugins.listing(self.root)}["lister"]
         self.assertEqual(listed["access"], plugins.entry_access(self.root, "lister"))  # the screen reads the same
+        # A manifest with access and no permissions: one-shot runs come with spend, as its first line says.
+        self.write_plugin("asker", {"module": "plugin", "api": "1.14", "access": {"request": "spend",
+                                                                                   "minimum": "observe"}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        for level, runs in (("spend", "allowed"), ("observe", "held")):
+            with self.subTest(f"one-shot runs at {level}"):
+                config.set_enabled(self.root, "asker", True, grant=level)
+                access = plugins.entry_access(self.root, "asker")
+                text = "run harnesses' models once (one-shot runs; this spends tokens)"
+                if runs == "allowed":
+                    self.assertIn(text, access["allowed"])
+                    self.assertIn(f"- {text}", tool.cli_run(self.root, plugin_action="info", name="asker").split(
+                        "It can:")[1].split("\n\n")[0])
+                else:
+                    self.assertIn({"text": text, "needs": "spend"}, access["held_back"])
 
     def test_a_refusal_names_what_actually_limits_the_plugin(self):
         """A refusal, a launch's note, mv2 plugins info and doctor name what holds a plugin back (MV2_EFFECTS, the
