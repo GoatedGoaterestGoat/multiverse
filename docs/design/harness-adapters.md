@@ -1366,20 +1366,27 @@ whichever write finished last. Nothing is ever resubmitted.
 `get_delivery` reads it: delivered is accepted and transcript-confirmed, not
 delivered is a definite failure that `--retry` may send again, and no file, or
 one that can't be read or isn't definite, stays `unknown`. An earlier attempt's
-receipt names its own ID, so it never decides a retry. A prompt the mod submits
-goes to Claude tagged with its ID (and send time), and
-the mod strips the tag where Claude stores the row, so that row is credited by
-its own tag, even after a reload. A queued steer goes clean, and its row is
-credited to the waiting steer whose whole text it holds: the longest, so a short
-text inside a longer one doesn't take its row, then the oldest, which is Claude's
-own queue order. When the row holds a tag as well, containment decides: a tag
-inside that text is the message's own words (a message about this protocol may
-quote one), so the steer wins; a tag around it is the outer envelope an older
-mod wrote, which names its message exactly, so the tag wins. That's safe because a message Claude may still hold is never
-retried, and one Claude refused is never stored, so a late copy and its retry
-are never both waiting with one text. Two different steers with the same text
-both waiting, the first lost silently, would credit the second's row to the
-first: reported wrongly, never sent twice. After a reload, which forgets what
+receipt names its own ID, so it never decides a retry. Every message goes to
+Claude as its clean text, queued or submitted, since Claude shows both in its
+queue line until they run, and stores them as given. A stored row is credited to
+the waiting message, sent the same way, whose whole text it holds: a peer row
+to a queued steer, a prompt row from the multiverse plugin to a submitted
+prompt. Among those, the longest, so a short text inside a longer one doesn't
+take its row, then the oldest, which is Claude's own order. When the row holds
+a tag as well, containment decides: a tag inside that text is the message's own
+words (a message about this protocol may quote one), so the message wins; a tag
+around it is the outer envelope an older mod wrote, which names its message
+exactly, so the tag wins, and only then does an envelope come off. An envelope
+counts only around the whole message: nothing before the tag but Claude's peer
+header (or nothing at all, for a prompt row) and nothing after it but Claude's
+trailer. A tag anywhere else is quoted in the message's own text, so with
+nothing waiting, after a reload say, such a row names no message and stays
+unconfirmed, and the attachment hook leaves its text whole for the model. That's safe
+because a message Claude may still hold is never retried, and one Claude
+refused is never stored, so a late copy and its retry are never both waiting
+with one text. Two different messages with the same text both waiting, the
+first lost silently, would credit the second's row to the first: reported
+wrongly, never sent twice. After a reload, which forgets what
 is waiting, a clean row is nobody's, and its message stays unconfirmed. `get_delivery` counts a receipt only when it names the
 requested ID in the shape the mod writes. It reads receipts (and `ask` answers) without waiting on
 the file and with a size bound: core holds the agent's launch and delivery locks

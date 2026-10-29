@@ -44,6 +44,20 @@ function tagged(text: string): Message | undefined {
   return { text: match[4] ?? "", mode, id: match[2], sent: match[3] }
 }
 
+// An older mod's tag around a whole message, as Claude stored it: nothing before the tag but Claude's own peer header
+// (inside its system reminder, or no wrapper at all for a prompt row), nothing after it but Claude's trailer. A tag
+// anywhere else is quoted in the message's own text: an mv2 message starts with its "Message from" line, so a tag it
+// quotes always has text before it.
+const HEAD = /^\s*(?:<system-reminder>\s*)?(?:Another Claude session sent a message[^\n]*:\s*)?$/
+const TAIL = /^\s*(?:This came from another Claude session[\s\S]*|<\/system-reminder>\s*)?$/
+
+function enveloped(text: string): Message | undefined {
+  const match = TAG.exec(text)
+  if (match === null) return undefined
+  if (!HEAD.test(text.slice(0, match.index)) || !TAIL.test(text.slice(match.index + match[0].length))) return undefined
+  return tagged(match[0])
+}
+
 // Main-loop turn state. A subagent's or teammate's turn.start and turn.complete
 // carry its agentId (turn.start since Claude Code 2.1.299's types say so); only
 // the main loop's turns count, or a background subagent would leave "working".
@@ -287,9 +301,12 @@ function settle($: EngineInterface, id: string | undefined, tool?: string) {
 // A message Claude has but hasn't stored yet: its ID (one delivery attempt), for its not-delivered receipt. A
 // refused one stays waiting, so a row that turns up after all still marks it delivered. `refused` is "unsure" after
 // a timeout and "definite" after Claude's own refusal.
-// `text` is set for a message queued as its clean text (steer mid-turn), which is how its stored row is told.
-type Waiting = { id?: string; text?: string; sent?: string; mode?: Message["mode"]; refused?: "unsure" | "definite";
-  written?: Promise<void> }
+// Every message goes to Claude as its clean text, which is how its stored row is told: `route` says how it went,
+// queued (a steer left in Claude's queue, stored as a peer row) or submitted (as the person's own words, stored as
+// the plugin's prompt row), and only rows of that kind are matched against it.
+type Route = "queued" | "submitted"
+type Waiting = { id?: string; text?: string; sent?: string; mode?: Message["mode"]; route?: Route;
+  refused?: "unsure" | "definite"; written?: Promise<void> }
 
 // How long an idle session may leave a taken message unstored before it counts as not delivered. Idle means an
 // observed one (idle()): a session just loaded, or still starting, has shown no turn boundary yet.
@@ -298,47 +315,41 @@ const STORE_GRACE_MS = 5000
 // Messages Claude has but hasn't stored yet, oldest first.
 const waitingRows: Waiting[] = []
 
-function hold(message: Message, queued = false): Waiting {
-  const entry: Waiting = queued ? { id: message.id, text: message.text, sent: message.sent, mode: message.mode }
-    : { id: message.id }
+function hold(message: Message, route: Route): Waiting {
+  const entry: Waiting = { id: message.id, text: message.text, sent: message.sent, mode: message.mode, route }
   waitingRows.push(entry)
   return entry
 }
 
-// Whose a peer row (or the peer prompt Claude runs) is: a steer the mod queued as clean text, or a message an older
-// mod queued inside its tag. When both fit, containment decides: a tag inside the waiting text is that message's
-// own words (a message about this protocol), so the waiting message wins; a tag around the waiting text is the
-// outer envelope of an older message, which names its message exactly, so the tag wins.
-function peerMessage(text: string): Message | undefined {
-  const queued = queuedIn(text)
-  const match = TAG.exec(text)
-  if (queued === undefined || match === null) return queued ?? tagged(text)
-  return queued.text.includes(match[0]) ? queued : tagged(text)
+// Whose a stored row (or the peer prompt Claude runs) is: a message the mod sent this way as clean text, or one an
+// older mod sent inside its tag. When both fit, containment decides: a tag inside the waiting text is that message's
+// own words (a message about this protocol), so the waiting message wins; a tag around the waiting text is the outer
+// envelope of an older message, which names its message exactly, so the tag wins. `enveloped` says the tag won, so
+// its envelope is the row's to strip.
+function rowMessage(text: string, route: Route): { message: Message; enveloped: boolean } | undefined {
+  const waiting = waitingIn(text, route)
+  const older = enveloped(text)  // only a tag around the whole message; a quoted one never names a message
+  if (waiting !== undefined && (older === undefined || waiting.text.includes(TAG.exec(text)?.[0] ?? "")))
+    return { message: waiting, enveloped: false }
+  return older === undefined ? undefined : { message: older, enveloped: true }
 }
 
-// The queued message a stored row (or the peer prompt Claude runs) holds: of those still waiting whose whole text it
-// contains, the longest (so a short text inside a longer one doesn't take its row), the oldest among equals, which
-// is Claude's own queue order. Claude refusing one for good means it's never stored.
-function queuedIn(text: string): Message | undefined {
+// The message, sent by `route`, that a stored row (or the peer prompt Claude runs) holds: of those still waiting whose
+// whole text it contains, the longest (so a short text inside a longer one doesn't take its row), the oldest among
+// equals, which is Claude's own order. Claude refusing one for good means it's never stored.
+function waitingIn(text: string, route: Route): Message | undefined {
   let found: Waiting | undefined
   for (const entry of waitingRows) {
-    if (entry.text === undefined || entry.refused === "definite" || !text.includes(entry.text)) continue
+    if (entry.route !== route || entry.text === undefined || entry.refused === "definite" || !text.includes(entry.text)) continue
     if (found === undefined || entry.text.length > (found.text ?? "").length) found = entry
   }
   return found === undefined || found.text === undefined ? undefined
     : { text: found.text, mode: found.mode ?? "steer", id: found.id, sent: found.sent }
 }
 
-// A prompt the mod submits as the person's own goes to Claude tagged with its ID (and send time), which the mod
-// strips where Claude stores the row (session.append), so it never shows; it tells that row's attempt apart, even
-// across a reload. A queued steer goes clean instead: Claude stores queued text as given.
-// The opening marked() writes, and only that, at the very start of a text.
+// The opening an older mod wrote around a prompt it submitted, and only that, at the very start of a text. Claude
+// shows a submitted prompt's text in its queue line until it runs, so the mod now submits it clean.
 const OPENING = /^<<MV2 id=[0-9a-fA-F-]{36}(?: sent=[0-9][0-9T:.+\-Z]*)?>>/
-
-function marked(message: Message): string {
-  if (message.id === undefined) return message.text
-  return `<<MV2 id=${message.id}${message.sent !== undefined ? ` sent=${message.sent}` : ""}>>${message.text}<</MV2>>`
-}
 
 function forget(entry: Waiting) {
   const index = waitingRows.indexOf(entry)
@@ -400,11 +411,11 @@ async function aged($: EngineInterface, text: string, sent: string | undefined):
 
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
-  const entry = hold(message)
+  const entry = hold(message, "submitted")
   if (idle()) expireLater($, [entry])
   // A hook must not wait for its own submit, so leave the hook first.
   $.clock.after(0, () => {
-    $.prompt.submit({ text: marked(message), asUser: true }).then((result) => {
+    $.prompt.submit({ text: message.text, asUser: true }).then((result) => {
       if (result === undefined || result === null || typeof result !== "object" || !("drop" in result)) return
       // Refused, so it never enters the conversation: forget it, and send later messages the peer way.
       forget(entry)
@@ -574,7 +585,7 @@ export const register: Register = (on) => {
     }
     // Queued at `next` as its clean text: it merges at the next tool result, or after an interruption runs as the
     // peer prompt of its own.
-    const entry = hold(message, true)
+    const entry = hold(message, "queued")
     if (idle()) expireLater($, [entry])
     return next({ ...e, text: message.text })
   })
@@ -583,10 +594,13 @@ export const register: Register = (on) => {
     const stored = text(e.message.content)
     // Claude's recorded rendering: its peer wrapper around our text, mid-turn or (after an interruption) as a turn
     // of its own.
-    // A row is ours by the tag in its own text, or, for a peer row, by holding the text of a steer the mod queued
-    // (peerMessage says which, when both fit). A prompt the mod submitted is a plugin row, so a queued text never
-    // takes it.
-    const message = e.origin.kind === "peer" ? peerMessage(stored) : tagged(stored)
+    // A row is ours by holding the text of a message the mod sent that way, or by an older mod's tag around it
+    // (rowMessage says which, when both fit). A queued steer is a peer row and a submitted prompt the multiverse
+    // plugin's, so neither kind takes the other's row.
+    const submitted = e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser &&
+      "name" in e.origin && e.origin.name === "multiverse"
+    const found = e.origin.kind === "peer" ? rowMessage(stored, "queued") : submitted ? rowMessage(stored, "submitted") : undefined
+    const message = found?.message
     if (e.origin.kind === "peer" && message !== undefined) {
       const known = waitingFor(message.id)
       if (known !== undefined) forget(known)
@@ -600,17 +614,18 @@ export const register: Register = (on) => {
       await receipt($, message, e.message.name === "queued_command" ? "mid-turn" : "peer-prompt")
       return result
     }
-    if (e.origin.kind === "plugin" && "asUser" in e.origin && e.origin.asUser && message !== undefined) {
+    if (submitted && found !== undefined && message !== undefined) {
       const known = waitingFor(message.id)
       if (known !== undefined) forget(known)
       const { sent } = message
-      // Only the envelope the mod wrote comes off, once: its opening at the start of the first text block and its
-      // closing at the end of the last, so a tag the message itself mentions stays. The age goes on the sender line,
-      // in the first text block; every other block stays exactly as it was.
+      // An older mod's envelope comes off, once: its opening at the start of the first text block and its closing at
+      // the end of the last, so a tag the message itself mentions stays; a clean prompt has none to strip. The age
+      // goes on the sender line, in the first text block; every other block stays exactly as it was.
       const texts = e.message.content.flatMap((part, index) => part.type === "text" ? [index] : [])
       const first = texts[0] ?? -1
       const last = texts[texts.length - 1] ?? -1
       const strip = (part: string, index: number) => {
+        if (!found.enveloped) return part
         const opened = index === first ? part.replace(OPENING, "") : part
         return index === last && opened.endsWith("<</MV2>>") ? opened.slice(0, -"<</MV2>>".length) : opened
       }
@@ -628,7 +643,7 @@ export const register: Register = (on) => {
 
   // Older history stored the tags inside Claude's wrapper.
   on("prompt.attachment", { type: "queued_command" }, async ($, e, next) => {
-    const message = tagged(e.text)
+    const message = enveloped(e.text)  // a clean message quoting a tag reaches the model whole
     return message === undefined ? next(e) : { text: message.text }
   })
 
@@ -642,7 +657,7 @@ export const register: Register = (on) => {
   // A steer queued mid-turn that no tool result took would start its own turn.
   on("prompt.submit", { origin: { kind: "peer" } }, async ($, e, next) => {
     if (e.turnId !== undefined) return next(e)
-    const message = peerMessage(e.text)  // as in session.append
+    const message = rowMessage(e.text, "queued")?.message  // as in session.append
     if (message === undefined) return next(e)
     // After an interruption Claude would refuse the submitted copy; the peer prompt itself runs.
     if (interrupted) return next(e)

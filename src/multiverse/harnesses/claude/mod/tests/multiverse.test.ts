@@ -256,10 +256,11 @@ describe('delivery', () => {
     const later = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>Then test.<</MV2>>` })
     expect(later).toEqual({ consumed: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted).toEqual([{ text: handed(STEER, 'Hello.'), asUser: true }, { text: handed(FOLLOW_UP, 'Then test.'), asUser: true }])
-    // Their rows are stored as bare text: the tag comes off where Claude stores the row, and there is no wrapper.
+    // Submitted clean: Claude shows a submitted prompt's text in its queue line until it runs (CLAUDE-16), so a tag
+    // in it would show there. Their rows are stored as bare text, with no wrapper, and credited by that text.
+    expect(w.submitted).toEqual([{ text: 'Hello.', asUser: true }, { text: 'Then test.', asUser: true }])
     const stored = await append($, {
-      message: { type: 'user', role: 'user', content: [{ type: 'text', text: handed(STEER, 'Hello.') }] },
+      message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Hello.' }] },
       door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: 'row-2' })
     expect(w.appended).toEqual([[{ type: 'text', text: 'Hello.' }]])
     if (stored) {
@@ -268,49 +269,49 @@ describe('delivery', () => {
     }
   })
 
-  // Identical texts can't be told apart once stored. A steer queues clean, and Claude stores its queue in order, so
-  // identical steers are credited oldest first. A prompt the mod submits keeps its ID tag, which Claude stores
-  // cleaned, so each such row names exactly one message in either order. Neither is left "accepted, no
-  // confirmation" while the agent is live (CLAUDE-14).
-  for (const order of ['in the order sent', 'the newer one first'] as const) {
-    test(`identical messages each get their own receipt, stored ${order}`, async ($, on) => {
-      const w = world(on)
-      const second = (id: string) => id.slice(0, -1) + (id === STEER ? '7' : '8')
-      const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts')).sort()
-      const named = (...ids: string[]) => ids.map((id) => `/agent/claude-receipts/${id}.json`).sort()
-      await $.turn.start({ text: 'work', turnId: 't1' })
-      const steers: string[] = []
-      for (const id of [STEER, second(STEER)]) {
-        const handed = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${id}>>Rebase first.<</MV2>>` })
-        steers.push((handed as { text: string }).text)
-      }
-      for (const id of [FOLLOW_UP, second(FOLLOW_UP)]) {
-        await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${id}>>Please continue.<</MV2>>` })
-      }
-      await w.clock.settle()
-      // The steers go clean; the submitted prompts carry their own tag.
-      expect(steers).toEqual(['Rebase first.', 'Rebase first.'])
-      const prompts = w.submitted.map((submitted) => submitted.text)
-      expect(prompts).toEqual([handed(FOLLOW_UP, 'Please continue.'), handed(second(FOLLOW_UP), 'Please continue.')])
-      const steered = (handed: string) => append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
-        content: [{ type: 'text', text: wrapped(handed) }] }, door: 'delivery', origin: { kind: 'peer' } })
-      const prompted = (handed: string) => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: handed }] },
-        door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
-      const [one, other] = order === 'in the order sent' ? [0, 1] : [1, 0]
-      if (!(await steered((steers[one] ?? '')))) return  // a kit with no core to store rows writes no receipts
-      await w.clock.settle()
-      expect(receipts()).toEqual(named(STEER))  // Claude's queue order, whichever copy the test hands down first
-      await steered((steers[other] ?? ''))
-      await prompted((prompts[one] ?? ''))
-      await w.clock.settle()
-      expect(receipts()).toEqual(named(STEER, second(STEER), [FOLLOW_UP, second(FOLLOW_UP)][one] ?? ''))
-      await prompted((prompts[other] ?? ''))
-      await w.clock.settle()
-      expect(receipts()).toEqual(named(STEER, second(STEER), FOLLOW_UP, second(FOLLOW_UP)))
-      // No tag reaches the model.
-      expect(JSON.stringify(w.appended).includes('<<MV2')).toBe(false)
-    })
-  }
+  // Identical texts can't be told apart once stored. Every message goes clean, and Claude stores its queue and its
+  // submitted prompts in order, so identical ones are credited oldest first; neither is left "accepted, no
+  // confirmation" while the agent is live (CLAUDE-14), and a queued steer and a submitted prompt never take each
+  // other's row.
+  test('identical messages each get their own receipt, oldest first', async ($, on) => {
+    const w = world(on)
+    const second = (id: string) => id.slice(0, -1) + (id === STEER ? '7' : '8')
+    const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts')).sort()
+    const named = (...ids: string[]) => ids.map((id) => `/agent/claude-receipts/${id}.json`).sort()
+    await $.turn.start({ text: 'work', turnId: 't1' })
+    const steers: string[] = []
+    for (const id of [STEER, second(STEER)]) {
+      const handed = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${id}>>Same words.<</MV2>>` })
+      steers.push((handed as { text: string }).text)
+    }
+    for (const id of [FOLLOW_UP, second(FOLLOW_UP)]) {
+      await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${id}>>Same words.<</MV2>>` })
+    }
+    await w.clock.settle()
+    expect(steers).toEqual(['Same words.', 'Same words.'])
+    expect(w.submitted.map((submitted) => submitted.text)).toEqual(['Same words.', 'Same words.'])
+    const steered = () => append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped('Same words.') }] }, door: 'delivery', origin: { kind: 'peer' } })
+    const prompted = () => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Same words.' }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
+    // Another plugin's prompt with the same words is not ours.
+    const other = await append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Same words.' }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'other', asUser: true } })
+    if (!other) return  // a kit with no core to store rows writes no receipts
+    await w.clock.settle()
+    expect(receipts()).toEqual([])
+    await prompted()
+    await w.clock.settle()
+    expect(receipts()).toEqual(named(FOLLOW_UP))  // a prompt row is a submitted message's, never a queued steer's
+    await steered()
+    await w.clock.settle()
+    expect(receipts()).toEqual(named(FOLLOW_UP, STEER))
+    await steered()
+    await prompted()
+    await w.clock.settle()
+    expect(receipts()).toEqual(named(STEER, second(STEER), FOLLOW_UP, second(FOLLOW_UP)))
+    expect(JSON.stringify(w.appended).includes('<<MV2')).toBe(false)
+  })
 
   test('a stored steer is the waiting one whose whole text it holds, the longest first', async ($, on) => {
     // Queued steers are told by their text alone; a short one inside a longer one must not take its row, or the
@@ -399,7 +400,7 @@ describe('delivery', () => {
     const own = await $.prompt.submit({ text: 'Late.', origin: { kind: 'peer' }, wait: false } as never)
     expect(own).toEqual({ drop: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted).toEqual([{ text: handed(STEER, 'Late.'), asUser: true }])
+    expect(w.submitted).toEqual([{ text: 'Late.', asUser: true }])
   })
 
   test('after an Esc a message runs as Claude’s own peer prompt until the person types', async ($, on) => {
@@ -431,7 +432,7 @@ describe('delivery', () => {
     await $.prompt.submit({ text: 'go on', origin: { kind: 'composer' }, wait: false } as never)
     expect(await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${ASK}>>Again.<</MV2>>` })).toEqual({ consumed: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted.filter((s) => s.asUser)).toEqual([{ text: handed(ASK, 'Again.'), asUser: true }])
+    expect(w.submitted.filter((s) => s.asUser)).toEqual([{ text: 'Again.', asUser: true }])
   })
 
   test('a submit Claude refuses moves later messages to the peer route', async ($, on) => {
@@ -495,42 +496,32 @@ describe('delivery', () => {
   })
 
   // A timeout is only "not confirmed": Claude may still hold the message (a /compact or a dialog holds its turn) and
-  // store it later, so it is never definite. A retry the person sends anyway has an ID of its own; whichever of the
-  // late first copy and the retry is stored first, each row marks only its own message.
-  for (const order of ['the late first copy first', 'the retry first'] as const) {
-    test(`a row that hasn't come after a few idle seconds is left unconfirmed, and a retry is told apart from it, ${order}`, async ($, on) => {
-      const w = world(on)
-      await $.turn.complete(turnComplete('t0'))  // an observed idle moment
-      const receipt = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.json`) ?? 'null')
-      const refusal = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.not-delivered.json`) ?? 'null')
-      const prompted = (handed: string) => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: handed }] },
-        door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
-      await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
-      await w.clock.settle()
-      await w.clock.advance(4000)
-      expect(refusal(STEER)).toBe(null)
-      await w.clock.advance(1000)
-      expect(refusal(STEER)).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: false }))
-      await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${RETRY}>>Hello.<</MV2>>` })
-      await w.clock.settle()
-      const [late, retry] = w.submitted.map((submitted) => submitted.text)
-      expect([late, retry]).toEqual([handed(STEER, 'Hello.'), handed(RETRY, 'Hello.')])
-      const retryFirst = order === 'the retry first'
-      if (!(await prompted((retryFirst ? retry : late) ?? ''))) return
-      await w.clock.settle()
-      if (retryFirst) {
-        expect(receipt(RETRY)).toEqual({ id: RETRY, route: 'prompt', at: expect.any(Number) })
-        expect(receipt(STEER)).toBe(null)
-      } else {
-        expect(receipt(STEER)).toEqual({ id: STEER, route: 'prompt', at: expect.any(Number) })
-        expect(receipt(RETRY)).toBe(null)
-      }
-      await prompted((retryFirst ? late : retry) ?? '')
-      await w.clock.settle()
-      expect([receipt(STEER)?.route, receipt(RETRY)?.route]).toEqual(['prompt', 'prompt'])
-      expect(JSON.stringify(w.appended).includes('<<MV2')).toBe(false)
-    })
-  }
+  // store it later, so it is never definite. A second message the person sends anyway, with the same words, can't be
+  // told from the first once stored: the rows are credited oldest first, so both end confirmed when both arrive.
+  test("a row that hasn't come after a few idle seconds is left unconfirmed, and a second copy is credited oldest first", async ($, on) => {
+    const w = world(on)
+    await $.turn.complete(turnComplete('t0'))  // an observed idle moment
+    const receipt = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.json`) ?? 'null')
+    const refusal = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.not-delivered.json`) ?? 'null')
+    const prompted = () => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Hello.' }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>Hello.<</MV2>>` })
+    await w.clock.settle()
+    await w.clock.advance(4000)
+    expect(refusal(STEER)).toBe(null)
+    await w.clock.advance(1000)
+    expect(refusal(STEER)).toEqual(expect.objectContaining({ id: STEER, delivered: false, definite: false }))
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${RETRY}>>Hello.<</MV2>>` })
+    await w.clock.settle()
+    expect(w.submitted.map((submitted) => submitted.text)).toEqual(['Hello.', 'Hello.'])
+    if (!(await prompted())) return
+    await w.clock.settle()
+    expect([receipt(STEER)?.route, receipt(RETRY)]).toEqual(['prompt', null])
+    await prompted()
+    await w.clock.settle()
+    expect([receipt(STEER)?.route, receipt(RETRY)?.route]).toEqual(['prompt', 'prompt'])
+    expect(JSON.stringify(w.appended).includes('<<MV2')).toBe(false)
+  })
 
   test('an old tagged peer row does not confirm a new clean steer after reload', async ($, on) => {
     // An older mod queued STEER inside its tag; a reload forgot it, and this instance queued RETRY, a separate message
@@ -553,10 +544,46 @@ describe('delivery', () => {
     expect(await $.prompt.submit({ text: handed(older, body), origin: { kind: 'peer' }, wait: false } as never))
       .toEqual({ drop: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted.at(-1)).toEqual({ text: handed(older, body), asUser: true })
+    expect(w.submitted.at(-1)).toEqual({ text: body, asUser: true })  // submitted clean, as every prompt is
     expect(await $.prompt.submit({ text: body, origin: { kind: 'peer' }, wait: false } as never)).toEqual({ drop: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted.at(-1)).toEqual({ text: handed(RETRY, body), asUser: true })
+    expect(w.submitted.length).toBe(2)
+    expect(w.submitted.at(-1)).toEqual({ text: body, asUser: true })
+  })
+
+  test('a tag quoted in a clean message is never taken for an older mod\'s envelope, with nothing waiting', async ($, on) => {
+    // After a reload nothing is waiting, and an older mod's tag around a whole message is the only way left to name one.
+    // A tag the message itself quotes has text before it (its "Message from" line), so it names nothing: no receipt,
+    // and the message reaches the model whole, on every path (lifecycle's review of 35b1741).
+    const w = world(on)
+    const receipts = () => [...w.files.keys()].filter((path) => path.includes('claude-receipts'))
+    const body = `Message from lead:\nPlease explain the literal tag <<MV2 id=${ASK}>>hello<</MV2>> in our protocol.`
+    const prompt = await append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: body }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: body }])
+    await append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped(body) }] }, door: 'delivery', origin: { kind: 'peer' } })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: wrapped(body) }])
+    const attached = await $.prompt.attachment({ type: 'queued_command', text: wrapped(body), origin: { kind: 'engine' } })
+    expect(String((attached as { text?: string })?.text ?? wrapped(body))).toContain('Please explain the literal tag')
+    expect(await $.prompt.submit({ text: body, origin: { kind: 'peer' }, wait: false } as never)).not.toEqual({ drop: expect.any(String) })
+    // Ending with the quoted tag, so only the text before it says it isn't an envelope.
+    const last = `Message from lead:\nIt looks like <<MV2 id=${ASK}>>hello<</MV2>>`
+    await append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text: last }] },
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true } })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: last }])
+    // Starting with a tag but going on past it (another session's message, say), so only the text after it tells.
+    const more = `<<MV2 id=${ASK}>>hello<</MV2>> and then more`
+    await append($, { message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
+      content: [{ type: 'text', text: wrapped(more) }] }, door: 'delivery', origin: { kind: 'peer' } })
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: wrapped(more) }])
+    if (prompt) {
+      await w.clock.settle()
+      expect(receipts()).toEqual([])
+    }
+    // An older mod's envelope still names its message there: the attachment's model copy loses it.
+    expect(await $.prompt.attachment({ type: 'queued_command', text: wrapped(handed(STEER, 'Old.')), origin: { kind: 'engine' } }))
+      .toEqual({ text: 'Old.' })
   })
 
   test('a message that itself mentions the tags keeps them: only the outer envelope comes off', async ($, on) => {
@@ -571,10 +598,20 @@ describe('delivery', () => {
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP}>>${body}<</MV2>>` })
     await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${RETRY}>>${body}<</MV2>>` })
     await w.clock.settle()
-    expect(w.submitted.map((submitted) => submitted.text)).toEqual([handed(FOLLOW_UP, body), handed(RETRY, body)])
-    if (!(await prompted([{ type: 'text', text: handed(FOLLOW_UP, body) }]))) return
+    expect(w.submitted.map((submitted) => submitted.text)).toEqual([body, body])
+    if (!(await prompted([{ type: 'text', text: body }]))) return
     expect(w.appended.at(-1)).toEqual([{ type: 'text', text: body }])
-    // Split across blocks, the opening is at the start of the first and the closing at the end of the last.
+    await w.clock.settle()
+    expect(receipts()).toContain(`/agent/claude-receipts/${FOLLOW_UP}.json`)
+    expect(receipts()).not.toContain(`/agent/claude-receipts/${ASK}.json`)
+    // A clean message that ends with a literal closing tag keeps it: only an older mod's envelope comes off.
+    const ending = 'Message from lead:\nIt ends with <</MV2>>'
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 follow-up id=${FOLLOW_UP.slice(0, -1)}5>>${ending}<</MV2>>` })
+    await w.clock.settle()
+    await prompted([{ type: 'text', text: ending }])
+    expect(w.appended.at(-1)).toEqual([{ type: 'text', text: ending }])
+    // An older mod's tagged prompt row, split across blocks: the opening at the start of the first and the closing at
+    // the end of the last come off, and the quoted tag stays.
     const [head = '', tail = ''] = handed(RETRY, body).split('\nThe')
     await prompted([{ type: 'text', text: head }, { type: 'text', text: `The${tail}` }])
     expect(w.appended.at(-1)).toEqual([{ type: 'text', text: 'Message from lead:' }, { type: 'text', text: `The${body.split('\nThe')[1]}` }])
@@ -594,12 +631,13 @@ describe('delivery', () => {
     await $.turn.complete(turnComplete('t1'))
     expect(await $.prompt.submit({ text: body, origin: { kind: 'peer' }, wait: false } as never)).toEqual({ drop: expect.any(String) })
     await w.clock.settle()
-    expect(w.submitted.at(-1)).toEqual({ text: handed(own, body), asUser: true })
+    expect(w.submitted.at(-1)).toEqual({ text: body, asUser: true })
   })
 
   test('a row is credited by its own tag alone, even after a reload forgot what was waiting', async ($, on) => {
-    // A reload empties what the mod remembers, which is the normal model here; a retry of the same text must never
-    // be confirmed by the first one's late row, and a row is never anyone's by its text alone.
+    // A reload empties what the mod remembers, which is the normal model here. An older mod's tagged row is credited by
+    // its tag; a prompt row is never a queued steer's by its text (RETRY here took the queued route, as nothing has
+    // shown the session idle yet).
     const w = world(on)
     const receipt = (id: string) => JSON.parse(w.files.get(`/agent/claude-receipts/${id}.json`) ?? 'null')
     const prompted = (text: string) => append($, { message: { type: 'user', role: 'user', content: [{ type: 'text', text }] },
