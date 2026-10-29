@@ -367,7 +367,11 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
 - **Checks** before anything is written: the conversation ends with an
   assistant message, every tool call has exactly one result in the next user
   message, no result lacks its call, and no call ID repeats (Claude fails
-  those as a 400 `tool_history_mismatch`).
+  those as a 400 `tool_history_mismatch`). A response split by a typed
+  prompt is not refused: Claude 2.1.312 resumes it and sends one assistant
+  message with all its calls, then their results and the prompt in one user
+  message. The check refuses only what Claude would refuse, since a refused
+  turn is never built.
 - **Reply.** Claude's JSON result. Its typed `api_error` comes first:
   `usage_limit_reached`, `model_requires_usage_credits` and
   `long_context_credits_required` are `usage_limit`;

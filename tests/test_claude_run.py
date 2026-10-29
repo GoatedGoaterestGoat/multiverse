@@ -97,6 +97,18 @@ class ClaudeRunTest(unittest.TestCase):
                                                                 True),
             "a prompt between one response's calls": ([u(text), a(call('c1'), mid='m1'), u(text), a(call('c2'), mid='m1'),
                                                        u(result('c1')), u(result('c2')), a(text, mid='m2')], False),
+            # One response split by a typed prompt. Claude 2.1.312 resumed and answered all three, sending one
+            # assistant message with both calls, then both results and the prompt in one user message. A refusal
+            # here would be permanent for GOAT (invalid_request isn't retried), so these must stay accepted.
+            "a prompt after a response's first result": ([u(text), a(call('c1'), mid='m1'), u(result('c1')), u(text),
+                                                          a(call('c2'), mid='m1'), u(result('c2')), a(text, mid='m2')],
+                                                         True),
+            "a prompt before a response's first result": ([u(text), a(call('c1'), mid='m1'), u(text), u(result('c1')),
+                                                           a(call('c2'), mid='m1'), u(result('c2')), a(text, mid='m2')],
+                                                          True),
+            "a prompt inside a response's result row": ([u(text), a(call('c1'), mid='m1'), u(result('c1'), text),
+                                                         a(call('c2'), mid='m1'), u(result('c2')), a(text, mid='m2')],
+                                                        True),
             'ends with a user message': ([u(text), a(text), u(text)], False),
             'a call never answered': ([u(text), a(call('c1')), a(text, mid='m2')], False),
             'a call answered at the end': ([u(text), a(call('c1'))], False),
