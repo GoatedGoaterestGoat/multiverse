@@ -148,7 +148,8 @@ own call). A row off the history is **abandoned**.
   compaction lies between the tip and the gap, the history starts at Claude's
   summary instead, with the boundary's `preservedMessages` rows right after
   it in their order, as Claude itself resumes the session, and no gap is
-  reported.
+  reported. The read names that summary instead (`summary`, 1.14): it is then
+  the only record of what came before.
 - The typed `/compact` row stays on the history, although the boundary's link
   skips it.
 - A row without a ref (Claude's API request records, queue and title rows)

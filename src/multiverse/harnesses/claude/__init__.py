@@ -1140,7 +1140,8 @@ class ClaudeAdapter(ConfiguredAdapter):
                                   size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
         return TranscriptView(source=source, rows=facts, history=analysis.history.rows,
                               context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
-                              gap=analysis.history.gap, history_version=analysis.version)
+                              gap=analysis.history.gap, summary=analysis.history.summary,
+                              history_version=analysis.version)
 
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for

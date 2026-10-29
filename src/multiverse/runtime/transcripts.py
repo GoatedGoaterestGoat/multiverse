@@ -74,6 +74,7 @@ class TranscriptInfo:
     updated_at: str | None = None
     tip: str | None = None
     gap: str | None = None
+    summary: str | None = None
     turns: int | None = None
     context_rows: int | None = None
     context_turns: int | None = None
@@ -111,6 +112,7 @@ class RowPage:
     remaining: int | None = None
     tip: str | None = None
     gap: str | None = None
+    summary: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -139,6 +141,7 @@ class TurnPage:
     remaining: int | None = None
     tip: str | None = None
     gap: str | None = None
+    summary: str | None = None
 
 
 def _binding(properties, facts):
@@ -602,7 +605,8 @@ def _row_page(loaded, order, *, after=None, before=None, limit=200, max_bytes=DE
     loaded.snapshot.reader.check()
     return RowPage(rows=result, next=next_cursor, previous=previous, at_end=remaining == 0,
                    generation=loaded.generation, remaining=remaining,
-                   tip=loaded.view.tip if history else None, gap=loaded.view.gap if history else None)
+                   tip=loaded.view.tip if history else None, gap=loaded.view.gap if history else None,
+                   summary=loaded.view.summary if history else None)
 
 
 def rows(root, directory, *, after=None, before=None, limit=200, max_bytes=DEFAULT_BYTES,
@@ -719,7 +723,7 @@ def turns(root, directory, *, after=None, before=None, limit=50, tip=None, gener
     loaded.snapshot.reader.check()
     return TurnPage(turns=tuple(item for item, _ in selected), next=next_cursor, previous=previous,
                     at_end=remaining == 0, generation=loaded.generation, remaining=remaining,
-                    tip=loaded.view.tip, gap=loaded.view.gap)
+                    tip=loaded.view.tip, gap=loaded.view.gap, summary=loaded.view.summary)
 
 
 def turn(root, directory, turn_id, *, after=None, limit=200, max_bytes=DEFAULT_BYTES, tip=None, generation=None):
@@ -756,7 +760,7 @@ def info(root, directory, *, generation=None, tip=None):
                               native_id=loaded.session.native_id, generation=loaded.generation,
                               start=_cursor(loaded), end=_cursor(loaded, len(view.rows) - 1 if view.rows else None, boundary='end'),
                               rows=len(view.rows), bytes=view.source.size, updated_at=view.source.updated_at,
-                              tip=view.tip, gap=view.gap, turns=len(grouped),
+                              tip=view.tip, gap=view.gap, summary=view.summary, turns=len(grouped),
                               context_rows=len(view.history) - view.context_from,
                               context_turns=sum(item.in_context for item, _ in grouped),
                               context_start=(_cursor(loaded) if not view.context_from else

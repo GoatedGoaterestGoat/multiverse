@@ -336,6 +336,16 @@ class ClaudeRows:
         """The next row hangs off `row`, an earlier one: a second branch."""
         self._parent = row["uuid"]
 
+    def compaction(self, summary="Summary of the conversation so far", stored=True):
+        """Claude's own compaction (1.14): its boundary, linked to the row before it, then its summary. With
+        `stored=False` the rows before it were never stored here, as when a session continues past a compaction
+        in a file of its own, and the history starts at the summary (`page.summary`)."""
+        from uuid import uuid4
+        before = self._parent if stored else str(uuid4())
+        self.add("system", subtype="compact_boundary", parentUuid=None, logicalParentUuid=before,
+                 compactMetadata={"trigger": "auto", "preservedMessages": {"uuids": []}})
+        return self.add("user", message={"role": "user", "content": summary}, isCompactSummary=True)
+
 
 class FakeTranscript:
     """A Claude transcript an agent reads, in a PluginTestCase (1.13): stored where the agent's records say its

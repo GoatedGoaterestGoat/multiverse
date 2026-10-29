@@ -286,7 +286,8 @@ reader exposes only a deadline and `check()` for the pinned identity; it has no
 native transport or process controls.
 
 `transcript_view` returns a `TranscriptView`: row facts in stored order, history
-indexes in conversation order, the context boundary, tip and gap. Facts carry
+indexes in conversation order, the context boundary, tip, gap and `summary`, the ref of the harness's own
+compaction summary row the history starts at when what came before was never stored. Facts carry
 labels and positions, never bodies. A position changes if preceding bytes change
 and stays valid when rows are appended. `transcript_bodies` reads only requested
 indexes and raises the content-free `TranscriptRowsChanged` if their bytes no

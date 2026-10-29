@@ -412,6 +412,9 @@ class TranscriptView:
     tip: str | None
     gap: str | None
     history_version: int
+    # When the history starts at the harness's own compaction summary because what came before was never stored:
+    # that summary row's ref, then the only record of what came before. None otherwise.
+    summary: str | None = None
 
 
 class TranscriptRowsChanged(ValueError):

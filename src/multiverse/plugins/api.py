@@ -1121,6 +1121,8 @@ class TranscriptInfo:
     updated_at: str | None = None
     tip: str | None = None         # the tip the counts below used (None: the newest leaf)
     gap: str | None = None         # ref of a parent the history needs and the harness never stored
+    summary: str | None = None     # 1.14: ref of the harness's own compaction summary the history starts at, when
+    #                                what came before it was never stored (then the only record of it); else None
     turns: int | None = None
     context_rows: int | None = None
     context_turns: int | None = None
@@ -1162,6 +1164,7 @@ class RowPage:
     remaining: int | None = None
     tip: str | None = None         # history reads: the tip used
     gap: str | None = None         # history reads: as TranscriptInfo.gap
+    summary: str | None = None     # history reads: as TranscriptInfo.summary (1.14)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1192,6 +1195,7 @@ class TurnPage:
     remaining: int | None = None
     tip: str | None = None
     gap: str | None = None
+    summary: str | None = None     # as TranscriptInfo.summary (1.14)
 
 
 class ModelsUnavailable(Error):
