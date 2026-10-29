@@ -404,6 +404,56 @@ class FakeTranscript:
         self._case.addCleanup(folder.chmod, 0o755)
 
 
+class FakeRuns:
+    """One-shot runs answered from a script (1.14), for PluginTestCase.fake_runs(). The real run_once runs: the
+    API's checks, access and permission, the harness's run options, model check and plan (its message checks
+    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Each run takes
+    the next answer: an api.Reply it returns, or an api.RunError it raises. `requests` holds each run's request
+    in full, oldest first: a dict of messages (an api.Message, or a row's data as passed), prompt, system, model,
+    effort, transport_retries, agent (its directory, or None) and timeout."""
+
+    def __init__(self, test, answers, version="2.1.312"):
+        from ..harnesses import types
+        from ..runtime import runs
+        from . import api
+        self.answers, self.requests, calling = list(answers), [], []
+        if not (test.bin / "claude").exists():  # what the run options ask the harness's executable; never a session
+            test.executable("claude", f"echo '{version} (Claude Code)'")
+        original = runs.run_once
+
+        def run_once(adapter, request, **keywords):
+            calling.append((request, keywords))
+            try:
+                return original(adapter, request, **keywords)
+            finally:
+                calling.pop()
+
+        def execute(executor, plan, payload):
+            request, keywords = calling[-1]
+            self.requests.append({
+                "messages": [item.data if isinstance(item, types.RunRow) else api.Message(item.role, [
+                    api.TextBlock(block.text) if isinstance(block, types.RunText)
+                    else api.ImageBlock(block.media_type, block.data) for block in item.blocks])
+                    for item in request.messages],
+                "prompt": request.prompt, "system": request.system, "model": request.model,
+                "effort": request.effort, "transport_retries": request.transport_retries,
+                "agent": keywords.get("agent_directory"), "timeout": keywords.get("timeout")})
+            if not self.answers:
+                raise types.RunFailure("failed", "the test's script has no answer left for this run")
+            answer = self.answers.pop(0)
+            if isinstance(answer, api.RunError):
+                raise types.RunFailure(answer.kind, str(answer), retry_after=answer.retry_after,
+                                       confirmed=answer.confirmed)
+            if not isinstance(answer, api.Reply):
+                raise TypeError("fake_runs answers are api.Reply and api.RunError")
+            return types.RunReply(text=answer.text, model=answer.model, usage=dict(answer.usage),
+                                  cost_usd=answer.cost_usd, stop=answer.stop, lost=tuple(answer.lost))
+
+        for patcher in (mock.patch.object(runs, "run_once", run_once), mock.patch.object(runs, "_execute", execute)):
+            patcher.start()
+            test.addCleanup(patcher.stop)
+
+
 class PluginTestCase(unittest.TestCase):
     # The plugin under test: a directory with plugin.json, or None to write plugins in the test.
     plugin = None
@@ -516,6 +566,11 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def fake_runs(self, *answers):
+        """One-shot runs answered from this script for the rest of the test (1.14): a FakeRuns, whose `requests`
+        records what each run was asked. Everything but the run itself is real."""
+        return FakeRuns(self, answers)
 
     def transcript(self, agent, rows=()):
         """A Claude transcript for `agent` (its directory, from agent(), or an api.Agent) that the API reads (1.13):

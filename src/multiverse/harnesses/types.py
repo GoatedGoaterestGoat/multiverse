@@ -1,5 +1,6 @@
 """Adapter boundary: specifications and observations, never tmux or state writes."""
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Generator, Literal, Mapping, Protocol, Sequence
 from uuid import UUID
 
@@ -18,9 +19,10 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
-        'models', 'check_model',
+        'models', 'check_model', 'run_options',
     ), 'observe'),
     'ask': 'spend',
+    'run_plan': 'spend',
     **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
 }
 
@@ -480,3 +482,103 @@ class ModelProvider(Protocol):
     def models(self, *, environment: Mapping[str, str | None]) -> ModelCatalog: ...
     def check_model(self, model: str, *, effort: str | None = None,
                     environment: Mapping[str, str | None]) -> ModelCheck: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunText:
+    text: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunImage:
+    media_type: str
+    data: bytes
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunMessage:
+    role: str
+    blocks: tuple[RunText | RunImage, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunRow:
+    format: str
+    data: dict
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunRequest:
+    messages: tuple[RunRow | RunMessage, ...]
+    prompt: str
+    system: str
+    model: str
+    effort: str | None = None
+    transport_retries: int | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunOptions:
+    supported: bool
+    reason: str = ''
+    images: bool = False
+    formats: tuple[str, ...] = ()
+    transport_retries: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunDirectory:
+    """A core-chosen private cwd and UUID, before anything has been written."""
+    path: Path
+    id: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunFile:
+    """An exclusively created relative file, below the run cwd or selected harness home."""
+    path: str
+    content: bytes
+    root: Literal['run', 'store'] = 'run'
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunOutcome:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunReply:
+    text: str
+    model: str | None = None
+    usage: Mapping[str, int] = field(default_factory=dict)
+    cost_usd: float | None = None
+    stop: str | None = None
+    lost: tuple[str, ...] = ()
+    duration: float = 0.0
+
+
+class RunFailure(ValueError):
+    """A classified, bounded native diagnostic; never attach the request or response body."""
+    def __init__(self, kind, reason, *, retry_after=None, confirmed=None, usage=None, cost_usd=None,
+                 model=None, duration=0.0):
+        self.kind, self.reason = kind, str(reason)[:4096]
+        self.retry_after, self.confirmed = retry_after, confirmed
+        self.usage, self.cost_usd, self.model = dict(usage or {}), cost_usd, model
+        self.duration = duration
+        super().__init__(self.reason)
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunPlan:
+    command: CommandSpec
+    interpret: Callable[[RunOutcome], RunReply]
+    files: tuple[RunFile, ...] = ()
+
+
+class RunProvider(Protocol):
+    """Optional one-shot model call: no tools, no saved conversation, no adapter-owned writes or processes."""
+    def run_options(self, *, environment: Mapping[str, str | None]) -> RunOptions: ...
+    def run_plan(self, request: RunRequest, *, environment: Mapping[str, str | None],
+                 run: RunDirectory) -> RunPlan: ...

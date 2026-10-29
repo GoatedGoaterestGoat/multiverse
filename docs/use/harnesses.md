@@ -215,6 +215,13 @@ Claude Code has no command that lists its models, so mv2 keeps a table of them, 
 - **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
 - **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
 
+### Claude's one-shot runs
+
+A plugin can ask Claude for one reply to a conversation it gives (`harness.run_once()`, [plugin API](../develop/plugins.md)), as compaction does for its merges. mv2 writes that conversation as a short-lived session in Claude's storage, under a run folder of its own, and runs `claude -p` on it with no tools, MCP servers, commands or project settings, for one turn. A prompt without a conversation runs on its own, with no session. Nothing of it is kept: the session file and the folders mv2 made are removed afterwards.
+
+- **What still loads.** Claude reads your own user settings, so the hooks of the Claude plugins you enabled, and their language servers, still start for a run. The model still gets no tools. mv2 turns off CLAUDE.md files and auto-memory, and Claude's retry and model switch after a refusal, so a refusal comes back as one, from the model asked.
+- **Cost.** A run is billed like any Claude request on your login. A two-message run on Haiku costs about $0.0001.
+
 ### Codex's models and transcripts
 
 Plugins read Codex's models through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)). The table comes from the checked release's bundled model catalog and is regenerated at each version check. It includes efforts, defaults, input types, context windows and hidden models. A known model's unsupported effort fails the check; an unknown ID passes as unverified.

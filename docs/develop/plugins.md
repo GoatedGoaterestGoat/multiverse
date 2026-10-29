@@ -174,8 +174,8 @@ Every call above has an effect class, and a plugin works under the access level 
 
 | Class | Means | Calls |
 | --- | --- | --- |
-| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, the transcript reads, a harness's `models()` and `check()`, `harness_info(..., agent=)`, `session`, `agent_at`, `current_agent` |
-| `spend` | Uses model tokens, money or time, still changing nothing | `ask` |
+| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, the transcript reads, a harness's `models()`, `check()` and `run_options()`, `harness_info(..., agent=)`, `session`, `agent_at`, `current_agent` |
+| `spend` | Uses model tokens, money or time, still changing nothing | `ask`, a harness's `run_once()` |
 | `act` | Changes a session, a launch, an inbox or a universe's files | `spawn`, `resume`, `kill`, `send`, `refresh(apply=True)`, `mv.settings.edit`, launch contributions and harness extensions |
 
 A plugin writing its own state is outside the classes: `mv.state_dir`, `mv.agent_state_dir`, `api.files`, `mv.log`, `mv.statusline.write`, `mv.events.emit` and `mv.settings.read` never raise for access, so they stay safe in `finally` blocks. So are a universe's own facts that a plugin needs to configure itself before it is turned on there: `universe.id`, `.name`, `.parent`, `.subverses()` and `mv.harness_info(universe, name)` without `agent=`. With `agent=`, `harness_info` reads that agent's records and is `observe`.
@@ -228,6 +228,33 @@ if not check.ok:
 - **Codex** uses its release's bundled model table, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
 - Treat a `source`, `provider`, input or effort you don't know as an opaque name: later minors may add them.
 
+### One-shot runs
+
+One model reply to a context you supply, with no tools and nothing saved (1.14; `spend`, needs `models.FAMILY`). Claude runs it; Codex, Pi and custom harnesses say it isn't supported yet. The design is [transcript-protocols](../design/transcript-protocols.md#the-one-shot-run).
+
+```python
+claude = mv.universe(root).harness("claude")
+options = claude.run_options()                # observe: .supported, .reason, .images, .formats, .transport_retries
+reply = claude.run_once(
+    [*rows, api.Message("user", [api.TextBlock("Here is the change"), api.ImageBlock("image/png", data)]),
+     api.Message("assistant", [api.TextBlock("Understood")])],
+    prompt="Summarise the conversation so far",  # the final user message
+    system=SYSTEM_PROMPT,                     # replaces the harness's own system prompt
+    model="haiku", effort="low",
+    agent=agent,                              # optional: run with this agent's recorded storage (its login)
+    transport_retries=3, timeout=600, cancel=event)
+reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop, reply.lost
+```
+
+- **`reply.usage`** counts tokens under `input`, `output`, `cache_read` and `cache_write`, where the harness reports them; `reply.cost_usd` is the harness's own figure.
+- **Messages:** an `api.Row` is passed as stored, the native passthrough: it must be this harness's format (`options.formats`) and carry its body (a row read with `bodies=False` is refused). An `api.Message("user" or "assistant", blocks)` is built by the harness from `api.TextBlock(text)` and, in user messages, `api.ImageBlock(media_type, data)` (PNG, JPEG, GIF or WebP, at most 5 MB). Messages, when there are any, end with the model's, since `prompt` is the next user message; with none, the prompt runs alone. What the harness can't carry is listed in `reply.lost`.
+- **Checked before anything is sent:** the arguments, the messages, the model and effort (`check()`'s rules), access and permission. A refusal is `api.Error`, or `api.RunError` with kind `invalid_request` or `unavailable`, and nothing is spent.
+- **`agent=`:** an agent of this universe running this harness. The run uses its recorded storage, so its login and settings; without a record it is refused ("resume it once"), except inside that agent's own session. A relative storage variable (`CLAUDE_CONFIG_DIR=relative`) is made absolute where it was set: the agent's recorded workspace, or this process's directory without `agent=`. Provider routing (Bedrock, Vertex and the like) comes from this process and the harness's settings, not the agent.
+- **`api.RunError`** has `kind`: `rate_limit` (retry after a while), `usage_limit` (the account's limit: stop), `refused`, `too_long` (the context doesn't fit, or is over 32 MiB; don't retry), `invalid_request`, `timeout`, `cancelled` (with `confirmed` false when the stop couldn't be proved), `unavailable` or `failed`. Treat a kind you don't know as `failed`. `retry_after` is seconds when the harness says. The message has the harness's own error text, never your messages or the reply.
+- **`cancel`**, a `threading.Event`, stops the run from another thread. `run_once` is safe from several threads at once and installs no signal handlers. Call it from a helper action, a service thread or the plugin host, not from a column, panel or settings check, which run as `observe` under a 2-second budget.
+- **What still loads:** your own Claude settings, so their enabled plugins' hooks, but no MCP servers, CLAUDE.md files or auto memory. The model gets no tools.
+- **Records:** each run's metadata (time, harness, model, agent, tokens, cost, duration, outcome), never its content, goes to `state/plugins/NAME/runs.jsonl` in the run's universe. `mv2 plugins info NAME` shows the last day's runs and cost.
+
 ### Permissions
 
 | Permission | Checked | Where |
@@ -239,7 +266,8 @@ if not check.ok:
 | `universe.write` | By the API | `refresh(apply=True)` |
 | `harness.claude`, `harness.codex`, `harness.pi` | By the manifest | A `harnesses` entry for that family; `mv.launch.contribute` doesn't check it |
 | `process.spawn` | By the manifest | A Codex entry's local MCP server; otherwise declared only |
-| `network.listen`, `models.HARNESS` | Declared only | Listening for connections; spending that harness's model tokens (`models.claude`) |
+| `models.HARNESS` | By the API (1.14) | A harness's `run_once()`: spending that harness's model tokens (`models.claude`) |
+| `network.listen` | Declared only | Listening for connections |
 
 A checked call that the manifest didn't ask for raises `api.Error`. Declared-only permissions tell the person turning the plugin on what it does, and a reviewer can hold the plugin to them. None of this is a sandbox. A plugin's code runs with the user's permissions.
 
@@ -346,6 +374,7 @@ Each test gets:
 - a temporary home, `CLAUDE_CONFIG_DIR` and `bin/` first on `PATH`;
 - no inherited agent identity;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
+- `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
 - a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 
 Nothing starts an agent, tmux, a harness or the plugin host. A test sees only its own plugins unless the class sets `bundled = True`.
@@ -355,6 +384,7 @@ Nothing starts an agent, tmux, a harness or the plugin host. A test sees only it
 | `loaded()`, `module(name)` | The plugin, loaded and registered. `registrations` holds what `register` added (`commands`, `columns`, `data_panels`, `actions`, `launch`, `handlers`, `helpers`, …), so you can call it directly. `module(name)` is one of its modules, as mv2 loaded it |
 | `agent(name, harness="claude", native_id=None, runtime=None, **properties)`, `claude_transcript(native_id, records)`, `executable(name, script)` | An agent's records, written without starting anything (returns its directory); a Claude transcript where Claude keeps it; a fake program on `PATH` |
 | `transcript(agent, rows=())`, `testing.ClaudeRows` | A Claude transcript the agent reads through the real API, core and Claude adapter (1.13), with `append`, `rewrite`, `clear` and `unreadable`; rows built with `prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind` and `compaction` (1.14) |
+| `fake_runs(*answers)` | One-shot runs answered from a script of Replies and RunErrors behind the real checks (1.14); `.requests` records each request |
 | `write_plugin(name, manifest, files)`, `enable(name, on=True)`, `subverse(name)`, `entry(name)` | Other plugins and scopes |
 | `dashboard(size=(120, 40))` | The real dashboard on `self.root`, in an `IsolatedAsyncioTestCase`. Drive it with `press`, `until`, `refresh`, `select`, `enter`, `back`, `open_plugins()`, `open_settings(name)`, `run_action(title)` and `close_screen()`. Read `table()`, `local_view()`, `palette()`, `status` and `header`. A plugin still loading adds its palette entries after the first refresh, so check for one with `until`; `run_action` waits for its own. `multiverse.plugins.dashboard_testing` lists what is promised |
 

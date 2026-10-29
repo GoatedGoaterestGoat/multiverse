@@ -40,7 +40,9 @@ from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read
+from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply
 from . import models as model_table
+from . import run as one_shot
 from . import transcripts as rows_source
 from .transcripts import (  # every transcript reader reads through this one row source
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
@@ -1207,6 +1209,54 @@ class ClaudeAdapter(ConfiguredAdapter):
     def check_model(self, model, *, effort=None, environment):
         """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
         return model_table.check(model, effort, environment)
+
+    def run_options(self, *, environment):
+        """What a one-shot run can do (the run protocol, run.py): any Claude Code from 2.1.267 on, which takes
+        --system-prompt-snapshot; images kept; rows of Claude's own transcripts passed through."""
+        executable = self.spec['spawn'][0]
+        if shutil.which(executable, path=environment.get('PATH')) is None:
+            return RunOptions(supported=False, reason=f'Claude Code is not installed ({executable} not found)')
+        version = claude_version(executable)
+        if version is not None and version < SNAPSHOT_FLAG_VERSION:
+            return RunOptions(supported=False, reason=f"Claude Code {'.'.join(map(str, version))} is older than "
+                                                      f"{'.'.join(map(str, SNAPSHOT_FLAG_VERSION))}, which runs need")
+        return RunOptions(supported=True, images=True, formats=(one_shot.FORMAT,), transport_retries=one_shot.RETRIES)
+
+    def run_plan(self, request, *, environment, run):
+        """The one-shot run for `request` in core's run directory `run`: Claude resumes a session file written in
+        the selected store's project folder for that directory, named by `run.id` (run.py says what it holds).
+        Messages Claude would refuse fail as invalid_request here, before anything is written or spent."""
+        checked = self.check_model(request.model, effort=request.effort, environment=environment)
+        if not checked.ok:
+            raise RunFailure('invalid_request', checked.reason or f'{request.model} cannot be used here')
+        model = checked.model or request.model
+        effort = checked.effort if checked.verified else request.effort
+        cwd = os.path.realpath(run.path)
+        key = rows_source.project_key(cwd)  # Claude's own name for the folder, a long path's shortened one included
+        try:
+            rows = one_shot.session(request.messages, session_id=run.id, cwd=cwd, model=model,
+                                    at=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
+            extra = one_shot.ENVIRONMENT if request.transport_retries is None else \
+                one_shot.environment(request.transport_retries)
+        except one_shot.Unusable as error:
+            raise RunFailure('invalid_request', str(error)) from None
+        content = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
+        # No messages: a question on its own, answered without a session to resume or a file to write.
+        argv = one_shot.command(self.spec['spawn'][0], prompt=request.prompt, session_id=run.id if rows else None,
+                                model=model, effort=effort, system=request.system)
+
+        def interpret(outcome):
+            result = one_shot.reply(outcome.returncode, outcome.stdout, outcome.stderr, model=model)
+            if result['kind'] is not None:
+                raise RunFailure(result['kind'], result['message'], usage=result.get('usage'),
+                                 cost_usd=result.get('cost_usd'), model=result.get('model'))
+            return RunReply(text=result['text'], model=result['model'], usage=result['usage'],
+                            cost_usd=result['cost_usd'], stop=result['stop'])
+
+        return RunPlan(command=CommandSpec(tuple(argv), one_shot.UNSET, environment=dict(extra)),
+                       files=(RunFile(path=f'projects/{key}/{run.id}.jsonl', content=content, root='store'),) if rows
+                       else (),
+                       interpret=interpret)
 
     def transcript_readable(self, session, *, reader=None):
         """Whether an earlier generation's transcript can still be found under its recorded home; None: can't tell."""

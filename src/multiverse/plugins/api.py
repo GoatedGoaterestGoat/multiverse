@@ -21,13 +21,15 @@ something changes or goes. Fields of `record` (an operation's full result)
 are not covered.
 """
 from contextlib import contextmanager, ExitStack
+import copy
 import functools
 import inspect
 from dataclasses import dataclass, field, fields
 import os
 from pathlib import Path
+import time
 
-from . import access as levels, agent_files, harness, loader, settings as settings_files
+from . import access as levels, agent_files, harness, loader, run_records, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
 
 VERSION = loader.API_VERSION
@@ -1245,6 +1247,62 @@ class ModelCheck:
     reason: str | None = None        # why not ok, or why ok is unverified
 
 
+IMAGE_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+IMAGE_BYTES = 5_000_000            # an image block's largest size: 5 MB, the model API's own limit
+
+
+@dataclass(frozen=True)
+class TextBlock:
+    """Text in a Message (1.14)."""
+    text: str
+
+
+@dataclass(frozen=True)
+class ImageBlock:
+    """An image in a user Message (1.14): its media type (IMAGE_TYPES) and bytes, at most 5 MB."""
+    media_type: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class Message:
+    """One message a one-shot run builds (1.14): role "user" or "assistant", its blocks in order."""
+    role: str
+    blocks: tuple                    # TextBlock, ImageBlock (user messages only)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Reply:
+    """What a one-shot run answered (1.14)."""
+    text: str
+    model: str | None = None         # the model that answered
+    usage: dict = field(default_factory=dict)  # tokens: input, output, cache_read, cache_write, where reported
+    cost_usd: float | None = None    # the harness's own figure, where it reports one
+    stop: str | None = None          # the stop reason ("end_turn", "max_tokens", ...)
+    lost: tuple = ()                 # what the harness couldn't carry from the messages, one line each
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunOptions:
+    """What a one-shot run on a harness supports (1.14). Treat a format you don't know as one you can't pass."""
+    supported: bool
+    reason: str | None = None        # why not, when not supported
+    images: bool = False             # image blocks are kept
+    formats: tuple = ()              # native row formats a Row can be passed in ("claude-jsonl")
+    transport_retries: tuple | None = None   # (lowest, highest) transport_retries the harness takes
+
+
+class RunError(Error):
+    """A one-shot run that didn't answer (1.14). `kind`: rate_limit, usage_limit, refused, too_long,
+    invalid_request, timeout, cancelled, unavailable or failed; treat one a later minor adds like failed.
+    `retry_after` is seconds when the harness says, else None. For cancelled, `confirmed` is False when the stop
+    couldn't be proved. The message carries the harness's own error text, never the run's input or reply."""
+
+    def __init__(self, message, *, kind="failed", retry_after=None, confirmed=True):
+        super().__init__(message)
+        self.kind, self.retry_after, self.confirmed = kind, retry_after, confirmed
+
+
 class Harness:
     """A harness configured in a universe (1.13): mv.universe(root).harness(NAME)."""
 
@@ -1268,6 +1326,151 @@ class Harness:
             raise Error("effort must be an effort name or None")
         return _from_core(ModelCheck, self._ask("check_model", model, effort=effort))
 
+    def run_options(self):
+        """What a one-shot run on this harness supports (1.14; observe): whether it runs at all and why not,
+        whether images are kept, the native row formats it takes and the transport_retries it accepts."""
+        from .. import harnesses
+        from ..runtime import runs
+        with _acting(self._universe._plugin._loaded, "observe", self._universe, f"reading {self.name}'s run options"):
+            adapter = _call(harnesses.load, self._universe.path, self.name)
+            environment = _absolute_storage(adapter, _launch_environment(adapter), os.getcwd())
+            return _from_core(RunOptions, _call(runs.options, adapter, environment=environment))
+
+    def run_once(self, messages, *, prompt, system, model, effort=None, agent=None, transport_retries=None,
+                 timeout=600, cancel=None):
+        """Run the model once, with no tools and no saved conversation, on `messages` then `prompt` (1.14; spend,
+        needs models.FAMILY). `messages`: Rows of this harness's format with their bodies (the native passthrough,
+        in the order given) or Messages it builds; the last is the model's. `system` replaces the harness's own
+        system prompt. A model or effort the harness doesn't take is RunError("invalid_request") before anything
+        is sent. `agent`: an Agent of this universe running this harness, whose recorded storage (its login and
+        settings) the run uses; its provider routing is this process's. `cancel`: a threading.Event. Each run's
+        metadata, never its content, is recorded for `mv2 plugins info`."""
+        plugin = self._universe._plugin
+        family = getattr(self.info, "family", "") or ""
+        if family:
+            plugin._need(f"models.{family}")
+        request = self._run_request(messages, prompt, system, model, effort, agent, transport_retries, timeout,
+                                    cancel)
+        from .. import harnesses
+        from ..harnesses import types
+        from ..runtime import runs
+        root = self._universe.path
+        with _acting(plugin._loaded, "spend", self._universe, f"running {self.name}"):
+            adapter = _call(harnesses.load, root, self.name)
+            environment = self._run_environment(adapter, agent)
+            self._check_against(_call(runs.options, adapter, environment=environment), messages, transport_retries)
+
+            def run():
+                try:
+                    return runs.run_once(adapter, request, root=root, plugin=plugin.name, environment=environment,
+                                         agent_directory=agent.directory if agent is not None else None,
+                                         timeout=timeout, cancel=cancel)
+                except types.RunFailure as failure:
+                    self._record(failure.model or model, agent, failure, failure.kind or "failed")
+                    raise RunError(failure.reason, kind=failure.kind or "failed", retry_after=failure.retry_after,
+                                   confirmed=failure.confirmed is not False) from None
+            reply = _call(run)
+        self._record(reply.model or model, agent, reply, "ok")
+        return _from_core(Reply, reply)
+
+    def _run_request(self, messages, prompt, system, model, effort, agent, retries, timeout, cancel):
+        """The core request for a run, every argument checked first: nothing is sent for a bad one."""
+        from ..harnesses import types
+        if isinstance(messages, (str, bytes)) or not isinstance(messages, (list, tuple)):
+            raise Error("messages must be a list of Rows and Messages")
+        converted = []
+        for item in messages:
+            if isinstance(item, Row):
+                if not isinstance(item.data, dict):
+                    raise Error("a Row passed to run_once needs its body: read it without bodies=False")
+                converted.append(types.RunRow(format=item.format, data=copy.deepcopy(item.data)))
+            elif isinstance(item, Message):
+                if item.role not in ("user", "assistant"):
+                    raise Error('a Message\'s role is "user" or "assistant"')
+                if isinstance(item.blocks, (str, bytes)) or not isinstance(item.blocks, (list, tuple)) or not item.blocks:
+                    raise Error("a Message needs at least one block")
+                blocks = []
+                for block in item.blocks:
+                    if isinstance(block, TextBlock) and isinstance(block.text, str):
+                        blocks.append(types.RunText(text=block.text))
+                    elif isinstance(block, ImageBlock) and item.role == "user":
+                        if block.media_type not in IMAGE_TYPES or not isinstance(block.data, (bytes, bytearray)):
+                            raise Error(f"an image is the bytes of one of {', '.join(IMAGE_TYPES)}")
+                        if len(block.data) > IMAGE_BYTES:
+                            raise Error("an image is at most 5 MB")
+                        blocks.append(types.RunImage(media_type=block.media_type, data=bytes(block.data)))
+                    else:
+                        raise Error("a Message's blocks are TextBlocks, and ImageBlocks in user messages")
+                converted.append(types.RunMessage(role=item.role, blocks=tuple(blocks)))
+            else:
+                raise Error("messages must be a list of Rows and Messages")
+        for name, value in (("prompt", prompt), ("system", system), ("model", model)):
+            if not isinstance(value, str) or (name != "system" and not value.strip()):
+                raise Error(f"{name} must be text")
+        if effort is not None and (not isinstance(effort, str) or not effort):
+            raise Error("effort must be an effort name or None")
+        if retries is not None and (isinstance(retries, bool) or not isinstance(retries, int)):
+            raise Error("transport_retries must be a whole number or None")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
+            raise Error("timeout must be seconds, more than 0 and at most 3600")
+        if cancel is not None and not callable(getattr(cancel, "is_set", None)):
+            raise Error("cancel must be a threading.Event or None")
+        if agent is not None:
+            if not isinstance(agent, Agent):
+                raise Error(f"agent must be an Agent, not {type(agent).__name__}: "
+                            f"pass mv.universe(universe).agent('NAME')")
+            if Path(agent.universe.path).resolve() != Path(self._universe.path).resolve():
+                raise Error(f"{agent.name} is in another universe: use mv.universe({str(agent.universe.path)!r})"
+                            f".harness({self.name!r})")
+            if agent.harness != self.name:
+                raise Error(f"{agent.name} runs {agent.harness}, not {self.name}")
+        return types.RunRequest(messages=tuple(converted), prompt=prompt, system=system, model=model, effort=effort,
+                                transport_retries=retries)
+
+    def _run_environment(self, adapter, agent):
+        """What the run gets: what a launch from this process would, and for an agent its recorded storage on top
+        (a recorded absence removes the variable). Unproven storage is refused, except inside the agent's own
+        session, whose inherited environment is the agent's."""
+        environment = _launch_environment(adapter)
+        if agent is None:
+            return _absolute_storage(adapter, environment, os.getcwd())
+        storage = self._universe._plugin.harness_info(self._universe, self.name, agent=agent).storage
+        if storage is None:
+            if not _inside(agent):
+                raise RunError(f"mv2 has no record of {agent.name}'s {self.name} storage; resume it once",
+                               kind="unavailable")
+            workspace = agent.record.get("workspace")
+            absolute = _absolute_storage(adapter, environment, workspace if isinstance(workspace, str)
+                                         and os.path.isabs(workspace) else None)
+            if absolute is None:
+                raise RunError(f"{agent.name}'s {self.name} storage is set relative to a workspace mv2 has no "
+                               f"record of", kind="unavailable")
+            return absolute
+        environment.update(storage)  # recorded values come resolved against the agent's workspace
+        return environment
+
+    def _check_against(self, options, messages, retries):
+        if not options.supported:
+            raise RunError(options.reason or f"{self.name} can't run once", kind="unavailable")
+        for item in messages:
+            if isinstance(item, Row) and item.format not in (options.formats or ()):
+                raise Error(f"a Row of format {item.format or 'unknown'!r} can't be passed to {self.name}: "
+                            f"build a Message")
+            if isinstance(item, Message) and not options.images and any(isinstance(block, ImageBlock)
+                                                                         for block in item.blocks):
+                raise Error(f"{self.name} keeps no images")
+        bounds = options.transport_retries
+        if retries is not None and bounds and not bounds[0] <= retries <= bounds[1]:
+            raise Error(f"transport_retries is {bounds[0]} to {bounds[1]} for {self.name}")
+
+    def _record(self, model, agent, outcome, kind):
+        usage = getattr(outcome, "usage", None) or {}
+        run_records.record(self._universe.path, self._universe._plugin.name, harness=self.name, model=model,
+                           agent=agent.id if agent is not None else None,
+                           input_tokens=usage.get("input"), output_tokens=usage.get("output"),
+                           cost_usd=getattr(outcome, "cost_usd", None),
+                           duration=round(getattr(outcome, "duration", 0.0) or 0.0, 3), outcome=kind)
+
     def _ask(self, method, *args, **kwargs):
         from .. import harnesses
         from ..harnesses import types
@@ -1287,6 +1490,29 @@ class Harness:
         if not isinstance(result, types.ModelCatalog if method == "models" else types.ModelCheck):
             raise ModelsUnavailable(f"{self.name}'s models could not be read")
         return result
+
+
+def _absolute_storage(adapter, environment, base):
+    """`environment` with each relative storage variable of the harness made absolute against `base`, the
+    directory it was set from, as Claude's own path resolution joins it (lexically): the run's process starts in
+    a directory of its own, where a relative value would name another store. None when one is relative and there
+    is no base to resolve it against."""
+    for key in getattr(adapter, "storage_env", ()) or ():
+        value = environment.get(key)
+        if isinstance(value, str) and value and not os.path.isabs(value):
+            if base is None:
+                return None
+            environment[key] = os.path.normpath(os.path.join(base, value))
+    return environment
+
+
+def _inside(agent):
+    """Whether this process runs inside `agent`'s own session."""
+    own = os.environ.get("MV2_AGENT_DIR")
+    try:
+        return bool(own) and Path(own).resolve() == Path(agent.directory).resolve()
+    except OSError:
+        return False
 
 
 def _launch_environment(adapter):
@@ -1311,6 +1537,11 @@ def _from_core(kind, value):
         values["turns"] = tuple(_from_core(Turn, item) for item in values.get("turns") or ())
     elif kind is ModelCatalog:
         values["models"] = tuple(_from_core(Model, item) for item in values.get("models") or ())
+    elif kind is Reply:
+        values["usage"], values["lost"] = dict(values.get("usage") or {}), tuple(values.get("lost") or ())
+    elif kind is RunOptions:
+        values["reason"] = values.get("reason") or None
+        values["formats"] = tuple(values.get("formats") or ())
     return kind(**values)  # a row's data is already a fresh copy: core re-reads each body per call
 
 
