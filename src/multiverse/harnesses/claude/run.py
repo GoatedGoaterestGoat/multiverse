@@ -71,16 +71,29 @@ def _built(item, parent, session_id, cwd, at, model):
     return rows
 
 
+def _queued(row):
+    """Whether `row` is a message Claude took while busy (a prompt typed or a message delivered mid-turn): stored as an
+    attachment of type queued_command, it is conversation, and Claude replays it in a resumed session."""
+    attachment = row.get('attachment') if row.get('type') == 'attachment' else None
+    prompt = attachment.get('prompt') if isinstance(attachment, dict) and attachment.get('type') == 'queued_command' else None
+    return bool(prompt) and isinstance(prompt, (str, list))
+
+
 def _copied(row, parent, session_id, cwd):
     """A transcript row in the run's session: its own session, folder and parent; recorded usage cleared (Claude
     sizes a resumed session from the last usage it finds, and refuses "Prompt is too long" before any request);
-    its model kept, since copied thinking carries the writing model's signature."""
-    if not isinstance(row, dict) or row.get('type') not in ('user', 'assistant') or not isinstance(row.get('message'), dict):
-        raise Unusable('a passed-through row must be a user or assistant row of a Claude transcript, with its body')
+    its model kept, since copied thinking carries the writing model's signature. A user or assistant row with its
+    body, or a queued message (_queued); no other attachment, which Claude adds and isn't conversation."""
+    if not isinstance(row, dict) or not (row.get('type') in ('user', 'assistant') and isinstance(row.get('message'), dict)
+                                         or _queued(row)):
+        raise Unusable('a passed-through row must be a user or assistant row of a Claude transcript, with its body, '
+                       'or a message Claude queued')
     copy = {key: value for key, value in row.items() if key not in ('isSidechain', 'logicalParentUuid', 'agentId')}
     copy.update(parentUuid=parent, uuid=row.get('uuid') if isinstance(row.get('uuid'), str) else _uuid(),
                 sessionId=session_id, cwd=cwd)
-    if 'usage' in copy['message']:
+    if 'session_id' in copy:  # an attachment row names its session twice
+        copy['session_id'] = session_id
+    if isinstance(copy.get('message'), dict) and 'usage' in copy['message']:
         copy['message'] = {**copy['message'], 'usage': {}}
     return copy
 

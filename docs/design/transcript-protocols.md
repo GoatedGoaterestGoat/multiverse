@@ -354,6 +354,11 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   recorded usage is cleared, since Claude sizes a resumed session from the last
   usage it finds and would refuse a small run as too long. Each keeps its
   recorded model: copied thinking carries the writing model's signature.
+  Rows are user and assistant rows with their bodies, plus a message Claude
+  took while busy (a prompt typed or a message delivered mid-turn), which it
+  stores as an attachment of type `queued_command`: that is conversation, and
+  Claude replays it in a resumed session. Any other attachment is Claude's own
+  and is refused.
   Claude runs a response's tool calls as they stream in and stores each
   result as soon as its call ends, so one response with several calls can be
   stored call, call, result, call, result. The session lays such a response

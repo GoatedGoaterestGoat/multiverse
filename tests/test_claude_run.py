@@ -74,9 +74,23 @@ class ClaudeRunTest(unittest.TestCase):
         self.assertFalse({'isSidechain', 'logicalParentUuid'} & set(rows[1]) | {'isSidechain'} & set(rows[0]))
         self.assertEqual({(r['sessionId'], r['cwd']) for r in rows}, {(SESSION, CWD)})
         self.assertEqual(answer['message']['usage'], {'input_tokens': 190000})  # the caller's row is left alone
-        with self.assertRaises(run.Unusable):
-            run.session([RunRow(format='claude-jsonl', data={'type': 'system', 'uuid': 's'})], session_id=SESSION, cwd=CWD,
-                        model=MODEL, at=AT)
+        # A message Claude took while busy is a queued_command attachment, conversation that Claude replays; every
+        # other attachment is Claude's own, and so is anything without its body (compaction's /compact of plugins).
+        queued = {'type': 'attachment', 'uuid': 'q1', 'parentUuid': 'a1', 'sessionId': 'agent', 'session_id': 'agent',
+                  'isSidechain': False, 'attachment': {'type': 'queued_command', 'prompt': 'Message from lead:\nAlso test.',
+                                                       'commandMode': 'prompt', 'isMeta': True,
+                                                       'origin': {'kind': 'peer', 'msg_id': 'm1'}}}
+        rows = run.session([RunRow(format='claude-jsonl', data=row) for row in (prompt, answer, queued, answer)],
+                           session_id=SESSION, cwd=CWD, model=MODEL, at=AT)
+        self.assertTrue(chain(rows))
+        self.assertEqual((rows[2]['attachment'], rows[2]['sessionId'], rows[2]['session_id']),
+                         (queued['attachment'], SESSION, SESSION))
+        for name, bad in (('a system row', {'type': 'system', 'uuid': 's'}),
+                          ('another attachment, even one with a prompt',
+                           {'type': 'attachment', 'uuid': 'x', 'attachment': {'type': 'hook_additional_context', 'prompt': 'x'}}),
+                          ('a queued message without its prompt', {**queued, 'attachment': {'type': 'queued_command'}})):
+            with self.subTest(name), self.assertRaises(run.Unusable):
+                run.session([RunRow(format='claude-jsonl', data=bad)], session_id=SESSION, cwd=CWD, model=MODEL, at=AT)
 
     def test_what_claude_would_refuse_is_refused_before_anything_is_spent(self):
         """Claude fails these only after a paid request (a 400 tool_history_mismatch), or answers a prompt that
