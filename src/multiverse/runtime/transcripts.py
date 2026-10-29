@@ -4,7 +4,7 @@ Providers own native rows and links. Core owns identity, cursors, page bounds
 and turns, and never parses a provider's row bodies.
 """
 from contextlib import contextmanager
-from copy import deepcopy
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import base64
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import time
+from threading import Lock
 from typing import Any
 
 from .. import harnesses
@@ -100,6 +101,7 @@ class Row:
     size: int = 0
     data: dict | None = None
     format: str = ''
+    turn: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -357,6 +359,24 @@ class _Loaded:
     nearest: tuple
     history_places: dict
     history_nearest: tuple
+    analysis: object
+
+
+# Only native metadata is cached, never a snapshot, session claim or row body.
+# A provider must return a new immutable view whenever any fact changes.
+_VIEW_CACHE = OrderedDict()
+_VIEW_LOCK = Lock()
+VIEW_CACHE_SIZE = 4
+
+
+@dataclass
+class _Analysis:
+    view: TranscriptView
+    maps: dict
+    stored_order: tuple
+    history_set: frozenset
+    context: frozenset
+    groups: dict = field(default_factory=dict)
 
 
 def _validate_view(view):
@@ -401,7 +421,7 @@ def _load(root, directory, *, generation=None, tip=None, snapshot=None):
     if session.native_id is None:
         raise Unavailable('No native conversation is bound to this agent yet')
     view = _provider(snapshot, 'transcript_view', session, tip=tip)
-    _validate_view(view)
+    analysis = _analyze(view)
     home = view.source.home
     if not isinstance(home, str) or not Path(home).is_absolute():
         raise Unavailable('The transcript provider did not identify its recorded storage')
@@ -427,6 +447,17 @@ def _load(root, directory, *, generation=None, tip=None, snapshot=None):
     selected_generation = _generation(session)
     if generation is not None and selected_generation != generation:
         raise Unavailable('Unknown transcript generation')
+    return _Loaded(snapshot=snapshot, session=session, view=view, generation=selected_generation,
+                   explicit=generation is not None, analysis=analysis, **analysis.maps)
+
+
+def _analyze(view):
+    with _VIEW_LOCK:
+        cached = _VIEW_CACHE.get(id(view))
+        if cached is not None and cached.view is view:
+            _VIEW_CACHE.move_to_end(id(view))
+            return cached
+    _validate_view(view)
     nearest, refs, previous = [], {}, None
     for i, row in enumerate(view.rows):
         if row.ref is not None:
@@ -438,11 +469,18 @@ def _load(root, directory, *, generation=None, tip=None, snapshot=None):
     for index in view.history:
         previous = view.rows[index].ref or previous
         history_nearest.append(previous)
-    return _Loaded(snapshot=snapshot, session=session, view=view, generation=selected_generation,
-                   explicit=generation is not None, positions={r.position: i for i, r in enumerate(view.rows)},
-                   refs=refs, nearest=tuple(nearest),
-                   history_places={index: place for place, index in enumerate(view.history)},
-                   history_nearest=tuple(history_nearest))
+    analysis = _Analysis(view=view, stored_order=tuple(range(len(view.rows))),
+                         history_set=frozenset(view.history), context=frozenset(view.history[view.context_from:]),
+                         maps={'positions': {r.position: i for i, r in enumerate(view.rows)}, 'refs': refs,
+                               'nearest': tuple(nearest),
+                               'history_places': {index: place for place, index in enumerate(view.history)},
+                               'history_nearest': tuple(history_nearest)})
+    with _VIEW_LOCK:
+        _VIEW_CACHE[id(view)] = analysis
+        _VIEW_CACHE.move_to_end(id(view))
+        while len(_VIEW_CACHE) > VIEW_CACHE_SIZE:
+            _VIEW_CACHE.popitem(last=False)
+    return analysis
 
 
 def _cursor(loaded, index=None, *, history=False, turn=None, edge=None, side='after', boundary=None):
@@ -495,7 +533,7 @@ def _resolve(loaded, value, *, history=False):
         index = loaded.positions.get(saved['p'])
         if index is None:
             raise _rewrite(loaded, saved['r'])
-    if history and index not in loaded.view.history and not (saved and saved.get('b')):
+    if history and index not in loaded.analysis.history_set and not (saved and saved.get('b')):
         resume = None
         nearest = saved['r'] if saved else loaded.view.rows[index].ref
         if nearest is not None:
@@ -534,7 +572,8 @@ def _row_page(loaded, order, *, after=None, before=None, limit=200, max_bytes=DE
         raise ValueError('Use either after or before, not both')
     labels, kinds = _filters(labels, 'labels'), _filters(kinds, 'kinds')
     order = tuple(order)
-    location = {index: place for place, index in enumerate(order)}
+    location = (loaded.history_places if order is loaded.view.history else
+                None if order is loaded.analysis.stored_order else {index: place for place, index in enumerate(order)})
     anchor = before if before is not None else after
     index = _resolve(loaded, anchor, history=history) if anchor is not None else None
     saved = _unpack(anchor, CURSOR_PREFIX) if isinstance(anchor, str) and anchor.startswith(CURSOR_PREFIX) else None
@@ -545,21 +584,22 @@ def _row_page(loaded, order, *, after=None, before=None, limit=200, max_bytes=DE
         # An end cursor pins a stored prefix. It may end on metadata outside
         # history; the first newer stored row is the continuation in history.
         boundary = next((place for place, row in enumerate(order) if row > index), len(order))
-    elif history and saved and saved.get('b') == 'context' and index not in location:
+    elif history and saved and saved.get('b') == 'context' and location is not None and index not in location:
         boundary = min(loaded.view.context_from, len(order))
-    elif index in location:
-        boundary = location[index] + (side == 'after')
+    elif location is None or index in location:
+        boundary = (index if location is None else location[index]) + (side == 'after')
     else:
         # A turn is a subset of history. A cursor on an embedded command is a
         # valid boundary between that prompt's rows too.
-        history_places = {row: place for place, row in enumerate(loaded.view.history)}
+        history_places = loaded.history_places
         if index not in history_places:
             raise ValueError('The transcript position is outside this turn')
         boundary = sum(history_places[i] < history_places[index]
                        or history_places[i] == history_places[index] and side == 'after' for i in order)
-    candidates = list(range(boundary)) if before is not None else list(range(boundary, len(order)))
-    matches = [place for place in candidates if (labels is None or loaded.view.rows[order[place]].label in labels)
-               and (kinds is None or loaded.view.rows[order[place]].kind in kinds)]
+    candidates = range(boundary) if before is not None else range(boundary, len(order))
+    matches = (candidates if labels is None and kinds is None else
+               [place for place in candidates if (labels is None or loaded.view.rows[order[place]].label in labels)
+                and (kinds is None or loaded.view.rows[order[place]].kind in kinds)])
     chosen, size = [], 0
     for place in reversed(matches) if before is not None else matches:
         amount = loaded.view.rows[order[place]].size
@@ -585,12 +625,12 @@ def _row_page(loaded, order, *, after=None, before=None, limit=200, max_bytes=DE
                 or any(body is not None and not isinstance(body, dict) for body in contents)):
             raise Unavailable('The harness returned invalid transcript bodies', state='error')
         values = dict(zip(selected, contents))
-    history_set = set(loaded.view.history)
-    context = set(loaded.view.history[loaded.view.context_from:])
+    history_set, context = loaded.analysis.history_set, loaded.analysis.context
+    _, turn_ids = _grouped(loaded)
     result = tuple(Row(cursor=_cursor(loaded, i, history=history), ref=fact.ref, kind=fact.kind, label=fact.label,
                        source=fact.source, call_id=fact.call_id, abandoned=i not in history_set,
                        in_context=i in context, stop=fact.stop, ends_turn=fact.ends_turn, at=fact.at,
-                       size=fact.size, data=deepcopy(values.get(i)), format=loaded.view.source.format or '')
+                       size=fact.size, data=values.get(i), format=loaded.view.source.format or '', turn=turn_ids.get(i))
                    for i in indexes for fact in (loaded.view.rows[i],))
     if chosen:
         next_cursor = _cursor(loaded, indexes[-1], history=history)
@@ -612,7 +652,7 @@ def _row_page(loaded, order, *, after=None, before=None, limit=200, max_bytes=DE
 def rows(root, directory, *, after=None, before=None, limit=200, max_bytes=DEFAULT_BYTES,
          history=False, labels=None, kinds=None, tip=None, generation=None, bodies=True):
     loaded = _load(root, directory, generation=generation, tip=tip)
-    order = loaded.view.history if history else range(len(loaded.view.rows))
+    order = loaded.view.history if history else loaded.analysis.stored_order
     return _row_page(loaded, order, after=after, before=before, limit=limit, max_bytes=max_bytes,
                      history=history, labels=labels, kinds=kinds, bodies=bodies)
 
@@ -625,7 +665,7 @@ def _timestamp(value):
         return None
 
 
-def _groups(loaded):
+def _build_groups(loaded):
     groups, prompt, command, latest, preamble = [], None, None, None, None
     for index in loaded.view.history:
         row = loaded.view.rows[index]
@@ -649,7 +689,7 @@ def _groups(loaded):
                 groups.append(preamble)
             group = preamble
         group['indexes'].append(index)
-    context = set(loaded.view.history[loaded.view.context_from:])
+    context = loaded.analysis.context
     result = []
     last_prompt = max((n for n, group in enumerate(groups) if group['kind'] == 'prompt'), default=-1)
     for n, group in enumerate(groups):
@@ -677,6 +717,27 @@ def _groups(loaded):
                             in_context=bool(context.intersection(indexes)), finished=finished,
                             preview=row.preview[:200] if kind != 'preamble' else ''), tuple(indexes)))
     return result
+
+
+def _grouped(loaded):
+    # Cursors inside Turn depend on this scope. The cached value contains no
+    # reader or authority and is used only after this page's fresh snapshot.
+    key = (loaded.snapshot.universe_id, loaded.session.agent_id, loaded.generation)
+    with _VIEW_LOCK:
+        cached = loaded.analysis.groups.get(key)
+    if cached is not None:
+        return cached
+    groups = tuple(_build_groups(loaded))
+    result = (groups, {index: turn.id for turn, indexes in groups for index in indexes})
+    with _VIEW_LOCK:
+        if len(loaded.analysis.groups) >= VIEW_CACHE_SIZE:
+            loaded.analysis.groups.pop(next(iter(loaded.analysis.groups)))
+        loaded.analysis.groups[key] = result
+    return result
+
+
+def _groups(loaded):
+    return _grouped(loaded)[0]
 
 
 def _turn_boundary(loaded, groups, anchor, *, before=False):

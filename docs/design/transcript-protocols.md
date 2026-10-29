@@ -175,7 +175,9 @@ turns.
 
 A command run mid-turn is its own turn, and the running turn's later rows
 stay with their prompt. Turns are listed by where they start. A turn's ID is
-its first row's ref.
+its first row's ref. Since turns interleave in history order, each history
+row names its turn (`Row.turn`, 1.14; `None` for an abandoned row), so a
+plugin slices one history read by turn instead of reading turn by turn.
 
 **Finished:**
 

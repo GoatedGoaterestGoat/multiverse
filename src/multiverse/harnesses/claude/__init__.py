@@ -356,6 +356,16 @@ def _check(reader):
         reader.check()
 
 
+def _deadline(reader):
+    """Between the rows of one page, only the deadline: core checks the snapshot itself before the page and before it
+    returns, and checking it per row made a large history read several times slower."""
+    if reader is not None and time.monotonic() >= reader.deadline:
+        reader.check()
+
+
+VIEWS = 4  # views kept per transcript index, one per tip a reader asked for
+
+
 def _empty_view(state, reason):
     return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(), context_from=0,
                           tip=None, gap=None, history_version=0)
@@ -1132,16 +1142,26 @@ class ClaudeAdapter(ConfiguredAdapter):
         if index is None:
             return _empty_view('unavailable', 'Claude has not written a transcript for this session yet')
         _check(reader)  # indexing a large copy cold takes a moment
+        # A read takes several pages, each asking again for an unchanged transcript: keep the view while the index
+        # is as it was (a change to the file, or to which copy is newest, rebuilds it).
+        key = (tip, home, index.inode, index.offset, index.rewrites, getattr(index, 'history_version', 0),
+               tuple(getattr(index, 'copies', None) or ()))
+        if key in index.views:
+            return index.views[key]
         analysis = rows_source.analyse(index, tip)
         entries = index.entries
         facts = tuple(_fact(item, *labelled) for item, labelled in zip(entries, analysis.labels))
         source = TranscriptSource(state='supported', home=home, format='claude-jsonl',
                                   version=next((item.version for item in reversed(entries) if item.version), None),
                                   size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
-        return TranscriptView(source=source, rows=facts, history=analysis.history.rows,
+        view = TranscriptView(source=source, rows=facts, history=analysis.history.rows,
                               context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
                               gap=analysis.history.gap, summary=analysis.history.summary,
                               history_version=analysis.version)
+        while len(index.views) >= VIEWS:
+            index.views.pop(next(iter(index.views)))
+        index.views[key] = view
+        return view
 
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for
@@ -1159,7 +1179,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         out = []
         with rows_source.open_regular(index.path) as handle:
             for number in indexes:
-                _check(reader)
+                _deadline(reader)
                 fact = view.rows[number]
                 # The index proved its prefix unchanged when it was read: the row must still have the view's position
                 # (its chained hash covers every earlier byte), and its own line's bytes, read now, must still match.

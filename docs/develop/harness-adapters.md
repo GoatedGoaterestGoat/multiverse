@@ -292,12 +292,21 @@ labels and positions, never bodies. A position changes if preceding bytes change
 and stays valid when rows are appended. `transcript_bodies` reads only requested
 indexes and raises the content-free `TranscriptRowsChanged` if their bytes no
 longer match the view. `transcript_readable` checks a recorded earlier generation.
-All reads use the pinned native ID and storage. An unrecorded home can be resolved
-from inherited values only inside that agent's own session.
+Bodies are fresh dictionaries on every read; core hands them to the caller without
+copying their contents again. Providers may reuse the same immutable view object
+while its source, facts and history are unchanged, but must return a new object
+whenever any of them changes. Core keeps a bounded cache of that view's analysis
+and turn membership, never of session authority or bodies. Identity is checked
+before and after each page; a provider's per-row loop can check only the deadline
+between those page checks, without re-reading agent records for every row. All reads use the pinned native ID and
+storage. An unrecorded home can be resolved from inherited values only inside
+that agent's own session.
 
 Core owns the opaque cursor envelope, generation selection, filters, page limits
-and turn grouping. Bodies larger than 16 MiB are metadata stubs; metadata-only
-pages never read bodies. A prompt finishes from a later prompt or timestamped
+and turn grouping. Each returned row names its turn at the selected history tip;
+an abandoned row has no turn. Commands and their output can interleave with the
+rows of a prompt turn, so a caller need not reread each turn to group a history.
+Bodies larger than 16 MiB are metadata stubs; metadata-only pages never read bodies. A prompt finishes from a later prompt or timestamped
 native end evidence, never from runtime idle status. Commands retain their own
 output while later responses remain with the current prompt. Turns, including
 the preamble, are listed by their first row in history order. See the

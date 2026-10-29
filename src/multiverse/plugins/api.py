@@ -1151,6 +1151,8 @@ class Row:
     size: int = 0                  # stored bytes
     data: dict | None = None       # the row as stored, a fresh copy per call; None over 16 MiB or unreadable
     format: str = ""
+    turn: str | None = None        # 1.14: the id of core's turn it belongs to (Turn.id), for a row on the history
+                                   # at the read's tip; None for an abandoned row
 
 
 @dataclass(frozen=True, kw_only=True)

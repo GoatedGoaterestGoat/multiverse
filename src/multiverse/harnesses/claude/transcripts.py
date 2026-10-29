@@ -240,6 +240,7 @@ class Transcript:
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
+        self.views = {}  # the adapter's views of this index as read, by tip and what they were built from
         self.unproved = False  # a change was accepted on the tail check alone since that proof
 
     def _tail_intact(self, handle):
