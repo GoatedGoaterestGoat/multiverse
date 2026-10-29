@@ -5,7 +5,7 @@ and its files, including when a plugin's worker dies. No agent lock spans a mode
 """
 import base64
 import copy
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 import json
 import math
 import os
@@ -122,6 +122,55 @@ def _scope(path, kind):
     return {'path': str(path), 'kind': kind, 'identity': run_files.identity(info)}
 
 
+@dataclass(frozen=True, kw_only=True)
+class RunScope:
+    """Directory identities captured before resolving the storage a one-shot call will use."""
+    root: str
+    root_identity: tuple
+    agent_directory: str | None = None
+    agent_identity: tuple | None = None
+
+    def records(self):
+        values = [(self.root, 'universe', self.root_identity)]
+        if self.agent_directory is not None:
+            values.append((self.agent_directory, 'agent', self.agent_identity))
+        for path, _, identity in values:
+            if (not isinstance(path, str) or not Path(path).is_absolute()
+                    or not isinstance(identity, tuple) or len(identity) != 2
+                    or not all(type(value) is int and value >= 0 for value in identity)):
+                raise RunFailure('invalid_request', 'Invalid run scope snapshot')
+        return [{'path': path, 'kind': kind, 'identity': list(identity)} for path, kind, identity in values]
+
+
+def capture_scope(root, *, agent_directory=None):
+    root = Path(os.path.abspath(root))
+    agent = Path(os.path.abspath(agent_directory)) if agent_directory is not None else None
+    if agent is not None and agent.parent != root / 'state' / 'agents':
+        raise RunFailure('invalid_request', 'The run agent is outside this universe')
+    universe = _scope(root, 'universe')
+    own = _scope(agent, 'agent') if agent is not None else None
+    result = RunScope(root=universe['path'], root_identity=tuple(universe['identity']),
+                      agent_directory=own['path'] if own else None,
+                      agent_identity=tuple(own['identity']) if own else None)
+    check_scope(result)
+    return result
+
+
+def check_scope(scope):
+    if not isinstance(scope, RunScope):
+        raise RunFailure('invalid_request', 'Invalid run scope snapshot')
+    _check_scopes(scope.records())
+
+
+def _check_scopes(values):
+    try:
+        run_supervisor.scopes(values)
+    except run_supervisor.Stopped as error:
+        if error.gone:
+            raise _gone(error.gone) from None
+        raise RunFailure(error.kind, error.reason) from None
+
+
 def _gone(kind):
     error = agent_files.AgentGone if kind == 'agent' else agent_files.UniverseGone
     return error(f'The {kind} folder was removed or moved during the run')
@@ -146,12 +195,7 @@ class RunExecutor:
             raise RunFailure('cancelled', 'The run was cancelled', confirmed=True)
         if time.monotonic() >= self.deadline:
             raise RunFailure('timeout', 'The run deadline passed', confirmed=True)
-        try:
-            run_supervisor.scopes(self.scopes)
-        except run_supervisor.Stopped as error:
-            if error.gone:
-                raise _gone(error.gone) from None
-            raise RunFailure(error.kind, error.reason) from None
+        _check_scopes(self.scopes)
 
     def execute(self, payload):
         self.check()
@@ -277,7 +321,7 @@ def _execute(executor, plan, payload):
     return value
 
 
-def run_once(adapter, request, *, root, plugin, environment, agent_directory=None, timeout=600, cancel=None):
+def run_once(adapter, request, *, root, plugin, environment, agent_directory=None, timeout=600, cancel=None, scope=None):
     started = time.monotonic()
     effects.require('run_plan', getattr(adapter, 'name', 'harness'))
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
@@ -285,15 +329,17 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
     if cancel is not None and not callable(getattr(cancel, 'is_set', None)):
         raise RunFailure('invalid_request', 'A run cancel value needs is_set()')
     try:
-        root = Path(root).absolute()
-        scopes = [_scope(root, 'universe')]
-        owner = run_files.component(getattr(adapter, 'name', 'harness'))
-        if agent_directory is not None:
-            agent = Path(agent_directory).absolute()
-            if agent.parent != root / 'state' / 'agents':
-                raise RunFailure('invalid_request', 'The run agent is outside this universe')
-            scopes.append(_scope(agent, 'agent'))
-            owner = run_files.component(agent.name)
+        root = Path(os.path.abspath(root))
+        agent = Path(os.path.abspath(agent_directory)) if agent_directory is not None else None
+        if agent is not None and agent.parent != root / 'state' / 'agents':
+            raise RunFailure('invalid_request', 'The run agent is outside this universe')
+        if scope is None:
+            scope = capture_scope(root, agent_directory=agent)
+        elif (not isinstance(scope, RunScope) or scope.root != str(root)
+              or scope.agent_directory != (str(agent) if agent is not None else None)):
+            raise RunFailure('invalid_request', 'The run scope snapshot belongs to another universe or agent')
+        scopes = scope.records()
+        owner = run_files.component(agent.name if agent is not None else getattr(adapter, 'name', 'harness'))
         executor = RunExecutor(deadline=started + timeout, cancel=cancel, scopes=scopes)
         executor.check()
         run_base = base()

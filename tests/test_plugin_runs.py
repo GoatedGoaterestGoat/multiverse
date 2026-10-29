@@ -1,5 +1,6 @@
 """A plugin's one-shot run through the plugin API (1.14): the API's checks, its environment and its records, with
 core's run replaced so nothing is spawned."""
+import contextlib
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -197,6 +198,63 @@ class RunApiTest(PluginTestCase):
                                               "outcomes": {"ok": 4, "rate_limit": 1, "cancelled": 1}})
             self.assertIn("Runs in the last day: 6 (2 failed: cancelled 1, rate_limit 1), $0.0026.",
                           plugins_tool.text("info", result))
+        # An agent replaced while its run is prepared never runs under the removed agent's login: through the real
+        # core, with only the run itself faked.
+        fake = self.fake_runs(api.Reply(text="never sent"), api.Reply(text="never sent"))
+        context = [api.Message("user", [api.TextBlock("Earlier")]), api.Message("assistant", [api.TextBlock("Noted")])]
+        old, new = self.work / "old-store", self.work / "new-store"
+
+        def replace(directory):
+            properties = json.loads((directory / "properties.json").read_text())
+            directory.rename(directory.with_name(directory.name + ".removed"))
+            directory.mkdir()
+            (directory / "properties.json").write_text(json.dumps(
+                {**properties, "native_storage_environment": {"CLAUDE_CONFIG_DIR": str(new)}}))
+        moments = (("during the storage read", "storage"), ("during the options call", "options"),
+                   ("during an unsupported options call", "options-unsupported"),
+                   ("as core's run is entered", "core"))
+        for name, moment in moments:
+            with self.subTest(f"an agent replaced {name}"):
+                directory = self.agent(f"swapped-{moment}", native_session_id="11111111-1111-4111-8111-111111111111",
+                                       native_storage_environment={"CLAUDE_CONFIG_DIR": str(old)})
+                swapped = self.mv.universe(self.root).agent(f"swapped-{moment}")
+                reading, options, entering = api.Plugin.harness_info, runs.options, runs.run_once
+                asked = []
+
+                def read_then_replace(plugin, *arguments, **keywords):
+                    info = reading(plugin, *arguments, **keywords)
+                    if keywords.get("agent") is not None and directory.exists():
+                        replace(directory)  # after its storage was read
+                    return info
+
+                def options_then_replace(adapter, *, environment):  # the harness may take a moment here
+                    asked.append(True)
+                    if moment.startswith("options") and directory.exists():
+                        replace(directory)
+                    if moment == "options-unsupported":
+                        return types.RunOptions(supported=False, reason="no one-shot support")
+                    return options(adapter, environment=environment)
+
+                entered = []
+
+                def enter_then_replace(adapter, request, **keywords):  # after both of the API's checks
+                    entered.append(True)
+                    if moment == "core" and directory.exists():
+                        replace(directory)
+                    return entering(adapter, request, **keywords)
+                patches = [mock.patch.object(runs, "options", options_then_replace),
+                           mock.patch.object(runs, "run_once", enter_then_replace)]
+                if moment == "storage":
+                    patches.append(mock.patch.object(api.Plugin, "harness_info", read_then_replace))
+                with contextlib.ExitStack() as stack, self.assertRaises(api.AgentGone):
+                    for patch in patches:
+                        stack.enter_context(patch)
+                    self.run_once(context, agent=swapped)
+                if moment == "storage":
+                    self.assertEqual(asked, [])  # refused right after the read, before the options call
+                if moment != "core":
+                    self.assertEqual(entered, [])  # refused by the API itself, before core's run is entered
+        self.assertEqual(fake.requests, [])  # none reached the run
 
     def test_fake_runs_answer_a_plugins_runs_behind_the_real_checks(self):
         """PluginTestCase.fake_runs answers runs from a script and records each request, while the API's, the

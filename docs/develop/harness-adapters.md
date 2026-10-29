@@ -351,8 +351,11 @@ A disposable supervisor owns the child's new process group. One deadline covers
 preparation, execution and interpretation; cancellation, timeout and the calling
 worker's death stop that group with TERM then KILL and bounded cleanup. The leader
 is not reaped until group cleanup, so a reused PID grants no control. Agent and
-universe folder identities are checked before preparation and spawning, while
-waiting and before returning. No agent lock spans the run, and removal never
+universe folder identities are captured before the API reads the agent's storage
+and checked after that read and the preliminary options probe. The same immutable
+snapshot is carried into core and checked before preparation and spawning, while
+waiting and before returning; replacing a folder cannot establish new authority
+for storage read from its predecessor. No agent lock spans the run, and removal never
 recreates the agent folder. A run cannot change its runtime, binding or inbox.
 
 Input and prepared file content are bounded to 32 MiB, stdout to 16 MiB and stderr

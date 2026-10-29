@@ -1358,15 +1358,22 @@ class Harness:
         from ..runtime import runs
         root = self._universe.path
         with _acting(plugin._loaded, "spend", self._universe, f"running {self.name}"):
+            # The folders' identity is taken before the agent's storage is read, and checked after that read and
+            # after the options call (which may start the harness), then carried into core: the storage and the
+            # run belong to one agent, and one replaced meanwhile is AgentGone, with nothing run.
+            scope = _call(runs.capture_scope, root, agent_directory=agent.directory if agent is not None else None)
             adapter = _call(harnesses.load, root, self.name)
             environment = self._run_environment(adapter, agent)
-            self._check_against(_call(runs.options, adapter, environment=environment), messages, transport_retries)
+            _call(runs.check_scope, scope)
+            options = _call(runs.options, adapter, environment=environment)
+            _call(runs.check_scope, scope)
+            self._check_against(options, messages, transport_retries)
 
             def run():
                 try:
                     return runs.run_once(adapter, request, root=root, plugin=plugin.name, environment=environment,
                                          agent_directory=agent.directory if agent is not None else None,
-                                         timeout=timeout, cancel=cancel)
+                                         scope=scope, timeout=timeout, cancel=cancel)
                 except types.RunFailure as failure:
                     self._record(failure.model or model, agent, failure, failure.kind or "failed")
                     raise RunError(failure.reason, kind=failure.kind or "failed", retry_after=failure.retry_after,

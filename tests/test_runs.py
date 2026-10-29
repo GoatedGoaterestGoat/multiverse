@@ -189,6 +189,45 @@ class RunsTest(BaseTest):
                         self.run_once()
                     self.assertEqual(caught.exception.kind, 'unavailable')
                     self.assertFalse(destination.exists())
+            for condition in ('agent replaced', 'universe replaced', 'another agent', 'another universe',
+                              'scope without agent', 'scope with unexpected agent'):
+                with self.subTest(scope=condition):
+                    agent = self.root / 'state/agents' / str(uuid4())
+                    agent.mkdir()
+                    scope = runs.capture_scope(self.root, agent_directory=agent)
+                    arguments = {'scope': scope, 'agent_directory': agent}
+                    restore = None
+                    expected = RunFailure
+                    if condition == 'agent replaced':
+                        agent.rename(agent.with_suffix('.old')); agent.mkdir()
+                        expected = agent_files.AgentGone
+                    elif condition == 'universe replaced':
+                        restore = self.root.with_name('old-scope-universe')
+                        self.root.rename(restore); self.root.mkdir()
+                        expected = agent_files.UniverseGone
+                    elif condition == 'another agent':
+                        other = agent.with_name(str(uuid4())); other.mkdir()
+                        arguments['agent_directory'] = other
+                    elif condition == 'another universe':
+                        other = self.work / 'another-scope-universe'; other.mkdir()
+                        arguments['scope'] = runs.capture_scope(other)
+                        arguments['agent_directory'] = None
+                    elif condition == 'scope without agent':
+                        arguments['scope'] = runs.capture_scope(self.root)
+                    else:
+                        arguments['agent_directory'] = None
+                    provider = Provider()
+                    try:
+                        with patch.object(runs, '_execute', return_value=RunReply(text='unexpected')) as execute, \
+                                patch.object(runs, 'process_started', return_value='fixture-start'):
+                            with self.assertRaises(expected) as caught:
+                                self.run_once(provider, **arguments)
+                            if expected is RunFailure: self.assertEqual(caught.exception.kind, 'invalid_request')
+                            execute.assert_not_called()
+                        self.assertEqual(provider.environments, [])  # no options or model probe before scope proof
+                    finally:
+                        if restore is not None:
+                            self.root.rmdir(); restore.rename(self.root)
             spawn.assert_not_called()
         self.assertFalse(runs.base().exists())
 
