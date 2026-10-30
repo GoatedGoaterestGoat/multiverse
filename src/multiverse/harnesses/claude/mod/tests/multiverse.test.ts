@@ -179,6 +179,8 @@ describe('the mv2 a callback imports', () => {
     ['MV2_SOURCE comes before a PYTHONPATH already set', { MV2_SOURCE: '/src', PYTHONPATH: '/mine' }, '/src:/mine'],
     ['MV2_SOURCE alone is the PYTHONPATH', { MV2_SOURCE: '/src' }, '/src'],
     ['without MV2_SOURCE, PYTHONPATH is left as it is', { PYTHONPATH: '/mine' }, undefined],
+    ['a PYTHONPATH that already starts with MV2_SOURCE is left as it is', { MV2_SOURCE: '/src', PYTHONPATH: '/src:/mine' }, undefined],
+    ['MV2_SOURCE later on PYTHONPATH still goes first', { MV2_SOURCE: '/src', PYTHONPATH: '/mine:/src' }, '/src:/mine:/src'],
   ]
   for (const [name, env, expected] of rows) {
     test(name, async ($, on) => {

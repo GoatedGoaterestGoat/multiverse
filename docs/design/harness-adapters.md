@@ -1492,7 +1492,7 @@ return, until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command. Each
 such `python -m` call (status, usage, the /clear move, and Pi's status) puts
 `MV2_SOURCE`, the package root of the mv2 that launched the agent, first on that
-call's `PYTHONPATH`, so it runs the same code even when the interpreter has another
+call's `PYTHONPATH` (left as it is when it already starts there), so it runs the same code even when the interpreter has another
 mv2 installed or none; the agent's own shells never get it. A report that
 exits non-zero or throws (a timeout, or a call Claude refuses before its trust
 prompt is answered) is logged in the pane and tried again at the next status

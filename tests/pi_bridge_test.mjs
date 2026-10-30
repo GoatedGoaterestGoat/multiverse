@@ -81,7 +81,9 @@ try {
   // Each runtime_update call runs mv2's own checkout: MV2_SOURCE goes first on its PYTHONPATH, or a stale
   // or missing install answers instead, unnoticed. mv2 commands keep the agent's own PYTHONPATH.
   for (const [env, python] of [[{ MV2_SOURCE: '/src', PYTHONPATH: '/mine' }, '/src:/mine'],
-                               [{ MV2_SOURCE: '/src' }, '/src'], [{ PYTHONPATH: '/mine' }, '/mine']]) {
+                               [{ MV2_SOURCE: '/src' }, '/src'], [{ PYTHONPATH: '/mine' }, '/mine'],
+                               [{ MV2_SOURCE: '/src', PYTHONPATH: '/src:/mine' }, '/src:/mine'],
+                               [{ MV2_SOURCE: '/src', PYTHONPATH: '/mine:/src' }, '/src:/mine:/src']]) {
     const g = await fixture({ env });
     await g.request({ message_id: 'paths' });
     await g.events.agent_start(); await g.events.agent_settled();

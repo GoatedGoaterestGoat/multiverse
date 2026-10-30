@@ -25,9 +25,10 @@ export default function multiverse(pi: any, run = exec) {
   }
   // `python -m` imports whatever mv2 that interpreter has installed, not the checkout
   // running this agent: mv2's own package root (MV2_SOURCE) goes first on that
-  // child's PYTHONPATH, never on the agent's own shells.
+  // child's PYTHONPATH (a PYTHONPATH that already starts with it is left as it is),
+  // never on the agent's own shells.
   function pythonEnv() {
-    if (!env.MV2_SOURCE) return env;
+    if (!env.MV2_SOURCE || env.PYTHONPATH?.split(":")[0] === env.MV2_SOURCE) return env;
     return { ...env, PYTHONPATH: env.PYTHONPATH ? `${env.MV2_SOURCE}:${env.PYTHONPATH}` : env.MV2_SOURCE };
   }
   // Not an mv2 command: agents report their phase, never their status.
