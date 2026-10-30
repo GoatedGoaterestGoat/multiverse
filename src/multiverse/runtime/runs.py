@@ -49,9 +49,11 @@ def _environment(environment):
     return MappingProxyType(result)
 
 
-def options(adapter, *, environment):
+def options(adapter, *, environment, root=None):
     """Observe the provider on the same scrubbed environment used to prepare a run."""
     effects.require('run_options', getattr(adapter, 'name', 'harness'))
+    if root is not None and (problem := _storage_problem(root, base())):
+        return RunOptions(supported=False, reason=problem)
     if not callable(getattr(adapter, 'run_options', None)):
         return RunOptions(supported=False, reason='This harness has no one-shot run provider')
     try:
@@ -179,6 +181,18 @@ def _gone(kind):
 def base():
     # This is the initiating process's HOME, not an agent's replayed storage HOME.
     return (Path.home() / '.multiverse' / 'runs').resolve()
+
+
+def _storage_problem(root, run_base):
+    """Runs may share a home universe, but never its scanned or mutable namespaces."""
+    run_base = Path(run_base).resolve()
+    universes = {Path(root).resolve()}
+    universes.update(parent for parent in run_base.parents if (parent / 'universe.json').is_file())
+    protected = (universe / name for universe in universes for name in ('state', 'subverses', 'trash'))
+    if (agent_files.agent_folder(run_base) is not None
+            or any(run_base == folder or folder in run_base.parents for folder in protected)):
+        return "One-shot run storage must be outside agent folders and universes' state, subverses and trash"
+    return None
 
 
 def leftovers(root):
@@ -343,11 +357,10 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
         executor = RunExecutor(deadline=started + timeout, cancel=cancel, scopes=scopes)
         executor.check()
         run_base = base()
-        if (run_base == root.resolve() or root.resolve() in run_base.parents
-                or agent_files.agent_folder(run_base) is not None):
-            raise RunFailure('unavailable', 'One-shot run storage must be outside agents and universes')
+        if problem := _storage_problem(root, run_base):
+            raise RunFailure('unavailable', problem)
         environment = _environment(environment)
-        supported = options(adapter, environment=environment)
+        supported = options(adapter, environment=environment, root=root)
         executor.check()
         if not supported.supported:
             raise RunFailure('unavailable', supported.reason)

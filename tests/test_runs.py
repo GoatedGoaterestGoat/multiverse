@@ -16,6 +16,8 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
+from multiverse.harnesses.claude import ClaudeAdapter
+from multiverse.universe import templates
 from multiverse.harnesses.types import (CommandSpec, ModelCheck, RunFailure, RunFile, RunOptions, RunPlan,
                                        RunReply, RunRequest)
 from multiverse.plugins import access, agent_files
@@ -124,7 +126,7 @@ class RunsTest(BaseTest):
         self.no_content()
 
     def test_housekeeping_never_hides_a_paid_reply_or_writes_to_the_callers_terminal(self):
-        """Housekeeping must not discard paid replies, write to the terminal or reject a dotfiles home."""
+        """Housekeeping must not discard paid replies, write to the terminal or reject a dotfiles or universe home."""
         for condition in ('sweep problem', 'dotfiles home', 'cleanup after success'):
             with self.subTest(condition):
                 counter = self.work / ('calls-' + condition.replace(' ', '-'))
@@ -158,6 +160,28 @@ class RunsTest(BaseTest):
                     for run in provider.plans:
                         if run.path.exists(): shutil.rmtree(run.path)
 
+        # The same real supervisor and Claude plan work whether the universe is in HOME or a project.
+        home = self.work / 'run-home'
+        home.mkdir()
+        binary = self.work / 'stand-in-claude'
+        binary.write_text(f'#!{sys.executable}\nimport json,sys\n'
+                          'print("2.1.312 (Claude Code)" if sys.argv[1:] == ["--version"] else '
+                          'json.dumps({"is_error": False, "result": "fake reply", "stop_reason": "end_turn"}))\n')
+        binary.chmod(0o700)
+        adapter = ClaudeAdapter.configured('claude', {'executable': str(binary)})
+        environment = {'HOME': str(home), 'PATH': os.environ['PATH'], 'CLAUDE_CONFIG_DIR': str(self.work / 'claude-store')}
+        for layout in ('.multiverse', 'proj/.multiverse'):
+            with self.subTest(universe=layout), patch.dict(os.environ, HOME=str(home)):
+                root = templates.create(home / layout, 'run-fixture')
+                before = {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                self.assertTrue(runs.options(adapter, environment=environment, root=root).supported)
+                reply = runs.run_once(adapter, replace(REQUEST, model='haiku'), root=root, plugin='fixture',
+                                      environment=environment)
+                self.assertEqual(reply.text, 'fake reply')
+                self.assertEqual(runs.base(), home / '.multiverse/runs')
+                self.assertEqual(list(runs.base().iterdir()), [])
+                self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()})
+
     def test_refusals_happen_before_content_or_processes(self):
         """A refused model, request, plan, scope or access level must spend nothing and create no files."""
         cancelled = threading.Event(); cancelled.set()
@@ -182,12 +206,25 @@ class RunsTest(BaseTest):
                 provider.run_plan = lambda *a, **kw: replace(original(*a, **kw), files=(RunFile(path='../outside', content=b'x'),))
                 with self.assertRaises(RunFailure):
                     self.run_once(provider)
-            for label, destination in (('universe', self.root / 'runs'),
-                                       ('agent', self.work / 'other/state/agents/someone/runs')):
+            other = templates.create(self.work / 'other-universe', 'other')
+            alias = self.work / 'linked-state'
+            alias.symlink_to(self.root / 'state', target_is_directory=True)
+            destinations = [('agent', self.work / 'other/state/agents/someone/runs'),
+                            ('linked state', alias / 'runs')]
+            for universe in (self.root, other):
+                for namespace in ('state', 'subverses', 'trash'):
+                    destinations.append((f'{universe.name}/{namespace}', universe / namespace / 'runs'))
+            for label, destination in destinations:
                 with self.subTest(base=label), patch.object(runs, 'base', return_value=destination):
+                    provider = Provider()
+                    availability = runs.options(provider, environment=self.environment, root=self.root)
+                    self.assertFalse(availability.supported)
+                    self.assertEqual(provider.environments, [])  # Not even the version probe may run here.
                     with self.assertRaises(RunFailure) as caught:
-                        self.run_once()
+                        self.run_once(provider)
                     self.assertEqual(caught.exception.kind, 'unavailable')
+                    self.assertEqual(caught.exception.reason, availability.reason)
+                    self.assertEqual(provider.environments, [])
                     self.assertFalse(destination.exists())
             for condition in ('agent replaced', 'universe replaced', 'another agent', 'another universe',
                               'scope without agent', 'scope with unexpected agent'):

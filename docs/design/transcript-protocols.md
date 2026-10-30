@@ -289,9 +289,12 @@ custom harnesses report it unsupported.
   process starts in a directory of its own. Provider routing
   is this process's, not the agent's: launches don't record it.
 - **The run** is core's (`runtime/runs.py`): a private directory under
-  `~/.multiverse/runs/`, the adapter's declared session file created
-  exclusively and removed afterwards, a small supervisor that owns the child's
-  process group, the deadline and `cancel`, and stops it with TERM then KILL
+  `~/.multiverse/runs/`, including when `~/.multiverse` is a home-folder
+  universe. The resolved run base stays outside agent folders and every universe's
+  `state/`, `subverses/` and `trash/`, the namespaces mv2 scans or removes;
+  `run_options()` and execution share this check. The adapter's declared session
+  file is created exclusively and removed afterwards, and a small supervisor owns
+  the child's process group, the deadline and `cancel`, and stops it with TERM then KILL
   when the caller ends. A reply is returned even when cleanup leaves
   something behind: the next run sweeps what is proven dead, and `mv2
   doctor` reports what is left. Input is bounded at 32 MiB (over it,

@@ -15,6 +15,7 @@ from multiverse.plugins import api, config, loader, run_records
 from multiverse.plugins.testing import ClaudeRows, PluginTestCase
 from multiverse.runtime import runs
 from multiverse.tools import plugins as plugins_tool
+from multiverse.universe import templates
 
 RUNNER = {"module": "plugin", "api": "1.14", "permissions": ["agents.read", "transcripts.read", "models.claude"]}
 OPTIONS = types.RunOptions(supported=True, images=True, formats=("claude-jsonl",), transport_retries=(0, 15))
@@ -38,7 +39,7 @@ class RunApiTest(PluginTestCase):
                 raise answer
             return answer or types.RunReply(text="Only the plugin sees this", model="claude-haiku-4-5", usage={"input": 3,
                                             "output": 1, "cache_read": 40, "cache_write": 606}, cost_usd=0.0004, stop="end_turn", duration=1.5)
-        return mock.patch.multiple(runs, run_once=run_once, options=lambda adapter, *, environment: options)
+        return mock.patch.multiple(runs, run_once=run_once, options=lambda adapter, *, environment, root=None: options)
 
     def run_once(self, messages=(), **keywords):
         arguments = {"prompt": "Summarise", "system": "You summarise.", "model": "haiku", **keywords}
@@ -229,13 +230,13 @@ class RunApiTest(PluginTestCase):
                         replace(directory)  # after its storage was read
                     return info
 
-                def options_then_replace(adapter, *, environment):  # the harness may take a moment here
+                def options_then_replace(adapter, *, environment, root=None):  # the harness may take a moment here
                     asked.append(True)
                     if moment.startswith("options") and directory.exists():
                         replace(directory)
                     if moment == "options-unsupported":
                         return types.RunOptions(supported=False, reason="no one-shot support")
-                    return options(adapter, environment=environment)
+                    return options(adapter, environment=environment, root=root)
 
                 entered = []
 
@@ -261,9 +262,12 @@ class RunApiTest(PluginTestCase):
     def test_fake_runs_answer_a_plugins_runs_behind_the_real_checks(self):
         """PluginTestCase.fake_runs answers runs from a script and records each request, while the API's, the
         harness's and core's checks still run; fragile because a fake that skipped them would let a plugin's
-        tests pass with requests the real harness refuses, found only when the person's run fails."""
+        tests pass with requests the real harness refuses, found only when the person's run fails. Also where runs
+        may live: a universe in the home folder runs, and run_options() refuses what run_once would, since a
+        harness reported as able to run while every run fails leaves a plugin like compaction on and broken."""
         fake = self.fake_runs(api.Reply(text="A summary", model="claude-haiku-4-5", usage={"input": 5}),
-                              api.RunError("overloaded", kind="rate_limit", retry_after=3))
+                              api.RunError("overloaded", kind="rate_limit", retry_after=3),
+                              api.Reply(text="A summary", model="claude-haiku-4-5", usage={"input": 5}))
         reply = self.claude.run_once([api.Message("user", [api.TextBlock("Earlier")]),
                                       api.Message("assistant", [api.TextBlock("Noted")])],
                                      prompt="Summarise", system="You summarise.", model="haiku", timeout=60)
@@ -283,6 +287,20 @@ class RunApiTest(PluginTestCase):
             with self.assertRaises(api.RunError) as caught:  # core's: a model the harness doesn't take
                 self.run_once(context, model="haiku", effort="ultra")
             self.assertEqual(caught.exception.kind, "invalid_request")
-        self.assertEqual(len(fake.requests), 2)  # the refused ones never reached the run
+        with self.subTest("a universe made in the home folder runs, and one under a universe's state/ is refused"):
+            home = templates.create(self.home / ".multiverse", "home", workdir=self.home)  # mv2 init in ~
+            self.enable("runner", root=home)
+            here = self.mv.universe(home).harness("claude")
+            self.assertTrue(here.run_options().supported)
+            self.assertEqual(here.run_once(context, prompt="Summarise", system="", model="haiku").text, "A summary")
+            buried = self.root / "state" / "home"  # a HOME that puts the run base under this universe's state/
+            buried.mkdir()
+            with mock.patch.dict(os.environ, HOME=str(buried)):
+                options = self.claude.run_options()
+                with self.assertRaises(api.RunError) as caught:
+                    self.run_once(context)
+            self.assertFalse(options.supported)  # run_options() says what every run would hit
+            self.assertEqual((caught.exception.kind, str(caught.exception)), ("unavailable", options.reason))
+        self.assertEqual(len(fake.requests), 3)  # the refused ones never reached the run
         self.assertEqual([item["outcome"] for item in self.records()], ["ok", "rate_limit", "invalid_request",
-                                                                         "invalid_request"])
+                                                                         "invalid_request"])  # run_options() refused that one before it ran

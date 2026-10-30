@@ -1336,7 +1336,8 @@ class Harness:
         with _acting(self._universe._plugin._loaded, "observe", self._universe, f"reading {self.name}'s run options"):
             adapter = _call(harnesses.load, self._universe.path, self.name)
             environment = _absolute_storage(adapter, _launch_environment(adapter), os.getcwd())
-            return _from_core(RunOptions, _call(runs.options, adapter, environment=environment))
+            return _from_core(RunOptions, _call(runs.options, adapter, environment=environment,
+                                                root=self._universe.path))
 
     def run_once(self, messages=(), *, prompt, system, model, effort=None, agent=None, transport_retries=None,
                  timeout=600, cancel=None):
@@ -1365,7 +1366,7 @@ class Harness:
             adapter = _call(harnesses.load, root, self.name)
             environment = self._run_environment(adapter, agent)
             _call(runs.check_scope, scope)
-            options = _call(runs.options, adapter, environment=environment)
+            options = _call(runs.options, adapter, environment=environment, root=root)
             _call(runs.check_scope, scope)
             self._check_against(options, messages, transport_retries)
 
