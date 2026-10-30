@@ -57,20 +57,55 @@ def _regular(path, *, create=False):
 def serialized(socket):
     path = registry(socket).with_suffix('.lock')
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with _regular(path, create=True) as stream:
-        deadline = time.monotonic() + 30
-        while True:
+    deadline = time.monotonic() + 30
+    def timed_out():
+        if time.monotonic() >= deadline:
+            raise Unreachable(f'Another mv2 process is starting or recovering the tmux server at {socket}; timed out waiting, retry') from None
+    while True:
+        with _regular(path, create=True) as stream:
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    timed_out()
+                    time.sleep(.02)
             try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise Unreachable(f'Another mv2 process is starting or recovering the tmux server at {socket}; timed out waiting, retry') from None
-                time.sleep(.02)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+                if not _same_lock(stream, path):
+                    timed_out()
+                    continue  # A previous owner pruned this inode while we waited.
+                try:
+                    yield
+                finally:
+                    _prune(socket, stream, path)
+                return
+            finally:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _same_lock(stream, path):
+    held = os.fstat(stream.fileno())
+    try:
+        current = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _prune(socket, stream, path):
+    """Prune only a touched, proven-gone entry after its owner has finished."""
+    try:
+        saved = _saved(socket)
+        if saved is not None and _state(saved) != 'gone':
+            return
+        if not _same_lock(stream, path):
+            return
+        registry(socket).unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        # A waiter holding this old inode must reopen and lock the path before
+        # entering. Nothing in this section can publish after we unlink it.
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        pass  # Unknown or damaged evidence remains; cleanup never masks the operation.
 
 
 def _tmux(pid):

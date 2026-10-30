@@ -207,6 +207,8 @@ A server that answers remains usable when its process details are temporarily un
 
 mv2 keeps server identities under `~/.multiverse/tmux-servers/`. Older launches identify a healthy server by their exact saved pane, session and launch tag. If that pane is absent, an active launch must prove its server through its runner; a registry entry learned from another server cannot replace that proof. If that runner may be alive but its process identity cannot be read, mv2 refuses to start a replacement server until the inspection succeeds. If both the registry and socket are deleted, a new universe with no launch records cannot discover that old server; restore its address before spawning there.
 
+When a locked command finishes, it removes that socket's registry entry only if the recorded server is proven gone, and removes the matching lock too. A lock without a record is also removed. It keeps live, uncertain or damaged records and does not sweep other sockets' entries.
+
 A missing native bridge socket has a different remedy: once that launch has been ready, if its recorded process is still alive, stop and resume that agent to recreate the socket. A bridge still starting may not have created its socket yet; mv2 does not call that a lost connection. A working alternate delivery path remains usable. Codex's shared daemon socket is separate from this launch-local socket.
 
 | Symptom | Cause | Fix |

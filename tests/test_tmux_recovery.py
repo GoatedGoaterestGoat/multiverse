@@ -6,6 +6,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 from unittest.mock import patch
 
 from isolation import track
@@ -457,7 +458,7 @@ class RecoveryProofTest(BaseTest):
                     self.assertEqual(found, {'pid': 12345, 'started': token} if case == 'verified parent' else None)
 
     def test_recovery_preserves_existing_directories_and_never_waits_on_record_fifos(self):
-        """Recovery must not chmod a user's home or hang a listing on a non-regular registry record."""
+        """Recovery must not change user folders, hang on non-regular records, or admit concurrent owners after pruning a lock."""
         backend = Tmux(str(self.work / 'tmux.sock'))
         path = recovery.address(backend)
         self.work.chmod(0o750)
@@ -512,6 +513,68 @@ class RecoveryProofTest(BaseTest):
         # Empty older servers still answer identity separately from list-panes.
         with patch.object(backend, '_run', side_effect=[RuntimeError('no current target'), '12345\t100']):
             self.assertEqual(recovery._probe(backend, path), ('', {'pid': 12345, 'epoch': 100}))
+        for state in ('gone', 'live', 'unknown', 'damaged', 'absent'):
+            with self.subTest(prune_touched_entry=state):
+                record, held = recovery.registry(path), recovery.registry(path).with_suffix('.lock')
+                record.unlink(missing_ok=True)
+                if state != 'absent':
+                    write(record, {'damaged': True} if state == 'damaged' else proof)
+                with patch.object(recovery, '_state', return_value=state):
+                    with recovery.serialized(path):
+                        self.assertTrue(held.exists())
+                        self.assertEqual(record.exists(), state != 'absent', 'Never prune before the section can publish')
+                self.assertEqual(record.exists(), state not in ('gone', 'absent'))
+                self.assertEqual(held.exists(), state not in ('gone', 'absent'))
+
+        for has_record in (False, True):
+            with self.subTest(detached_lock_waiter=True, has_record=has_record):
+                record, held = recovery.registry(path), recovery.registry(path).with_suffix('.lock')
+                record.unlink(missing_ok=True)
+                if has_record:
+                    write(record, proof)
+                opened, release, reopened, entered = (threading.Event() for _ in range(4))
+                errors, opens = [], []
+                regular = recovery._regular
+                @contextmanager
+                def delayed_open(target, **kwargs):
+                    with regular(target, **kwargs) as stream:
+                        if target == held and threading.current_thread() is waiter:
+                            opens.append(True)
+                            if len(opens) == 1:
+                                opened.set()
+                                if not release.wait(5):
+                                    raise TimeoutError('Old-inode waiter was not released')
+                            else:
+                                reopened.set()
+                        yield stream
+                def wait_on_old_inode():
+                    try:
+                        with recovery.serialized(path):
+                            entered.set()
+                    except Exception as error:
+                        errors.append(error)
+                waiter = threading.Thread(target=wait_on_old_inode)
+                try:
+                    with patch.object(recovery, '_regular', side_effect=delayed_open), \
+                            patch.object(recovery, '_state', return_value='gone'):
+                        with recovery.serialized(path):
+                            waiter.start()
+                            self.assertTrue(opened.wait(5))
+                        self.assertFalse(record.exists())
+                        self.assertFalse(held.exists())
+                        with recovery.serialized(path):
+                            release.set()
+                            self.assertTrue(reopened.wait(5), 'A detached lock waiter must reopen the current inode')
+                            self.assertFalse(entered.is_set(), 'Old and new lock inodes admitted concurrent owners')
+                        waiter.join(5)
+                        self.assertFalse(waiter.is_alive())
+                        self.assertEqual(errors, [])
+                        self.assertTrue(entered.is_set())
+                        self.assertFalse(held.exists())
+                finally:
+                    release.set()
+                    if waiter.ident is not None:
+                        waiter.join(5)
 
 
 
