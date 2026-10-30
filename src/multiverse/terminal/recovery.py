@@ -10,6 +10,7 @@ import signal
 import stat
 import subprocess
 import time
+from uuid import UUID
 
 from ..runtime.process import process_command, process_parent, process_snapshot, start_matches, valid_start
 from ..store import write
@@ -217,14 +218,36 @@ def _recorded(socket, facts):
     return recorded
 
 
+def _owns_pane(answer, facts):
+    """An exact saved pane/session/launch tag proves which server holds this launch."""
+    if answer is None or not facts:
+        return False
+    launch = facts.get('launch_id')
+    try:
+        if not isinstance(launch, str) or str(UUID(launch)) != launch:
+            return False
+    except ValueError:
+        return False
+    terminal = facts.get('tmux') or {}
+    if not isinstance(terminal, dict) or not terminal.get('pane') or not terminal.get('session'):
+        return False
+    for line in answer[0].splitlines():
+        row = line.split('\t')
+        if (len(row) == 7 and row[0] == terminal['pane'] and row[1] == terminal['session']
+                and row[5] == launch):
+            return True  # A remain-on-exit pane still identifies its original server.
+    return False
+
+
 def _matches_answer(answer, saved, recorded, facts):
     if answer is None or saved is None:
         return False
     current = answer[1]
     return (current['epoch'] is not None
             and (current['pid'], current['epoch']) == (saved['pid'], saved.get('epoch'))
-            and (recorded is None or _same(recorded, saved)
-                 or (facts or {}).get('state') in ('stopped', 'dormant', 'failed')))
+            and (not facts or facts.get('state') in ('stopped', 'dormant', 'failed')
+                 or recorded is not None and _same(recorded, saved)
+                 or _owns_pane(answer, facts)))
 
 
 def healthy(backend, *, facts=None):
@@ -268,7 +291,7 @@ def connected(backend, *, facts=None):
     # start_time and older registry entries take the full proof path.
     if _matches_answer(answer, saved, recorded, facts):
         return answer[0], saved
-    legacy = runner_server(facts or {}) if recorded is None else None
+    legacy = runner_server(facts or {}) if recorded is None and not _owns_pane(answer, facts) else None
     states = {}
     def state(proof):
         key = proof['pid'], proof['started']

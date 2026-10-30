@@ -121,6 +121,14 @@ class SocketRecoveryTest(TerminalBase):
                 with self.assertRaisesRegex(RuntimeError, 'duplicate session'):
                     self.backend.create('duplicate', self.work, ['/stand-in'])
 
+        with self.subTest('a healthy legacy pane proves its server without process queries'):
+            facts = read(directory / 'runtime.json')
+            legacy = {**facts, 'tmux': {key: value for key, value in facts['tmux'].items() if key != 'server'}}
+            with patch.object(recovery, 'process_snapshot', side_effect=AssertionError('Healthy legacy pane inspected a process')):
+                panes, error = self.backend.snapshot(facts=legacy)
+            self.assertIsNone(error)
+            self.assertIn(legacy['tmux']['pane'], panes)
+
         with self.subTest('an unreadable live legacy runner never permits a second server'):
             until(lambda: read(directory / 'runtime.json').get('pid_started'))
             saved = read(directory / 'runtime.json')
@@ -207,6 +215,24 @@ class SocketRecoveryTest(TerminalBase):
                     lifecycle.start(self.root, name='refused', harness='fake', socket_path=self.socket)
                 self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
             self.assertEqual(int(self.backend._run('display-message', '-p', '#{pid}')), other)
+            original = read(directory / 'runtime.json')
+            for legacy in (True, False):
+                with self.subTest(registry_warmed_by_replacement=True, legacy=legacy):
+                    facts = {**original, 'tmux': {key: value for key, value in original['tmux'].items()
+                                                if not legacy or key != 'server'}}
+                    write(directory / 'runtime.json', facts)
+                    recovery.registry(recovery.address(self.backend)).unlink()
+                    _, error = self.backend.snapshot()  # A different observer learns the replacement.
+                    self.assertIsNone(error)
+                    self.assertEqual(read(recovery.registry(recovery.address(self.backend)))['pid'], other)
+                    with patch.object(recovery.os, 'kill', wraps=os.kill) as signals:
+                        _, error = self.backend.snapshot(facts=facts)
+                        self.assertIn(str(old), error)
+                        self.assertIn(str(other), error)
+                        with self.assertRaisesRegex(recovery.Unreachable, 'conflicting server identities'):
+                            self.backend.ensure(self.root)
+                        self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+            write(directory / 'runtime.json', original)
         finally:
             self.backend._run('kill-server')
             os.kill(old, signal.SIGUSR1)
@@ -357,6 +383,26 @@ class RecoveryProofTest(BaseTest):
                         backend.ensure(self.root)
                 finally:
                     (directory / 'runtime.json').unlink()
+
+        launch = uid()
+        own = {'state': 'running', 'launch_id': launch, 'tmux': {'pane': '%1', 'session': '$1'}}
+        row = ['%1', '$1', '0', 'agent', 'universe', launch, '123']
+        for case in ('own', 'dead', 'other pane', 'other session', 'other launch', 'malformed launch'):
+            with self.subTest(pane_server_proof=case):
+                selected, facts = list(row), own
+                if case == 'dead':
+                    selected[2] = '1'
+                elif case == 'other pane':
+                    selected[0] = '%2'
+                elif case == 'other session':
+                    selected[1] = '$2'
+                elif case == 'other launch':
+                    selected[5] = uid()
+                elif case == 'malformed launch':
+                    selected[5] = 'not-a-launch'
+                    facts = {**own, 'launch_id': selected[5]}
+                self.assertEqual(recovery._matches_answer(('\t'.join(selected), answer[1]), proof, None, facts),
+                                 case in ('own', 'dead'))
 
         # The legacy parent proof must verify both runner observations too.
         facts = {'runner_pid': 23456, 'runner_started': token}
