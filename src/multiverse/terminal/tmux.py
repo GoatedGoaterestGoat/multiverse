@@ -1,5 +1,6 @@
 """tmux identifies terminals, not agents. Tags bind a pane to one launch."""
 import os
+from functools import lru_cache
 import re
 from pathlib import Path
 import shlex
@@ -11,22 +12,29 @@ from . import recovery, statusline
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
 
 
+@lru_cache(maxsize=1)
+def _launch_version():
+    try:
+        result = subprocess.run(['tmux', '-V'], stdin=subprocess.DEVNULL,
+                                text=True, capture_output=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 and isinstance(result.stdout, str) else None
+
+
+def _launch_problem(*, missing_join=False):
+    found = _launch_version() or 'tmux (version unreadable)'
+    detail = ' does not support -N;' if missing_join else ' found;'
+    return ValueError(f'{found}{detail} new launches require tmux 3.2 or newer. Upgrade tmux and retry. '
+                      'Existing agents can still be observed and stopped.')
+
+
 def _no_join_only_option(error):
-    # Before 3.2, use the server-side command parser to join without autostart.
     return re.search(r"\b(?:unknown|invalid|illegal) option(?:\s+--|\s*:)?\s+['\"]?-?N\b", str(error)) is not None
 
 
 def _connect_failure(error):
     return 'no server running' in str(error) or 'connecting to' in str(error)
-
-
-def _server_command(words):
-    # The old tmux parser expands $, ~, #, backslashes and command separators.
-    # Quote every word. Before 3.0 it reparses a trailing semicolon even in quotes;
-    # 3.0 also cannot preserve a literal newline in this command string.
-    if any(any(c in str(word) for c in '\r\n\0') or str(word).endswith(';') for word in words):
-        raise ValueError('This launch argument needs tmux 3.2 or newer; the older command parser cannot preserve a newline or trailing semicolon')
-    return ' '.join("'" + str(word).replace("'", "'\"'\"'") + "'" for word in words)
 
 
 def _created_identity(result):
@@ -126,7 +134,17 @@ class Tmux:
             reason = recovery.UnreachableReason(str(error)) if isinstance(error, recovery.Unreachable) else str(error)
             return {}, reason
 
+    @staticmethod
+    def require_launch_version():
+        found = _launch_version()
+        # OpenBSD and development builds do not necessarily use release numbers.
+        # Only a known older numeric release is grounds to refuse a new launch.
+        match = re.match(r'^tmux\s+(\d+)\.(\d+)(?=\D|$)', found or '')
+        if match and tuple(map(int, match.groups())) < (3, 2):
+            raise _launch_problem()
+
     def create(self, name, cwd, argv):
+        self.require_launch_version()
         if self.default:
             from ..runtime.paths import prepare
             prepare(Path(self.prefix[2]).parent)
@@ -137,15 +155,15 @@ class Tmux:
         command = ("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}\t#{pid}\t#{start_time}",
                    "-s", name, "-c", str(cwd), *options, *argv)
         result = None
-        unsupported = False
         if recovery.healthy(self) is not None:
             try:
                 # -N joins only: a cleaner after the probe must not make tmux
                 # create a second server while the first still lives.
                 result = self._run('-N', *command)
             except RuntimeError as error:
-                unsupported = _no_join_only_option(error)
-                if not (unsupported or _connect_failure(error)):
+                if _no_join_only_option(error):
+                    raise _launch_problem(missing_join=True) from error
+                if not _connect_failure(error):
                     raise
             else:
                 server = self._created_server(result)
@@ -157,19 +175,11 @@ class Tmux:
                 else:
                     for attempt in range(2):
                         try:
-                            if not unsupported:
-                                try:
-                                    result = self._run('-N', *command)
-                                except RuntimeError as error:
-                                    if not _no_join_only_option(error):
-                                        raise
-                                    unsupported = True
-                            if unsupported:
-                                # if-shell has no client-side STARTSERVER flag.
-                                # Its nested command runs only on an existing server.
-                                result = self._run('if-shell', '-F', '1', _server_command(command))
+                            result = self._run('-N', *command)
                             break
                         except RuntimeError as error:
+                            if _no_join_only_option(error):
+                                raise _launch_problem(missing_join=True) from error
                             if not _connect_failure(error):
                                 raise
                             if attempt or recovery.connected(self) is None:
@@ -199,7 +209,7 @@ class Tmux:
         try:
             # Guard and exact session-id removal execute in the same server.
             # A replacement at the path, or another session on this one, is left alone.
-            self._run('if-shell', '-F', condition, _server_command(('kill-session', '-t', session)))
+            self._run('if-shell', '-F', condition, f"kill-session -t '{session}'")
         except (OSError, RuntimeError, subprocess.SubprocessError):
             pass  # Preserve the conflict; no unsafe fallback signal or target.
 
@@ -248,6 +258,7 @@ class Tmux:
 
     def respawn(self, properties, runtime, cwd, argv):
         """Replace only a dead owned runner, preserving its attached clients."""
+        self.require_launch_version()
         panes, error = self.snapshot()
         pane = panes.get(runtime['tmux']['pane'])
         if error or not matches(pane, properties, runtime) or pane['pane_dead'] != '1':

@@ -1,6 +1,5 @@
 """A lost tmux address is not evidence that its recorded processes exited."""
 import os
-import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,7 +16,7 @@ from multiverse.harnesses.types import NativeResult
 from test_message_delivery import DeliveryFixture
 from multiverse.store import read, write, uid
 from multiverse.universe.mailbox import message_record
-from multiverse.terminal import recovery
+from multiverse.terminal import recovery, tmux
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import send
 from test_multiverse import BaseTest, TerminalBase, until
@@ -87,68 +86,33 @@ class SocketRecoveryTest(TerminalBase):
                     until(path.exists)
 
         for known, vanished in ((True, False), (False, False), (True, True)):
-            with self.subTest(old_tmux_without_join_only=True, known=known, vanished=vanished):
+            with self.subTest(unrecognized_tmux_without_join_only=True, known=known, vanished=vanished):
                 if not known:
                     recovery.registry(path.resolve()).unlink()
-                serial, original_run = recovery.serialized, self.backend._run
-                held, fallback, removed = [], [], []
-                @contextmanager
-                def locked(socket):
-                    with serial(socket):
-                        held.append(True)
-                        try:
-                            yield
-                        finally:
-                            held.pop()
-                def old_tmux(*args):
+                original_run = self.backend._run
+                attempted, creation = [], []
+                def no_join_flag(*args):
                     if args[0] == '-N':
+                        attempted.append(True)
+                        if vanished and path.exists():
+                            path.unlink()
                         raise RuntimeError('tmux: unknown option -- N')
                     if args[0] in ('new-session', 'if-shell'):
-                        self.assertTrue(held, 'Old tmux must join under the recovery lock')
-                        fallback.append(args[0])
-                        if vanished and not removed:
-                            path.unlink()
-                            removed.append(True)
+                        creation.append(args[0])
                     return original_run(*args)
-                second = None
                 try:
-                    with patch.object(recovery, 'serialized', side_effect=locked), \
-                            patch.object(self.backend, '_run', side_effect=old_tmux):
-                        extra = self.backend.create('old-tmux', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
-                    second = int(original_run('display-message', '-p', '#{pid}'))
-                    self.assertEqual(second, server, 'The old-tmux join started a second server after an external unlink')
-                    self.assertTrue(fallback)
-                    self.assertEqual(set(fallback), {'if-shell'})
-                    original_run('kill-pane', '-t', extra['pane'])
+                    with patch.object(tmux, '_launch_version', return_value=None), \
+                            patch.object(self.backend, '_run', side_effect=no_join_flag):
+                        with self.assertRaisesRegex(ValueError, 'version unreadable.*tmux 3.2'):
+                            self.backend.create('old-tmux', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                    self.assertEqual(attempted, [True])
+                    self.assertEqual(creation, [], 'An unsupported join must never fall back to a command that starts a server')
                 finally:
-                    if second is not None and second != server:
-                        original_run('kill-server')
                     if not path.exists():
                         os.kill(server, signal.SIGUSR1)
                         until(path.exists)
-        with self.subTest('old-tmux command words are literal, including quotes and shell syntax'):
-            cwd = self.work / "a'; kill-server; ' $HOME ~ # back\\slash"
-            cwd.mkdir()
-            captured = self.work / 'literal.json'
-            words = ["a'; kill-server; '", '$HOME', '~', '#comment', 'a\\b', 'a\tb', '', '`touch WRONG`']
-            script = 'import json,os,sys,time; open(sys.argv[1],"w").write(json.dumps([os.getcwd(),sys.argv[2:]])); time.sleep(60)'
-            original_run = self.backend._run
-            def legacy(*args):
-                if args[0] == '-N':
-                    raise RuntimeError('tmux: unknown option -- N')
-                return original_run(*args)
-            with patch.object(self.backend, '_run', side_effect=legacy):
-                extra = self.backend.create('quoted-join', cwd, [sys.executable, '-c', script, str(captured), *words])
-                until(lambda: captured.exists() and captured.stat().st_size)
-                self.assertEqual(json.loads(captured.read_text()), [str(cwd), words])
-                with self.assertRaisesRegex(RuntimeError, 'duplicate session'):
-                    self.backend.create('quoted-join', cwd, ['/stand-in'])
-                for word in ('line\nbreak', 'line\rbreak', 'trailing;', ';'):
-                    with self.subTest(refused_literal=repr(word)), self.assertRaisesRegex(ValueError, 'tmux 3.2 or newer'):
-                        self.backend.create('unrepresentable', cwd, ['/stand-in', word])
-            original_run('kill-pane', '-t', extra['pane'])
-            self.assertFalse((cwd / 'WRONG').exists())
-
+                self.assertEqual(int(original_run('display-message', '-p', '#{pid}')), server)
+                self.assertNotIn('old-tmux', original_run('list-sessions', '-F', '#{session_name}').splitlines())
         for fast in (False, True):
             with self.subTest('a proven post-creation conflict discards only the new session', fast=fast):
                 original_run, connected, observe = self.backend._run, recovery.connected, recovery.observe
@@ -354,6 +318,44 @@ class SocketRecoveryTest(TerminalBase):
 
 
 class RecoveryProofTest(BaseTest):
+    def test_only_known_old_tmux_releases_refuse_new_launches(self):
+        """An old tmux needs an actionable launch error, but unknown builds and existing agents must remain usable."""
+        backend = Tmux(str(self.work / 'tmux.sock'))
+        for found, refused in (('tmux 2.7', True), ('tmux 3.0a', True), ('tmux 3.1c', True),
+                               ('tmux 3.1c distro', True), ('tmux 3.2', False), ('tmux 3.2a', False),
+                               ('tmux 3.10', False), ('tmux 4.0-dev', False), ('tmux openbsd-7.4', False),
+                               ('tmux master', False), ('tmux next-3.5', False), ('unrecognized', False)):
+            tmux._launch_version.cache_clear()
+            try:
+                with self.subTest(version=found), \
+                        patch.object(tmux.subprocess, 'run', return_value=subprocess.CompletedProcess(['tmux', '-V'], 0, found + '\n')) as query, \
+                        patch.object(recovery, 'healthy', side_effect=RuntimeError('creation reached')):
+                    for _ in range(2):
+                        if refused:
+                            with self.assertRaisesRegex(ValueError, 'new launches require tmux 3.2') as caught:
+                                backend.create('new', self.work, ['/stand-in'])
+                            self.assertIn(found, str(caught.exception))
+                        else:
+                            with self.assertRaisesRegex(RuntimeError, 'creation reached'):
+                                backend.create('new', self.work, ['/stand-in'])
+                    query.assert_called_once()
+                    self.assertEqual(query.call_args.args[0], ['tmux', '-V'])
+            finally:
+                tmux._launch_version.cache_clear()
+        with patch.object(tmux, '_launch_version', return_value='tmux 2.7'), \
+                patch.object(lifecycle.paths, 'prepare', side_effect=AssertionError('run storage reached')):
+            # The public lifecycle path must refuse before starting a native
+            # service or making sockets, not only when it reaches Tmux.create.
+            harness = self.root / 'harnesses/fake'
+            harness.mkdir()
+            write(harness / 'harness.json', {'schema': 1, 'spawn': [sys.executable, '-c', 'pass'],
+                                           'resume': [sys.executable, '-c', 'pass']})
+            with self.assertRaisesRegex(ValueError, 'tmux 3.2'):
+                lifecycle.start(self.root, name='old-version', harness='fake', socket_path=backend.prefix[2])
+        with patch.object(tmux, '_launch_version', side_effect=AssertionError('Observation gated by launch version')), \
+                patch.object(recovery, 'observe', return_value=None):
+            self.assertEqual(backend.snapshot(), ({}, None))
+
     def test_only_a_current_tmux_identity_authorizes_a_recovery_signal(self):
         """SIGUSR1 kills unrelated processes, so reuse, unreadable identity and conflicting proofs must never authorize it."""
         backend = Tmux(str(self.work / 'address' / 'tmux.sock'))

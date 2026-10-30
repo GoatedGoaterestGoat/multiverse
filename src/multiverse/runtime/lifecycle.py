@@ -451,6 +451,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError(f'Harness executable not found: {argv[0]}')
         # Preparation can refuse without changing runtime storage or tmux.
         # Recovery still precedes any terminal creation or native service start.
+        Tmux.require_launch_version()
         paths.prepare(run_root)
         Tmux(socket_path).ensure(root)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
