@@ -71,7 +71,7 @@ def test_runs_at_once_share_the_machines_slots(self):
 | `native_safety.py` | The Codex daemon guard (not a test module) |
 | `native_processes.py` | Ends the processes of a private Codex server before its test removes the home (not a test module) |
 | `native_cli.py` | An `mv2` launcher pinned to this checkout's source and interpreter, and a `python3` that fails if called, for native callback fixtures (not a test module) |
-| `fixtures/` | Data recorded from the real thing: Codex 0.163.0 screens and 0.164.0 renderer snapshots, Claude 2.1.314 screens, Claude session files and `/proc` lines, a delivery ledger written by main@52b9df4, and runtime records from older writers |
+| `fixtures/` | Data recorded from the real thing: Codex 0.163.0 and 0.164.0 screens and 0.164.0 renderer snapshots, Claude 2.1.314 screens, Claude session files and `/proc` lines, a delivery ledger written by main@52b9df4, and runtime records from older writers |
 | `mock-provider.ts`, `steering-provider.ts`, `pi_bridge_test.mjs` | Offline Pi providers and the Pi extension's tests |
 
 The Claude mod and typeahead keep their TypeScript tests next to them, in `src/multiverse/harnesses/claude/mod/tests/` and `src/multiverse/plugins/builtin/typeahead/claude/tests/`.

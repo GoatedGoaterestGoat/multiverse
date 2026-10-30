@@ -18,9 +18,9 @@ from tui_demo import DemoBackend
 
 FIXTURES = Path(__file__).parent / "fixtures"
 # One capture set per checked release, with the lines the live pane shows; a release whose screen differs fails here,
-# not as an untidy pane. Codex's mid-conversation screens are its own renderer's snapshots, not tmux captures.
-SCREENS = {"claude": FIXTURES / "claude/screens-2.1.314.json",
-           "codex": FIXTURES / "codex/upstream-screens-0.164.0.json"}
+# not as an untidy pane. Codex's upstream screens are its own renderer's snapshots, not tmux captures.
+SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("codex", FIXTURES / "codex/screens-0.164.0.json"),
+           ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
@@ -68,7 +68,7 @@ class PaneDisplayTest(BaseTest):
         """Each screen loses exactly the harness's input box and the rows under it, a dialog or a screen the harness
         can't be sure of stays as it is, and a line of dashes in the conversation stays; a harness release that changes
         its screen breaks only this."""
-        for harness, path in SCREENS.items():
+        for harness, path in SCREENS:
             adapter = harnesses.load(self.root, harness)
             for frame in json.loads(path.read_text()):
                 with self.subTest(harness=harness, screen=frame["name"]):

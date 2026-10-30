@@ -3,15 +3,17 @@ draws them.
 
 Codex ends its screen with the composer (`› ` and the draft, or a fixed placeholder when it is empty), a blank row
 and the footer. The composer, any draft in it and everything under it go when the footer proves the composer: the
-rows after the last blank row are one or two footer rows Codex draws there (the status line naming the folder
-second, or shortcut, queue and context hints). Anything else comes back unchanged: an approval or selection dialog,
-whose chosen option (`› 1. Yes, proceed`) looks like a draft but whose last row is its own hint; a composer over a
-search, a message or no footer yet; and every screen whose last `› ` row has unindented rows under it, such as a
-sent message in the history.
+rows after the last blank row are one or two footer rows Codex draws there. One is the status line, known by its
+folder second, its model and effort first or a context reading among its items; the other has shortcut, queue and
+context hints. Anything else comes back unchanged: an approval or selection dialog, whose chosen option
+(`› 1. Yes, proceed`) looks like a draft but whose last row is its own hint; a composer over a search, a message or
+no footer yet; and every screen whose last `› ` row has unindented rows under it, such as a sent message in the
+history.
 """
 
 FOOTER_ROWS = 2    # the most footer rows under the composer
 HINTS = (' for shortcuts', ' to queue message', ' to queue')
+EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')  # the effort after the model's name
 
 
 def display(text):
@@ -33,12 +35,25 @@ def display(text):
 
 
 def footer(row):
-    """The status line naming the folder second, or a row of shortcut, queue and context hints."""
+    """The status line, or a row of shortcut, queue and context hints."""
     parts = [part.strip() for part in row.split('  ') if part.strip()]
     if parts and all(hint(part) or context(part) for part in parts):
         return True
     items = row.split(' · ')
-    return len(parts) == 1 and len(items) >= 2 and folder(items[1])
+    return len(parts) == 1 and len(items) >= 2 and (folder(items[1]) or model(items[0]) or any(map(reading, items)))
+
+
+def model(item):
+    """The status line's model with its effort, as "GPT-6.1-Sol xhigh"."""
+    words = item.split()
+    return len(words) >= 2 and words[-1] in EFFORTS
+
+
+def reading(item):
+    """The status line's context, as "Context 76% left" or "Context 20% used"."""
+    word, _, rest = item.partition(' ')
+    number, _, state = rest.partition('% ')
+    return word == 'Context' and number.isdigit() and state in ('left', 'used')
 
 
 def folder(item):

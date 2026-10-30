@@ -1,0 +1,18 @@
+[
+ {
+  "name": "configured status line",
+  "note": "idle after a reply; a status line of model and effort, branch, approvals, context, limits, tokens and the agent name, then the shortcut hint; the last 12 rows of a real tmux capture of an agent on this machine",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "    + Show details\n\n• Item 6 is closed. All four files in integrated d8efc682 match the approved fix exactly. No Codex adapter change was needed. Lifecycle’s macOS/Linux gates passed; completion\n  report sent to lead.\n\n  Worked for 39s • 00:56\n\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol xhigh · bug-fixes · never · Context 76% left · weekly 83% left · 10.9M used · plugins-codex\n  ? for shortcuts\n",
+  "shown": "    + Show details\n\n• Item 6 is closed. All four files in integrated d8efc682 match the approved fix exactly. No Codex adapter change was needed. Lifecycle’s macOS/Linux gates passed; completion\n  report sent to lead.\n\n  Worked for 39s • 00:56\n\n"
+ },
+ {
+  "name": "status line cut short",
+  "note": "the same status line cut with … at the right edge; the last 12 rows of a real tmux capture of an agent on this machine",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "\n• Approved revision 5. The configuration dialog and footerless prompt are\n  preserved. All 3 focused tests passed; reviewed files stayed unchanged. Sent\n  approval to pane-display.\n\n  Worked for 58s • 21:28\n\n\n› Ask Codex to do anything\n\n  GPT-6-Astra xhigh · bug-fixes · never · Context 40% left · weekly 83% left · …\n  ? for shortcuts\n",
+  "shown": "\n• Approved revision 5. The configuration dialog and footerless prompt are\n  preserved. All 3 focused tests passed; reviewed files stayed unchanged. Sent\n  approval to pane-display.\n\n  Worked for 58s • 21:28\n\n"
+ }
+]

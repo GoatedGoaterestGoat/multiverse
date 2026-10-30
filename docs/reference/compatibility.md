@@ -16,7 +16,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 
 | Harness | Version | What was checked |
 | --- | --- | --- |
-| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and, from its renderer's snapshots, the composer and footer the dashboard's live pane leaves out. |
+| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and the composer and footer the dashboard's live pane leaves out, from its panes and its renderer's snapshots. |
 | Claude Code | 2.1.314 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
