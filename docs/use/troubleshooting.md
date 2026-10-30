@@ -7,6 +7,8 @@ record; callbacks from an agent still require their verified identity.
 A leftover folder with damaged records may conservatively reserve a name when
 that text appears in a surviving record. Repair the named damaged file. If `properties.json` is missing, list, inspect and doctor offer `mv2 remove UUID` even when other records survive. Removal checks those records and the agent's processes before moving the leftover folder to the trash; a live or unprovable process still blocks it. A present but damaged properties file must be repaired instead: list, inspect, doctor and a refused remove show its full path and advise repairing it from a backup or restoring an intact copy. They never offer removal for that file.
 
+If `runtime.json` is readable but damaged, repair or restore it from a verified backup. The advice mentions restoring read access only when mv2 cannot read the file.
+
 Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
 
 ## Start here

@@ -93,7 +93,8 @@ def runtime(path):
         path = Path(path)
         if path.name != 'runtime.json':
             raise
-        raise RecordError(path, f'{error.reason}; restore read access or restore {path} from a verified backup. '
+        remedy = 'restore read access or restore' if error.reason.startswith('cannot be read:') else 'repair or restore'
+        raise RecordError(path, f'{error.reason}; {remedy} {path} from a verified backup. '
             f'To close a surviving tagged terminal, use mv2 kill {path.parent.name}; only after verifying '
             'its terminal, runner and child have exited, remove this runtime.json and resume', error.data) from None
 

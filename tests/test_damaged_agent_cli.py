@@ -53,7 +53,8 @@ class DamagedAgentCliTest(BaseTest):
 
     def test_each_command_keeps_a_damaged_record_local(self):
         """list, inspect, doctor, send and kill, as text and as JSON, keep each form of a damaged record local and
-        name its file, also through the real CLI; fragile because each command has its own read path, and one
+        name its file and distinguish readable damage from denied access, also through the real CLI; fragile
+        because each command has its own read path, and one
         uncaught RecordError breaks that command for every agent (c61c4c0, LC-9)."""
         healthy = self.entries['healthy'].name
         for file, kinds in (('properties.json', ('list', 'truncated', 'empty', 'name', 'harness', 'unreadable')),
@@ -88,6 +89,11 @@ class DamagedAgentCliTest(BaseTest):
                                 rows = {row['id']: row for row in value}
                                 self.assertEqual(rows[healthy]['name'], 'healthy')
                                 self.assertIn(file, rows[self.bad.name]['damaged']['file'])
+                                if file == 'runtime.json':
+                                    reason = rows[self.bad.name]['damaged']['reason']
+                                    self.assertEqual('restore read access' in reason, kind == 'unreadable')
+                                    if kind != 'unreadable':
+                                        self.assertIn('repair or restore', reason)
                             elif command[0] == 'doctor':
                                 self.assertTrue(any(file in problem for problem in value['problems']), value)
                             elif command[1] == self.bad.name:
