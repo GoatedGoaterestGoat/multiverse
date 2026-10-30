@@ -201,6 +201,8 @@ If a cleaner removes the socket or its folder while tmux is still running, mv2 r
 
 If recovery fails, the agent stays `unknown`, and the error names the socket and the process to check. Follow its manual recovery command only after verifying that PID still names the original tmux server. Do not remove `runtime.json` or start another server at the same path. Saved failed messages still need an explicit `mv2 deliver NAME --retry` or `--dismiss`; recovery never resends them.
 
+A server that answers remains usable when its process details are temporarily unreadable. mv2 saves no new signal authority until it can verify those details; a missing socket still requires the full process proof before recovery.
+
 mv2 keeps server identities under `~/.multiverse/tmux-servers/`. Older launches can prove their server through a still-running runner. If both the registry and socket are deleted, a new universe with no launch records cannot discover that old server; restore its address before spawning there.
 
 A missing native bridge socket has a different remedy: if its recorded process is still alive, stop and resume that agent to recreate the socket. A working alternate delivery path remains usable. Codex's shared daemon socket is separate from this launch-local socket.

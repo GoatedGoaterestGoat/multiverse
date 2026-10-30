@@ -183,14 +183,18 @@ def _same(left, right):
 def _remember(socket, current):
     observed = process_snapshot(current['pid'])
     if observed is None or observed[1].startswith(('Z', 'X')) or not _tmux(current['pid']):
-        raise Unreachable(f'Cannot verify the answering tmux server PID {current["pid"]} at {socket}')
+        return None  # A responsive channel is usable without authority to signal its process.
     proof = {**current, 'started': observed[0], 'socket': str(socket)}
     write(registry(socket), proof)
     return proof
 
 
 def connected(backend, *, facts=None):
-    """Under serialized(), return a verified pane listing, or None for a gone server."""
+    """Under serialized(), return (panes, signal proof), or None for a gone server.
+
+    The proof may be unavailable even when the server answers. Never substitute
+    a previous registry entry for the identity of this response.
+    """
     socket = address(backend)
     saved_error = None
     try:
@@ -214,7 +218,7 @@ def connected(backend, *, facts=None):
         if (current['epoch'] is not None and (current['pid'], current['epoch']) == (saved['pid'], saved.get('epoch'))
                 and (recorded is None or _same(recorded, saved)
                      or (facts or {}).get('state') in ('stopped', 'dormant', 'failed'))):
-            return answer[0]
+            return answer[0], saved
     legacy = runner_server(facts or {}) if recorded is None else None
     states = {}
     def state(proof):
@@ -229,11 +233,36 @@ def connected(backend, *, facts=None):
     expected = proofs[0][1] if proofs else None
     if answer is not None:
         output, current = answer
-        observed = process_snapshot(current['pid'])
-        if expected and (observed is None or not _same({**current, 'started': observed[0]}, expected)):
-            raise _conflict(socket, [*proofs, ('answering server', current)])
-        _remember(socket, current)
-        return output
+        if expected:
+            observed = process_snapshot(current['pid'])
+            if (current['pid'] != expected['pid']
+                    or observed is not None and not _same({**current, 'started': observed[0]}, expected)):
+                raise _conflict(socket, [*proofs, ('answering server', current)])
+        proof = _remember(socket, current)
+        if proof is not None:
+            return output, proof
+        # A resume may have closed the server's last pane just after its
+        # answer. Re-probe before either joining it or considering recovery.
+        answer = _probe(backend, socket)
+        if answer is not None:
+            if expected:
+                observed = process_snapshot(answer[1]['pid'])
+                if (answer[1]['pid'] != expected['pid']
+                        or observed is not None and not _same({**answer[1], 'started': observed[0]}, expected)):
+                    raise _conflict(socket, [*proofs, ('answering server', answer[1])])
+            return answer[0], None
+        if expected is None:
+            observed = process_snapshot(current['pid'])
+            try:
+                os.kill(current['pid'], 0)
+                gone = observed is not None and observed[1].startswith(('Z', 'X'))
+            except ProcessLookupError:
+                gone = True
+            except PermissionError:
+                gone = False
+            if not gone:
+                raise Unreachable(f'Tmux server PID {current["pid"]} stopped answering at {socket}; '
+                                  'its process identity is unavailable, so no signal or replacement server is safe; retry')
     if expected is None:
         if saved is not None:
             registry(socket).unlink(missing_ok=True)  # Its original process is proven gone.
@@ -261,8 +290,7 @@ def connected(backend, *, facts=None):
         observed = process_snapshot(current['pid'])
         if observed is None or not _same({**current, 'started': observed[0]}, expected):
             raise _conflict(socket, [*proofs, ('answering server', current)])
-        _remember(socket, current)
-        return output
+        return output, _remember(socket, current)
     except Unreachable:
         raise
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:

@@ -128,7 +128,7 @@ class RecoveryProofTest(BaseTest):
         proof = {'pid': 12345, 'started': token, 'socket': str(socket), 'epoch': 100}
         answer = ('panes', {'pid': 12345, 'epoch': 100})
         for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal',
-                     'registry conflict', 'new answering server', 'healthy fast path', 'same PID new epoch',
+                     'registry conflict', 'new answering server', 'different PID with unreadable start', 'healthy fast path', 'same PID new epoch',
                      'old tmux without epoch', 'stopped old record'):
             with self.subTest(case=case):
                 write(recovery.registry(socket), proof)
@@ -144,6 +144,9 @@ class RecoveryProofTest(BaseTest):
                     observations = (later, 'S')
                 elif case == 'registry conflict':
                     facts = {'tmux': {'server': {**proof, 'pid': 99999}}}
+                elif case == 'different PID with unreadable start':
+                    observations = None
+                    probes = [('panes', {'pid': 99999, 'epoch': 101})]
                 elif case == 'new answering server':
                     probes = [('panes', {'pid': 99999, 'epoch': 101})]
                 elif case == 'healthy fast path':
@@ -162,10 +165,10 @@ class RecoveryProofTest(BaseTest):
                         patch.object(recovery, '_probe', side_effect=probes):
                     if case == 'changed before signal':
                         snapshot.side_effect = [(token, 'S'), (later, 'S')]
-                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'registry conflict', 'new answering server'):
+                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'registry conflict', 'new answering server', 'different PID with unreadable start'):
                         with self.assertRaises(recovery.Unreachable) as caught:
                             recovery.connected(backend, facts=facts)
-                        if case in ('registry conflict', 'new answering server'):
+                        if case in ('registry conflict', 'new answering server', 'different PID with unreadable start'):
                             self.assertIn('12345', str(caught.exception))
                             self.assertIn('99999', str(caught.exception))
                             self.assertNotIn('kill -USR1', str(caught.exception))
@@ -174,7 +177,7 @@ class RecoveryProofTest(BaseTest):
                             self.assertIn('PID 12345', str(caught.exception))
                     else:
                         result = recovery.connected(backend, facts=facts)
-                        self.assertEqual(result, None if case == 'reused PID' else 'panes')
+                        self.assertEqual(result[0] if result is not None else None, None if case == 'reused PID' else 'panes')
                     signalled = [call.args for call in signals.call_args_list if call.args[1] == signal.SIGUSR1]
                     self.assertEqual(signalled, [(12345, signal.SIGUSR1)] if case == 'verified' else [])
                     if case in ('healthy fast path', 'stopped old record'):
@@ -182,6 +185,48 @@ class RecoveryProofTest(BaseTest):
                     elif case in ('same PID new epoch', 'old tmux without epoch', 'stopped old record'):
                         self.assertTrue(snapshot.called)
                         self.assertEqual(read(recovery.registry(socket))['started'], observations[0])
+        # A responsive channel needs no signal authority. A failed OS lookup
+        # must neither reject a new pane nor borrow a dead server's identity.
+        for unavailable in ('snapshot', 'executable'):
+            for stale in (False, True):
+                with self.subTest(answering=True, unavailable=unavailable, stale=stale):
+                    recovery.registry(socket).unlink(missing_ok=True)
+                    if stale:
+                        write(recovery.registry(socket), {**proof, 'pid': 99999})
+                    with patch.object(recovery, '_probe', side_effect=[('', {'pid': 99999, 'epoch': 100}) if stale else None, answer, answer]), \
+                            patch.object(recovery, 'process_snapshot', return_value=None if unavailable == 'snapshot' else (token, 'S')), \
+                            patch.object(recovery, 'process_command', return_value=None if unavailable == 'executable' else 'tmux'), \
+                            patch.object(recovery.os, 'kill', side_effect=ProcessLookupError) as signals, \
+                            patch.object(backend, '_run', return_value=f'{socket}\t$1\t%1'):
+                        terminal = backend.create('new', self.work, ['/stand-in'])
+                    self.assertEqual(terminal['pane'], '%1')
+                    self.assertIsNone(terminal['server'])
+                    self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+
+        for gone in (False, True):
+            with self.subTest(answer_disappears=gone):
+                recovery.registry(socket).unlink(missing_ok=True)
+                with patch.object(recovery, '_probe', side_effect=[answer, None if gone else answer]), \
+                        patch.object(recovery, 'process_snapshot', return_value=None), \
+                        patch.object(recovery.os, 'kill', side_effect=ProcessLookupError if gone else None):
+                    found = recovery.connected(backend)
+                self.assertEqual(found, None if gone else ('panes', None))
+        write(recovery.registry(socket), {**proof, 'epoch': None})
+        with self.subTest(known_answer_unreadable=True), \
+                patch.object(recovery, '_probe', return_value=('panes', {**answer[1], 'epoch': None})), \
+                patch.object(recovery, 'process_snapshot', return_value=None), \
+                patch.object(recovery.os, 'kill'):
+            self.assertEqual(recovery.connected(backend), ('panes', None))
+
+        with self.subTest(second_answer_has_different_pid=True), \
+                patch.object(recovery, '_probe', side_effect=[('panes', {**answer[1], 'epoch': None}),
+                    ('other panes', {'pid': 99999, 'epoch': None})]), \
+                patch.object(recovery, 'process_snapshot', return_value=None), \
+                patch.object(recovery.os, 'kill') as signals:
+            with self.assertRaisesRegex(recovery.Unreachable, 'conflicting server identities'):
+                recovery.connected(backend)
+            self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+
         # The legacy parent proof must verify both runner observations too.
         facts = {'runner_pid': 23456, 'runner_started': token}
         for case in ('verified parent', 'runner reused', 'parent changed', 'orphan', 'non-tmux parent'):
@@ -208,7 +253,7 @@ class RecoveryProofTest(BaseTest):
                 patch.object(recovery, '_probe', side_effect=[None, None, ('panes', {'pid': 12345, 'epoch': 100})]), \
                 patch.object(recovery, 'process_snapshot', return_value=(proof['started'], 'S')), \
                 patch.object(recovery, 'process_command', return_value='tmux'), patch.object(recovery.os, 'kill'):
-            self.assertEqual(recovery.connected(backend), 'panes')
+            self.assertEqual(recovery.connected(backend)[0], 'panes')
         self.assertEqual(self.work.stat().st_mode & 0o777, 0o750)
         for kind in ('record', 'lock'):
             with self.subTest(kind=kind):
@@ -231,7 +276,7 @@ class RecoveryProofTest(BaseTest):
                         patch.object(recovery, 'process_snapshot', return_value=(proof['started'], 'S')), \
                         patch.object(recovery, 'process_command', return_value='tmux'):
                     if answers:
-                        self.assertEqual(recovery.connected(backend), '')
+                        self.assertEqual(recovery.connected(backend)[0], '')
                         self.assertEqual(read(recovery.registry(path))['pid'], 12345)
                     else:
                         with self.assertRaises(recovery.Unreachable):

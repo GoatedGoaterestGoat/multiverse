@@ -89,9 +89,10 @@ class Tmux:
     def snapshot(self, *, facts=None):
         try:
             with recovery.serialized(recovery.address(self)):
-                output = recovery.connected(self, facts=facts)
-            if output is None:
+                answer = recovery.connected(self, facts=facts)
+            if answer is None:
                 return {}, None
+            output, _ = answer
             return {row[0]: dict(zip(FIELDS, row)) for line in output.splitlines()
                     if len(row := line.split("\t")) == len(FIELDS)}, None
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -110,8 +111,8 @@ class Tmux:
             recovery.connected(self)
             result = self._run("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
                                "-s", name, "-c", str(cwd), *options, *argv)
-            recovery.connected(self)
-            server = recovery._saved(recovery.address(self))
+            answer = recovery.connected(self)
+            server = answer[1] if answer is not None else None
         if len(result.split("\t")) != 3:
             # Some tmux versions return success even if server startup failed.
             raise RuntimeError(f"tmux did not return a pane identity: {result!r}")
