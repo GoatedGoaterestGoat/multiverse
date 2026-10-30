@@ -1,14 +1,14 @@
-"""One test's environment: its own HOME and tmux socket folder (TMUX_TMPDIR), and nothing the shell or agent running
-the suite would pass on: no agent identity, and no variable that looks like a credential.
+"""One test's environment: its own HOME, tmux socket folder (TMUX_TMPDIR) and run folder (MV2_RUN_DIR), and nothing
+the shell or agent running the suite would pass on: no agent identity, and no variable that looks like a credential.
 
     from isolation import isolate
 
     def setUp(self):
         isolate(self)   # first in setUp, before anything reads HOME or starts a process; returns the HOME
 
-The processes a test starts inherit its HOME and TMUX_TMPDIR, so neither the test nor the runners, relays and CLI
-calls it starts can write the real ~/.multiverse or reach the live agents' default tmux server. BaseTest calls it;
-a TestCase that is not a BaseTest can too.
+The processes a test starts inherit them, so neither the test nor the runners, relays and CLI calls it starts can
+write the real ~/.multiverse or reach the live agents' tmux servers and native sockets. BaseTest calls it; a
+TestCase that is not a BaseTest can too.
 
     track(tmux_socket=socket)   # a tmux server, or track(pid=pid) a daemon, started outside the test's process group
 
@@ -41,14 +41,16 @@ def _inherited(key, value):
 
 
 def isolated_environment(home):
-    """os.environ without what was inherited, and HOME and TMUX_TMPDIR `home`, each unless the test already gave
-    itself one."""
+    """os.environ without what was inherited, with HOME and TMUX_TMPDIR `home` and MV2_RUN_DIR `home`/run, each unless
+    the test already gave itself one."""
     environment = {key: value for key, value in os.environ.items() if not _inherited(key, value)}
     for key, value in OWN.items():
         environment.setdefault(key, value)  # unless the test set its own
-    for key in ("HOME", "TMUX_TMPDIR"):  # TMUX_TMPDIR: where the default tmux server, the live agents', has its socket
+    # TMUX_TMPDIR and MV2_RUN_DIR: where the live agents' default tmux servers and native sockets are. The run folder
+    # is short, for the native sockets' paths.
+    for key, value in (("HOME", home), ("TMUX_TMPDIR", home), ("MV2_RUN_DIR", home / "run")):
         if os.environ.get(key) == STARTED_WITH.get(key):
-            environment[key] = str(home)
+            environment[key] = str(value)
     return environment
 
 

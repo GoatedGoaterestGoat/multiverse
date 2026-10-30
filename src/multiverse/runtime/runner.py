@@ -616,7 +616,8 @@ def main():
         env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
             endpoint = Path(request['rpc_proxy']['socket_path'] if request.get('rpc_proxy') else request['control_endpoint']['address'])
-            if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
+            from multiverse.runtime.paths import launch_socket
+            if endpoint != launch_socket(launch.name, request.get('env') or {}):
                 raise ValueError('Native control socket does not belong to this launch')
             service_dir = endpoint.parent
         # A bridge resume already has a saved ID, but it must validate the new

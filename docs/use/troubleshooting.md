@@ -195,7 +195,7 @@ The message ends with a restart command for the agent's selected Codex home, lik
 
 ### tmux socket or permission problems
 
-mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socket in `MV2_TMUX_SOCKET`. `spawn` and `resume` read the variable from your environment, so set it the same way each time. Each agent remembers its socket, and mv2 always observes the agent there. Agents get their own server's socket, so the agents they start land on the same server.
+mv2 runs new agents on `~/.multiverse/run/tmux.sock`, or on the socket in `MV2_TMUX_SOCKET`. `MV2_RUN_DIR` overrides the private run directory and also moves new native bridge sockets. `spawn` and `resume` use the current selection; existing agents stay at their saved addresses. Children inherit their verified parent's current server and run directory. Discovery also checks the old `tmux -L multiverse-v2` server, so an upgrade sees agents still running there.
 
 If a cleaner removes the socket or its folder while tmux is still running, mv2 reconnects to that server. It verifies the saved PID, process start time and executable before sending `SIGUSR1`, recreates missing folders privately, and checks that the server answers. Concurrent callers share a short recovery lock. A different server answering at the same path is a conflict: mv2 names both PIDs and sends no signal.
 
@@ -208,8 +208,8 @@ A missing native bridge socket has a different remedy: if its recorded process i
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |
-| `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET` |
-| `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -L multiverse-v2 ls` |
+| `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET`; for a native socket, set a shorter absolute `MV2_RUN_DIR` |
+| `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -S "${MV2_RUN_DIR:-$HOME/.multiverse/run}/tmux.sock" ls`; older launches use `tmux -L multiverse-v2 ls` |
 | `server exited unexpectedly` on spawn, and the server's other sessions are gone | `MV2_TMUX_SOCKET` names a server with a global `window-size manual`; tmux 3.6a crashes on any new session there, with or without mv2 | Use mv2's own server, or unset `window-size` on yours (`tmux set -gu window-size`) |
 
 ### The dashboard doesn't show your agents

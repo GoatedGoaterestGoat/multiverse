@@ -40,6 +40,7 @@ import threading
 import time
 import traceback
 import unittest
+import uuid
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -216,6 +217,8 @@ def worker(start, target, shard, shards, report, verbosity, watch, grace):
     sys.path[:0] = [str(start)] + ([str(HERE)] if Path(start) != HERE else [])
     import home_safety
     home_safety.install()  # strict: before a test module or fixture moves HOME
+    if "MV2_TEST_RUN_DIR" in os.environ:  # only now that the guard has the real run folder (main)
+        os.environ["MV2_RUN_DIR"] = os.environ.pop("MV2_TEST_RUN_DIR")
     loader = unittest.TestLoader()
     # A module (qa.test_x), or a class or test in one, by name. Import the module part a package at a time, as
     # discovery imports a module: a SkipTest skips it, anything else is a failing test named after it.
@@ -669,21 +672,35 @@ def main(argv=None):
     if argv[:1] == ["--worker"]:
         start, target, shard, shards, report, verbosity, grace, watch = argv[1:]
         return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch), float(grace))
-    # The default tmux server (tmux -L multiverse-v2), where the live agents run, keeps its socket under TMUX_TMPDIR,
-    # or /tmp, and an agent's MV2_TMUX_SOCKET names its server: the run has a folder of its own and no socket, so
-    # that nothing a test runs or starts without naming a socket can reach the user's agents. The folder is in the
-    # temporary folder unless the socket's path would pass macOS's 103 bytes there.
+    # The live agents' servers and sockets: the default tmux server and their native sockets in the run folder
+    # (MV2_RUN_DIR, or ~/.multiverse/run), the legacy default server under TMUX_TMPDIR, or /tmp, and the server an
+    # agent's MV2_TMUX_SOCKET names. The run has a folder of its own for the first two and no socket, so that nothing a
+    # test runs or starts without naming a socket can reach the user's agents. Each worker takes the folder as its
+    # MV2_RUN_DIR only once the home guard has recorded the real one (worker). The folder is in the temporary folder
+    # unless a native socket's path would pass the system's limit there.
     os.environ.pop("MV2_TMUX_SOCKET", None)
-    socket = Path("tmux-%d" % os.getuid(), "multiverse-v2")
-    tmux = tempfile.mkdtemp(prefix="mv2-tmux-")
-    if len(str(Path(tmux, socket))) > 100:
-        os.rmdir(tmux)
-        tmux = tempfile.mkdtemp(prefix="mv2-tmux-", dir="/tmp")
-    os.environ["TMUX_TMPDIR"] = tmux
+    private = tempfile.mkdtemp(prefix="mv2-run-")
+    if not _native_sockets_fit(private):
+        os.rmdir(private)
+        private = tempfile.mkdtemp(prefix="mv2-run-", dir="/tmp")
+    os.environ.update(TMUX_TMPDIR=private, MV2_TEST_RUN_DIR=private)
     try:
         return _main(argv)
     finally:
-        shutil.rmtree(tmux, ignore_errors=True)
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def _native_sockets_fit(folder):
+    """Whether a launch's native socket in `folder`, as the run folder, stays within the system's limit, as mv2
+    checks it."""
+    if str(tracking.SRC) not in sys.path:
+        sys.path.insert(0, str(tracking.SRC))  # this checkout's mv2
+    from multiverse.runtime import paths
+    try:
+        paths.native_socket(str(uuid.UUID(int=0)), directory=os.path.realpath(folder))
+    except ValueError:
+        return False
+    return True
 
 
 def _main(argv):

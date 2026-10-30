@@ -27,8 +27,11 @@ def status_setup(root, properties, launch_id, family):
 class Tmux:
     pane_format = "\t".join("#{" + field + "}" for field in (*FIELDS, "pid", "start_time"))
 
-    def __init__(self, socket_path=None):
-        self.prefix = ["tmux", "-S", socket_path] if socket_path else ["tmux", "-L", "multiverse-v2"]
+    def __init__(self, socket_path=None, *, legacy=False):
+        from ..runtime.paths import run_directory
+        self.default = not socket_path and not legacy
+        self.prefix = (["tmux", "-L", "multiverse-v2"] if legacy else
+                       ["tmux", "-S", str(socket_path or run_directory() / 'tmux.sock')])
 
     def run(self, *args):
         try:
@@ -96,6 +99,9 @@ class Tmux:
             return {}, reason
 
     def create(self, name, cwd, argv):
+        if self.default:
+            from ..runtime.paths import prepare
+            prepare(Path(self.prefix[2]).parent)
         options = []
         for key in ("PATH", "PYTHONPATH", "MV2_CLI", "MV2_PYTHON"):
             if key in os.environ:

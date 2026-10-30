@@ -169,7 +169,8 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
     if (properties.get('id') != directory.name
             or properties.get('universe_id') != read(root / 'universe.json').get('id')):
         raise _problem(directory, 'saved agent/universe identity does not match its directory')
-    sockets = {None}
+    from ..terminal.recovery import address as terminal_address
+    sockets = {str(terminal_address(Tmux())), str(terminal_address(Tmux(legacy=True)))}
     terminal = (facts or {}).get('tmux')
     if isinstance(terminal, dict):
         saved = terminal.get('socket')
@@ -266,7 +267,13 @@ def _qualified_facts(root, directory, properties, terminal, launch_id, request, 
     facts = {'launch_id': launch_id, 'tmux': terminal, 'state': 'ending',
              'status': 'unknown', 'ending_at': now()}
     env = request.get('env')
-    expected = str(Path('/tmp') / ('mv2-native-' + launch_id) / 'rpc.sock')
+    from .paths import launch_socket
+    if not isinstance(env, dict):
+        return facts
+    try:
+        expected = str(launch_socket(launch_id, env))
+    except ValueError:
+        return facts
     proof = {'MV2_CONTROL_SOCKET': expected, 'MV2_UNIVERSE': str(root), 'MV2_AGENT_ID': properties['id'],
              'MV2_AGENT_DIR': str(directory), 'MV2_LAUNCH_ID': launch_id}
     if not isinstance(env, dict) or any(env.get(key) != value for key, value in proof.items()):

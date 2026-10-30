@@ -21,6 +21,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 import threading
@@ -73,6 +74,20 @@ _HARNESS_HOMES = [os.path.join(os.path.expanduser("~"), name) for name in (".cla
 # Claude Code's account and per-folder trust state, a file beside ~/.claude, which it writes by way of temporary and
 # backup copies beside it.
 _HARNESS_FILES = [os.path.join(os.path.expanduser("~"), ".claude.json")]
+
+
+def _real_run_directory():
+    """The person's run folder (MV2_RUN_DIR, else ~/.multiverse/run), where the live tmux server and the agents'
+    native sockets are, as mv2 finds it; None for a relative MV2_RUN_DIR, which mv2 itself refuses."""
+    from ..runtime import paths
+    try:
+        return str(paths.run_directory())
+    except ValueError:
+        return None
+
+
+_RUN_DIR = _real_run_directory()  # captured at import, as the homes above
+
 # The universe of the mv2 checkout this module runs from (src/multiverse/plugins/testing.py), when it runs from
 # one: there, it is the universe agents run in, which a test finding a universe from its directory would change.
 _SOURCE = Path(__file__).resolve().parents[3]
@@ -91,8 +106,8 @@ def install(home=None, strict=True):
     makes a process that another caller installed strict lenient again."""
     global _installed, _strict
     _strict = _strict or strict
-    homes = [home] if home is not None else [_REAL_HOME, *_HARNESS_HOMES] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE
-                                                                            else [])
+    homes = [home] if home is not None else [_REAL_HOME, *_HARNESS_HOMES] + [each for each in (_CHECKOUT_STATE,
+                                                                                               _RUN_DIR) if each]
     for each in homes:
         given = os.path.normpath(os.path.abspath(each))
         _protected.update({given, os.path.realpath(given)})  # as written and as resolved (/tmp, /var are links)
@@ -159,6 +174,13 @@ def _hook(event, args):
         if len(args) < 3 or not _writes(args[1], args[2]):
             return
         targets = [(args[0], getattr(_open_context, "dir_fd", None))]
+    elif event in ("socket.bind", "socket.connect"):
+        # A Unix socket by path: under a protected home, one the live tmux server or an agent serves on.
+        if len(args) < 2 or getattr(args[0], "family", None) != socket.AF_UNIX or not isinstance(args[1], (str, bytes)):
+            return
+        if not args[1] or args[1][:1] in ("\0", b"\0"):  # Linux's abstract names are no file
+            return
+        targets = [(args[1], None)]
     elif event in _TARGETS:
         targets = [(args[at] if at < len(args) else None, args[fd] if fd is not None and fd < len(args) else None)
                    for at, fd in _TARGETS[event]]
@@ -484,7 +506,10 @@ class PluginTestCase(unittest.TestCase):
         self.claude_config = self.work / "claude-config"
         self.claude_config.mkdir()
         # TMUX_TMPDIR: where the default tmux server, the live agents', keeps its socket; the test's is its own.
+        # MV2_RUN_DIR: the live agents' run folder; the test's own, short enough for its native sockets' paths.
+        (self.work / "run").mkdir(mode=0o700)
         environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config), TMUX_TMPDIR=str(self.work),
+                           MV2_RUN_DIR=str(self.work / "run"),
                            PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
                            MV2_PLUGIN_PATH=os.pathsep.join(
                                str(path) for path in (self.plugin, self.plugins_dir) if path is not None))

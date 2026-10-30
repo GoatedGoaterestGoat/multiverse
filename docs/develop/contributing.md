@@ -36,6 +36,8 @@ mv2
 
 Git ignores `.multiverse/` and `.run/`. Create `.run` once, because tmux doesn't create a socket's directory. Run `mv2 init .` once too, because mv2 creates a universe only when `MV2_UNIVERSE` is unset. Keep machine-specific notes in `.multiverse/DEVELOPMENT.md`.
 
+The explicit tmux override leaves native sockets in `~/.multiverse/run/native/`. Set `MV2_RUN_DIR` to a short private absolute directory when the checkout needs separate native sockets too.
+
 The script finds the checkout through Git's common directory. Sourcing it in a worktree therefore still points at the main checkout; see [work in a worktree](#work-in-a-worktree).
 
 ## Try the dashboard demo

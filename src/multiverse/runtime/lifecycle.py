@@ -20,7 +20,7 @@ from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import effects, native, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
 
 TEARDOWN_TIMEOUT = 10
 
@@ -247,9 +247,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
+    calling_socket, run_root = (None, None) if _recovery else agent_identity.calling_paths()
     socket_path = (_recovery['terminal']['socket'] if _recovery else
-                   socket_path if socket_path is not None else agent_identity.calling_socket())
+                   socket_path if socket_path is not None else calling_socket)
+    storage_socket = socket_path  # Only an explicit caller selection contributes storage evidence.
+    socket_path = socket_path or str(run_root / 'tmux.sock')
     agent_dir, properties, harness, model = _record(root, name, task, harness, model, resume)
+    if _recovery:
+        saved_root = runtime(agent_dir).get('run_directory')
+        run_root = paths.recorded_directory(saved_root) if saved_root is not None else paths.run_directory()
+    paths.prepare(run_root)
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
     adapter = harnesses.load(root, harness)
@@ -340,9 +347,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         bootstrap = catalog.bootstrap(root, properties)
         if adapter.bootstrap:
             bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
-        # A short private path avoids Unix socket length limits in deep worktrees.
-        # Created only when the adapter requests a native service below.
-        service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
+        # Keep launch sockets outside temporary storage. Validate the complete
+        # address before native preparation or a child can start.
+        service_dir = paths.native_socket(launch_id, directory=run_root).parent
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
         if resume:
             values['task'] = resume_prompt or ''
@@ -351,7 +358,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # can name it, e.g. in a plugin's MCP server. It always wins over ambient or saved values, and the
         # parent's MV2 identity never reaches the child. The tmux socket is added once the pane is owned.
         target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
-                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
+                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_RUN_DIR": str(run_root), "MV2_CLI": cli_path,
                   "MV2_PYTHON": sys.executable, "MV2_SOURCE": source(),
                   "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
         policy_hook = native.adapter_hook(adapter, 'agent_identity_policy')
@@ -365,7 +372,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
         if start_fresh:
             storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
-                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path, adapter.storage_env)))
+                                                                  ambient, _storage_terminals(previous, agent_dir, storage_socket, adapter.storage_env)))
             # Preparation is still read-only. The old binding is retired only
             # once the replacement command is valid and ready to be published.
             for key in agents.sessions.FRESH_FIELDS:
@@ -377,7 +384,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             mode, session = 'spawn', None
             values['session_id'] = properties.get('native_session_id') or ''
         storage = _storage_environment(adapter, properties, environment, ambient, resume and not start_fresh, agent_dir, previous,
-                                       storage_notices, socket_path=socket_path)
+                                       storage_notices, socket_path=storage_socket)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
@@ -483,7 +490,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
-              _initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery))
+              {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
+               'run_directory': str(run_root)})
         if fresh:
             # The replacement launch has now been published. If retirement
             # crashed earlier, its next resume used spawn preparation above.
@@ -514,6 +522,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         command = plain_fallback(command, error)
             if command.control_endpoint:
                 try:
+                    paths.prepare(service_dir.parent)
                     service_dir.mkdir(mode=0o700)
                     service_directory_created = True
                 except OSError as error:

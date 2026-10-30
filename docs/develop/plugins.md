@@ -374,7 +374,7 @@ class MyPluginTest(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 Each test gets:
 
 - a temporary universe from the base template (`self.root`), with the plugin found and on;
-- a temporary home, `CLAUDE_CONFIG_DIR` and tmux socket folder (`TMUX_TMPDIR`, so the default tmux server, where your agents run, is out of reach), and `bin/` first on `PATH`;
+- a temporary home, `CLAUDE_CONFIG_DIR`, tmux socket folder (`TMUX_TMPDIR`, so the default tmux server, where your agents run, is out of reach) and run folder (`MV2_RUN_DIR`), and `bin/` first on `PATH`;
 - no inherited agent identity, and no `MV2_TMUX_SOCKET`;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
 - `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;

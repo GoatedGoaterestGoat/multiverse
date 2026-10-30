@@ -399,6 +399,11 @@ class NativeBackendTest(BaseTest):
         request = read(launch / 'request.json')
         request.pop('attachment')
         request['rpc_proxy'].pop('binds_session')
+        # A runner started before the move keeps its exact /tmp endpoint.
+        request['env'].pop('MV2_RUN_DIR')
+        old_socket = '/tmp/mv2-native-' + self.launch + '/rpc.sock'
+        request['env']['MV2_CONTROL_SOCKET'] = old_socket
+        request['rpc_proxy']['socket_path'] = old_socket
         write(launch / 'request.json', request)
         facts = {k: v for k, v in self.facts.items() if k not in ('attachment', 'native_service', 'native_relay')}
         write(self.directory / 'runtime.json', facts)

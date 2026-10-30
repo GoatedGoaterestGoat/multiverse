@@ -7,10 +7,13 @@ mv2 reads and sets the variables below. You set only a few of them. The runner a
 | Variable | What it does |
 | --- | --- |
 | `MV2_UNIVERSE` | The universe to use when a command has no `-u`. Without it, mv2 searches the current directory and its parents. When no universe is found and no command is given, `mv2` creates one in the current directory, unless `-u` or `MV2_UNIVERSE` is set. |
-| `MV2_TMUX_SOCKET` | The path of the tmux socket for new agent terminals. Without it, agents run on the tmux server named `multiverse-v2` (`tmux -L multiverse-v2`). Existing agents stay on the socket recorded in their `runtime.json`. |
+| `MV2_RUN_DIR` | Absolute private runtime directory, default `~/.multiverse/run` (mode `0700`). New launches use `tmux.sock` and `native/LAUNCH/rpc.sock` inside it. Set a shorter path if the complete native socket address exceeds 103 bytes on macOS or 107 on Linux. |
+| `MV2_TMUX_SOCKET` | Overrides the tmux socket for new agent terminals; otherwise it is `MV2_RUN_DIR/tmux.sock`. It does not move native bridge sockets. Existing agents stay on the socket recorded in their `runtime.json`. |
 | `NO_COLOR` | The dashboard shows no color. Agents don't inherit it; see [NO_COLOR and agents](#no_color-and-agents). |
 
 In a development checkout, `. scripts/dev-env.sh` exports `MV2_UNIVERSE`, `MV2_TMUX_SOCKET`, `MV2_CLI` and `MV2_PYTHON` for the checkout's own universe. See [Contributing](../develop/contributing.md).
+
+Older launches keep their saved tmux and `/tmp/mv2-native-LAUNCH/rpc.sock` addresses until stopped and resumed. Discovery checks the old `tmux -L multiverse-v2` server too, so an upgrade never treats its running agents as absent.
 
 ## Variables mv2 sets in agent sessions
 
@@ -26,11 +29,12 @@ mv2 removes every inherited `MV2_*` variable before it starts an agent, then set
 | `MV2_CLI` | The `mv2` executable: the checkout's `bin/mv2`, else the running `mv2`, else `mv2` on `PATH` | Agents run `"$MV2_CLI" COMMAND`. Its directory is also put first on the agent's `PATH`. |
 | `MV2_PYTHON` | The Python interpreter running mv2 | The Claude mod and the Pi extension report status, usage and compaction with it. |
 | `MV2_SOURCE` | The import root of the running mv2 package | Python callbacks prepend it to their child's `PYTHONPATH`, so they use the same checkout or installation. The agent's own `PYTHONPATH` is unchanged. |
-| `MV2_CONTROL_SOCKET` | `/tmp/mv2-native-LAUNCH/rpc.sock`; current launches omit it from connected Codex tools | The private socket of this launch's bridge. The Pi extension listens on it. Older loaded Codex conversations may retain an obsolete value; it does not authorize a current control call. |
+| `MV2_CONTROL_SOCKET` | `MV2_RUN_DIR/native/LAUNCH/rpc.sock`; current launches omit it from connected Codex tools | The private socket of this launch's bridge. The Pi extension listens on it. Older loaded Codex conversations may retain an obsolete value; it does not authorize a current control call. |
+| `MV2_RUN_DIR` | This launch's resolved runtime directory; omitted from connected Codex tools | Child launches read it from the verified current runtime, alongside its tmux socket, rather than from cached tool settings. |
 | `MV2_TMUX_SOCKET` | The agent's tmux socket; current launches omit it from connected Codex tools | Identifies the frontend's server. Older loaded conversations may retain it. Child launches use the verified calling agent's runtime record to find its current server. |
 | `MV2_COMPACTION` | `1` | The compaction plugin sets it for connected Claude launches while compaction is on. Its compaction hook acts only then. See [plugin variables](#plugin-variables). |
 
-Connected Codex tools keep the same agent identity when another Codex client drives the conversation. Current launches do not pass `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` or `MV2_TMUX_SOCKET`. Codex supplies `CODEX_THREAD_ID`; mv2 also checks the saved native storage paths. A `/btw` side conversation inherits these settings, but its different thread ID cannot authorize it as the main agent. It can still run unscoped mv2 commands as the operator; this identity check is not an execution sandbox. A child agent still launches on its parent's tmux server, using the parent's current runtime record rather than a socket saved in the conversation. If that record is missing or damaged, spawning a child names the file to restore; it never falls back to another server.
+Connected Codex tools keep the same agent identity when another Codex client drives the conversation. Current launches do not pass `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET`, `MV2_TMUX_SOCKET` or `MV2_RUN_DIR`. Codex supplies `CODEX_THREAD_ID`; mv2 also checks the saved native storage paths. A `/btw` side conversation inherits these settings, but its different thread ID cannot authorize it as the main agent. It can still run unscoped mv2 commands as the operator; this identity check is not an execution sandbox. A child agent still launches on its parent's tmux server, using the parent's current runtime record rather than a socket saved in the conversation. If that record is missing or damaged, spawning a child names the file to restore; it never falls back to another server. An older runtime without a recorded run directory uses the caller's current `MV2_RUN_DIR` or the default for new native sockets.
 
 Each launch requests `MV2_CLI`, `MV2_PYTHON`, `MV2_SOURCE` and `PATH` from the mv2 installation starting it. These paths are tool settings, not identity proof. The saved maps describe requests, not measured values in a loaded conversation. Codex can retain an idle conversation for up to 30 minutes after its last client leaves by default, so restarting the frontend does not guarantee new tool settings.
 
@@ -51,7 +55,7 @@ authority or repair the runtime record.
 | `MV2_PLUGIN_PATH` | Directories to find plugins in, separated by `:`. Each one is a plugin or a folder of plugins. Plugins found here come before every other source and need no trust. Agents don't inherit it. See [making plugins](../develop/plugins.md#quickstart). |
 | `MV2_<NAME>`, `MV2_<NAME>_*` | Plugin NAME's launch additions set these in agent sessions. NAME is the plugin's name upper-cased, with hyphens as underscores, as in the compaction plugin's `MV2_COMPACTION`. A plugin can set no other `MV2_*` variable. |
 
-Plugin code finds its universe and agent from `MV2_UNIVERSE`, `MV2_AGENT_DIR` and `MV2_AGENT_ID`. A helper action, `"$MV2_PYTHON" -m multiverse.plugins [-u UNIVERSE] run PLUGIN ACTION`, works in the `-u` universe. Without `-u`, it uses `MV2_UNIVERSE`, and otherwise the universe the current directory is in. `mv2 plugins host start` starts the plugin host on the tmux server that `MV2_TMUX_SOCKET` names, or else on `multiverse-v2`.
+Plugin code finds its universe and agent from `MV2_UNIVERSE`, `MV2_AGENT_DIR` and `MV2_AGENT_ID`. A helper action, `"$MV2_PYTHON" -m multiverse.plugins [-u UNIVERSE] run PLUGIN ACTION`, works in the `-u` universe. Without `-u`, it uses `MV2_UNIVERSE`, and otherwise the universe the current directory is in. `mv2 plugins host start` starts the plugin host on the tmux server that `MV2_TMUX_SOCKET` names, or else on `MV2_RUN_DIR/tmux.sock`.
 
 ## NO_COLOR and agents
 

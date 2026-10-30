@@ -632,7 +632,9 @@ class LaunchIsolationTest(unittest.TestCase):
                         backend.environment.side_effect = {key: str(old_home), 'HOME': str(self.work)}.get
                     backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
                     servers = []
-                    def terminal(socket=None):
+                    def terminal(socket=None, *, legacy=False):
+                        from multiverse.terminal.tmux import Tmux
+                        backend.prefix = Tmux(socket, legacy=legacy).prefix
                         servers.append(socket)
                         return backend
                     from multiverse.runtime import storage_adoption
@@ -662,7 +664,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             raise PermissionError('unreadable conversation file')
                         return original_lstat(path, *args, **kwargs)
                     with patch.object(lifecycle, 'Tmux', side_effect=terminal), \
-                            patch('multiverse.runtime.missing_runtime.Tmux', return_value=backend), \
+                            patch('multiverse.runtime.missing_runtime.Tmux', side_effect=terminal), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
                             patch.object(Path, 'read_bytes', read_bytes), \

@@ -3,6 +3,7 @@ import contextlib
 import os
 from pathlib import Path
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -64,6 +65,25 @@ class StandInHome(PluginTestCase):
         return directory
 
 
+class RunFolderTest(unittest.TestCase):
+    def test_a_plugin_test_gets_a_run_folder_of_its_own(self):
+        """A PluginTestCase test gets an MV2_RUN_DIR inside its own folder, never the one it was run with; fragile
+        because the tests run inside a live agent, whose run folder holds the live tmux server and the agents'
+        native sockets, so a plugin test starting the host or a launch would use it without anything showing, and
+        its HOME's default path is too long for a native socket."""
+        class Probe(PluginTestCase):
+            def test_nothing(self):
+                pass
+        with mock.patch.dict(os.environ, MV2_RUN_DIR="/live/run"):
+            probe = Probe("test_nothing")
+            probe.setUp()
+            try:
+                seen = os.environ.get("MV2_RUN_DIR")
+            finally:
+                probe.doCleanups()
+        self.assertEqual(Path(seen).parent, probe.work)
+
+
 class GuardTest(StandInHome):
     def test_a_write_under_the_protected_home_is_refused_and_recorded(self):
         """The home guard refuses and records writes into the protected ~/.multiverse, the user's real ~/.claude,
@@ -119,6 +139,24 @@ class GuardTest(StandInHome):
                 with self.assertRaises(PermissionError):
                     os.rename(missing, target)
             self.assertEqual([item["path"] for item in self.new_violations()], [str(target) for target in targets])
+        with self.subTest("a socket served on or connected to under the real ~/.multiverse, or a real MV2_RUN_DIR"):
+            # The live tmux server and agents' native sockets live in ~/.multiverse/run (or MV2_RUN_DIR): a test
+            # binding or connecting there would serve on, or talk to, the person's live agents. Probed under a
+            # directory that is never there, so a guard that let it through gets FileNotFoundError and touches nothing.
+            testing.install()
+            never = f"mv2-guard-probe-{os.getpid()}-{time.monotonic_ns()}"
+            live_run = self.work / "live-run"  # a real MV2_RUN_DIR, as captured at import
+            with mock.patch.object(testing, "_RUN_DIR", str(live_run)):
+                testing.install()
+            probes = [Path(testing._REAL_HOME) / "run" / never / "p.sock", live_run / never / "p.sock"]
+            for probe in probes:
+                for operation in ("bind", "connect"):
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix, self.assertRaises(PermissionError):
+                        getattr(unix, operation)(str(probe))
+            with self.assertRaises(PermissionError):
+                os.mkdir(live_run)
+            self.assertEqual([item["event"] for item in self.new_violations()],
+                             ["socket.bind", "socket.connect"] * 2 + ["os.mkdir"])
         with self.subTest("check raises once for what is not reported"):
             testing._record("open", str(self.protected / "late.json"))
             with self.assertRaisesRegex(AssertionError, "late.json"):

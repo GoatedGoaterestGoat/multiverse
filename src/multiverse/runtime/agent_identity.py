@@ -88,7 +88,13 @@ def sender_actor(environment=None, *, acting="send"):
 
 
 def calling_socket(environment=None):
-    """Resolve an agent's current terminal server without trusting cached native socket values."""
+    """Resolve the current terminal server without trusting cached native values."""
+    return calling_paths(environment)[0]
+
+
+def calling_paths(environment=None):
+    """Resolve terminal and run directory from the same verified current runtime."""
+    from . import paths
     env = os.environ if environment is None else environment
     caller = actor(env)
     if caller is not None:
@@ -104,7 +110,7 @@ def calling_socket(environment=None):
                 or (env.get('MV2_AGENT_DIR') and Path(env['MV2_AGENT_DIR']).resolve() != directory.resolve())):
             raise ValueError('Calling agent identity does not match its saved record')
     else:
-        return env.get('MV2_TMUX_SOCKET')
+        return env.get('MV2_TMUX_SOCKET'), paths.run_directory(env)
     from ..universe import records
     path = directory / 'runtime.json'
     try:
@@ -119,7 +125,9 @@ def calling_socket(environment=None):
     socket = terminal.get('socket') if isinstance(terminal, dict) else None
     if not isinstance(socket, str) or not socket or '\0' in socket:
         raise ValueError('Calling agent has no recorded tmux server')
-    return socket
+    run_root = (paths.recorded_directory(facts['run_directory']) if 'run_directory' in facts else
+                paths.run_directory(env))
+    return socket, run_root
 
 
 def _recorded_launch(env, root, directory, properties, spec):
