@@ -235,7 +235,15 @@ async function report($: EngineInterface) {
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
       // v2 reads a tag's send time; mv2 sends one only to a mod that registered it.
       if (!registered) argv.push("--bridge", "claude-mod-v2")
-      const result = await $.process.run(argv, { timeoutMs: 10000, env: await pythonEnv($) })
+      let result
+      try {
+        result = await $.process.run(argv, { timeoutMs: 10000, env: await pythonEnv($) })
+      } catch (error) {
+        // A timeout or a refusal (Claude runs a mod's calls only once its trust prompt is answered) is logged like
+        // a failed exit; the next status change tries again.
+        $.ui.log(`multiverse: status report failed: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)
         return
