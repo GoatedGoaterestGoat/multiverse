@@ -139,7 +139,8 @@ class GuardTest(StandInHome):
                 with self.assertRaises(PermissionError):
                     os.rename(missing, target)
             self.assertEqual([item["path"] for item in self.new_violations()], [str(target) for target in targets])
-        with self.subTest("a socket served on or connected to under the real ~/.multiverse, or a real MV2_RUN_DIR"):
+        with self.subTest("a socket served on or connected to under the real ~/.multiverse, or a real MV2_RUN_DIR, "
+                          "but not one under Claude's or Codex's home"):
             # The live tmux server and agents' native sockets live in ~/.multiverse/run (or MV2_RUN_DIR): a test
             # binding or connecting there would serve on, or talk to, the person's live agents. Probed under a
             # directory that is never there, so a guard that let it through gets FileNotFoundError and touches nothing.
@@ -157,6 +158,12 @@ class GuardTest(StandInHome):
                 os.mkdir(live_run)
             self.assertEqual([item["event"] for item in self.new_violations()],
                              ["socket.bind", "socket.connect"] * 2 + ["os.mkdir"])
+            # Under Claude's or Codex's home a socket is left to their own guards: native_safety refuses the Codex
+            # daemon's, and its test of that must not fail here too. A folder never there: nothing is reached.
+            for harness in (".claude", ".codex"):
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix, self.assertRaises(FileNotFoundError):
+                    unix.connect(str(Path(testing._REAL_HOME).parent / harness / never / "p.sock"))
+            self.assertEqual(self.new_violations(), [])
         with self.subTest("check raises once for what is not reported"):
             testing._record("open", str(self.protected / "late.json"))
             with self.assertRaisesRegex(AssertionError, "late.json"):
