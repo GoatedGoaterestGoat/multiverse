@@ -24,7 +24,7 @@ SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("codex", FIXTU
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
-             "permissions selection", "config dialog", "reconnecting with draft", "history search"}
+             "permissions selection", "config dialog", "warning dialog", "reconnecting with draft", "history search"}
 # Built from Codex 0.164.0's source and its reviewers' probes, not captured: the end of the screen under a reply, and
 # what is left of the screen, None when it stays unchanged.
 CONVERSATION = "• Previous conversation\n\n"
@@ -32,6 +32,8 @@ CODEX_BUILT = {
     "a draft between blank rows": ("› Ask Codex to do anything\n\n  100% context left\n\n"
                                    "  gpt-5 default · /tmp/project\n", "• Previous conversation\n"),
     "a draft on the footer": ("› fix it\n  100% context left\n", None),
+    "the warning count beside the status line": ("› fix it\n\n  gpt-5 default · /tmp/project      ⚠ 1 warning · "
+                                                 "f2 to view\n", "• Previous conversation\n"),
     "no footer": ("› Ask Codex to do anything\n", None),
     "three rows that look like footer": ("› fix it\n\n  ? for shortcuts\n  100% context left\n"
                                          "  gpt-5 default · /tmp\n", None),

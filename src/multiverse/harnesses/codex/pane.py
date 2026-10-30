@@ -5,10 +5,10 @@ Codex ends its screen with the composer (`› ` and the draft, or a fixed placeh
 and the footer. The composer, any draft in it and everything under it go when the footer proves the composer: the
 rows after the last blank row are one or two footer rows Codex draws there. One is the status line, known by its
 folder second, its model and effort first or a context reading among its items; the other has shortcut, queue and
-context hints. Anything else comes back unchanged: an approval or selection dialog, whose chosen option
-(`› 1. Yes, proceed`) looks like a draft but whose last row is its own hint; a composer over a search, a message or
-no footer yet; and every screen whose last `› ` row has unindented rows under it, such as a sent message in the
-history.
+context hints and the warning count. Anything else comes back unchanged: an approval, selection or warnings dialog,
+whose chosen option (`› 1. Yes, proceed`) looks like a draft but whose last row is its own hint; a composer over a
+search, a message or no footer yet; and every screen whose last `› ` row has unindented rows under it, such as a sent
+message in the history.
 """
 
 FOOTER_ROWS = 2    # the most footer rows under the composer
@@ -35,12 +35,13 @@ def display(text):
 
 
 def footer(row):
-    """The status line, or a row of shortcut, queue and context hints."""
+    """The status line, or a row of shortcut, queue and context hints; either may end with the warning count."""
     parts = [part.strip() for part in row.split('  ') if part.strip()]
-    if parts and all(hint(part) or context(part) for part in parts):
+    if parts and all(hint(part) or context(part) or warning(part) for part in parts):
         return True
-    items = row.split(' · ')
-    return len(parts) == 1 and len(items) >= 2 and (folder(items[1]) or model(items[0]) or any(map(reading, items)))
+    items = parts[0].split(' · ') if parts else []
+    return (len(items) >= 2 and all(map(warning, parts[1:]))
+            and (folder(items[1]) or model(items[0]) or any(map(reading, items))))
 
 
 def model(item):
@@ -63,6 +64,13 @@ def folder(item):
 
 def hint(part):
     return any(part.endswith(end) and ' ' not in part.removesuffix(end) for end in HINTS)
+
+
+def warning(part):
+    """Codex's warning count at the right of the hint row: "⚠ 1 warning · f2 to view", "⚠ 2 · f2" or "⚠ 3"."""
+    count, _, key = part.removeprefix('⚠ ').partition(' · ')
+    count = count.removesuffix(' warnings').removesuffix(' warning')
+    return part.startswith('⚠ ') and count.isdigit() and ' ' not in key.removesuffix(' to view')
 
 
 def context(part):
