@@ -98,6 +98,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
                     f"then mv2 resume {name}, then mv2 deliver {name} --retry or --dismiss.")
         return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry or --dismiss."
     if state == 'unknown':
+        if accepted and value.get('evidence_problem'):
+            return (f"{name}: message accepted; cannot yet tell whether it arrived. {clean(value['evidence_problem']).rstrip('.')}; "
+                    f"then run mv2 deliver {name} --check. Do not resend.") + dismiss
         if accepted:
             return f'{name}: message accepted; no confirmation yet. Do not resend.' + dismiss
         if value.get('evidence_problem'):

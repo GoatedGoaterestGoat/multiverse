@@ -9,6 +9,23 @@ from ..universe import mailbox, storage
 from . import attachments
 
 
+def launch_ended(directory, launch_id):
+    """True only when the launch's cleanup record and both its processes prove it gone.
+
+    A malformed record or a process that may still run is False; an unreadable
+    record raises, so a caller can tell damage from a launch that still runs.
+    """
+    cleanup = read(directory / 'launches' / launch_id / 'cleanup.json')
+    if (not isinstance(cleanup, dict) or cleanup.get('schema') != 1 or cleanup.get('launch_id') != launch_id
+            or any(type(cleanup.get(key)) is not int or cleanup[key] <= 0 for key in ('pid', 'child_pid'))):
+        return False
+    # A completed journal alone is not process-exit proof. Sample the saved
+    # runner and child independently, including unknown inspection/reuse.
+    facts = {'launch_id': launch_id, 'runner_pid': cleanup['pid'], 'runner_started': cleanup.get('pid_started'),
+             'pid': cleanup['child_pid'], 'pid_started': cleanup.get('child_started')}
+    return not (attachments.recorded_process_problem(directory, facts) or attachments.problem(directory, facts))
+
+
 def check(directory, adapter, session, executor, message, tracking):
     """No native submission: missing evidence keeps an acceptance unconfirmed."""
     from .native import adapter_hook, observe
@@ -29,15 +46,7 @@ def check(directory, adapter, session, executor, message, tracking):
         if not launch_ready(adapter, executor.properties, facts, directory, request,
                             observe(executor.properties, facts)['live']):
             return None
-        cleanup = read(directory / 'launches' / old / 'cleanup.json')
-        if (not isinstance(cleanup, dict) or cleanup.get('schema') != 1 or cleanup.get('launch_id') != old
-                or any(type(cleanup.get(key)) is not int or cleanup[key] <= 0 for key in ('pid', 'child_pid'))):
-            return None
-        # A completed journal alone is not process-exit proof. Sample the saved
-        # runner and child independently, including unknown inspection/reuse.
-        old_facts = {'launch_id': old, 'runner_pid': cleanup['pid'], 'runner_started': cleanup.get('pid_started'),
-                     'pid': cleanup['child_pid'], 'pid_started': cleanup.get('child_started')}
-        if attachments.recorded_process_problem(directory, old_facts) or attachments.problem(directory, old_facts):
+        if not launch_ended(directory, old):
             return None
         saved = tracking.get('delivery_context')
         if isinstance(saved, dict):

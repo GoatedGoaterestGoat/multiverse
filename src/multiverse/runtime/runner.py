@@ -518,15 +518,48 @@ def wait_startup_candidate(directory, launch_id, process, child_at):
 
 
 
+def _wake_evidence_inputs(launch, environment, message_id):
+    """This exact launch's wake prompt, session and storage as its harness checks them; None for another launch."""
+    from multiverse import harnesses
+    from multiverse.harnesses.types import SessionHandle
+    from multiverse.runtime.native import adapter_hook
+    from multiverse.runtime.wake import prompt_context
+    from multiverse.universe.mailbox import message_record
+    directory = launch.parent.parent
+    properties, facts = read(directory / 'properties.json'), runtime(directory)
+    if facts.get('launch_id') != launch.name:
+        return None
+    adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
+    message, tracking = message_record(directory, message_id)
+    target = tracking.get('target_session') or message.get('target_session')
+    if target and properties.get('native_session_id') != target:
+        raise ValueError('The wake conversation changed before startup evidence was recorded')
+    session = SessionHandle.from_records(properties, facts, directory)
+    prompt, since = (launch / 'task.md').read_text(), facts.get('started_at')
+    return (adapter_hook(adapter, 'startup_prompt_evidence'), session, prompt, since,
+            prompt_context(adapter, session, prompt, since, environment))
+
+
+def started_wake_snapshot(launch, environment, message_id):
+    """A started wake's exact prompt evidence, kept so --check can settle it later.
+
+    None (no hook, another launch, a changed conversation) keeps the old rule: an
+    accepted wake is left out of --check.
+    """
+    if not message_id:
+        return None
+    try:
+        inputs = _wake_evidence_inputs(launch, environment, message_id)
+    except Exception:
+        return None
+    return inputs[4] if inputs is not None and inputs[0] is not None else None
+
+
 def finish_failed_wake(launch, request, environment, process, reason):
     """A failed startup is retryable only with exact harness negative evidence."""
     message_id = request.get('resume_message_id')
     if not message_id:
         return
-    from multiverse import harnesses
-    from multiverse.harnesses.types import SessionHandle
-    from multiverse.runtime.native import adapter_hook
-    from multiverse.runtime.wake import prompt_context
     from multiverse.universe.mailbox import finish_wake
     evidence = None
     snapshot = None
@@ -534,19 +567,9 @@ def finish_failed_wake(launch, request, environment, process, reason):
         evidence = False  # No child was ever created.
     elif process.poll() is not None:
         try:
-            directory = launch.parent.parent
-            properties, facts = read(directory / 'properties.json'), runtime(directory)
-            if facts.get('launch_id') == launch.name:
-                adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
-                hook = adapter_hook(adapter, 'startup_prompt_evidence')
-                from multiverse.universe.mailbox import message_record
-                message, tracking = message_record(directory, message_id)
-                target = tracking.get('target_session') or message.get('target_session')
-                if target and properties.get('native_session_id') != target:
-                    raise ValueError('The wake conversation changed before startup evidence was recorded')
-                session = SessionHandle.from_records(properties, facts, directory)
-                prompt, since = (launch / 'task.md').read_text(), facts.get('started_at')
-                snapshot = prompt_context(adapter, session, prompt, since, environment)
+            inputs = _wake_evidence_inputs(launch, environment, message_id)
+            if inputs is not None:
+                hook, session, prompt, since, snapshot = inputs
                 if hook is not None:
                     evidence = hook(session, prompt, since, dict(environment))
         except Exception:
@@ -756,8 +779,10 @@ def main():
         except subprocess.TimeoutExpired:
             startup_checked = True
             native_refusal = runtime(agent_dir).get('native_refusal')
+            snapshot = None if native_refusal else started_wake_snapshot(launch, env, request.get('resume_message_id'))
             finish_wake(agent_dir, launch.name, request.get('resume_message_id'), not native_refusal,
-                        native_refusal['message'] if native_refusal else '', uncertain=bool(native_refusal))
+                        native_refusal['message'] if native_refusal else '', uncertain=bool(native_refusal),
+                        prompt_context=snapshot)
             update_runtime(agent_dir, launch.name, startup_checked=True)
             from multiverse.runtime.lifecycle import note_ready
             note_ready(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)

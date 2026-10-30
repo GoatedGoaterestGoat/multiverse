@@ -160,6 +160,35 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         write(self.root / 'harnesses/claude/harness.json', spec)
         return executable
 
+    def test_a_started_wake_keeps_its_exact_prompt_evidence(self):
+        """Through the real runner, a wake that survives startup keeps its exact launch, prompt, session and storage,
+        so deliver --check can confirm it or call it lost later; a break goes unnoticed because the wake just stays
+        unconfirmed forever."""
+        executable = self.work / 'sleeping-claude'
+        executable.write_text(f'#!{sys.executable}\nimport time\ntime.sleep(30)\n')
+        executable.chmod(0o755)
+        spec = read(self.root / 'harnesses/claude/harness.json')
+        spec['settings'] = {'executable': str(executable), 'inbox_bridge': False}
+        write(self.root / 'harnesses/claude/harness.json', spec)
+        agent_id, native_id = str(uuid4()), str(uuid4())
+        directory = self.root / 'state/agents' / agent_id
+        write(directory / 'properties.json', {'id': agent_id,
+              'universe_id': read(self.root / 'universe.json')['id'], 'name': 'started-wake',
+              'task': 'original task', 'harness': 'claude', 'workspace': str(self.work), 'native_session_id': native_id,
+              'native_storage_environment': {key: os.environ.get(key) for adapter in harnesses.BUILTINS.values()
+                                             for key in adapter.storage_env}})
+        with patch.dict(os.environ, {'MV2_TMUX_SOCKET': self.socket}):
+            self.assertTrue(send.run(self.root, agent=agent_id, text='Take this once', sender={'name': 'user'})['saved'])
+        saved = inbox(directory, all_messages=True)['messages'][0]
+        until(lambda: message_record(directory, saved['id'])[1].get('submission_state') == 'accepted')
+        tracking = message_record(directory, saved['id'])[1]
+        launch = tracking['wake_launch_id']
+        snapshot = tracking['wake_prompt_context']
+        self.assertEqual((snapshot['session']['launch_id'], snapshot['session']['native_id']), (launch, native_id))
+        self.assertEqual(snapshot['prompt'], (directory / 'launches' / launch / 'task.md').read_text())
+        self.assertIn('Take this once', snapshot['prompt'])
+        self.assertEqual(snapshot['since'], agents.runtime(directory)['started_at'])
+
     def test_a_failed_wake_never_replays_and_fails_its_queued_input(self):
         """Through the real runner and tmux, a wake whose process cannot start ends failed with its output as the
         reason, never replays an uncertain prompt, turns queued bridge messages into failed ones, and deliver

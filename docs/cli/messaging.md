@@ -180,9 +180,20 @@ is reported once with the message text and advice to send a new message delibera
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
 lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
-An accepted command-line wake prompt has no correlatable native receipt and is
-excluded from recurring checks. An uncertain or failed wake keeps its existing
-evidence check and is never resent automatically.
+A message that woke an agent is checked against that launch's own starting
+prompt, with the harness's transcript evidence (Claude Code today), on each
+`mv2 deliver --check` until it settles; listings and the dashboard never read it.
+It is confirmed once its prompt is recorded. Until then `--check` prints
+`NAME: message accepted; no confirmation yet. Do not resend.`, also while the
+launch still runs without the prompt recorded, because the harness can still be
+holding it (Claude's resume dialog, for example). When the evidence can't be read,
+it prints `NAME: message accepted; cannot yet tell whether it arrived.` with what
+to restore. Only when the launch was proven to have ended before a read that found
+no prompt is it reported lost, once, like any other loss. Nothing is recorded
+until it settles. A wake made before this check existed, or by a harness without
+that evidence (Codex, Pi), is still left out of recurring checks. An uncertain or
+failed wake keeps its existing evidence check. No wake prompt is ever resent
+automatically.
 Identical accepted messages need separate stored copies: each text row confirms
 at most one acceptance, oldest first. Any excess acceptance stays unconfirmed;
 an exact message-ID receipt confirms only that message.
