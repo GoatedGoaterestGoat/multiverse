@@ -16,8 +16,8 @@ def failure_reason(reason, text='', *, preserve_details=False):
             reason = re.sub(pattern, 'the message', reason)
     if preserve_details:
         # Wake refusals carry actionable record paths and recovery instructions.
-        # Keep them whole, while still removing reflected message bodies above.
-        return clean(reason)
+        # Keep them whole; the summary supplies the final sentence separator.
+        return clean(reason).removesuffix('.')
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'

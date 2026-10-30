@@ -12,6 +12,7 @@ from multiverse import cli, harnesses, store
 from multiverse.universe import mailbox
 from multiverse.runtime import lifecycle, native, storage_adoption
 from multiverse.harnesses.types import NativeResult
+from multiverse.terminal import tmux
 from multiverse.tools import list_agents, send
 from multiverse.tools._messaging import failure_reason
 
@@ -200,6 +201,22 @@ class MessagingCliTest(BaseTest):
             with patch.object(native, 'finalize_launch_only', return_value=None):
                 self.output('deliver', 'third', '--check', code=1)
             self.assertIn(reason, self.stderr)
+
+        with patch.object(tmux, '_launch_version', return_value='tmux 3.1c'):
+            reason = str(tmux._launch_problem())
+        for diagnostic in (reason, reason.removesuffix('.')):
+            with self.subTest('tmux wake refusal has one sentence separator', diagnostic=diagnostic):
+                def refuse(root, reference, message_id, **kwargs):
+                    return native._wake_failure(self.directories['third'], message_id, ValueError(diagnostic))
+                with patch.object(native, 'send_or_wake', side_effect=refuse):
+                    self.output('send', 'third', '--text', 'wake message', code=1)
+                    self.assertEqual(self.stderr.strip(),
+                        f'Not delivered to third: Could not wake agent: {reason} Saved; fix the reason, '
+                        'then mv2 deliver third --retry or --dismiss.')
+                    self.assertEqual(self.history('third')[-1]['tracking']['attempts'][-1]['reason'],
+                                     'Could not wake agent: ' + diagnostic)
+                    record = json.loads(self.output('send', 'third', '--text', 'wake message', '--json', code=1))
+                    self.assertEqual(record['native_delivery']['reason'], 'Could not wake agent: ' + diagnostic)
 
     def test_advice_follows_the_agents_state(self):
         """Delivery advice follows state: live and broken gets kill then resume, stopped gets resume without kill,
