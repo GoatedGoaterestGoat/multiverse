@@ -443,6 +443,18 @@ class RecoveryProofTest(BaseTest):
                                  case in ('own', 'dead'))
 
         # The legacy parent proof must verify both runner observations too.
+        for state, saved in (('Zs', None), ('X', 'damaged'), ('S', None), (None, None)):
+            with self.subTest(legacy_runner_state=state, saved_start=saved), \
+                    patch.object(recovery.os, 'kill') as signals, \
+                    patch.object(recovery, 'process_snapshot', return_value=(token, state) if state else None), \
+                    patch.object(recovery, 'process_parent', side_effect=AssertionError('Unproven runner parent inspected')):
+                legacy = {'state': 'running', 'runner_pid': 23456, 'runner_started': saved}
+                if state in ('Zs', 'X'):
+                    self.assertIsNone(recovery.runner_server(legacy))
+                else:
+                    with self.assertRaises(recovery.Unreachable):
+                        recovery.runner_server(legacy)
+                self.assertEqual([call.args for call in signals.call_args_list], [(23456, 0)])
         facts = {'runner_pid': 23456, 'runner_started': token}
         for case in ('verified parent', 'runner reused', 'parent changed', 'orphan', 'non-tmux parent'):
             with self.subTest(case=case), patch.object(recovery.os, 'kill'), \

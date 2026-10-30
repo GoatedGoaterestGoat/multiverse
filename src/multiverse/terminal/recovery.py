@@ -148,10 +148,12 @@ def runner_server(facts):
     except (PermissionError, OverflowError):
         raise Unreachable(problem) from None
     observed = process_snapshot(pid)
-    if observed is None or not valid_start(started):
+    if observed is None:
         raise Unreachable(problem)
     if observed[1].startswith(('Z', 'X')):
         return None
+    if not valid_start(started):
+        raise Unreachable(problem)
     if not start_matches(started, pid, observed=observed[0]):
         # Converting an old Linux ctime token may itself need an unavailable
         # process query. Only comparable, differing tokens prove PID reuse.
