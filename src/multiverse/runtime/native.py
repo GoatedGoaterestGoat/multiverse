@@ -361,9 +361,15 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
 
 
 def missing_socket_problem(root, properties, facts):
-    """Name a vanished launch-local endpoint only while its original child is proven live."""
+    """Name a vanished endpoint only after readiness, with its original child proven live."""
     from .process import process_snapshot, start_matches
     try:
+        relay = facts.get('native_relay') or {}
+        was_ready = (facts.get('startup_delivery') == 'ready' or relay.get('state') == 'ready'
+                     or relay.get('state') == 'lost' and facts.get('state') == 'running'
+                     and (facts.get('attachment') or {}).get('readiness') in ('binding', 'legacy-binding'))
+        if not was_ready:
+            return None  # A starting bridge may not have created its socket yet.
         launch = normalize_session_id(facts.get('launch_id'))
         directory = root / 'state' / 'agents' / properties['id']
         request = read(directory / 'launches' / launch / 'request.json')

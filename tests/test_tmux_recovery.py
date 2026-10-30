@@ -518,12 +518,22 @@ class RecoveryProofTest(BaseTest):
 class NativeSocketNoticeTest(DeliveryFixture):
     def test_a_lost_local_socket_names_the_live_process_without_preventing_a_working_fallback(self):
         """Missing frontend sockets need a resume remedy, but cannot disable another native delivery path or trigger replay."""
-        for case in ('direct', 'proxy', 'stale launch', 'PID reused', 'present', 'fallback succeeds', 'uncertain'):
+        for case in ('direct', 'proxy', 'stale launch', 'PID reused', 'present', 'fallback succeeds', 'uncertain',
+                     'starting', 'startup survived', 'startup failed', 'relay ready', 'relay lost after binding',
+                     'relay lost before binding', 'relay lost without binding contract'):
             with self.subTest(case=case):
                 self.recipient()
                 properties = read(self.directory / 'properties.json')
                 facts = {**read(self.directory / 'runtime.json'), 'pid': os.getpid(),
-                         'pid_started': process_started(os.getpid())}
+                         'pid_started': process_started(os.getpid()), 'startup_delivery': 'ready'}
+                if case.startswith(('starting', 'startup', 'relay')):
+                    facts['startup_delivery'] = 'failed' if case == 'startup failed' else 'waiting'
+                    facts['startup_checked'] = case == 'startup survived'
+                if case.startswith('relay'):
+                    facts['native_relay'] = {'state': 'ready' if case == 'relay ready' else 'lost'}
+                    facts['attachment'] = {'readiness': 'process' if case == 'relay lost without binding contract' else 'binding'}
+                    if case == 'relay lost before binding':
+                        facts['state'] = 'starting'
                 local = str(self.work / 'missing-local.sock')
                 shared = str(self.work / 'missing-daemon.sock')
                 env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': self.agent,
@@ -541,7 +551,8 @@ class NativeSocketNoticeTest(DeliveryFixture):
                     Path(local).touch()
                 write(self.directory / 'runtime.json', facts)
                 write(self.directory / 'launches' / self.launch / 'request.json', request)
-                expected = case not in ('stale launch', 'PID reused', 'present')
+                expected = case not in ('stale launch', 'PID reused', 'present', 'starting', 'startup survived',
+                                       'startup failed', 'relay lost before binding', 'relay lost without binding contract')
                 try:
                     problem = native.connection_problem(self.root, properties, facts)
                     if expected:
@@ -562,6 +573,10 @@ class NativeSocketNoticeTest(DeliveryFixture):
                     self.behavior = NativeResult('native_queued' if case == 'fallback succeeds' else
                                                  'unknown' if case == 'uncertain' else 'unavailable',
                                                  reason='Adapter result')
+                    # Startup queue behavior has its own table; here ask the
+                    # adapter directly enough to check only the loss diagnostic.
+                    facts['startup_delivery'] = None if facts['startup_delivery'] == 'waiting' else facts['startup_delivery']
+                    write(self.directory / 'runtime.json', facts)
                     result = self.send('one message', delivery='steer')
                     self.assertEqual(len(self.calls), 1)
                     _, tracking = message_record(self.directory, result['id'])
