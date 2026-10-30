@@ -259,6 +259,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved_root = runtime(agent_dir).get('run_directory') if resume else None
         run_root = paths.recorded_directory(saved_root) if saved_root is not None else paths.run_directory()
     socket_path = socket_path or str(run_root / 'tmux.sock')
+    planned_launch = uid()
+    service_dir = paths.native_socket(planned_launch, directory=run_root).parent
+    paths.socket_path(socket_path, variable=('MV2_RUN_DIR' if Path(socket_path).is_relative_to(run_root)
+                                            else 'MV2_TMUX_SOCKET'))
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
     adapter = harnesses.load(root, harness)
@@ -283,7 +287,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 raise error
             if observation['live'] in ('stopped', 'dormant'):
                 attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
-    proposed_launch = uid() if not resume else None
+    proposed_launch = planned_launch if not resume else None
     if not resume:
         launch_lock = lambda path: _publish_record(root, agent_dir, properties, proposed_launch)
     elif _recovery:
@@ -343,14 +347,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if _queue_wake:
                 resume_prompt = None
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
-        launch_id = proposed_launch or uid()
+        launch_id = planned_launch
         launch = agent_dir / "launches" / launch_id
         bootstrap = catalog.bootstrap(root, properties)
         if adapter.bootstrap:
             bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
-        # Keep launch sockets outside temporary storage. Validate the complete
-        # address before native preparation or a child can start.
-        service_dir = paths.native_socket(launch_id, directory=run_root).parent
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
         if resume:
             values['task'] = resume_prompt or ''

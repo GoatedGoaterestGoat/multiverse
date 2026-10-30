@@ -8,7 +8,7 @@ mv2 reads and sets the variables below. You set only a few of them. The runner a
 | --- | --- |
 | `MV2_UNIVERSE` | The universe to use when a command has no `-u`. Without it, mv2 searches the current directory and its parents. When no universe is found and no command is given, `mv2` creates one in the current directory, unless `-u` or `MV2_UNIVERSE` is set. |
 | `MV2_RUN_DIR` | Absolute private runtime directory, default `~/.multiverse/run` (mode `0700`). New launches use `tmux.sock` and `native/LAUNCH/rpc.sock` inside it. Set a shorter path if the complete native socket address exceeds 103 bytes on macOS or 107 on Linux. A wake on the target's explicitly selected server keeps the target's recorded run directory, rather than inheriting the sender's. |
-| `MV2_TMUX_SOCKET` | Overrides the tmux socket for new agent terminals; otherwise it is `MV2_RUN_DIR/tmux.sock`. It does not move native bridge sockets. Existing agents stay on the socket recorded in their `runtime.json`. |
+| `MV2_TMUX_SOCKET` | Overrides the tmux socket for new agent terminals; otherwise it is `MV2_RUN_DIR/tmux.sock`. It does not move native bridge sockets. Both complete socket paths are validated before provider or tmux access; a length error names the setting to shorten. Existing agents stay on the socket recorded in their `runtime.json`. |
 | `NO_COLOR` | The dashboard shows no color. Agents don't inherit it; see [NO_COLOR and agents](#no_color-and-agents). |
 
 In a development checkout, `. scripts/dev-env.sh` exports `MV2_UNIVERSE`, `MV2_TMUX_SOCKET`, `MV2_CLI` and `MV2_PYTHON` for the checkout's own universe. See [Contributing](../develop/contributing.md).

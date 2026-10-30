@@ -21,9 +21,15 @@ def native_socket(launch_id, *, directory=None):
         raise ValueError('A native socket requires a launch UUID')
     root = recorded_directory(directory) if directory is not None else run_directory()
     path = root / 'native' / launch_id / 'rpc.sock'
+    return socket_path(path, variable='MV2_RUN_DIR', kind='Native')
+
+
+def socket_path(path, *, variable, kind='Tmux'):
+    """Validate a complete Unix address before any provider or terminal work."""
+    path = Path(path)
     limit = 103 if sys.platform == 'darwin' else 107
     if len(os.fsencode(path)) > limit:
-        raise ValueError(f'Native socket path is longer than {limit} bytes: {path}; set MV2_RUN_DIR to a shorter absolute path')
+        raise ValueError(f'{kind} socket path is longer than {limit} bytes: {path}; set {variable} to a shorter absolute path')
     return path
 
 

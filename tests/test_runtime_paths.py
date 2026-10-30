@@ -56,6 +56,27 @@ class RunDirectoryTest(BaseTest):
             with self.assertRaisesRegex(ValueError, 'MV2_RUN_DIR'):
                 lifecycle.start(self.root, name='too-long', harness='pi')
             spawn.assert_not_called()
+        for source in ('explicit tmux', 'run directory', 'HOME default'):
+            with self.subTest(overlong_socket=source):
+                too_long = str(self.work / ('long-' + 'x' * 100))
+                env = dict(os.environ)
+                socket = None
+                if source == 'explicit tmux':
+                    socket = too_long + '/tmux.sock'
+                    variable = 'MV2_TMUX_SOCKET'
+                elif source == 'run directory':
+                    env['MV2_RUN_DIR'] = too_long
+                    variable = 'MV2_RUN_DIR'
+                else:
+                    env.pop('MV2_RUN_DIR', None)
+                    env['HOME'] = too_long
+                    variable = 'MV2_RUN_DIR'
+                with patch.dict(os.environ, env, clear=True), \
+                        patch.object(lifecycle, 'Tmux', side_effect=AssertionError('Terminal reached before path validation')), \
+                        patch.object(harnesses, 'load', side_effect=AssertionError('Provider reached before path validation')):
+                    with self.assertRaisesRegex(ValueError, variable):
+                        lifecycle.start(self.root, name='invalid-path', harness='pi', socket_path=socket)
+                self.assertFalse(Path(too_long).exists())
 
 
 class DurableLaunchTest(TerminalBase):
