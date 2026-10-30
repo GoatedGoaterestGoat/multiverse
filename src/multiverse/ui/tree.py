@@ -11,8 +11,12 @@ def with_usage(agent):
     """Display fields from the agent's native usage reading."""
     reading = agent.get("usage") if isinstance(agent.get("usage"), dict) else {}
     held = agent.get("focus")
-    return {**agent, "context": display.context_display(reading), "context_level": display.context_level(reading),
-            "cost": display.cost_display(reading), "context_line": display.context_line(reading),
+    if agent.get("usage_pending"):  # not read yet: the agents show first, their usage when it lands
+        shown = {"context": "…", "context_level": None, "cost": "…", "context_line": "Context: reading…"}
+    else:
+        shown = {"context": display.context_display(reading), "context_level": display.context_level(reading),
+                 "cost": display.cost_display(reading), "context_line": display.context_line(reading)}
+    return {**agent, **shown,
             "focus_line": ("Focused " + focus.ends(held) + ": only inbox-only messages reach it") if held else "Not focused"}
 
 

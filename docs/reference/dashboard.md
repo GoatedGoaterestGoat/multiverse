@@ -26,8 +26,8 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `name` | The agent's name (always shown) |
 | `live` | `alive`, `ending`, `stopped`, `dormant`, `starting` (a new agent still being prepared) or `unknown` |
 | `status` | `working`, `waiting`, `idle` or `disconnected`, from the harness over a live connection |
-| `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90% |
-| `cost` | The session's cost so far (off by default) |
+| `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90%. It shows `…` until the agent's usage has been read, which can take a few seconds after the dashboard opens; the agents are listed before then. An agent whose conversation can't be confirmed shows `N/A`, never an earlier reading |
+| `cost` | The session's cost so far (off by default), or `…` until it has been read |
 | `phase`, `summary` | What the agent last reported with `mv2 report` |
 | `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |

@@ -111,10 +111,24 @@ ROW_FIELDS = frozenset((
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
-    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error',
+    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error', 'identity_error',
     'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
     'usage', 'tokens', 'usage_detail',
 ))
+
+
+def row_usage(row):
+    """Measure an already reconciled row, without rebinding or writing core records.
+
+    The caller must discard a result if the displayed row's universe, agent,
+    launch, native ID or storage changed while the reader ran. A damaged or
+    identity-error row never becomes a valid measurement through this helper.
+    """
+    if row.get('damaged'):
+        return {}
+    measured = (NativeResult('error', row['identity_error']).to_dict() if 'identity_error' in row else
+                native.usage_snapshot(Path(row['universe']), row, row['runtime'], reconciled=True))
+    return {'usage': measured, 'tokens': display.usage_total(measured), 'usage_detail': display.usage_details(measured)}
 
 
 def listing(root, recursive=False, only=None, *, usage=True):
@@ -162,12 +176,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                     facts, observation = _listing_observation(properties, facts, snapshots)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
-                usage_fields = {}
-                if usage:
-                    measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
-                                native.usage_snapshot(scope, properties, facts, reconciled=True))
-                    usage_fields = {'usage': measured, 'tokens': display.usage_total(measured),
-                                    'usage_detail': display.usage_details(measured)}
+                identity_fields = {'identity_error': identity_problem} if identity_problem is not None else {}
+                usage_fields = row_usage({**properties, **identity_fields, 'universe': str(scope), 'runtime': facts}) if usage else {}
                 relay = facts.get('native_relay') or {}
                 relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
                 if relay_problem and observation['live'] == 'alive':
@@ -180,7 +190,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
                         is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
-                rows.append(text_defaults({**properties, **usage_fields, "universe": str(scope), **observation,
+                rows.append(text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",

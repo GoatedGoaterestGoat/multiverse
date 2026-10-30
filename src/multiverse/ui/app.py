@@ -5,9 +5,12 @@ are mixins of MultiverseApp. Their key actions stay app actions, so bindings and
 check_action see them; Textual @on handlers must stay on this class.
 """
 import asyncio
+import copy
 import functools
+import gc
 from pathlib import Path
 import sys
+import threading
 import weakref
 
 from rich.text import Text
@@ -25,7 +28,7 @@ from textual.worker import WorkerFailed
 from ..display import clean
 from ..plugins import loader
 from . import columns, theme
-from .backend import LocalBackend
+from .backend import LocalBackend, usage_identity, usage_key
 from .commands import AgentCommands
 from .editing import TreeEditing
 from .fleet import FleetView
@@ -130,6 +133,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.moving = None  # The row being moved while a destination is chosen.
         self._harness_options = None
         self.scan_count = 0
+        self.usage_reading = False  # a usage read is running in its daemon thread
         self._table_signature = None
         self.history = []
         self._restore_scroll = None
@@ -239,6 +243,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             if generation != self._scope_generation:
                 return
             self.populate_table()
+            self.read_usage()
             if self._restore_scroll is not None:
                 scroll = self._restore_scroll
                 self._restore_scroll = None
@@ -249,6 +254,44 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.scanning = False
             if generation != self._scope_generation:
                 self.refresh_snapshot()
+
+    def read_usage(self):
+        """Read the shown agents' usage in a daemon thread and fill their cells when it lands. A refresh never waits
+        for it and quitting leaves it behind: in a new process it parses every Claude transcript, for seconds. One
+        read at a time; a refresh while one runs keeps the last values."""
+        reader = getattr(self.backend, "read_usage", None)
+        if reader is None or self.usage_reading or not self.snapshot:
+            return
+        rows = [copy.deepcopy(row) for row in self.snapshot["agents"] if not isinstance(row.get("damaged"), dict)]
+        if not rows:
+            return
+        self.usage_reading = True
+
+        def run():
+            try:
+                found = reader(rows)
+            except Exception:
+                found = {}
+            try:
+                self.call_from_thread(self.apply_usage, found)
+            except Exception:
+                pass  # the dashboard has closed meanwhile
+
+        threading.Thread(target=run, name="mv2-usage", daemon=True).start()
+
+    def apply_usage(self, found):
+        """Put a usage read into the rows that still show what it was read for."""
+        self.usage_reading = False
+        changed = False
+        for member in (self.snapshot or {}).get("agents", []):
+            reading = found.get(usage_key(member))
+            if reading and reading[0] == usage_identity(member) and "identity_error" not in member:
+                member.update(reading[1])
+                member.pop("usage_pending", None)
+                changed = True
+        if changed:
+            self.populate_table()
+            self.show_totals()
 
     def show_totals(self):
         """The header counts: agents, the account's rate limits, plugin errors and a plugin host that is needed but off."""
@@ -772,3 +815,5 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
 
 def start(root, backend=None):
     MultiverseApp(root, backend).run()
+    # Leave the heap to the operating system: freeing the transcript index object by object took up to 0.65 s after q.
+    gc.freeze()
