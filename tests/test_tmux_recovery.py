@@ -1,5 +1,6 @@
 """A lost tmux address is not evidence that its recorded processes exited."""
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
@@ -85,12 +86,12 @@ class SocketRecoveryTest(TerminalBase):
                     os.kill(server, signal.SIGUSR1)
                     until(path.exists)
 
-        for known in (True, False):
-            with self.subTest(old_tmux_without_join_only=True, known=known):
+        for known, vanished in ((True, False), (False, False), (True, True)):
+            with self.subTest(old_tmux_without_join_only=True, known=known, vanished=vanished):
                 if not known:
                     recovery.registry(path.resolve()).unlink()
                 serial, original_run = recovery.serialized, self.backend._run
-                held, fallback = [], []
+                held, fallback, removed = [], [], []
                 @contextmanager
                 def locked(socket):
                     with serial(socket):
@@ -102,15 +103,85 @@ class SocketRecoveryTest(TerminalBase):
                 def old_tmux(*args):
                     if args[0] == '-N':
                         raise RuntimeError('tmux: unknown option -- N')
-                    if args[0] == 'new-session':
-                        self.assertTrue(held, 'Old tmux must never start outside the recovery lock')
-                        fallback.append(True)
+                    if args[0] in ('new-session', 'if-shell'):
+                        self.assertTrue(held, 'Old tmux must join under the recovery lock')
+                        fallback.append(args[0])
+                        if vanished and not removed:
+                            path.unlink()
+                            removed.append(True)
                     return original_run(*args)
-                with patch.object(recovery, 'serialized', side_effect=locked), \
-                        patch.object(self.backend, '_run', side_effect=old_tmux):
-                    extra = self.backend.create('old-tmux', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
-                self.assertEqual(fallback, [True])
-                original_run('kill-pane', '-t', extra['pane'])
+                second = None
+                try:
+                    with patch.object(recovery, 'serialized', side_effect=locked), \
+                            patch.object(self.backend, '_run', side_effect=old_tmux):
+                        extra = self.backend.create('old-tmux', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                    second = int(original_run('display-message', '-p', '#{pid}'))
+                    self.assertEqual(second, server, 'The old-tmux join started a second server after an external unlink')
+                    self.assertTrue(fallback)
+                    self.assertEqual(set(fallback), {'if-shell'})
+                    original_run('kill-pane', '-t', extra['pane'])
+                finally:
+                    if second is not None and second != server:
+                        original_run('kill-server')
+                    if not path.exists():
+                        os.kill(server, signal.SIGUSR1)
+                        until(path.exists)
+        with self.subTest('old-tmux command words are literal, including quotes and shell syntax'):
+            cwd = self.work / "a'; kill-server; ' $HOME ~ # back\\slash"
+            cwd.mkdir()
+            captured = self.work / 'literal.json'
+            words = ["a'; kill-server; '", '$HOME', '~', '#comment', 'a\\b', 'a\tb', '', '`touch WRONG`']
+            script = 'import json,os,sys,time; open(sys.argv[1],"w").write(json.dumps([os.getcwd(),sys.argv[2:]])); time.sleep(60)'
+            original_run = self.backend._run
+            def legacy(*args):
+                if args[0] == '-N':
+                    raise RuntimeError('tmux: unknown option -- N')
+                return original_run(*args)
+            with patch.object(self.backend, '_run', side_effect=legacy):
+                extra = self.backend.create('quoted-join', cwd, [sys.executable, '-c', script, str(captured), *words])
+                until(lambda: captured.exists() and captured.stat().st_size)
+                self.assertEqual(json.loads(captured.read_text()), [str(cwd), words])
+                with self.assertRaisesRegex(RuntimeError, 'duplicate session'):
+                    self.backend.create('quoted-join', cwd, ['/stand-in'])
+                for word in ('line\nbreak', 'line\rbreak', 'trailing;', ';'):
+                    with self.subTest(refused_literal=repr(word)), self.assertRaisesRegex(ValueError, 'tmux 3.2 or newer'):
+                        self.backend.create('unrepresentable', cwd, ['/stand-in', word])
+            original_run('kill-pane', '-t', extra['pane'])
+            self.assertFalse((cwd / 'WRONG').exists())
+
+        for fast in (False, True):
+            with self.subTest('a proven post-creation conflict discards only the new session', fast=fast):
+                original_run, connected, observe = self.backend._run, recovery.connected, recovery.observe
+                created = []
+                def joined(*args):
+                    result = original_run(*args)
+                    if 'new-session' in args[:2]:
+                        created.append(result.split('\t')[1])
+                    return result
+                def checked(*args, **kwargs):
+                    if created:
+                        raise recovery._conflict(path, [('saved', {'pid': server}), ('answer', {'pid': server + 1})])
+                    return connected(*args, **kwargs)
+                with patch.object(self.backend, '_run', side_effect=joined), \
+                        patch.object(recovery, 'healthy', wraps=recovery.healthy if fast else lambda *a: None), \
+                        patch.object(recovery, 'connected', side_effect=checked), \
+                        patch.object(recovery, 'observe', side_effect=lambda *a, **kw: checked(*a, **kw) if created else observe(*a, **kw)):
+                    with self.assertRaisesRegex(recovery.ServerConflict, 'conflicting server identities'):
+                        self.backend.create('conflicted-join', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                self.assertEqual(len(created), 1)
+                self.assertNotIn(created[0], original_run('list-sessions', '-F', '#{session_id}').splitlines())
+                self.assertEqual(int(original_run('display-message', '-p', '#{pid}')), server)
+                self.assertIn(result['runtime']['tmux']['session'], original_run('list-sessions', '-F', '#{session_id}').splitlines())
+        with self.subTest('conflict cleanup never removes a session on another server identity'):
+            extra = self.backend.create('guarded-cleanup', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+            epoch = self.backend._run('display-message', '-p', '#{start_time}')
+            identity = [self.socket, extra['session'], extra['pane'], str(server), epoch]
+            for pid, started in ((str(server + 1), epoch), (str(server), str(int(epoch) + 1))):
+                self.backend._discard_created([*identity[:3], pid, started])
+                self.assertIn(extra['session'], self.backend._run('list-sessions', '-F', '#{session_id}').splitlines())
+            self.backend._discard_created(identity)
+            self.assertNotIn(extra['session'], self.backend._run('list-sessions', '-F', '#{session_id}').splitlines())
+
         with self.subTest(unrelated_join_error=True):
             original_run = self.backend._run
             def duplicate(*args):
@@ -360,7 +431,7 @@ class RecoveryProofTest(BaseTest):
                     created = []
                     def create(*args):
                         created.append(True)
-                        return f'{socket}\t$1\t%1'
+                        return f'{socket}\t$1\t%1\t12345\t100'
                     with patch.object(recovery, '_probe', side_effect=lambda *args:
                             answer if created else ('', {'pid': 99999, 'epoch': 100}) if stale else None), \
                             patch.object(recovery, 'process_snapshot', return_value=None if unavailable == 'snapshot' else (token, 'S')), \
@@ -403,7 +474,7 @@ class RecoveryProofTest(BaseTest):
                         patch.object(recovery, 'healthy', return_value=('panes', proof) if fast else None), \
                         patch.object(recovery, 'observe', side_effect=problem), \
                         patch.object(recovery, 'connected', side_effect=[None, problem]), \
-                        patch.object(backend, '_run', return_value=f'{socket}\t$1\t%1'):
+                        patch.object(backend, '_run', return_value=f'{socket}\t$1\t%1\t12345\t100'):
                     terminal = backend.create('created', self.work, ['/stand-in'])
                     self.assertEqual(terminal['pane'], '%1')
                     self.assertIsNone(terminal['server'])

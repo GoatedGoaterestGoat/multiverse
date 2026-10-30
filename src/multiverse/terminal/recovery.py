@@ -21,6 +21,10 @@ class Unreachable(RuntimeError):
     """A terminal server is unreachable, rather than a damaged agent record."""
 
 
+class ServerConflict(Unreachable):
+    """Two proven server identities must never be treated as missing bookkeeping."""
+
+
 class UnreachableReason(str):
     """A JSON-compatible observation that retains its recovery error category."""
 
@@ -203,7 +207,7 @@ def _problem(socket, proof, reason):
 
 def _conflict(socket, proofs):
     names = ', '.join(f'{source}: PID {proof["pid"]}' for source, proof in proofs)
-    return Unreachable(f'Tmux socket {socket} has conflicting server identities ({names}). No signal sent. '
+    return ServerConflict(f'Tmux socket {socket} has conflicting server identities ({names}). No signal sent. '
                        'Resolve this server conflict before retrying; do not send SIGUSR1 while another server owns the path')
 
 

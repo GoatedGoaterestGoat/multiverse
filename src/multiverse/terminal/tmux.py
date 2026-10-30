@@ -12,9 +12,30 @@ FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_
 
 
 def _no_join_only_option(error):
-    # Older tmux has no -N. Its ordinary new-session is allowed only while
-    # holding our creation/recovery lock, after the normal proof checks.
+    # Before 3.2, use the server-side command parser to join without autostart.
     return re.search(r"\b(?:unknown|invalid|illegal) option(?:\s+--|\s*:)?\s+['\"]?-?N\b", str(error)) is not None
+
+
+def _connect_failure(error):
+    return 'no server running' in str(error) or 'connecting to' in str(error)
+
+
+def _server_command(words):
+    # The old tmux parser expands $, ~, #, backslashes and command separators.
+    # Quote every word. Before 3.0 it reparses a trailing semicolon even in quotes;
+    # 3.0 also cannot preserve a literal newline in this command string.
+    if any(any(c in str(word) for c in '\r\n\0') or str(word).endswith(';') for word in words):
+        raise ValueError('This launch argument needs tmux 3.2 or newer; the older command parser cannot preserve a newline or trailing semicolon')
+    return ' '.join("'" + str(word).replace("'", "'\"'\"'") + "'" for word in words)
+
+
+def _created_identity(result):
+    fields = result.split('\t')
+    if (len(fields) != 5 or not re.fullmatch(r'\$\d+', fields[1])
+            or not re.fullmatch(r'%\d+', fields[2]) or not fields[3].isdigit()
+            or (fields[4] and not fields[4].isdigit())):
+        raise RuntimeError(f'tmux did not return a pane identity: {result!r}')
+    return fields
 
 
 def status_setup(root, properties, launch_id, family):
@@ -113,7 +134,7 @@ class Tmux:
         for key in ("PATH", "PYTHONPATH", "MV2_CLI", "MV2_PYTHON"):
             if key in os.environ:
                 options.extend(["-e", f"{key}={os.environ[key]}"])
-        command = ("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
+        command = ("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}\t#{pid}\t#{start_time}",
                    "-s", name, "-c", str(cwd), *options, *argv)
         result = None
         unsupported = False
@@ -124,37 +145,63 @@ class Tmux:
                 result = self._run('-N', *command)
             except RuntimeError as error:
                 unsupported = _no_join_only_option(error)
-                if not (unsupported or 'no server running' in str(error) or 'connecting to' in str(error)):
+                if not (unsupported or _connect_failure(error)):
                     raise
             else:
-                server = self._created_server()
+                server = self._created_server(result)
         if result is None:
             with recovery.serialized(recovery.address(self)):
                 answer = recovery.connected(self)
-                if answer is not None and not unsupported:
-                    try:
-                        result = self._run('-N', *command)
-                    except RuntimeError as error:
-                        if not _no_join_only_option(error):
-                            raise
-                if result is None:
-                    result = self._run(*command)
-                server = self._created_server(locked=True)
-        if len(result.split("\t")) != 3:
-            # Some tmux versions return success even if server startup failed.
-            raise RuntimeError(f"tmux did not return a pane identity: {result!r}")
-        socket_path, session_id, pane_id = result.split("\t")
+                if answer is None:
+                    result = self._run(*command)  # Genuine first-server creation only.
+                else:
+                    for attempt in range(2):
+                        try:
+                            if not unsupported:
+                                try:
+                                    result = self._run('-N', *command)
+                                except RuntimeError as error:
+                                    if not _no_join_only_option(error):
+                                        raise
+                                    unsupported = True
+                            if unsupported:
+                                # if-shell has no client-side STARTSERVER flag.
+                                # Its nested command runs only on an existing server.
+                                result = self._run('if-shell', '-F', '1', _server_command(command))
+                            break
+                        except RuntimeError as error:
+                            if not _connect_failure(error):
+                                raise
+                            if attempt or recovery.connected(self) is None:
+                                raise recovery.Unreachable(f'Tmux socket {recovery.address(self)} vanished while joining; retry') from error
+                server = self._created_server(result, locked=True)
+        socket_path, session_id, pane_id, _, _ = _created_identity(result)
         return {"socket": socket_path, "session": session_id, "pane": pane_id, "server": server}
 
-    def _created_server(self, *, locked=False):
-        # Once new-session returned its pane identity, hand it to lifecycle even
-        # if optional signal-proof bookkeeping fails. Otherwise that live pane
-        # would escape tagging and launch-failure cleanup.
+    def _created_server(self, result, *, locked=False):
+        # Unreadable bookkeeping cannot strand a created pane before lifecycle
+        # can tag it. A proven conflict, however, must remove our session and fail.
+        identity = _created_identity(result)
         try:
             answer = recovery.connected(self) if locked else recovery.observe(self)
             return answer[1] if answer is not None else None
+        except recovery.ServerConflict:
+            self._discard_created(identity)
+            raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             return None
+
+    def _discard_created(self, identity):
+        _, session, _, pid, epoch = identity
+        if not epoch:
+            return  # No server epoch: never remove a potentially reused identity.
+        condition = '#{&&:#{==:#{pid},' + pid + '},#{==:#{start_time},' + epoch + '}}'
+        try:
+            # Guard and exact session-id removal execute in the same server.
+            # A replacement at the path, or another session on this one, is left alone.
+            self._run('if-shell', '-F', condition, _server_command(('kill-session', '-t', session)))
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass  # Preserve the conflict; no unsafe fallback signal or target.
 
     def ensure(self, root):
         """Seed old launch proofs before a spawn can create a server on this path."""
