@@ -98,10 +98,28 @@ def _state(proof):
 
 def runner_server(facts):
     """Legacy launches prove the server through their still-live runner's parent."""
+    if facts.get('state') in ('stopped', 'dormant', 'failed'):
+        return None  # An ended launch's old PID may now belong to someone else.
     pid, started = facts.get('runner_pid'), facts.get('runner_started')
+    if type(pid) is not int or pid <= 0:
+        return None
+    problem = f'Cannot verify live runner PID {pid}; no signal or replacement server is safe; retry after restoring process access'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except (PermissionError, OverflowError):
+        raise Unreachable(problem) from None
     observed = process_snapshot(pid)
-    if (observed is None or observed[1].startswith(('Z', 'X'))
-            or not start_matches(started, pid, observed=observed[0])):
+    if observed is None or not valid_start(started):
+        raise Unreachable(problem)
+    if observed[1].startswith(('Z', 'X')):
+        return None
+    if not start_matches(started, pid, observed=observed[0]):
+        # Converting an old Linux ctime token may itself need an unavailable
+        # process query. Only comparable, differing tokens prove PID reuse.
+        if started.startswith('linux:') != observed[0].startswith('linux:'):
+            raise Unreachable(problem)
         return None
     parent = process_parent(pid)
     if parent == 1:

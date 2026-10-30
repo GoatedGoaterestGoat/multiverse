@@ -13,7 +13,7 @@ from multiverse.runtime import lifecycle, native
 from multiverse.runtime.process import process_started
 from multiverse.harnesses.types import NativeResult
 from test_message_delivery import DeliveryFixture
-from multiverse.store import read, write
+from multiverse.store import read, write, uid
 from multiverse.universe.mailbox import message_record
 from multiverse.terminal import recovery
 from multiverse.terminal.tmux import Tmux
@@ -120,6 +120,42 @@ class SocketRecoveryTest(TerminalBase):
                     patch.object(recovery, 'serialized', side_effect=AssertionError('Unrelated failure retried')):
                 with self.assertRaisesRegex(RuntimeError, 'duplicate session'):
                     self.backend.create('duplicate', self.work, ['/stand-in'])
+
+        with self.subTest('an unreadable live legacy runner never permits a second server'):
+            until(lambda: read(directory / 'runtime.json').get('pid_started'))
+            saved = read(directory / 'runtime.json')
+            legacy = {**saved, 'tmux': {key: value for key, value in saved['tmux'].items() if key != 'server'}}
+            write(directory / 'runtime.json', legacy)
+            recovery.registry(path.resolve()).unlink()
+            path.unlink()
+            observed = recovery.process_snapshot
+            def unreadable(pid):
+                return None if pid == legacy['runner_pid'] else observed(pid)
+            refused = None
+            second = None
+            try:
+                with patch.object(recovery, 'process_snapshot', side_effect=unreadable), \
+                        patch.object(recovery.os, 'kill', wraps=os.kill) as signals:
+                    _, error = self.backend.snapshot(facts=legacy)
+                    try:
+                        lifecycle.start(self.root, name='unreadable-new', harness='fake', socket_path=self.socket)
+                    except recovery.Unreachable as caught:
+                        refused = caught
+                    else:
+                        second = int(self.backend._run('display-message', '-p', '#{pid}'))
+                    self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+                self.assertIsNone(second, 'Unknown runner inspection allowed a duplicate server')
+                self.assertIsNotNone(error)
+                self.assertIsNotNone(refused)
+                self.assertIn(str(legacy['runner_pid']), str(refused))
+            finally:
+                if second is not None and second != server:
+                    self.backend._run('kill-server')
+                if not path.exists():
+                    os.kill(server, signal.SIGUSR1)
+                    until(path.exists)
+                write(directory / 'runtime.json', saved)
+                self.backend.snapshot(facts=saved)
 
         actions = [('list', listed), ('environment', lambda: self.backend.environment('PATH')),
                    ('attach', lambda: lifecycle.terminal_action(self.root, 'tester', 'attach')),
@@ -307,6 +343,20 @@ class RecoveryProofTest(BaseTest):
                     terminal = backend.create('created', self.work, ['/stand-in'])
                     self.assertEqual(terminal['pane'], '%1')
                     self.assertIsNone(terminal['server'])
+
+        for ended in ('stopped', 'dormant', 'failed'):
+            with self.subTest(ended_legacy_runner_pid_reused=ended):
+                recovery.registry(socket).unlink(missing_ok=True)
+                directory = self.root / 'state/agents' / uid()
+                facts = {'state': ended, 'launch_id': uid(), 'runner_pid': os.getpid(),
+                         'tmux': {'socket': str(socket), 'session': '$1', 'pane': '%1'}}
+                write(directory / 'runtime.json', facts)
+                try:
+                    with patch.object(recovery, '_probe', return_value=None), \
+                            patch.object(recovery, 'process_snapshot', side_effect=AssertionError('Ended runner inspected')):
+                        backend.ensure(self.root)
+                finally:
+                    (directory / 'runtime.json').unlink()
 
         # The legacy parent proof must verify both runner observations too.
         facts = {'runner_pid': 23456, 'runner_started': token}
