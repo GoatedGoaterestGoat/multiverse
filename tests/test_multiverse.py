@@ -125,7 +125,7 @@ class TerminalBase(BaseTest):
         except AssertionError:
             remaining = sorted(pid for pid in pids if not exited(pid))
             try:
-                detail = subprocess.run(['ps', '-o', 'pid,ppid,stat,etime,comm', '-p', ','.join(map(str, remaining))],
+                detail = subprocess.run(['ps', '-ww', '-o', 'pid,ppid,stat,etime,args', '-p', ','.join(map(str, remaining))],
                                         text=True, capture_output=True, check=False, timeout=5).stdout.strip()
             except (OSError, subprocess.SubprocessError) as error:
                 detail = f'Process inspection unavailable: {error}'
@@ -142,12 +142,13 @@ class TerminalBase(BaseTest):
 
 class TerminalCleanupTest(BaseTest):
     def test_cleanup_waits_for_running_processes_but_not_unreaped_exits(self):
-        """An unreaped exit cannot write fixture state, but a live or uninspectable process must still block cleanup."""
+        """Teardown must wait for live or unknown processes and identify their full command; only a proven exit can stop writing fixture state."""
         original_until = until
+        marker = 'mv2-cleanup-survivor-' + 'x' * 160
         for state in ('running', 'uninspectable', 'exited but unreaped'):
             with self.subTest(state=state):
                 child = subprocess.Popen([sys.executable, '-c', 'pass' if state == 'exited but unreaped'
-                                           else 'import time; time.sleep(60)'],
+                                           else 'import time; time.sleep(60)', marker],
                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 try:
                     if state == 'exited but unreaped':
@@ -164,6 +165,8 @@ class TerminalCleanupTest(BaseTest):
                             with self.assertRaises(AssertionError) as caught:
                                 TerminalBase.kill_server(self)
                             self.assertIn(str(child.pid), str(caught.exception))
+                            self.assertIn('import time; time.sleep(60)', str(caught.exception))
+                            self.assertIn(marker, str(caught.exception), 'The complete argv identifies a surviving runner or child')
                 finally:
                     if child.poll() is None:
                         child.terminate()
