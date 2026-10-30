@@ -60,7 +60,9 @@ def isolate(test):
     home_safety.running(test.id())
     test.addCleanup(home_safety.check, test.id())  # registered first, so it runs last: this test's refused writes
     test.addCleanup(home_safety.running, None)
-    temporary = tempfile.TemporaryDirectory(prefix="mv2-test-home-", dir="/tmp")
+    # Short: many tests drop every MV2_* variable, MV2_RUN_DIR with it, and then a launch's native socket is in the
+    # default run folder under this HOME, ~/.multiverse/run/native/<launch>/rpc.sock, within macOS's 103 bytes.
+    temporary = tempfile.TemporaryDirectory(prefix="mv2-h-", dir="/tmp")
     test.addCleanup(temporary.cleanup)
     test.enterContext(mock.patch.dict(os.environ, isolated_environment(Path(temporary.name).resolve()),
                                       clear=True))

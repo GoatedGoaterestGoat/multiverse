@@ -366,7 +366,8 @@ class RunnerTest(unittest.TestCase):
         """The live agents' default tmux server and native sockets are in the run folder (MV2_RUN_DIR, or
         ~/.multiverse/run), their legacy default server under TMUX_TMPDIR, or /tmp, and an agent's MV2_TMUX_SOCKET
         names its server: so the runner gives each run, and isolate() and PluginTestCase each test, a run folder and
-        a TMUX_TMPDIR of its own, short enough for native sockets' paths, and no MV2_TMUX_SOCKET; otherwise a test
+        a TMUX_TMPDIR of its own, short enough for native sockets' paths (isolate()'s HOME too, for tests that drop
+        MV2_*), and no MV2_TMUX_SOCKET; otherwise a test
         that reaches discovery or a launch without naming a socket inspects, or kills panes on, the user's agents,
         and nothing shows it."""
         self.module("test_tmux_folder", """
@@ -415,6 +416,11 @@ class RunnerTest(unittest.TestCase):
                 def test_isolated(self):
                     isolate(self)
                     check(self, {"test": here(), "child": child()}, own=True)
+                    # A test that drops every MV2_* variable, a common way to shed the agent's identity, still gets a
+                    # run folder its native sockets fit in: the default one under its HOME.
+                    del os.environ["MV2_RUN_DIR"]
+                    default = str(paths.run_directory())
+                    self.assertEqual((default != LIVE_RUN, fits(default)), (True, True), default)
             class PluginFolders(PluginTestCase):
                 def setUp(self):
                     # As when its tests run without the runner, which has dropped the agent's socket by now.
