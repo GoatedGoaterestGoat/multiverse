@@ -1219,9 +1219,11 @@ def kill(root, reference, *, attachment_only=False):
             live = observe(properties, latest)['live']
             if live in ('stopped', 'dormant'):
                 return
-            if live == 'unknown':
-                raise RuntimeError('Cannot verify native exit; terminal retained')
             if time.monotonic() >= deadline:
+                if live == 'unknown':
+                    name = properties.get('name') or agent_dir.name
+                    raise RuntimeError('Native exit not confirmed: process state unknown; terminal retained. '
+                                       f'Run mv2 kill {name} again')
                 raise TimeoutError('Native process has not exited; terminal retained')
             time.sleep(.05)
 
