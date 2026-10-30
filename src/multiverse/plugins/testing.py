@@ -267,7 +267,7 @@ def _at_exit():
 
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
-           "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
+           "MV2_TMUX_SOCKET", "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
 
 
 class ClaudeRows:
@@ -483,7 +483,8 @@ class PluginTestCase(unittest.TestCase):
         self.bin.mkdir()
         self.claude_config = self.work / "claude-config"
         self.claude_config.mkdir()
-        environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config),
+        # TMUX_TMPDIR: where the default tmux server, the live agents', keeps its socket; the test's is its own.
+        environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config), TMUX_TMPDIR=str(self.work),
                            PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
                            MV2_PLUGIN_PATH=os.pathsep.join(
                                str(path) for path in (self.plugin, self.plugins_dir) if path is not None))

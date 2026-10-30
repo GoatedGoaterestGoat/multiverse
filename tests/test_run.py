@@ -15,6 +15,7 @@ import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 
 from isolation import isolate
 
@@ -39,6 +40,10 @@ class RunnerTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name).resolve()
         self.slots = self.work / "slots"  # never the machine's: these runners must not wait for the suite's
+        # The runners these tests start, some killed on purpose, keep their scratch and tmux folders in here, which
+        # goes when the test ends, never in the machine's temporary folder.
+        (self.work / "tmp").mkdir()
+        self.enterContext(mock.patch.dict(os.environ, TMPDIR=str(self.work / "tmp")))
         self.fresh("main")
 
     def fresh(self, name):
@@ -354,6 +359,62 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("Ran 1 tests", result.stdout)
         for value in planted.values():
             self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_no_test_or_child_reaches_the_live_agents_tmux_server(self):
+        """The default tmux server (tmux -L multiverse-v2), where the live agents run, keeps its socket under
+        TMUX_TMPDIR, or /tmp when it's unset, and an agent's MV2_TMUX_SOCKET names that server: so the runner gives
+        each run, and isolate() and PluginTestCase each test, a TMUX_TMPDIR of its own and no MV2_TMUX_SOCKET;
+        otherwise a test that reaches discovery or a launch without naming a socket inspects, or kills panes on, the
+        user's agents, and nothing shows it."""
+        self.module("test_tmux_folder", """
+            import json, os, subprocess, sys, unittest
+            from isolation import isolate
+            from multiverse.plugins.testing import PluginTestCase
+            NAMES = ("TMUX_TMPDIR", "MV2_TMUX_SOCKET")
+            AT_IMPORT = [os.environ.get(name) for name in NAMES]
+            RUNS = AT_IMPORT[0]
+            def child():
+                return json.loads(subprocess.run(
+                    [sys.executable, "-c", "import json, os, sys; print(json.dumps([os.environ.get(name) "
+                     "for name in sys.argv[1:]]))", *NAMES], capture_output=True, text=True, check=True).stdout)
+            def describe(folder, socket):
+                return {"private folder": bool(folder) and os.path.isdir(folder)
+                        and os.stat(folder).st_uid == os.getuid() and not os.stat(folder).st_mode & 0o077,
+                        "socket": socket}
+            def check(test, seen, own):
+                print("SEEN " + test.id() + " " + json.dumps(seen))
+                test.assertEqual({key: describe(*value) for key, value in seen.items()},
+                                 dict.fromkeys(seen, {"private folder": True, "socket": None}))
+                if own:  # its own folder, not the run's
+                    test.assertNotIn(RUNS, [folder for folder, _ in seen.values()])
+            class Folders(unittest.TestCase):
+                def test_plain(self):
+                    check(self, {"import": AT_IMPORT, "test": [os.environ.get(name) for name in NAMES],
+                                 "child": child()}, own=False)
+                def test_isolated(self):
+                    isolate(self)
+                    check(self, {"test": [os.environ.get(name) for name in NAMES], "child": child()}, own=True)
+            class PluginFolders(PluginTestCase):
+                def setUp(self):
+                    # As when its tests run without the runner, which has dropped the agent's socket by now.
+                    self.addCleanup(os.environ.pop, "MV2_TMUX_SOCKET", None)
+                    os.environ["MV2_TMUX_SOCKET"] = "/the-live-agents/tmux.sock"
+                    super().setUp()
+                def test_plugin_test(self):
+                    check(self, {"test": [os.environ.get(name) for name in NAMES], "child": child()}, own=True)
+            """)
+        planted = self.row / "the-agents-tmux-folder"
+        planted.mkdir(mode=0o700)
+        socket = {"MV2_TMUX_SOCKET": str(planted / "tmux-501" / "live-agents")}  # an agent's own server
+        for name, environment in (("an agent's TMUX_TMPDIR", {**os.environ, **socket, "TMUX_TMPDIR": str(planted)}),
+                                  ("none: tmux uses /tmp", {**{key: value for key, value in os.environ.items()
+                                                               if key != "TMUX_TMPDIR"}, **socket})):
+            with self.subTest(name):
+                result = subprocess.run(self.command("-v", "test_tmux_folder"), env=environment, text=True,
+                                        capture_output=True, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 3 tests", result.stdout)
+                self.assertNotIn(str(planted), result.stdout + result.stderr)
 
     def interrupted(self, how):
         """Start a run whose second unit waits, stop the runner with signal `how` once the first unit has failed and

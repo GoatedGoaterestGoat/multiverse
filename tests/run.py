@@ -30,6 +30,7 @@ import os
 from pathlib import Path
 import random
 import select
+import shutil
 import signal
 import stat
 import subprocess
@@ -668,6 +669,24 @@ def main(argv=None):
     if argv[:1] == ["--worker"]:
         start, target, shard, shards, report, verbosity, grace, watch = argv[1:]
         return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch), float(grace))
+    # The default tmux server (tmux -L multiverse-v2), where the live agents run, keeps its socket under TMUX_TMPDIR,
+    # or /tmp, and an agent's MV2_TMUX_SOCKET names its server: the run has a folder of its own and no socket, so
+    # that nothing a test runs or starts without naming a socket can reach the user's agents. The folder is in the
+    # temporary folder unless the socket's path would pass macOS's 103 bytes there.
+    os.environ.pop("MV2_TMUX_SOCKET", None)
+    socket = Path("tmux-%d" % os.getuid(), "multiverse-v2")
+    tmux = tempfile.mkdtemp(prefix="mv2-tmux-")
+    if len(str(Path(tmux, socket))) > 100:
+        os.rmdir(tmux)
+        tmux = tempfile.mkdtemp(prefix="mv2-tmux-", dir="/tmp")
+    os.environ["TMUX_TMPDIR"] = tmux
+    try:
+        return _main(argv)
+    finally:
+        shutil.rmtree(tmux, ignore_errors=True)
+
+
+def _main(argv):
     signal.signal(signal.SIGINT, signal.default_int_handler)  # even when started with it ignored, as `cmd &` is
     signal.signal(signal.SIGTERM, _terminated)
     parser = argparse.ArgumentParser(prog="tests/run.py", description=__doc__.split("\n\n")[0])
