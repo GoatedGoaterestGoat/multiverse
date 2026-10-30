@@ -787,7 +787,8 @@ class SettingsAccess:
 
     def check(self, function):
         """function(settings), or function(settings, universe directory), raises ValueError naming what is
-        wrong. It sees the whole file. Usable as a decorator."""
+        wrong. It sees the whole file. It may return a list of strings, notes that keep the settings usable and
+        that mv2 plugins info and settings show (1.15). Usable as a decorator."""
         self._loaded.registrations.settings_check = _declared(self._loaded, "observe", "settings check", function)
         return function
 

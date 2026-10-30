@@ -292,9 +292,10 @@ class SettingsTest(PluginTestCase):
         """A settings edit changes only named keys, DELETE removes one, a schema refusal or the plugin's own check
         (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, a plugin's
         own settings screen is had where it is off too (or why not), on request and never by listing it, and
-        enabling twice never reinstalls defaults; fragile because the check and the screen need the plugin's code
-        even where it is off (COMPACTION-2), and a break quietly writes a bad file, says "no schema" on the Plugins
-        screen, or imports off plugins on every mv2 plugins."""
+        enabling twice never reinstalls defaults, and notes a check returns keep the settings usable and show in info
+        and settings; fragile because the check and the screen need the plugin's code even where it is off
+        (COMPACTION-2), and a break quietly writes a bad file, says "no schema" on the Plugins screen, imports off
+        plugins on every mv2 plugins, or drops a note such as an ignored key nobody then sees."""
         with self.subTest("only the named keys"):
             manifest_ = self.greeter("greeter")
             path = settings.path(self.root, "greeter")
@@ -315,6 +316,25 @@ class SettingsTest(PluginTestCase):
             self.assertEqual(result["installed"], [str(settings.path(self.root, "fresh"))])
             self.assertEqual(plugins.set_enabled(self.root, "fresh", True)["installed"], [])
             self.assertEqual(plugins.settings_of(self.root, "fresh")[0], {"schema": 2, "greeting": "hello"})
+        with self.subTest("its own check's notes: the settings stay usable, and info and settings show them"):
+            self.greeter("noted", "def register(mv):\n"
+                                  "    @mv.settings.check\n"
+                                  "    def check(values):\n"
+                                  "        if values.get('greeting') == 'yo':\n"
+                                  "            return ['greeting: yo is informal, kept\\nmore', 3]\n")
+            self.enable("noted")
+            path = settings.path(self.root, "noted")
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('{"schema": 2, "greeting": "yo"}')
+            loader.load(self.entry("noted"))
+            note = "greeting: yo is informal, kept"  # its first line only; the 3 is no note
+            self.assertTrue(self.entry("noted").usable)
+            listed = next(item for item in plugins.listing(self.root, wait=None) if item["name"] == "noted")
+            self.assertEqual((listed["settings"]["problem"], listed["settings"]["notes"]), (None, [note]))
+            for action in ("info", "settings"):
+                result = tool.run(self.root, plugin_action=action, name="noted")
+                self.assertEqual(result["notes"] if action == "settings" else result["settings"]["notes"], [note])
+                self.assertIn(note, tool.text(action, result))
         with self.subTest("its own check, once loaded"):
             self.greeter("scary", "def register(mv):\n"
                                   "    @mv.settings.check\n"

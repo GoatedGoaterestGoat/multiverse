@@ -298,6 +298,7 @@ def check(settings):                            # or check(settings, universe_di
 - `read` gives the file as written, or the defaults while there is no file. Keys a person removed aren't filled in, so merge your own defaults, as notifier does.
 - `edit` changes only the named keys (dotted paths). It writes nothing unless the whole result passes the schema and your check.
 - Settings that fail the schema or your check make the plugin act as off in that universe. Its command still runs, after a line saying why.
+- **Notes (1.15):** a check that returns a list of strings passes and reports them, for something worth saying that isn't a refusal, such as a key you ignore. `mv2 plugins info` and `mv2 plugins settings` show each, its first line up to 200 characters, at most 20. A check that raises still refuses, and `mv2 doctor` shows notes only if your own doctor check reports them.
 - Configure on `P` builds fields from the schema for strings, numbers, booleans and enums. `mv.dashboard.settings(fields=[...])` chooses and labels them with `api.Field(path, label, kind="text", options=(), placeholder="", help="")`, where `kind` is `text`, `int`, `float`, `bool` or `choice`.
 - `screen="screens:Settings"` names your own screen, built on `multiverse.plugins.ui.FieldScreen`. That module's docstring lists what it promises.
 
