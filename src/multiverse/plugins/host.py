@@ -217,8 +217,8 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
 def _start_worker(root, name):
     """A plugin's worker, in a process group of its own: what its calls start (a hung subprocess.run) goes with
     it when it ends."""
-    return subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker", "--supervisor",
-                             str(os.getpid()), str(root), name], stdin=subprocess.DEVNULL, start_new_session=True)
+    return subprocess.Popen(loader.module_command("multiverse.plugins.host", "--worker", "--supervisor", os.getpid(),
+                                                  root, name), stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def _exited(process):
@@ -379,7 +379,7 @@ def start(root):
     backend = Tmux(os.environ.get("MV2_TMUX_SOCKET"))
     try:
         terminal = backend.create(f"mv2-plugins-{meta['id'][:8]}", root,
-                                  [sys.executable, "-m", "multiverse.plugins.host", str(root)])
+                                  loader.module_command("multiverse.plugins.host", root))
     except Exception as error:
         if "duplicate session" not in str(error):
             raise

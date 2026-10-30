@@ -61,6 +61,18 @@ REFRESH_WAIT = 0.5  # seconds a dashboard refresh waits, in all, for plugins sti
 UNUSABLE = "its settings cannot be used: "  # how an `unusable` entry's problem begins, after the plugin's name  # seconds a guarded call may take where a person waits on it
 
 
+# A child that runs a module of this mv2 as __main__, with this mv2 first on its path rather than whatever mv2 the
+# interpreter finds itself (MV2_SOURCE's rule): the source folder is an argument, never part of the code.
+_RUN_MODULE = ("import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
+               "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)")
+
+
+def module_command(module, *arguments):
+    """The argv that runs `module` of this running mv2, like `python -m module ARGUMENTS`."""
+    import multiverse
+    return [sys.executable, "-c", _RUN_MODULE, multiverse.source(), module, *map(str, arguments)]
+
+
 class PluginError(ValueError):
     """A plugin that is on cannot be used; the message says why and what to do."""
 

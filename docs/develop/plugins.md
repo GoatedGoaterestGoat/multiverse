@@ -88,7 +88,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it. Its changes to `context`, mv2's measured reading, are dropped (1.13): show an estimate in a [column](#columns) of your own |
 | `events` | `mv.events.on("agent.status", fn)`: `fn(event)` | A handler in the plugin host; see [events and the host](#events-and-the-host) |
 | `service` | `mv.service(start, stop=None)` | Long-running work in the plugin host |
-| `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `"$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`. `mv.helper.command("ping", *args)` gives that argv |
+| `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`, so the mv2 that launched the agent runs it. `mv.helper.command("ping", *args)` gives an argv that runs it with the mv2 running your plugin |
 
 ### Columns
 

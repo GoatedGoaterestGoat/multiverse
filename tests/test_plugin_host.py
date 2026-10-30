@@ -340,3 +340,39 @@ class WorkerExitTest(PluginTestCase):
                 _until(lambda: _process_state(ended.pid) == "Z", 10)
                 self.assertTrue(host._exited(ended))
                 self.assertEqual(_process_state(ended.pid), "Z", "the check reaped the worker")
+
+
+class RunningSourceTest(PluginTestCase):
+    def test_the_host_and_a_plugins_helpers_import_the_mv2_that_started_them(self):
+        """The plugin host's supervisor and workers, and a helper command a plugin starts, import the multiverse
+        package of the process that started them, not one the interpreter finds itself; fragile because an
+        interpreter's own path (an editable install of another checkout, a stale install after git pull) holds
+        another mv2, which runs the host or a helper as other code, and nothing shows it."""
+        stub = self.work / "other-mv2"
+        for module in ("multiverse/__init__.py", "multiverse/plugins/__init__.py"):
+            (stub / module).parent.mkdir(parents=True, exist_ok=True)
+            (stub / module).write_text("")
+        for module in ("multiverse/plugins/__main__.py", "multiverse/plugins/host.py"):
+            (stub / module).write_text("print('the other mv2')\n")
+        self.write_plugin("helping", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": (
+            "def register(mv):\n"
+            "    mv.helper.action('hello', lambda *arguments: print('hello from helping') or 0)\n")})
+        self.enable("helping")
+        from multiverse.plugins import api, loader
+        mv = api.Plugin(loader.load(self.entry("helping")))
+        argvs = {"helper": mv.helper.command("hello", universe=self.root)}
+        with mock.patch.object(subprocess, "Popen") as popen:
+            host._start_worker(self.root, "helping")
+        argvs["worker"] = [*popen.call_args.args[0][:-5], "--help"]  # its own options, then asked for usage only
+        with mock.patch("multiverse.terminal.tmux.Tmux.create", side_effect=RuntimeError("stop here")) as create:
+            with self.assertRaises(RuntimeError):
+                host.start(self.root)
+        argvs["supervisor"] = [*create.call_args.args[2][:-1], "--help"]
+        other = {**os.environ, "PYTHONPATH": str(stub)}  # the interpreter's own path holds another mv2
+        for name, argv in argvs.items():
+            with self.subTest(name):
+                done = subprocess.run(argv, env=other, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                      timeout=60)
+                self.assertNotIn("the other mv2", done.stdout + done.stderr)
+                self.assertEqual(done.returncode, 0, done.stderr[-400:])
+                self.assertIn("hello from helping" if name == "helper" else "multiverse.plugins.host", done.stdout)

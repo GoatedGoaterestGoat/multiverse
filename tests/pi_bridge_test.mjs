@@ -8,20 +8,23 @@ import multiverse from '../src/multiverse/harnesses/pi/extension.ts';
 const directories = [], fixtures = [];
 const originalInterval = global.setInterval;
 global.setInterval = () => { throw Error('No periodic polling permitted'); };
-async function fixture({ failSend = false, wrongSession = false, stale = false } = {}) {
+async function fixture({ failSend = false, wrongSession = false, stale = false, env = {} } = {}) {
   const directory = mkdtempSync('/tmp/mv2-pi-'); directories.push(directory);
   const file = join(directory, 'session.jsonl'), socket = join(directory, 'control.sock');
   writeFileSync(file, JSON.stringify({ type: 'session', id: 'native' }) + '\n');
   Object.assign(process.env, { MV2_AGENT_ID: 'agent', MV2_LAUNCH_ID: 'launch', MV2_AGENT_DIR: directory,
     MV2_CONTROL_SOCKET: socket, MV2_UNIVERSE: '/tmp/u', MV2_CLI: '/tmp/mv2', MV2_PYTHON: 'python' });
-  const events = {}, calls = [], sent = [], warnings = [];
+  for (const name of ['MV2_SOURCE', 'PYTHONPATH']) delete process.env[name];
+  Object.assign(process.env, env);
+  const events = {}, calls = [], sent = [], warnings = [], paths = [];
   let currentFile = wrongSession ? '/other/file' : file;
   const pi = { on(name, fn) { events[name] = fn; }, registerCommand() {},
     sendMessage(message, options) {
       if (failSend) throw Error('native failure');
       sent.push({ message, options });
     } };
-  const run = async (_, args) => {
+  const run = async (_, args, options) => {
+    paths.push([args[0] === '-m' ? 'python' : 'mv2', options?.env?.PYTHONPATH]);
     // Status goes through the tool module, never an mv2 command.
     assert(args[3] !== 'runtime-update');
     calls.push(args[0] === '-m' ? [args[1].split('.').pop().replace('_', '-'), ...args.slice(4)] : args.slice(3));
@@ -41,7 +44,7 @@ async function fixture({ failSend = false, wrongSession = false, stale = false }
     client.on('data', chunk => { data += chunk; });
     client.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
   });
-  const f = { events, calls, sent, warnings, request, file, changeFile: value => { currentFile = value; } };
+  const f = { events, calls, sent, warnings, paths, request, file, changeFile: value => { currentFile = value; } };
   fixtures.push(f); return f;
 }
 try {
@@ -75,6 +78,17 @@ try {
   for (const options of [{ wrongSession: true }, { stale: true }]) {
     const blocked = await fixture(options); await assert.rejects(blocked.request());
   }
+  // Each runtime_update call runs mv2's own checkout: MV2_SOURCE goes first on its PYTHONPATH, or a stale
+  // or missing install answers instead, unnoticed. mv2 commands keep the agent's own PYTHONPATH.
+  for (const [env, python] of [[{ MV2_SOURCE: '/src', PYTHONPATH: '/mine' }, '/src:/mine'],
+                               [{ MV2_SOURCE: '/src' }, '/src'], [{ PYTHONPATH: '/mine' }, '/mine']]) {
+    const g = await fixture({ env });
+    await g.request({ message_id: 'paths' });
+    await g.events.agent_start(); await g.events.agent_settled();
+    assert(g.paths.some(([kind]) => kind === 'python') && g.paths.some(([kind]) => kind === 'mv2'));
+    for (const [kind, path] of g.paths) assert.equal(path, kind === 'python' ? python : env.PYTHONPATH);
+  }
+  for (const name of ['MV2_SOURCE', 'PYTHONPATH']) delete process.env[name];
   const reader = new TranscriptReceipts();
   const file = f.file;
   appendFileSync(file, '{"type":"custom_message"');

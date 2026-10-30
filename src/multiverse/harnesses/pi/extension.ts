@@ -23,10 +23,17 @@ export default function multiverse(pi: any, run = exec) {
       { env, timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
     return result.stdout;
   }
+  // `python -m` imports whatever mv2 that interpreter has installed, not the checkout
+  // running this agent: mv2's own package root (MV2_SOURCE) goes first on that
+  // child's PYTHONPATH, never on the agent's own shells.
+  function pythonEnv() {
+    if (!env.MV2_SOURCE) return env;
+    return { ...env, PYTHONPATH: env.PYTHONPATH ? `${env.MV2_SOURCE}:${env.PYTHONPATH}` : env.MV2_SOURCE };
+  }
   // Not an mv2 command: agents report their phase, never their status.
   async function runtimeUpdate(...args: string[]) {
     await run(env.MV2_PYTHON!, ["-m", "multiverse.tools.runtime_update", "-u", env.MV2_UNIVERSE!, ...args],
-      { env, timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
+      { env: pythonEnv(), timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
   }
   function report(error: unknown) { context?.ui?.notify(`Multiverse: ${error}`, "warning"); }
   async function reportStatus(value: string) {

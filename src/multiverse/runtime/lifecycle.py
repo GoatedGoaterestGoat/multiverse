@@ -13,7 +13,7 @@ import sys
 import time
 import tempfile
 
-from .. import display, harnesses, universe
+from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
@@ -321,7 +321,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # parent's MV2 identity never reaches the child. The tmux socket is added once the pane is owned.
         target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
                   "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
-                  "MV2_PYTHON": sys.executable, "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
+                  "MV2_PYTHON": sys.executable, "MV2_SOURCE": source(),
+                  "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
         policy_hook = native.adapter_hook(adapter, 'agent_identity_policy')
         policy_spec = policy_hook() if policy_hook else None
         agent_environment = agent_identity.environment(target, policy_spec, properties.get('agent_environment'))

@@ -3,6 +3,7 @@ import { agePhrase, withAge } from './age'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
 import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
+import { pythonEnv } from './python'
 import { registerUsage } from './usage'
 
 // Multiverse sends each message over this session's peer inbox at `next`
@@ -234,7 +235,7 @@ async function report($: EngineInterface) {
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
       // v2 reads a tag's send time; mv2 sends one only to a mod that registered it.
       if (!registered) argv.push("--bridge", "claude-mod-v2")
-      const result = await $.process.run(argv, { timeoutMs: 10000 })
+      const result = await $.process.run(argv, { timeoutMs: 10000, env: await pythonEnv($) })
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)
         return
@@ -280,7 +281,7 @@ async function moved($: EngineInterface, previous: string, session: string) {
   }
   try {
     const result = await $.process.run([python, "-m", "multiverse.tools.runtime_update", "--native-session-id", session,
-      "--previous-session-id", previous, "--session-reason", "clear"], { timeoutMs: 10000 })
+      "--previous-session-id", previous, "--session-reason", "clear"], { timeoutMs: 10000, env: await pythonEnv($) })
     if (result.exitCode !== 0) $.ui.log(`multiverse: the move to a new session was not recorded: ${result.stderr.trim()}`)
   } catch (error) {
     $.ui.log(`multiverse: the move to a new session was not recorded: ${String(error)}`)

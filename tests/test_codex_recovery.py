@@ -186,7 +186,8 @@ class RecoveryWorkerTest(unittest.TestCase):
         rows += [(('unknown acceptance time', attempts), {}, accepted_at(attempts), loss, 'skipped', None)
                  for attempts in ([], [{'at': 'invalid'}], [{'at': '2000-01-01'}])]
         for case, changes, prepare, cause, expected, reason in rows:
-            with self.subTest(case=case):
+            with self.subTest(case=case), patch.dict(os.environ, {'PYTHONPATH': '/user/imports',
+                                                                'MV2_SOURCE': '/old/installation'}):
                 self.reset(**changes)
                 if prepare:
                     prepare()
@@ -200,6 +201,10 @@ class RecoveryWorkerTest(unittest.TestCase):
                 self.assertEqual(ledger.read_bytes() if ledger.exists() else None, before)
                 if expected == 'checking':
                     self.assertEqual(facts['native_relay']['state'], 'lost')
+                    child_env = self.popen.call_args.kwargs.get('env', {})
+                    self.assertEqual(child_env.get('PYTHONPATH'),
+                                     str(Path(recovery.__file__).resolve().parents[2]) + os.pathsep + '/user/imports')
+                    self.assertEqual(os.environ['PYTHONPATH'], '/user/imports')
                     recovery.schedule(self.directory, self.launch)
                 self.assertEqual(self.popen.call_count, 1 if expected == 'checking' else 0)
 

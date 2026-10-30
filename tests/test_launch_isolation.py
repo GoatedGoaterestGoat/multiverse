@@ -891,18 +891,22 @@ class LaunchIsolationTest(unittest.TestCase):
         backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}
         with self.subTest(part='harness env'), patch.object(lifecycle, "Tmux", return_value=backend), \
                 patch.object(lifecycle.shutil, "which", return_value="/fake/executable"), \
-                patch.object(lifecycle, "observe", return_value={"live": "dormant"}):
+                patch.object(lifecycle, "observe", return_value={"live": "dormant"}), \
+                patch.dict(os.environ, {'MV2_SOURCE': '/other/installation', 'PYTHONPATH': '/user/imports'}):
             first = lifecycle.start(self.root, "env", "task", "pi")
             directory = agents.directory(self.root, first["id"])
             session(directory)
             for result in (first, lifecycle.start(self.root, resume=first["id"])):
                 request = read(directory / "launches" / result["runtime"]["launch_id"] / "request.json")
-                with patch.dict(os.environ, {"INHERITED": "tmux server", "MV2_AGENT_ID": "parent"}):
+                with patch.dict(os.environ, {"INHERITED": "tmux server", "MV2_AGENT_ID": "parent",
+                                             "MV2_SOURCE": "/old/server/installation"}):
                     env = runner.launch_environment(request)
                 # The harness's value replaces the inherited one; this launch's identity still wins.
                 self.assertEqual(env["IS_SANDBOX"], "1")
                 self.assertEqual(env["INHERITED"], "harness")
                 self.assertEqual(env["MV2_AGENT_ID"], first["id"])
+                self.assertEqual(env['MV2_SOURCE'], str(Path(lifecycle.__file__).resolve().parents[2]))
+                self.assertEqual(env['PYTHONPATH'], '/user/imports')
 
         env = {'IS_SANDBOX': '1', 'NO_COLOR': '1', 'LITERAL': 'a "quoted" $(false) é'}
         values = self.adapter_values()

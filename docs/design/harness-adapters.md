@@ -1012,7 +1012,7 @@ universe, full agent UUID, directory, CLI/Python paths and pinned native storage
 proof is an error, never an operator fallback. `MV2_LAUNCH_ID` and launch-private
 control/tmux addresses are absent. The attachment's `--remote` relay remains
 private to that launch; there is no stable raw-native relay. Each new launch requests
-`MV2_CLI`, `MV2_PYTHON` and `PATH` from the launching mv2 installation. The
+`MV2_CLI`, `MV2_PYTHON`, `MV2_SOURCE` and `PATH` from the launching mv2 installation. The
 requested map is kept in that launch's `request.json.agent_environment` and the
 agent's latest `properties.json.agent_environment`; it is not an attestation of
 the environment in an already-loaded shared conversation. Executable paths are
@@ -1484,7 +1484,11 @@ when the tag gains a part an older mod can't read: a mod still on `claude-mod-v1
 until it reloads stays connected and gets tags without a send time) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
-multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
+multiverse.tools.runtime_update --status`, which is not an `mv2` command. Each
+such `python -m` call (status, usage, the /clear move, and Pi's status) puts
+`MV2_SOURCE`, the package root of the mv2 that launched the agent, first on that
+call's `PYTHONPATH`, so it runs the same code even when the interpreter has another
+mv2 installed or none; the agent's own shells never get it. Agents
 report their phase with `mv2 report` but never set their status: `working` while a main-loop turn runs; `waiting` while an
 `AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched

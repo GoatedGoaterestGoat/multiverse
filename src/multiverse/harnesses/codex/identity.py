@@ -12,7 +12,7 @@ POLICY = AgentIdentitySpec('codex-agent-v1', 'CODEX_THREAD_ID', ('CODEX_HOME', '
 # a socket here would freeze one launch's server choice in shared tools.
 VOLATILE = frozenset({'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'})
 STABLE = frozenset({'MV2_IDENTITY_MODE', 'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
-                    'MV2_CLI', 'MV2_PYTHON', 'PATH'})
+                    'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE', 'PATH'})
 
 
 def resume_notice(caller_environment, effective_environment):

@@ -26,7 +26,7 @@ def environment(target, spec, saved=None):
         return {}
     specification(spec)
     values = {key: target[key] for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
-                                          'MV2_CLI', 'MV2_PYTHON', 'PATH')}
+                                          'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE', 'PATH')}
     # Request the launching installation's tools each time. A shared native
     # conversation may retain its previous environment after a frontend restart;
     # saved paths are diagnostics, not authority and never override this request.

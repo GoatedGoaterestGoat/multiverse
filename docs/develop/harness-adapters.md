@@ -123,11 +123,11 @@ An optional relay view's `primary_event(direction, value)` describes exact-prima
 A bridged launch takes messages once it is ready. Until then, core holds them as `pending`, and the runner delivers them in order. Readiness comes from the integration registering itself, or from the relay validating the binding:
 
 ```sh
-"$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v2 --status idle
-"$MV2_PYTHON" -m multiverse.tools.runtime_update --usage-json '{"context": {"tokens": 82000, "window": 200000}}'
+PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v2 --status idle
+PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.tools.runtime_update --usage-json '{"context": {"tokens": 82000, "window": 200000}}'
 ```
 
-Integrations report `--status` (`idle`, `working`, `waiting`, `unknown`) and `--usage-json` the same way. `runtime_update` checks `MV2_LAUNCH_ID` and refuses an outdated launch. The adapter compares the reported bridge ID with its own constant.
+Integrations report `--status` (`idle`, `working`, `waiting`, `unknown`) and `--usage-json` the same way. `MV2_SOURCE` names the running package's import root. Prepend it to `PYTHONPATH` for each callback child only, preserving any existing path. When `MV2_SOURCE` is unset, leave `PYTHONPATH` alone. Do not export that change to the agent or its tool shells. `runtime_update` checks `MV2_LAUNCH_ID` and refuses an outdated launch. The adapter compares the reported bridge ID with its own constant.
 
 ## Plugin launch contributions
 
