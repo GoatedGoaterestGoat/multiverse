@@ -150,7 +150,7 @@ class OrphanRemovalTest(BaseTest):
     def test_new_core_evidence_during_discovery_is_not_moved(self):
         """Core evidence that appears while orphan discovery runs stops the move; fragile because it is a race with a
         starting launch that hand-testing never hits (bd3d410)."""
-        def snapshot(backend):
+        def snapshot(backend, *, facts=None):
             write(self.directory / 'runtime.json', {'state': 'starting'})
             return {}, None
         with patch.object(Tmux, 'snapshot', snapshot), self.assertRaisesRegex(records.RecordError, 'changed'):
