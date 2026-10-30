@@ -558,16 +558,20 @@ NOTED = """def register(mv):
 class SettingsNotesTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_the_plugins_screen_shows_the_notes_a_plugins_settings_check_returns(self):
         """A note a plugin's settings check returns (1.15) shows on the Plugins screen, under the settings line and on
-        its settings form, and leaves the settings usable; fragile and unnoticed because a note is advice, so the
-        settings keep working without it while the setting it names (an unknown key compaction ignores) silently does
-        nothing."""
+        its settings form, and leaves the settings usable; the screen names it once, under the plugin's settings while
+        that plugin is selected and among the universe's problems otherwise; fragile and unnoticed because a note is
+        advice, so the settings keep working without it while the setting it names (an unknown key compaction ignores)
+        silently does nothing, and a note named twice reads as two problems."""
         self.write_plugin("noted", {"module": "plugin", "settings": {
             "version": 1, "schema": "schema.json", "defaults": "defaults.json"}}, {
             "plugin.py": NOTED, "schema.json": json.dumps({"type": "object", "properties": {
                 "greeting": {"type": "string"}, "loud": {"type": "boolean"}}}),
             "defaults.json": json.dumps({"schema": 1, "greeting": "hello"})})
         plugins.set_enabled(self.root, "noted", True)
+        self.write_plugin("plain", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
+        plugins.set_enabled(self.root, "plain", True)
         note = "Note: loud: ignored, this plugin has no such setting"
+        said = note.removeprefix("Note: ")
         async with self.dashboard() as d:
             for written, says in (({"schema": 1, "greeting": "hello"}, False),
                                   ({"schema": 1, "greeting": "hello", "loud": True}, True)):
@@ -584,6 +588,16 @@ class SettingsNotesTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("(unusable)", lines[settings_line])
                     if says:
                         self.assertEqual(lines[settings_line + 1:settings_line + 2], [note])  # right under it
+                        await d.until(lambda: any(said in problem for problem in shown.problems), "the universe's problems")
+                        details = lambda: " ".join(str(shown.query_one("#plugin-details").render()).split())
+                        self.assertEqual(details().count(said), 1, details())  # not again as a problem below
+                        shown.query_one("#plugins-table", DataTable).move_cursor(
+                            row=[item["name"] for item in shown.items].index("plain"), animate=False)
+                        await d.until(lambda: details().startswith("plain"), "plain's details")
+                        self.assertEqual(details().count(said), 1, details())  # another plugin selected: still named
+                        shown.query_one("#plugins-table", DataTable).move_cursor(
+                            row=[item["name"] for item in shown.items].index("noted"), animate=False)
+                        await d.until(lambda: details().startswith("noted"), "noted's details again")
                     else:
                         self.assertFalse(any(line.startswith("Note:") for line in lines))
                     await d.press("enter")

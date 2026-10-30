@@ -242,8 +242,13 @@ class PluginsScreen(ModalScreen):
                 state += " · status unknown"
             text = f"Plugin host: {state}" + "".join(f"\n  {clean(name)}: {clean(why)}" for name, why in self.host["stopped"].items()) \
                 + (f"\n  {clean(self.host['problem'])}" if self.host.get("problem") else "") + "\n\n" + text
-        if self.problems:
-            text += "\n\n" + "\n".join("• " + clean(problem) for problem in self.problems)
+        # The universe's problems include each plugin's settings notes, so that one is never only on a screen nobody
+        # opened; the selected plugin's own are already its Note lines above, and are not named twice.
+        notes = ((item or {}).get("settings") or {}).get("notes") or ()
+        problems = [problem for problem in self.problems
+                    if not (item and problem.startswith(f"{item['name']}: ") and any(problem.endswith(note) for note in notes))]
+        if problems:
+            text += "\n\n" + "\n".join("• " + clean(problem) for problem in problems)
         self.query_one("#plugin-details", Static).update(text)
 
     def on_data_table_row_highlighted(self, event):
