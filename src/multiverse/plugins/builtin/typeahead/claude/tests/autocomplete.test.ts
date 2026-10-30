@@ -167,16 +167,26 @@ describe('reading in the background', () => {
     expect(w.runs.length).toBe(4)  // and read again, once each
   })
 
-  test('typing never waits on a slow mv2, and a read under way is not started twice', async ($, on) => {
-    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 3000 }))
-    expect(await ask($, '/multi')).toEqual(['engine-row'])
-    await w.clock.settle()
-    expect(await ask($, '/multiverse h')).toEqual(['engine-row'])  // nothing kept yet, and no wait for it
-    expect(await ask($, '/multiverse he')).toEqual(['engine-row'])
-    await w.clock.settle()
+  // The first query past the command's name answers with the first read's rows: answered at once, its rows were never
+  // drawn until another key (qa-claude, 4 of 4: a pasted prefix showed nothing). Bounded, so a stuck read can't hold it.
+  test('the first query waits for the first read; a slow one is bounded; a read under way is not started twice', async ($, on) => {
+    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 2000 }))
+    expect(await ask($, '/multi')).toEqual(['engine-row'])  // reading ahead: nothing to offer yet, no wait
+    const first = ask($, '/multiverse h')
+    await w.clock.advance(2000)
+    expect(await first).toEqual(['engine-row', 'help'])  // the first read's rows, with no further key
     expect(w.runs.length).toBe(2)
+  })
+
+  test('a stuck first read holds the first answer only up to its bound, and is not started twice', async ($, on) => {
+    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 10000 }))
+    expect(await ask($, '/multi')).toEqual(['engine-row'])
+    const bounded = ask($, '/multiverse h')
     await w.clock.advance(3000)
-    expect(await ask($, '/multiverse he')).toEqual(['engine-row', 'help'])
+    expect(await bounded).toEqual(['engine-row'])  // the bound, not the read, ended the wait
+    await w.clock.advance(7000)
+    expect(await ask($, '/multiverse he')).toEqual(['engine-row', 'help'])  // the read landed: kept now
+    expect(w.runs.length).toBe(2)  // one read of each kind, never started twice
   })
 
   test('a failed or broken read offers no rows, never an error', async ($, on) => {
