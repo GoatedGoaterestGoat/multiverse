@@ -261,7 +261,8 @@ class DamagedListingTests(PluginTestCase):
                            (["--columns", ","], "Name at least one column"), (["--columns", "name,,phase"], "empty"),
                            (["--columns", "name,phase,name"], "name more than once"),
                            (["--json", "--columns", "name,nmae"], "nmae"), (["--json", "--columns", "id,id"], "more than once"),
-                           (["--json", "--columns="], "Name at least one")):
+                           (["--json", "--columns="], "id,name,live,status"), (["--json", "--columns", ","], "plain mv2 list --json"),
+                           (["--json", "--columns", "nmae"], "plain mv2 list --json")):
             with self.subTest("refused", args=args):
                 err = io.StringIO()
                 with self.assertRaises(SystemExit) as exited:

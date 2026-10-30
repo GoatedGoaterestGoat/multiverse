@@ -19,6 +19,8 @@ COLUMNS = {
 DEFAULT_COLUMNS = ("name", "status", "phase", "summary")
 # The --json fields that need each agent's token usage read, the slow part of a listing; nothing else reads it.
 USAGE_FIELDS = ("usage", "tokens", "usage_detail")
+# Where a refusal under --json points: there are too many fields to list in one line.
+JSON_FIELDS_HINT = "fields of mv2 list --json, such as id,name,live,status; plain mv2 list --json shows every field"
 
 
 def configure(parser):
@@ -36,12 +38,13 @@ def chosen(columns, json=False):
     anything else, naming what it can show."""
     names = [name.strip() for name in columns.split(",")]
     if not any(names):  # an empty --columns, as from --columns "$UNSET", must not fall back to the whole table
-        raise ValueError(f"Name at least one column: {', '.join(COLUMNS)}")
+        raise ValueError(f"Name at least one of the {JSON_FIELDS_HINT}" if json
+                         else f"Name at least one column: {', '.join(COLUMNS)}")
     if not all(names):
         raise ValueError(f"--columns {columns!r} has an empty entry: separate column names with single commas")
     unknown = [name for name in names if name not in (lifecycle.ROW_FIELDS if json else COLUMNS)]
     if unknown and json:
-        raise ValueError(f"Not a field of mv2 list --json: {', '.join(unknown)}")
+        raise ValueError(f"Not a field of mv2 list --json: {', '.join(unknown)}. Name {JSON_FIELDS_HINT}")
     if unknown:
         raise ValueError(f"Unknown column {', '.join(unknown)}: choose from {', '.join(COLUMNS)}")
     repeated = sorted({name for name in names if names.count(name) > 1})
