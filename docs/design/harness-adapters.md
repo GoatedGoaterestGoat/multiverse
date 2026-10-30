@@ -1438,8 +1438,10 @@ workflows and skills (`kind/name` when a bare name is shared or reserved); after
 `send` it offers this universe's agents, except this one and any row built from a
 damaged record, which `send` can't reach (a comma list
 completes its last name); a catalog entry's arguments get nothing. It reads `mv2
-catalog` and `mv2 list --json` in the background and keeps them five seconds, so
-typing never waits on mv2, and a failed read offers no rows. It is separate
+catalog` and `mv2 list --json --columns id,name,universe,live,status,phase,damaged`
+(the fields its rows use, and no usage field, so mv2 doesn't read every agent's
+transcript) in the background and keeps them five seconds, so typing never waits
+on mv2, and a failed read offers no rows. It is separate
 because it hooks `prompt.autocomplete`, which older Claude refuses: there the
 adapter does not load it, and the mod keeps working without it.
 

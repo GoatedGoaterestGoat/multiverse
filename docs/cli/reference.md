@@ -96,7 +96,7 @@ mv2 list [--recursive] [--wide] [--columns COLUMNS] [--json]
 | --- | --- | --- | --- |
 | `--recursive` |  |  |  |
 | `--wide` |  | Show full summaries and errors |  |
-| `--columns` | `COLUMNS` | Show these columns, comma-separated, in this order: name, status, phase, summary, harness, universe, id. One column prints one value per line and nothing else |  |
+| `--columns` | `COLUMNS` | Show these columns, comma-separated, in this order: name, status, phase, summary, harness, universe, id. One column prints one value per line and nothing else. With --json, name fields of each entry instead, such as id,name,live,status; usage is read only for usage, tokens, usage_detail |  |
 | `--json` |  |  |  |
 
 ## catalog

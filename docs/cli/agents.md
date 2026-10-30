@@ -37,7 +37,9 @@ mv2 list --columns name         # one name per line, for scripts
 
 Each line shows the agent's name, status, reported phase and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
-`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at. `--json` always gives every field.
+`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
+
+`--json` gives every field of each agent. With `--columns`, it gives only the fields named, in that order, such as `mv2 list --json --columns id,name,live,status`. Their values are the same as in the full `--json` output, and a field an agent doesn't have is left out of its entry. Reading each agent's token usage is the slow part of a listing, so mv2 reads it only for plain `--json`, or when `--columns` names `usage`, `tokens` or `usage_detail`. The text listing never reads it.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 

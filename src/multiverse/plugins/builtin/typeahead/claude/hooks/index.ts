@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 // Claude refuses a module that hooks it. The Claude adapter loads this plugin only for 2.1.292 or
 // newer, so the multiverse mod itself keeps working everywhere.
 //
-// The catalog (`mv2 catalog --json`) and the agent list (`mv2 list --json`) are read in the background and kept a few seconds. Typing
+// The catalog (`mv2 catalog --json`) and the agent list (`mv2 list --json --columns ...`) are read in the background and kept a few seconds. Typing
 // never waits on them: a hook answers from what is kept, and reading starts after it returns, first
 // while `/mu...` is still being typed. A failed read leaves no rows.
 
@@ -55,6 +55,8 @@ export function catalogRows(entries: readonly CatalogEntry[]): Suggestion[] {
 }
 
 type Listed = { id?: unknown; name?: unknown; universe?: unknown; live?: unknown; status?: unknown; phase?: unknown; damaged?: unknown }
+// Exactly the fields agentRows reads: asking for no usage field keeps mv2 from reading every agent's transcript.
+export const LIST_FIELDS = "id,name,universe,live,status,phase,damaged"
 
 // The agents `mv2 send` can reach from here: `mv2 list --json` also shows other universes' agents,
 // which it cannot. This agent is left out, and so is a name `send` could not take as one word, and a row
@@ -100,7 +102,7 @@ const kept: Record<"catalog" | "agents", Kept> = {
 async function load($: EngineInterface, which: "catalog" | "agents", cli: string) {
   const entry = kept[which]
   try {
-    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog", "--json"] : ["list", "--json"])],
+    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog", "--json"] : ["list", "--json", "--columns", LIST_FIELDS])],
                                        { timeoutMs: LOAD_TIMEOUT_MS })
     if (result.exitCode !== 0) entry.rows = []
     else if (which === "catalog") entry.rows = catalogRows(catalogEntries(JSON.parse(result.stdout)))

@@ -17,24 +17,31 @@ COLUMNS = {
     "id": lambda row, root, wide: row.get("id") or "",
 }
 DEFAULT_COLUMNS = ("name", "status", "phase", "summary")
+# The --json fields that need each agent's token usage read, the slow part of a listing; nothing else reads it.
+USAGE_FIELDS = ("usage", "tokens", "usage_detail")
 
 
 def configure(parser):
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--wide", action="store_true", help="Show full summaries and errors")
     parser.add_argument("--columns", help=f"Show these columns, comma-separated, in this order: {', '.join(COLUMNS)}. "
-                                          "One column prints one value per line and nothing else")
+                                          "One column prints one value per line and nothing else. With --json, name "
+                                          "fields of each entry instead, such as id,name,live,status; usage is read "
+                                          f"only for {', '.join(USAGE_FIELDS)}")
     parser.add_argument("--json", action="store_true")
 
 
-def chosen(columns):
-    """The column names --columns asks for, in order; ValueError for anything else, naming what it can show."""
+def chosen(columns, json=False):
+    """The column names --columns asks for, in order, or with `json` the fields of each --json entry; ValueError for
+    anything else, naming what it can show."""
     names = [name.strip() for name in columns.split(",")]
     if not any(names):  # an empty --columns, as from --columns "$UNSET", must not fall back to the whole table
         raise ValueError(f"Name at least one column: {', '.join(COLUMNS)}")
     if not all(names):
         raise ValueError(f"--columns {columns!r} has an empty entry: separate column names with single commas")
-    unknown = [name for name in names if name not in COLUMNS]
+    unknown = [name for name in names if name not in (lifecycle.ROW_FIELDS if json else COLUMNS)]
+    if unknown and json:
+        raise ValueError(f"Not a field of mv2 list --json: {', '.join(unknown)}")
     if unknown:
         raise ValueError(f"Unknown column {', '.join(unknown)}: choose from {', '.join(COLUMNS)}")
     repeated = sorted({name for name in names if names.count(name) > 1})
@@ -55,11 +62,11 @@ def place(row, root):
 
 
 def run(root=None, *, recursive=False, json=False, wide=False, columns=None):
-    if json and columns is not None:
-        raise ValueError("--columns shapes the text listing; --json always gives every field")
-    names = chosen(columns) if columns is not None else DEFAULT_COLUMNS
+    """The listing as text, or with `json` as rows: every field, or with `columns` enough for those fields (cli_run
+    keeps just them). Usage is read only where the output shows it, as the slowest part of a listing."""
+    names = chosen(columns, json) if columns is not None else (None if json else DEFAULT_COLUMNS)
     root = universe.resolve(root)
-    rows = lifecycle.listing(root, recursive)
+    rows = lifecycle.listing(root, recursive, usage=json and (names is None or any(name in USAGE_FIELDS for name in names)))
     if json:
         return rows
     if len(names) == 1:  # for scripts: one value per agent, and nothing that could be read as one
@@ -101,9 +108,13 @@ def cli_run(root=None, *, recursive=False, json=False, wide=False, columns=None)
     if not json:
         return result or None  # one column and no agents: print nothing, not an empty line
     # The dashboard uses run(json=True) and retains the core observation enum.
-    return [{**row, 'live': live_label(row),
+    rows = [{**row, 'live': live_label(row),
              **({'reason': 'Launch is being prepared'} if live_label(row) == 'starting' else {})}
             for row in result]
+    if columns is None:
+        return rows
+    names = chosen(columns, json=True)  # each entry keeps the fields asked, in that order; one it lacks is left out
+    return [{name: row[name] for name in names if name in row} for row in rows]
 
 
 if __name__ == "__main__":

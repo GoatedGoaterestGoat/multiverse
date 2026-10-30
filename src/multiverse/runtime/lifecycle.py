@@ -103,11 +103,25 @@ def _listing_runtime(directory, facts, *, prepare=False):
             facts = current
 
 
-def listing(root, recursive=False, only=None):
+# Built-in fields accepted by JSON projections. Full rows also preserve any
+# additional legacy properties; projecting never changes the stored record.
+ROW_FIELDS = frozenset((
+    'id', 'universe_id', 'name', 'harness', 'model', 'task', 'phase', 'summary',
+    'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
+    'native_session_homes', 'native_session_provider', 'native_session_transition',
+    'native_storage_environment', 'native_environment', 'native_service_identity',
+    'agent_identity', 'agent_environment', 'native_fresh_pending',
+    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error',
+    'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
+    'usage', 'tokens', 'usage_detail',
+))
+
+
+def listing(root, recursive=False, only=None, *, usage=True):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
     One agent's damaged records never stop the others: that agent's row says which file is unusable and why
-    (see damaged_row)."""
+    (see damaged_row). With usage=False, omit usage fields without reading native transcripts."""
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
@@ -148,8 +162,12 @@ def listing(root, recursive=False, only=None):
                     facts, observation = _listing_observation(properties, facts, snapshots)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
-                measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
-                            native.usage_snapshot(scope, properties, facts, reconciled=True))
+                usage_fields = {}
+                if usage:
+                    measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
+                                native.usage_snapshot(scope, properties, facts, reconciled=True))
+                    usage_fields = {'usage': measured, 'tokens': display.usage_total(measured),
+                                    'usage_detail': display.usage_details(measured)}
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = (None if facts.get('exit_code') in (-15, 143) else
@@ -159,8 +177,7 @@ def listing(root, recursive=False, only=None):
                         is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
-                rows.append(text_defaults({**properties, "usage": measured, "tokens": display.usage_total(measured),
-                             "usage_detail": display.usage_details(measured), "universe": str(scope), **observation,
+                rows.append(text_defaults({**properties, **usage_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
