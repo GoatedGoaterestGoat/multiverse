@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from native_safety import install as install_native_safety
 install_native_safety()
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
+from multiverse.runtime.process import process_snapshot
 from multiverse.universe import templates
 from multiverse.tools import send
 from multiverse.universe.mailbox import append_message, inbox
@@ -112,10 +114,22 @@ class TerminalBase(BaseTest):
         def exited(pid):
             try:
                 os.kill(pid, 0)
-                return False
             except ProcessLookupError:
                 return True
-        until(lambda: all(exited(pid) for pid in pids), seconds=15)
+            # An orphan can have exited before its reaper runs. It cannot write
+            # fixture state; unknown inspection of a live PID still blocks.
+            observed = process_snapshot(pid)
+            return observed is not None and observed[1].startswith('Z')
+        try:
+            until(lambda: all(exited(pid) for pid in pids), seconds=15)
+        except AssertionError:
+            remaining = sorted(pid for pid in pids if not exited(pid))
+            try:
+                detail = subprocess.run(['ps', '-o', 'pid,ppid,stat,etime,comm', '-p', ','.join(map(str, remaining))],
+                                        text=True, capture_output=True, check=False, timeout=5).stdout.strip()
+            except (OSError, subprocess.SubprocessError) as error:
+                detail = f'Process inspection unavailable: {error}'
+            raise AssertionError(f'Terminal processes did not exit within 15 s: {remaining}\n{detail}') from None
         # A runner can spawn the detached helper while it is exiting above.
         until(lambda: not core_processes(), seconds=15)
 
@@ -124,6 +138,36 @@ class TerminalBase(BaseTest):
         agent_dir = agents.directory(self.root, result["id"])
         until(lambda: (agent_dir / "seen.json").exists())
         return result, agent_dir
+
+
+class TerminalCleanupTest(BaseTest):
+    def test_cleanup_waits_for_running_processes_but_not_unreaped_exits(self):
+        """An unreaped exit cannot write fixture state, but a live or uninspectable process must still block cleanup."""
+        original_until = until
+        for state in ('running', 'uninspectable', 'exited but unreaped'):
+            with self.subTest(state=state):
+                child = subprocess.Popen([sys.executable, '-c', 'pass' if state == 'exited but unreaped'
+                                           else 'import time; time.sleep(60)'],
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    if state == 'exited but unreaped':
+                        original_until(lambda: (info := process_snapshot(child.pid)) and info[1].startswith('Z'))
+                    self.backend = Mock()
+                    self.backend.snapshot.return_value = ({'%1': {'pane_pid': str(child.pid)}}, None)
+                    observe = patch(__name__ + '.process_snapshot', return_value=None) if state == 'uninspectable' else nullcontext()
+                    with observe, patch(__name__ + '.until', side_effect=lambda predicate, seconds=15:
+                                        original_until(predicate, seconds=.25)):
+                        if state == 'exited but unreaped':
+                            TerminalBase.kill_server(self)
+                            self.assertIsNone(child.returncode, 'The helper observes an exit; the parent still owns reaping it')
+                        else:
+                            with self.assertRaises(AssertionError) as caught:
+                                TerminalBase.kill_server(self)
+                            self.assertIn(str(child.pid), str(caught.exception))
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                    child.wait(timeout=5)
 
 
 class TerminalTest(TerminalBase):

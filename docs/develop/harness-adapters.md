@@ -286,19 +286,92 @@ reader exposes only a deadline and `check()` for the pinned identity; it has no
 native transport or process controls.
 
 `transcript_view` returns a `TranscriptView`: row facts in stored order, history
-indexes in conversation order, the context boundary, tip and gap. Facts carry
+indexes in conversation order, the context boundary, tip, gap and `summary`, the ref of the harness's own
+compaction summary row the history starts at when what came before was never stored. Facts carry
 labels and positions, never bodies. A position changes if preceding bytes change
 and stays valid when rows are appended. `transcript_bodies` reads only requested
 indexes and raises the content-free `TranscriptRowsChanged` if their bytes no
 longer match the view. `transcript_readable` checks a recorded earlier generation.
-All reads use the pinned native ID and storage. An unrecorded home can be resolved
-from inherited values only inside that agent's own session.
+Bodies are fresh dictionaries on every read; core hands them to the caller without
+copying their contents again. Providers may reuse the same immutable view object
+while its source, facts and history are unchanged, but must return a new object
+whenever any of them changes. Core keeps a bounded cache of that view's analysis
+and turn membership, never of session authority or bodies. Identity is checked
+before and after each page; a provider's per-row loop can check only the deadline
+between those page checks, without re-reading agent records for every row. All reads use the pinned native ID and
+storage. An unrecorded home can be resolved from inherited values only inside
+that agent's own session.
 
 Core owns the opaque cursor envelope, generation selection, filters, page limits
-and turn grouping. Bodies larger than 16 MiB are metadata stubs; metadata-only
-pages never read bodies. A prompt finishes from a later prompt or timestamped
+and turn grouping. Each returned row names its turn at the selected history tip;
+an abandoned row has no turn. Commands and their output can interleave with the
+rows of a prompt turn, so a caller need not reread each turn to group a history.
+Bodies larger than 16 MiB are metadata stubs; metadata-only pages never read bodies. A prompt finishes from a later prompt or timestamped
 native end evidence, never from runtime idle status. Commands retain their own
 output while later responses remain with the current prompt. Turns, including
 the preamble, are listed by their first row in history order. See the
 [transcript design](../design/transcript-protocols.md) for the history and
 replacement rules, and the [plugin API](plugins.md) for the public read methods.
+
+## One-shot runs
+
+The optional `RunProvider` exposes `run_options(environment=...)` (observe) and
+`run_plan(request, environment=..., run=...)` (spend). A plan contains an argv-only
+`CommandSpec`, bounded `RunFile` declarations and a pure `interpret(RunOutcome)`
+function. It describes no launch, service, relay or attachment. The adapter makes
+no files and starts no process. Core checks the model and effort before asking
+for a plan; an unverified but accepted model may run. Unsupported harnesses return
+an unavailable result without spending.
+
+The environment is a snapshot selected by the caller, including an agent's
+proven storage when requested. `None` means unset and an empty string stays empty.
+Core removes inherited mv2 and harness session identity after every overlay.
+The adapter receives the same snapshot for options, model checking and planning;
+it must not read the caller's environment again. Routing beyond storage is the
+calling process's and the harness settings', as described in the
+[plugin API](plugins.md).
+
+Core chooses a private directory under the initiating user's
+`~/.multiverse/runs/PLUGIN/AGENT-OR-HARNESS/UUID`. This also works when
+`~/.multiverse` is the universe. The complete run directory must stay outside
+agent folders and every universe's `state/`, `subverses/` and `trash/`
+namespaces, which mv2 scans, moves or removes. Core resolves both the destination
+and those protected folders before comparing them, including when a namespace is
+a link. Options check this plugin's selected owner directory; execution checks
+the full path including the fresh run UUID before preparing the provider. The
+same location rule applies to both, so an unsafe location reports unsupported
+without probing the provider. A home managed as a dotfiles repository
+is allowed; the provider disables project settings and instructions for the run. Files are relative to that directory, or one declared session file under
+the adapter's selected store. That store file names this run's UUID. All files
+are created exclusively with private permissions and a metadata-only ownership
+journal precedes their contents. Core removes only files with the recorded file
+identity and empty folders it created inside that run and its declared store
+path; shared nonempty store parents stay put. The plugin and owner namespace
+folders above the run directory are removed once empty, only while their recorded
+identities still match. A short, bounded lock on the persistent run root coordinates
+namespace creation and removal so cleanup cannot unlink a new run's open parent;
+no lock spans the model call. Another run keeps these folders nonempty, and the
+last run removes them. Older journals without namespace identities leave those
+parents alone.
+
+A disposable supervisor owns the child's new process group. One deadline covers
+preparation, execution and interpretation; cancellation, timeout and the calling
+worker's death stop that group with TERM then KILL and bounded cleanup. The leader
+is not reaped until group cleanup, so a reused PID grants no control. Agent and
+universe folder identities are captured before the API reads the agent's storage
+and checked after that read and the preliminary options probe. The same immutable
+snapshot is carried into core and checked before preparation and spawning, while
+waiting and before returning; replacing a folder cannot establish new authority
+for storage read from its predecessor. No agent lock spans the run, and removal never
+recreates the agent folder. A run cannot change its runtime, binding or inbox.
+
+Input and prepared file content are bounded to 32 MiB, stdout to 16 MiB and stderr
+to 64 KiB. Overflow is a failure, not a truncated success. Replies stay in memory;
+errors carry only a bounded native diagnostic or a content-free core reason.
+`RunReply` and `RunFailure` carry elapsed time and any known usage and cost for the
+plugin's metadata-only run record. Core never retries. The next run performs a
+bounded, silent sweep of leftovers only when all recorded producers are proven
+gone and all file ownership still matches. After the supervisor records that a run
+ended, the calling dashboard or plugin worker need not exit before cleanup. A
+cleanup problem does not discard a successful reply: the journal stays for the
+next sweep and `mv2 doctor`, which reports leftovers without deleting them.

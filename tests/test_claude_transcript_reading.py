@@ -1,6 +1,7 @@
 """Reading a Claude session's transcript: labels, history, positions and copies (harnesses/claude/transcripts.py)."""
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -142,6 +143,49 @@ class ClaudeTranscriptReadingTest(BaseTest):
             self.write([user('orphan', 'never-stored', 'After a failed write', origin={'kind': 'human'}, promptId='p1')])
             _, analysis = self.read()
             self.assertEqual(analysis.history.gap, 'never-stored')
+
+    def test_pages_of_an_unchanged_transcript_share_one_view_and_check_only_the_deadline(self):
+        """A read takes many pages of one transcript; fragile because a view kept across pages must never outlive a
+        change to the file, and checking only the deadline inside a page must still stop a page that ran out of time."""
+        user = lambda uuid, parent: {'type': 'user', 'uuid': uuid, 'parentUuid': parent,
+                                     'message': {'role': 'user', 'content': 'x' * 40}}
+        self.write([user(f'u{n}', f'u{n - 1}' if n else None) for n in range(20)])
+        adapter, session = self.adapter(), self.session()
+        view = adapter.transcript_view(session)
+        self.assertIs(adapter.transcript_view(session), view)  # an unchanged transcript: the same view
+        self.assertIsNot(adapter.transcript_view(session, tip='u5'), view)  # another tip: a view of its own
+        with open(self.path, 'ab') as handle:
+            handle.write((json.dumps(user('u20', 'u19')) + '\n').encode())
+        grown = adapter.transcript_view(session)
+        self.assertEqual((len(grown.rows), grown.tip), (21, 'u20'))
+        text = self.path.read_bytes()
+        self.path.write_bytes(text.replace(b'"u3"', b'"v3"', 1))  # same length, before the end: Claude rewrote it
+        os.utime(self.path, ns=(self.path.stat().st_atime_ns, self.path.stat().st_mtime_ns + 1000))
+        rewritten = adapter.transcript_view(session)
+        self.assertIsNot(rewritten, grown)
+        self.assertEqual(rewritten.rows[3].ref, 'v3')
+
+        class Reader:
+            def __init__(self, deadline):
+                self.deadline, self.checks = deadline, 0
+
+            def check(self):
+                self.checks += 1
+                if time.monotonic() >= self.deadline:
+                    raise TimeoutError('deadline')
+        reader = Reader(time.monotonic() + 60)
+        adapter.transcript_bodies(session, rewritten, list(range(21)), max_bytes=1 << 20, reader=reader)
+        self.assertEqual(reader.checks, 1)  # once before the page, not once per row
+        clock = [0.0]
+
+        def tick():  # time passes as the page reads its rows: the deadline runs out partway
+            clock[0] += 1
+            return clock[0]
+
+        late = Reader(5)
+        with patch.object(time, 'monotonic', tick), self.assertRaises(TimeoutError):
+            adapter.transcript_bodies(session, rewritten, list(range(21)), max_bytes=1 << 20, reader=late)
+        self.assertLess(clock[0], 21)  # stopped inside the page, not after it
 
     def test_a_position_finds_a_rewrite_and_usage_starts_over(self):
         """A cursor must notice when Claude rewrites the file in place; fragile because truncating at a tombstoned

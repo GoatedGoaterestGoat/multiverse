@@ -3,8 +3,9 @@
 How plugins read an agent's conversation and a harness's models, and what a
 harness adapter provides for them. This record covers what API 1.13 builds:
 reading rows by cursor, labels, history, context and turns, and a harness's
-models with a check of a model and effort. The one-shot run and
-harness-neutral conversation entries come later (see [Later](#later)).
+models with a check of a model and effort; and what API 1.14 adds: where a
+history starts after the harness's own compaction, and the one-shot run.
+Harness-neutral conversation entries come later (see [Later](#later)).
 
 The protocols are mv2's own. A plugin uses them; it never defines what an
 adapter implements ([plugins](plugins.md)). Reading is implemented for Claude and Codex. Pi reports it unavailable
@@ -148,7 +149,8 @@ own call). A row off the history is **abandoned**.
   compaction lies between the tip and the gap, the history starts at Claude's
   summary instead, with the boundary's `preservedMessages` rows right after
   it in their order, as Claude itself resumes the session, and no gap is
-  reported.
+  reported. The read names that summary instead (`summary`, 1.14): it is then
+  the only record of what came before.
 - The typed `/compact` row stays on the history, although the boundary's link
   skips it.
 - A row without a ref (Claude's API request records, queue and title rows)
@@ -174,7 +176,9 @@ turns.
 
 A command run mid-turn is its own turn, and the running turn's later rows
 stay with their prompt. Turns are listed by where they start. A turn's ID is
-its first row's ref.
+its first row's ref. Since turns interleave in history order, each history
+row names its turn (`Row.turn`, 1.14; `None` for an abandoned row), so a
+plugin slices one history read by turn instead of reading turn by turn.
 
 **Finished:**
 
@@ -256,10 +260,144 @@ An adapter provides models by implementing `ModelProvider` in
 environment=)`, both observe in `EFFECTS`. Core passes the environment; the
 adapter reads only the variables it needs from it.
 
+## The one-shot run
+
+`harness.run_once(messages, prompt=, system=, model=, effort=, agent=,
+transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
+`models.FAMILY`) gets one model reply to a context the plugin supplies, with
+no tools and no saved conversation. `run_options()` (`observe`, but it may start
+the harness once per process to read its version) says whether a
+harness runs at all and what it keeps. Claude implements it; Codex, Pi and
+custom harnesses report it unsupported.
+
+- **Messages.** A `Row` is the native passthrough: this harness's format, with
+  its body, used in the order given as one linear conversation, with the
+  fix-ups only the adapter knows. A `Message(role, blocks)` of `TextBlock` and
+  `ImageBlock` is built by the adapter. Shape errors the API sees (types, a
+  row without a body or of another format) are `api.Error`; the harness's own
+  checks (Claude: messages, when there are any, end on the model's, and
+  every tool call is answered; with none the prompt runs alone)
+  are `RunError("invalid_request")`. Both come before anything is written or
+  spent, and so does `check_model` on the run's environment.
+- **Environment.** What a launch from this process gets (its environment
+  without `MV2_*`, the harness's `unset_env` removed, its settings `env` on
+  top), then, for `agent=`, that agent's replayable `HarnessInfo.storage`,
+  then a final scrub of every agent identity. Unproven storage is refused
+  ("resume it once") except inside the agent's own session. A relative
+  storage variable is made absolute where it was set (the agent's recorded
+  workspace, or this process's directory without an agent), since the run's
+  process starts in a directory of its own. Provider routing
+  is this process's, not the agent's: launches don't record it.
+- **The run** is core's (`runtime/runs.py`): a private directory under
+  `~/.multiverse/runs/`, including when `~/.multiverse` is a home-folder
+  universe. The complete destination, including plugin, owner and run UUID,
+  stays outside agent folders and every universe's `state/`, `subverses/`
+  and `trash/`, the namespaces mv2 scans or removes. Both the destination and
+  protected folders are resolved through links. `run_options()` checks the
+  plugin/owner directory with the same rule; execution checks its exact run path. The adapter's declared session
+  file is created exclusively and removed afterwards, and a small supervisor owns
+  the child's process group, the deadline and `cancel`, and stops it with TERM then KILL
+  when the caller ends. A reply is returned even when cleanup leaves
+  something behind: the next run sweeps what is proven dead, and `mv2
+  doctor` reports what is left. Input is bounded at 32 MiB (over it,
+  `too_long`); output is bounded and never logged.
+- **Errors** are `api.RunError` with an open `kind` (`rate_limit`,
+  `usage_limit`, `refused`, `too_long`, `invalid_request`, `timeout`,
+  `cancelled`, `unavailable`, `failed`) and `retry_after`, carrying the
+  harness's own error text and never the run's input or reply.
+- **Records.** Each run appends its metadata (time, harness, model, agent,
+  input, output and cache read and write tokens, cost, duration, outcome) to `state/plugins/NAME/runs.jsonl` in the
+  run's universe, never content; `mv2 plugins info` sums the last day. The
+  event journal is not that record: it is written only while a plugin
+  subscribes, and pruned.
+
+### Claude
+
+The Claude plan (`harnesses/claude/run.py`) resumes a session it declares in
+the selected store's `projects/<key of the run directory's real path>/`,
+named by the run's ID, and keeps nothing. With no messages it declares no file
+and leaves out `--resume`: Claude answers the prompt alone. A run directory
+whose key would pass 200 characters gets Claude's own shortened name: its first
+200, `-`, and a base-36 hash of the path:
+
+```text
+CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
+  --strict-mcp-config --disable-slash-commands --setting-sources user
+  --max-turns 1 --output-format json --model M [--effort E]
+  --system-prompt S --system-prompt-snapshot off -- PROMPT
+```
+
+- **Command.** `CLAUDE` is the harness's `claude` looked up once on the
+  run's own `PATH`, as one absolute path: `run_options()` checks that
+  binary's version and the plan runs it, so a `PATH` from the harness's
+  settings can't make the check and the run use different Claudes. The
+  prompt comes last, after `--`, so Claude reads it as text whatever it
+  starts with; before `--`, a prompt such as `--resume=ID` would be an option
+  and read another conversation. `--max-turns` is hidden in Claude Code's
+  help but present.
+  `--system-prompt-snapshot off` (2.1.267 and newer; `run_options()` refuses
+  an older Claude) keeps a recorded prompt from replacing the run's own. The
+  model and effort are the ones `check_model` resolved for the provider; a
+  model that takes no effort gets no `--effort`.
+- **Environment.** The plan adds only its own variables:
+  `CLAUDE_CODE_MAX_RETRIES` from `transport_retries` (0 to 15),
+  `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK` and
+  `CLAUDE_CODE_DISABLE_REFUSAL_RETRY` (Claude retries a refused request and
+  can switch models after a flagged message, so a refusal would otherwise come
+  back answered by another model), and `CLAUDE_CODE_DISABLE_CLAUDE_MDS` and
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. It removes
+  `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, so a run loads no mod; core removes the
+  identity every launch drops.
+- **What still loads.** `--setting-sources user` keeps the user's own
+  settings, so their enabled Claude plugins' hooks and language servers still
+  start. `--strict-mcp-config` skips MCP servers; `--bare` would skip the rest
+  but reads no OAuth login. The model gets no tools. A real 2.1.312 run read no
+  CLAUDE.md from its own folder even without the switch, which stays for the
+  user's `~/.claude/CLAUDE.md`.
+- **Rows** (passthrough) get the run's session ID, folder and a linear parent
+  chain; `isSidechain`, `logicalParentUuid` and `agentId` are dropped, and
+  recorded usage is cleared, since Claude sizes a resumed session from the last
+  usage it finds and would refuse a small run as too long. Each keeps its
+  recorded model: copied thinking carries the writing model's signature.
+  Rows are user and assistant rows with their bodies, plus a message Claude
+  took while busy (a prompt typed or a message delivered mid-turn), which it
+  stores as an attachment of type `queued_command`: that is conversation, and
+  Claude replays it in a resumed session. Any other attachment is Claude's own
+  and is refused.
+  Claude runs a response's tool calls as they stream in and stores each
+  result as soon as its call ends, so one response with several calls can be
+  stored call, call, result, call, result. The session lays such a response
+  out as the API saw it: its own rows in their stored order, then the rows
+  holding the results of its calls. Only a row that holds nothing but results
+  for that response's calls moves; anything else ends the response there.
+- **Messages** (built) are stored the way Claude stores them: a user message
+  as one row, images only there; an assistant message as one row per block,
+  sharing one message ID, `end_turn` on the last only, on the run's model,
+  with empty usage. No title row: a real run needed none.
+- **Checks** before anything is written: the conversation ends with an
+  assistant message, every tool call has exactly one result in the next user
+  message, no result lacks its call, and no call ID repeats (Claude fails
+  those as a 400 `tool_history_mismatch`). A response split by a typed
+  prompt is not refused: Claude 2.1.312 resumes it and sends one assistant
+  message with all its calls, then their results and the prompt in one user
+  message. The check refuses only what Claude would refuse, since a refused
+  turn is never built.
+- **Reply.** Claude's JSON result. Its typed `api_error` comes first:
+  `usage_limit_reached`, `model_requires_usage_credits` and
+  `long_context_credits_required` are `usage_limit`;
+  `tool_history_mismatch` is `invalid_request`; `safety_monitor_blocked` is
+  `refused`; `no_response` is `rate_limit`; `provider_credentials`,
+  `gateway_signin_required`, `gateway_session_expired` and
+  `api_key_auth_disabled` are `failed`. Then the text rules: `stop_reason`
+  `refusal` is `refused`, "Prompt is too long" `too_long`, a 404 on the model
+  `invalid_request`, 408, 429, 529, 5xx, overloaded or network `rate_limit`,
+  a usage-limit message `usage_limit`, anything else `failed`. A failed run
+  still reports the model, usage and cost the result gives. `retry_after` is
+  None: the JSON result has none.
+
 ## Later
 
-- **The one-shot run** (API 1.14): one model reply to a context a plugin
-  supplies, with no tools and nothing saved.
 - **Conversation entries** (API 1.15): each row's content in one form for
   every harness.
-- **Pi reading and models; Codex and Pi one-shot runs** ([future work](future-work.md)).
+- **Pi reading and models; Codex and Pi one-shot runs; a schema for the reply; provider routing recorded at
+  launch for per-agent runs** ([future work](future-work.md)).

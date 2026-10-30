@@ -336,6 +336,16 @@ class ClaudeRows:
         """The next row hangs off `row`, an earlier one: a second branch."""
         self._parent = row["uuid"]
 
+    def compaction(self, summary="Summary of the conversation so far", stored=True):
+        """Claude's own compaction (1.14): its boundary, linked to the row before it, then its summary. With
+        `stored=False` the rows before it were never stored here, as when a session continues past a compaction
+        in a file of its own, and the history starts at the summary (`page.summary`)."""
+        from uuid import uuid4
+        before = self._parent if stored else str(uuid4())
+        self.add("system", subtype="compact_boundary", parentUuid=None, logicalParentUuid=before,
+                 compactMetadata={"trigger": "auto", "preservedMessages": {"uuids": []}})
+        return self.add("user", message={"role": "user", "content": summary}, isCompactSummary=True)
+
 
 class FakeTranscript:
     """A Claude transcript an agent reads, in a PluginTestCase (1.13): stored where the agent's records say its
@@ -392,6 +402,56 @@ class FakeTranscript:
         folder = self.path.parent
         folder.chmod(0)
         self._case.addCleanup(folder.chmod, 0o755)
+
+
+class FakeRuns:
+    """One-shot runs answered from a script (1.14), for PluginTestCase.fake_runs(). The real run_once runs: the
+    API's checks, access and permission, the harness's run options, model check and plan (its message checks
+    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Each run takes
+    the next answer: an api.Reply it returns, or an api.RunError it raises. `requests` holds each run's request
+    in full, oldest first: a dict of messages (an api.Message, or a row's data as passed), prompt, system, model,
+    effort, transport_retries, agent (its directory, or None) and timeout."""
+
+    def __init__(self, test, answers, version="2.1.312"):
+        from ..harnesses import types
+        from ..runtime import runs
+        from . import api
+        self.answers, self.requests, calling = list(answers), [], []
+        if not (test.bin / "claude").exists():  # what the run options ask the harness's executable; never a session
+            test.executable("claude", f"echo '{version} (Claude Code)'")
+        original = runs.run_once
+
+        def run_once(adapter, request, **keywords):
+            calling.append((request, keywords))
+            try:
+                return original(adapter, request, **keywords)
+            finally:
+                calling.pop()
+
+        def execute(executor, plan, payload):
+            request, keywords = calling[-1]
+            self.requests.append({
+                "messages": [item.data if isinstance(item, types.RunRow) else api.Message(item.role, [
+                    api.TextBlock(block.text) if isinstance(block, types.RunText)
+                    else api.ImageBlock(block.media_type, block.data) for block in item.blocks])
+                    for item in request.messages],
+                "prompt": request.prompt, "system": request.system, "model": request.model,
+                "effort": request.effort, "transport_retries": request.transport_retries,
+                "agent": keywords.get("agent_directory"), "timeout": keywords.get("timeout")})
+            if not self.answers:
+                raise types.RunFailure("failed", "the test's script has no answer left for this run")
+            answer = self.answers.pop(0)
+            if isinstance(answer, api.RunError):
+                raise types.RunFailure(answer.kind, str(answer), retry_after=answer.retry_after,
+                                       confirmed=answer.confirmed)
+            if not isinstance(answer, api.Reply):
+                raise TypeError("fake_runs answers are api.Reply and api.RunError")
+            return types.RunReply(text=answer.text, model=answer.model, usage=dict(answer.usage),
+                                  cost_usd=answer.cost_usd, stop=answer.stop, lost=tuple(answer.lost))
+
+        for patcher in (mock.patch.object(runs, "run_once", run_once), mock.patch.object(runs, "_execute", execute)):
+            patcher.start()
+            test.addCleanup(patcher.stop)
 
 
 class PluginTestCase(unittest.TestCase):
@@ -506,6 +566,11 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def fake_runs(self, *answers):
+        """One-shot runs answered from this script for the rest of the test (1.14): a FakeRuns, whose `requests`
+        records what each run was asked. Everything but the run itself is real."""
+        return FakeRuns(self, answers)
 
     def transcript(self, agent, rows=()):
         """A Claude transcript for `agent` (its directory, from agent(), or an api.Agent) that the API reads (1.13):

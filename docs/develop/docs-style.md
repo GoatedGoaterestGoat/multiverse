@@ -13,7 +13,6 @@ How to write and update mv2's docs. Keep pages short, accurate and easy to scan.
 | `docs/reference/` | Anyone looking something up | Complete lists: dashboard keys and views, files, variables, versions |
 | `docs/develop/` | Contributors and integrators | How the code works and how to change it |
 | `docs/design/` | Maintainers | Rationale, decisions and detailed contracts. User pages link here only for depth |
-| `AGENTS.md` | Coding agents working on this repo | Repo rules in a form an agent can follow |
 
 The prompts installed into universes (`templates/*/bootstrap.md`, `skills/`, `commands/`, `workflows/`) are docs for agents at work. They follow the same rules, but they must stay short: every word costs context.
 

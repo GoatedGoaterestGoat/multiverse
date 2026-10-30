@@ -61,6 +61,8 @@ def check(root, notes=None):
                     found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
+        from ..runtime.runs import leftovers
+        found.extend((problem, problem) for problem in leftovers(scope))
         found.extend((problem, problem) for problem in _plugins(scope))
         if notes is not None:
             notes.extend(_plugin_notes(scope))

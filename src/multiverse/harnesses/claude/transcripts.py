@@ -63,14 +63,33 @@ def read_regular(path):
         return handle.read()
 
 
-PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
+PROJECT_KEY_LENGTH = 200  # past this, Claude keeps a project folder name's first 200 characters and adds a hash
+
+
+def _hash(text):
+    """Claude's string hash: h = h * 31 + code unit over the UTF-16 code units, as a signed 32-bit integer."""
+    h, data = 0, text.encode('utf-16-le')
+    for i in range(0, len(data), 2):
+        h = (h * 31 + (data[i] | data[i + 1] << 8)) & 0xFFFFFFFF
+    return h - (1 << 32) if h & 0x80000000 else h
+
+
+def _base36(number):
+    digits, out = '0123456789abcdefghijklmnopqrstuvwxyz', ''
+    while True:
+        number, rest = divmod(number, 36)
+        out = digits[rest] + out
+        if not number:
+            return out
 
 
 def project_key(path):
     """Claude's project folder name for a launch directory: the NFC path, every UTF-16 code unit that isn't
-    an ASCII letter or digit replaced by '-', as Bun does (so a character outside the BMP gives '--')."""
-    return ''.join(c if c.isascii() and c.isalnum() else '-' * (2 if ord(c) > 0xFFFF else 1)
-                   for c in unicodedata.normalize('NFC', str(path)))
+    an ASCII letter or digit replaced by '-', as Bun does (so a character outside the BMP gives '--'). Past 200
+    characters, its first 200, '-', and the path's hash in base 36 (Claude Code 2.1.312's own rule)."""
+    text = unicodedata.normalize('NFC', str(path))
+    key = ''.join(c if c.isascii() and c.isalnum() else '-' * (2 if ord(c) > 0xFFFF else 1) for c in text)
+    return key if len(key) <= PROJECT_KEY_LENGTH else f'{key[:PROJECT_KEY_LENGTH]}-{_base36(abs(_hash(text)))}'
 
 
 def could_hold(name, workspaces):
@@ -240,6 +259,7 @@ class Transcript:
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
+        self.views = {}  # the adapter's views of this index as read, by tip and what they were built from
         self.unproved = False  # a change was accepted on the tail check alone since that proof
 
     def _tail_intact(self, handle):

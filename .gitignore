@@ -12,3 +12,6 @@ dist/
 # What Claude Code writes into a plugin directory it loads, for bundled mv2 plugins' Claude parts.
 /src/multiverse/plugins/builtin/*/claude/tsconfig.json
 /src/multiverse/plugins/builtin/*/claude/.claude-plugin/types/
+# Coding-agent instructions are local to each clone.
+/AGENTS.md
+/CLAUDE.md

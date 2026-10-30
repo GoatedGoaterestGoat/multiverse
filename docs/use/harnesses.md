@@ -80,7 +80,7 @@ Claude Code draws every plugin's status line in yellow, with `⚠` and the plugi
 
 **`/clear` and `/restart`.** `/clear` moves Claude to a new conversation. mv2 follows it, so messages, context use and resume go to the new conversation, and the earlier one stays recorded for the agent. Claude's own `/restart` relaunches without mv2's inbox. mv2 still delivers when it can confirm the relaunched process is the same agent; otherwise `mv2 inspect NAME` says to kill and resume it.
 
-**After an Esc.** Claude refuses a plugin's prompts after an interrupt until you type something, so until then each message runs as Claude's own message from another session, shown and stored as mv2's text alone. A message Claude refuses is reported not delivered, and `mv2 deliver NAME --retry` sends it again. One Claude has taken but not stored after a few idle seconds, or by the end of a later turn, is reported not confirmed instead, and `--retry` leaves it: Claude holds a taken message while `/compact` or a dialog holds its turn, and stores it afterwards. Its row confirms it when it comes, and Claude refusing it later makes it not delivered. While Claude is busy, a queued message shows a short `<<MV2 id=…>>` tag in Claude's queue line until Claude stores it; the tag is how mv2 tells which message a stored row is, and it comes off before the model reads it.
+**After an Esc.** Claude refuses a plugin's prompts after an interrupt until you type something, so until then each message runs as Claude's own message from another session, shown and stored as mv2's text alone. A message Claude refuses is reported not delivered, and `mv2 deliver NAME --retry` sends it again. One Claude has taken but not stored after a few idle seconds, or by the end of a later turn, is reported not confirmed instead, and `--retry` leaves it: Claude holds a taken message while `/compact` or a dialog holds its turn, and stores it afterwards. Its row confirms it when it comes, and Claude refusing it later makes it not delivered. A message queued while Claude is busy shows as mv2's text alone, in Claude's queue line and its transcript. Rows an older mv2 stored may still show a `<<MV2 id=…>>` tag there; the agent never reads it.
 
 **Permissions.** Claude's permission prompts, login and workspace trust stay native. The agent shows `waiting`, and you attach to answer. To run without prompts in a sandbox, pass Claude's own flags in `args`, for example `"args": ["--dangerously-skip-permissions"]`.
 
@@ -214,6 +214,13 @@ Claude Code has no command that lists its models, so mv2 keeps a table of them, 
 - **Efforts.** Claude Code never refuses an effort: it uses the model's default instead. `harness.check()` refuses an effort the model doesn't take, such as `xhigh` for Sonnet 4.6, and the `[1m]` suffix on a model that doesn't take it.
 - **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
 - **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
+
+### Claude's one-shot runs
+
+A plugin can ask Claude for one reply to a conversation it gives (`harness.run_once()`, [plugin API](../develop/plugins.md)), as compaction does for its merges. mv2 writes that conversation as a short-lived session in Claude's storage, under a run folder of its own, and runs `claude -p` on it with no tools, MCP servers, commands or project settings, for one turn. A prompt without a conversation runs on its own, with no session. Nothing of it is kept: the session file and the folders mv2 made are removed afterwards.
+
+- **What still loads.** Claude reads your own user settings, so the hooks of the Claude plugins you enabled, and their language servers, still start for a run. The model still gets no tools. mv2 turns off CLAUDE.md files and auto-memory, and Claude's retry and model switch after a refusal, so a refusal comes back as one, from the model asked.
+- **Cost.** A run is billed like any Claude request on your login. A two-message run on Haiku costs about $0.0001.
 
 ### Codex's models and transcripts
 

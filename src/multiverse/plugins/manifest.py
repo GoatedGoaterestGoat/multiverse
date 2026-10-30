@@ -177,11 +177,17 @@ class Manifest:
         return allowed, held
 
     def _permission_names(self):
-        return sorted(self.permissions or (LEVEL_PERMISSIONS[self.access.request] if self.access.declared else ()))
+        if self.permissions or not self.access.declared:
+            return sorted(self.permissions)
+        # An access-only manifest at spend or above carries every harness's models.*: one line for them all.
+        models = ("models.*",) if levels.rank(self.access.request) >= levels.rank("spend") else ()
+        return sorted((*LEVEL_PERMISSIONS[self.access.request], *models))
 
 
 def permission_text(name):
-    return PERMISSIONS.get(name) or (f"use {name.split('.', 1)[1]} models (this spends tokens)"
+    if name == "models.*":
+        return "run harnesses' models once (one-shot runs; this spends tokens)"
+    return PERMISSIONS.get(name) or (f"run {name.split('.', 1)[1]}'s models once (one-shot runs; this spends tokens)"
                                      if MODEL_PERMISSION.fullmatch(name) else name)
 
 
@@ -189,7 +195,7 @@ def permission_needs(name):
     """The access level using a permission needs (1.13): the lowest level that carries it; spend for models.*; act
     for harness.*, since a launch addition needs act; None for a declaration of what the plugin's own code does,
     which no level gates (process.spawn, network.listen)."""
-    if MODEL_PERMISSION.fullmatch(name):
+    if MODEL_PERMISSION.fullmatch(name) or name == "models.*":
         return "spend"
     if name.startswith("harness."):
         return "act"

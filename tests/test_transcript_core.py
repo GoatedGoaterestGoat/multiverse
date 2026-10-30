@@ -1,5 +1,6 @@
 """Core transcript identity and paging, over metadata without native row parsing."""
 from dataclasses import replace
+from copy import deepcopy
 import fcntl
 import json
 import os
@@ -48,7 +49,7 @@ class Provider:
         if self.during_body:
             self.during_body()
         reader.check()
-        return [self.bodies[i] for i in indexes]
+        return [deepcopy(self.bodies[i]) for i in indexes]
 
     def transcript_readable(self, session, *, reader=None):
         return session.native_id in self.views
@@ -114,6 +115,42 @@ class TranscriptCoreTest(BaseTest):
             with self.subTest(kwargs), self.assertRaises(ValueError):
                 t.rows(self.root, self.directory, **kwargs)
 
+    def test_unchanged_metadata_is_reused_without_reusing_authority_or_bodies(self):
+        """Large paged histories otherwise repeat a full analysis per page; caching must not skip current identity,
+        changes to a view, or fresh bodies, since those failures can return another generation's data silently."""
+        original_view = self.provider.views[self.native_id]
+        with patch.object(t, '_validate_view', wraps=t._validate_view) as validate, \
+                patch.object(t, '_build_groups', wraps=t._build_groups) as group, \
+                patch.object(t, '_snapshot', wraps=t._snapshot) as snapshot:
+            first = t.rows(self.root, self.directory, history=True, limit=1)
+            second = t.rows(self.root, self.directory, history=True, after=first.next, limit=1)
+            third = t.rows(self.root, self.directory, history=True, after=second.next, limit=1)
+            self.assertEqual([first.rows[0].turn, second.rows[0].turn, third.rows[0].turn], ['r0', 'r0', 'r2'])
+            self.assertEqual((validate.call_count, group.call_count, snapshot.call_count), (1, 1, 3))
+            # The provider's fresh body is handed through once, not copied again at each layer.
+            body = {'fresh': ['value']}
+            with patch.object(self.provider, 'transcript_bodies', return_value=[body]):
+                page = t.rows(self.root, self.directory, limit=1)
+            self.assertIs(page.rows[0].data, body)
+            # A new object is always validated and regrouped, even if its history_version and tip stayed the same.
+            self.provider.views[self.native_id] = replace(original_view, rows=tuple(
+                replace(row, label='response') if i == 2 else row for i, row in enumerate(original_view.rows)))
+            changed = t.rows(self.root, self.directory)
+            self.assertEqual([row.turn for row in changed.rows], ['r0'] * 4)
+            self.assertEqual((validate.call_count, group.call_count), (2, 2))
+            broken = replace(original_view, rows=(original_view.rows[0], original_view.rows[0]))
+            self.provider.views[self.native_id] = broken
+            with self.assertRaises(t.Unavailable): t.rows(self.root, self.directory)
+            self.assertEqual(validate.call_count, 3)
+            self.provider.views[self.native_id] = original_view
+            # Reusing the exact view still cannot bypass a removed agent's snapshot.
+            self.directory.rename(self.directory.with_suffix('.moved'))
+            with self.assertRaises(AgentGone): t.rows(self.root, self.directory)
+        # The bound retains metadata only, never every old view of a growing file.
+        for version in range(t.VIEW_CACHE_SIZE + 2):
+            t._analyze(replace(original_view, history_version=version))
+        self.assertLessEqual(len(t._VIEW_CACHE), t.VIEW_CACHE_SIZE)
+
     def test_history_reorders_rows_and_distinguishes_rewrite_from_branch_divergence(self):
         """Compaction history order and a rewound branch must never be confused with raw-file positions."""
         self.set_rows(['prompt', 'response', 'compaction', 'prompt'], history=[2, 0, 3], context_from=1)
@@ -125,6 +162,7 @@ class TranscriptCoreTest(BaseTest):
         self.assertEqual((info.context_rows, info.rows), (2, 4))
         raw = t.rows(self.root, self.directory)
         self.assertTrue(raw.rows[1].abandoned)
+        self.assertIsNone(raw.rows[1].turn)
         self.assertFalse(raw.rows[2].in_context)
         old = self.provider.views[self.native_id]
         self.provider.views[(self.native_id, 'r3')] = old
@@ -158,6 +196,8 @@ class TranscriptCoreTest(BaseTest):
                          [('preamble', 'preamble', 1, None), ('r1', 'prompt', 3, False), ('r3', 'command', 3, True)])
         self.assertEqual((page.turns[2].command, page.turns[2].args), ('/compact', 'keep tests'))
         self.assertEqual(info.turns, 3)
+        self.assertEqual([row.turn for row in t.rows(self.root, self.directory).rows],
+                         ['preamble', 'r1', 'r1', 'r3', 'r3', 'r3', 'r1'])
         self.assertEqual(info.context_start, info.start)
         self.assertEqual([r.id for r in t.turns(self.root, self.directory, before=info.end).turns],
                          ['preamble', 'r1', 'r3'])
@@ -207,6 +247,9 @@ class TranscriptCoreTest(BaseTest):
         current = t.info(self.root, self.directory)
         self.assertEqual([(r.native_id, r.reason, r.readable) for r in current.earlier], [(self.native_id, 'clear', True)])
         self.assertEqual(current.earlier[0].generation, original.generation)
+        for selected, expected in ((None, current.generation), (original.generation, original.generation)):
+            page = t.turns(self.root, self.directory, generation=selected)
+            self.assertTrue(all(t._unpack(turn.start, t.CURSOR_PREFIX)['g'] == expected for turn in page.turns))
         with self.assertRaises(t.Changed) as replaced:
             t.rows(self.root, self.directory, after=old_page.next)
         self.assertEqual((replaced.exception.reason, replaced.exception.resume), ('replaced', current.start))

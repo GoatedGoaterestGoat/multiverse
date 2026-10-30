@@ -47,7 +47,9 @@ elif sys.argv[1:] == ['--help']:
     print(case.get('help', '  --remote <URL>'))
 else:
     directory = pathlib.Path(os.environ['MV2_AGENT_DIR'])
-    (directory / 'executed.json').write_text(json.dumps(sys.argv[1:]))
+    pending = directory / 'executed.json.pending'
+    pending.write_text(json.dumps(sys.argv[1:]))
+    pending.replace(directory / 'executed.json')
     print('FAKE CODEX READY', flush=True)
     time.sleep(120)
 ''')

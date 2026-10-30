@@ -2,13 +2,27 @@
 (not a test module). isolation.track writes a record a line, JSON, to the file MV2_TEST_TRACKED names; the worker
 adds what it sees in the tracked process groups (sample); Run.end_tracked reads them all.
 """
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import threading
 
 SRC = Path(__file__).resolve().parents[1] / "src"
+# The worker samples from a thread beside the tests, in their process, so it reaches the system only through these,
+# taken at import: never through a name a test patches process-wide, such as subprocess.Popen, Path.open, os.listdir
+# or time.sleep.
+_Popen, _PIPE, _DEVNULL = subprocess.Popen, subprocess.PIPE, subprocess.DEVNULL
+_open, _listdir, _Timer = io.open, os.listdir, threading.Timer
+_PS = shutil.which("ps") or "/bin/ps"  # and ps by its path, in an environment of its own, whatever a test does to it
+
+
+def _read(path):
+    with _open(path) as handle:
+        return handle.read()
 
 
 def process_module():
@@ -22,7 +36,7 @@ def process_module():
 def records(path):
     """The records in `path`, one JSON object a line; a line cut short when its unit was killed is skipped."""
     try:
-        lines = Path(path).read_text().splitlines()
+        lines = _read(path).splitlines()
     except (OSError, TypeError):
         return []
     found = []
@@ -44,10 +58,18 @@ def processes():
         return _linux_processes()
     start = process_module().START
     try:
-        output = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
-                                timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
+        ps = _Popen([_PS, "-A", "-o", "pid=,pgid=,stat=,lstart="], stdin=_DEVNULL, stdout=_PIPE, stderr=_DEVNULL,
+                    text=True, env={"TZ": "UTC", "LC_ALL": "C"})
+    except OSError:
+        return []
+    # Bounded by a timer, not communicate(timeout=): waiting with a timeout polls through time.sleep.
+    stop = _Timer(10, ps.kill)
+    stop.start()
+    try:
+        output = ps.communicate()[0]
+    finally:
+        stop.cancel()
+    if ps.returncode:
         return []
     found = []
     for line in output.splitlines():
@@ -61,8 +83,8 @@ def _linux_processes():
     """processes() from /proc: each process's state, group and start ticks from one read of its stat, with the boot
     id process_started puts in front of them, so a process that took a recorded PID after a reboot never matches."""
     try:
-        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        names = os.listdir("/proc")
+        boot = _read("/proc/sys/kernel/random/boot_id").strip()
+        names = _listdir("/proc")
     except OSError:
         return []
     found = []
@@ -70,7 +92,7 @@ def _linux_processes():
         if not name.isdigit():
             continue
         try:
-            text = Path("/proc", name, "stat").read_text()
+            text = _read(f"/proc/{name}/stat")
         except OSError:
             continue  # it has exited since the listing
         fields = text[text.rfind(")") + 2:].split() if ")" in text else []
@@ -105,5 +127,5 @@ def sample(path):
              for pid, group, state, started in present
              if group in attested and (pid, started) not in known and not state.startswith("Z")]
     if lines:
-        with open(path, "a") as out:
+        with _open(path, "a") as out:
             out.write("".join(lines))

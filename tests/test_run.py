@@ -244,20 +244,38 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn("FAILED", fine[0])
         self.assertEqual(result.stdout.splitlines()[-1], "FAILED (failures=1, errors=4)")
 
-    def test_a_test_that_patches_time_sleep_sees_only_its_own_calls(self):
-        """The runner's threads never sleep through time.sleep, which tests patch process-wide to drive fake clocks;
-        a runner thread in a test's fake made it fail far from the runner ('751.0 != 5', 7cd5810)."""
-        self.module("test_patched_sleep", """
-            import threading, time, unittest
+    def test_a_test_that_patches_what_the_runner_uses_sees_only_its_own_calls(self):
+        """The runner's threads, which share a process with the tests, never sleep, read a clock, start a process,
+        open a file or list a directory through what tests patch process-wide (time.sleep and time.monotonic for fake
+        clocks, subprocess.Popen to forbid processes, Path.open); a runner thread in a test's fake makes it fail far
+        from the runner ('751.0 != 5', 7cd5810; a Popen mock saw the group sampler's ps, test_runs)."""
+        self.module("test_patched_globals", """
+            import subprocess, sys, threading, unittest
             from unittest import mock
-            class PatchedSleep(unittest.TestCase):
-                def test_fake_clock(self):
-                    calls = []
-                    with mock.patch.object(time, "sleep", side_effect=lambda seconds: calls.append(seconds)):
-                        threading.Event().wait(1.5)  # long enough for any thread of the runner's to sleep
-                    self.assertEqual(calls, [], "a thread of the runner's slept in this test's fake time.sleep")
+            from isolation import track
+
+            NAMES = ("time.sleep", "time.monotonic", "subprocess.Popen", "subprocess.run", "pathlib.Path.open",
+                     "os.listdir")
+
+            class PatchedGlobals(unittest.TestCase):
+                def test_fakes(self):
+                    # A tracked process group, so that the runner looks at who is in it while the fakes are in place.
+                    leader = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                              start_new_session=True)
+                    self.addCleanup(leader.wait)
+                    self.addCleanup(leader.kill)
+                    track(pid=leader.pid)
+                    patches = [mock.patch(name) for name in NAMES]
+                    fakes = [patch.start() for patch in patches]
+                    try:
+                        threading.Event().wait(1.5)  # long enough for the runner's threads to look three times
+                    finally:
+                        for patch in patches:
+                            patch.stop()
+                    used = {name: fake.call_args_list for name, fake in zip(NAMES, fakes) if fake.call_args_list}
+                    self.assertEqual(used, {}, "a thread of the runner's went through this test's fakes")
             """)
-        result = self.run_tests("test_patched_sleep")
+        result = self.run_tests("test_patched_globals")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_a_write_under_the_guarded_home_fails_its_test_even_when_the_code_swallows_the_refusal(self):

@@ -149,9 +149,10 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         return {"universe": str(root), "plugins": plugins.listing(root, wait=None),
                 "problems": plugins.problems(root, reserved())}
     if plugin_action == "info":
+        from ..plugins import run_records
         for item in plugins.listing(root, wait=None):
             if item["name"] == name:
-                return {"universe": str(root), **item}
+                return {"universe": str(root), **item, "runs": run_records.summary(root, name)}
         plugins.entry(root, name)  # raises with the reason
     if plugin_action == "grant":
         if level is None:
@@ -433,6 +434,11 @@ def text(action, result):
         if result["permissions"]:
             lines.extend(_permission_lines(result))
             lines.append("Plugins run with your own permissions: these limits guard against mistakes, not a sandbox.")
+        runs = result.get("runs")
+        if runs is not None:
+            failed = ", ".join(f"{kind} {count}" for kind, count in sorted(runs["outcomes"].items()) if kind != "ok")
+            lines.append(f'Runs in the last day: {runs["runs"]}' + (f' ({runs["failed"]} failed: {failed})' if failed else "")
+                         + f', ${runs["cost_usd"]:.4f}.')
         for command, help_text in result["commands"].items():
             lines.append(f"Command: mv2 {command}: {help_text}")
         if result["settings"]:

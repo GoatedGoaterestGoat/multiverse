@@ -55,6 +55,61 @@ class TranscriptApiTest(PluginTestCase):
         rows = self.agent_.transcript_turn(turns.turns[0].id)
         self.assertEqual(len(rows.rows), 5)
 
+    def test_a_history_read_says_when_it_starts_at_claudes_own_summary(self):
+        """A history that starts at Claude's own compaction summary, because what came before was never stored, says
+        so on the info, history pages and turn pages, and only there; fragile because the provider knows it and
+        core dropped it once, so a plugin silently lost the only record of what came before (COMPACTION-8)."""
+        for stored in (False, True):
+            with self.subTest("what came before was " + ("stored" if stored else "never stored")):
+                rows = ClaudeRows()
+                if stored:
+                    rows.prompt("Earlier task")
+                    rows.response("earlier answer")
+                summary = rows.compaction(stored=stored)
+                rows.prompt("Go on")
+                rows.response("ok")
+                self.fake.rewrite(rows.rows)
+                expected = None if stored else summary["uuid"]
+                info = self.agent_.transcript()
+                history = self.agent_.transcript_rows(after=info.start, history=True)
+                self.assertEqual((info.summary, history.summary, self.agent_.transcript_turns().summary),
+                                 (expected,) * 3)
+                self.assertIsNone(self.agent_.transcript_rows(after=info.start).summary)  # not a history read
+                if not stored:
+                    self.assertEqual(history.rows[1].ref, expected)  # right after its boundary, labelled compaction
+                    self.assertEqual(history.rows[1].label, "compaction")
+
+    def test_a_history_row_names_its_turn(self):
+        """Each history row names the turn it belongs to, the same id turn pages give, and an abandoned row none,
+        also where turns interleave; fragile because turns interleave in history order, so a plugin slicing a
+        history read by row order alone silently puts a mid-turn command's rows into the wrong turn."""
+        rows = ClaudeRows()
+        rows.prompt("First task")
+        early = rows.response("working", tool=("tu1", "Bash", {"command": "ls"}))
+        rows.command("/model", "haiku", "Set model to haiku")  # typed while the turn runs
+        rows.tool_result("tu1", "a.txt")
+        rows.response("done")
+        rows.turn_end()
+        rows.rewind(early)
+        rows.prompt("A branch a rewind left")  # abandoned once the history goes on from the other branch
+        rows.rewind(rows.rows[6])  # the second prompt goes on from the first turn's end
+        rows.prompt("Second task")
+        rows.response("ok")
+        self.fake.rewrite(rows.rows)
+        turns = {turn.id: turn for turn in self.agent_.transcript_turns().turns}
+        info = self.agent_.transcript()
+        history = self.agent_.transcript_rows(after=info.start, history=True).rows
+        self.assertTrue(all(row.turn in turns for row in history))
+        kinds = [turns[row.turn].kind for row in history]
+        self.assertEqual(kinds.count("command"), 2)  # the /model row and its output, in the middle of the prompt turn
+        self.assertEqual([row.turn for row in history].count(history[0].turn), 5)  # the first prompt turn, split
+        raw = self.agent_.transcript_rows(after=info.start).rows
+        abandoned = [row for row in raw if row.abandoned]
+        self.assertEqual([row.data["message"]["content"] for row in abandoned], ["A branch a rewind left"])
+        self.assertIsNone(abandoned[0].turn)
+        self.assertEqual({row.ref: row.turn for row in raw if not row.abandoned},
+                         {row.ref: row.turn for row in history})  # the same turn on a raw read
+
     def test_codex_rollout_turns_and_rollback_use_the_same_public_cursor_api(self):
         """Codex's event echoes and rollback markers must produce one public turn per native input, with diverged cursors."""
         from test_codex_transcript_reading import event, message
