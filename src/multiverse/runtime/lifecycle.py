@@ -247,15 +247,18 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
-    calling_socket, run_root = (None, None) if _recovery else agent_identity.calling_paths()
+    calling_socket, run_root = (agent_identity.calling_paths() if socket_path is None and not _recovery
+                                else (None, None))
     socket_path = (_recovery['terminal']['socket'] if _recovery else
                    socket_path if socket_path is not None else calling_socket)
     storage_socket = socket_path  # Only an explicit caller selection contributes storage evidence.
-    socket_path = socket_path or str(run_root / 'tmux.sock')
     agent_dir, properties, harness, model = _record(root, name, task, harness, model, resume)
-    if _recovery:
-        saved_root = runtime(agent_dir).get('run_directory')
+    if run_root is None:
+        # An explicit terminal resumes this target, rather than placing a new
+        # child of the caller (notably when another agent wakes it).
+        saved_root = runtime(agent_dir).get('run_directory') if resume else None
         run_root = paths.recorded_directory(saved_root) if saved_root is not None else paths.run_directory()
+    socket_path = socket_path or str(run_root / 'tmux.sock')
     paths.prepare(run_root)
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness

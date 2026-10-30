@@ -46,9 +46,13 @@ class PluginLaunchTest(NativeBackendTest):
     def contexts(self, **start):
         self.adapter.calls.clear()
         parent = {"MV2_AGENT_ID": "parent-agent", "MV2_LAUNCH_ID": "parent-launch", "MV2_TMUX_SOCKET": "/parent.sock",
-                  "MV2_UNIVERSE": "/parent", "AMBIENT_SETTING": "kept"}
+                  "MV2_UNIVERSE": "/parent", "MV2_RUN_DIR": str(self.work / "caller-run"),
+                  "AMBIENT_SETTING": "kept"}
+        expected_run = (agents.runtime(self.directory)['run_directory'] if start.get('resume')
+                        else parent['MV2_RUN_DIR'])
         with patch.dict(os.environ, parent), patch.object(lifecycle, "_cli_path", return_value="/opt/mv2/bin/mv2"):
             result = lifecycle.start(self.root, socket_path="/parent.sock", **start)
+        self.assertEqual(result['runtime']['run_directory'], expected_run)
         self.addCleanup(shutil.rmtree, Path("/tmp") / ("mv2-native-" + result["runtime"]["launch_id"]), True)
         return result, [call[-1] for call in self.adapter.calls if call[0] in ("spawn", "resume")]
 
