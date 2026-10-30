@@ -138,7 +138,11 @@ class Inspector(Vertical):
     async def capture(self, row, generation):
         error = False
         try:
-            output = await asyncio.to_thread(self.app.backend.inspect, Path(row["universe"]), row["id"])
+            live_pane = getattr(self.app.backend, "live_pane", None)
+            if live_pane:
+                output = await asyncio.to_thread(live_pane, Path(row["universe"]), row["id"], row.get("harness"))
+            else:  # a backend without it shows the terminal as it is
+                output = await asyncio.to_thread(self.app.backend.inspect, Path(row["universe"]), row["id"])
         except Exception as exc:
             output, error = f"Preview unavailable: {exc}", True
         finally:

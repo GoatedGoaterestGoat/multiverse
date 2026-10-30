@@ -42,6 +42,7 @@ from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, Transcript
 from ...store import read
 from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply
 from . import models as model_table
+from . import pane
 from . import run as one_shot
 from . import transcripts as rows_source
 from .transcripts import (  # every transcript reader reads through this one row source
@@ -1209,6 +1210,10 @@ class ClaudeAdapter(ConfiguredAdapter):
     def check_model(self, model, *, effort=None, environment):
         """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
         return model_table.check(model, effort, environment)
+
+    def display_pane(self, text):
+        """The live pane without Claude's input box rules, status rows and empty prompt (pane.py)."""
+        return pane.display(text)
 
     def run_options(self, *, environment):
         """What a one-shot run can do (the run protocol, run.py): any Claude Code from 2.1.267 on, which takes

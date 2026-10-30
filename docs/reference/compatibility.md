@@ -16,8 +16,8 @@ mv2's requirements and the harness versions it was checked against are listed he
 
 | Harness | Version | What was checked |
 | --- | --- | --- |
-| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
-| Claude Code | 2.1.314 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and, from its renderer's snapshots, the composer and footer the dashboard's live pane leaves out. |
+| Claude Code | 2.1.314 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 The Codex check compared generated experimental app-server schemas and the
@@ -35,6 +35,12 @@ on, with no older-release notice.
 
 When checking a new Codex release, also regenerate the adapter's bundled model
 catalog from that release's source and review changes to the rollout format.
+
+When checking a new Claude Code or Codex release, also add its screens to
+`tests/fixtures/`: real captures, or Codex's renderer snapshots labelled as
+such. Then run `tests/test_pane_display.py`. The dashboard's live pane must
+still leave out the input box and the rows under it, and keep dialogs
+unchanged.
 
 Other releases may behave differently. The Claude Code mod API is early access and can change between releases.
 

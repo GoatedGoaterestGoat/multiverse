@@ -106,6 +106,9 @@ class DemoBackend:
             agent = self.find(root, reference)
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
 
+    def live_pane(self, root, reference, harness):
+        return self.inspect(root, reference)
+
     # Moves and removals are unchecked here; the real rules live in multiverse.universe.relocate.
     def move_agent(self, root, reference, destination):
         with self.lock:

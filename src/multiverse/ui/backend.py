@@ -131,6 +131,10 @@ class LocalBackend:
     def inspect(self, root, reference):
         return inspect.run(root, agent=reference)
 
+    def live_pane(self, root, reference, harness):
+        """The terminal as the inspector shows it: without the harness's own chrome, where it can say what that is."""
+        return inspect.display(root, harness, inspect.run(root, agent=reference))
+
     def attach(self, root, reference):
         return attach.run(root, agent=reference)
 
