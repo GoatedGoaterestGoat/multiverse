@@ -83,10 +83,12 @@ class OperationTest(BaseTest):
         runtime = (self.directory / 'runtime.json').read_bytes()
         launches = list((self.directory / 'launches').iterdir())
         with patch.object(self.adapter, 'resume', side_effect=ValueError('Invalid saved session')), \
-                patch.object(lifecycle, 'Tmux') as terminal:
+                patch.object(lifecycle, 'Tmux') as terminal, \
+                patch.object(lifecycle.paths, 'prepare', wraps=lifecycle.paths.prepare) as prepare:
             with self.assertRaisesRegex(ValueError, 'Invalid saved session'):
                 LocalBackend().resume(self.root, self.agent)
             terminal.assert_not_called()
+            prepare.assert_not_called()
         self.assertEqual((self.directory / 'properties.json').read_bytes(), properties)
         self.assertEqual((self.directory / 'runtime.json').read_bytes(), runtime)
         self.assertEqual(list((self.directory / 'launches').iterdir()), launches)

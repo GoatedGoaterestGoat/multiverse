@@ -259,7 +259,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved_root = runtime(agent_dir).get('run_directory') if resume else None
         run_root = paths.recorded_directory(saved_root) if saved_root is not None else paths.run_directory()
     socket_path = socket_path or str(run_root / 'tmux.sock')
-    paths.prepare(run_root)
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
     adapter = harnesses.load(root, harness)
@@ -270,7 +269,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         properties["native_session_id"] = properties["id"]
     if not shutil.which("tmux"):
         raise ValueError("tmux is required to spawn agents")
-    Tmux(socket_path).ensure(root)
     # A universe can contain agents assigned to different worktrees. Resume in
     # the agent's recorded workspace even if the universe default has changed.
     workdir = Path(properties["workspace"]).resolve() if resume and properties.get("workspace") else universe.workspace(root)
@@ -450,6 +448,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
+        # Preparation can refuse without changing runtime storage or tmux.
+        # Recovery still precedes any terminal creation or native service start.
+        paths.prepare(run_root)
+        Tmux(socket_path).ensure(root)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
             # Resume creates a fresh pane; remove only the old owned wrapper.
             old_backend, old_pane = owned(properties, previous, states=('stopped',))
