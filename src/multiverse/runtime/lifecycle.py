@@ -1213,6 +1213,9 @@ def kill(root, reference, *, attachment_only=False):
             raise ValueError('Outdated launch; refusing to kill a replacement')
         return latest
 
+    unknown_exit = ('Native exit not confirmed: process state unknown; terminal retained. '
+                    f"Run mv2 kill {properties.get('name') or agent_dir.name} again")
+
     def wait_for_exit(timeout):
         deadline = time.monotonic() + timeout
         while True:
@@ -1222,9 +1225,7 @@ def kill(root, reference, *, attachment_only=False):
                 return
             if time.monotonic() >= deadline:
                 if live == 'unknown':
-                    name = properties.get('name') or agent_dir.name
-                    raise RuntimeError('Native exit not confirmed: process state unknown; terminal retained. '
-                                       f'Run mv2 kill {name} again')
+                    raise RuntimeError(unknown_exit)
                 raise TimeoutError('Native process has not exited; terminal retained')
             time.sleep(.05)
 
@@ -1247,7 +1248,8 @@ def kill(root, reference, *, attachment_only=False):
                 update_runtime(agent_dir, launch_id, state='stopped', status='unknown', stopped_at=now())
                 backend.run('kill-pane', '-t', pane)
             elif live != 'dormant':
-                raise RuntimeError(f'Native exit not confirmed ({live}); terminal retained')
+                raise RuntimeError(unknown_exit if live == 'unknown' else
+                                   f'Native exit not confirmed ({live}); terminal retained')
             update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now(),
                            error=cancellation.reason if cancellation and cancellation.state != 'ok' else None,
                            native_cancellation=cancellation.to_dict() if cancellation else None)

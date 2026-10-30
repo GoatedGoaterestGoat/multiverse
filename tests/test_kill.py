@@ -203,13 +203,22 @@ class KillTest(TerminalBase):
             agents.update_runtime(directory, facts['launch_id'], pid=facts['pid'])
             lifecycle.kill(self.root, launched['id'])
             self.assertEqual(self.live(launched), 'dormant')
-        for number, case in enumerate(('transient inspection failure', 'persistent inspection failure', 'replacement during inspection')):
+        for number, case in enumerate(('initial inspection failure', 'transient inspection failure',
+                                       'persistent inspection failure', 'replacement during inspection')):
             with self.subTest(case=case):
                 launched, directory = self.start('inspection-' + str(number))
                 until(lambda: agents.runtime(directory).get('pid_started'))
                 saved = agents.runtime(directory)
-                signal_child, observe = Tmux.signal_child, lifecycle.observe
-                signals, failures = [], []
+                signal_child, observe, stop = Tmux.signal_child, lifecycle.observe, native.stop
+                signals, failures, cancellations = [], [], []
+                def stop_native(*args, **kwargs):
+                    result = stop(*args, **kwargs)
+                    if case == 'initial inspection failure':
+                        # Native cancellation can end its child before core tries
+                        # to observe exit or sends any terminal signal itself.
+                        signal_child(self.backend, read(directory / 'properties.json'), saved, signal.SIGTERM)
+                    cancellations.append(True)
+                    return result
                 def signal_native(backend, properties, facts, number):
                     signals.append(number)
                     if case == 'transient inspection failure':
@@ -217,7 +226,8 @@ class KillTest(TerminalBase):
                 def inspect(properties, facts, *args, **kwargs):
                     if failures and case == 'replacement during inspection':
                         self.fail('A replacement launch was observed during the old launch exit wait')
-                    if signals and (not failures or case == 'persistent inspection failure'):
+                    if (case == 'initial inspection failure' and cancellations or
+                            signals and (not failures or case == 'persistent inspection failure')):
                         failures.append(True)
                         if case == 'replacement during inspection':
                             write(directory / 'runtime.json', {**saved, 'launch_id': str(uuid4())})
@@ -225,6 +235,7 @@ class KillTest(TerminalBase):
                     return observe(properties, facts, *args, **kwargs)
                 try:
                     with patch.object(Tmux, 'signal_child', signal_native), \
+                            patch.object(native, 'stop', side_effect=stop_native), \
                             patch.object(lifecycle, 'observe', side_effect=inspect):
                         if case == 'transient inspection failure':
                             self.assertEqual(lifecycle.kill(self.root, launched['id'])['state'], 'dormant')
@@ -232,7 +243,8 @@ class KillTest(TerminalBase):
                             message = 'Outdated launch' if case == 'replacement during inspection' else 'Run mv2 kill'
                             with self.assertRaisesRegex((RuntimeError, ValueError), message):
                                 lifecycle.kill(self.root, launched['id'])
-                    self.assertEqual(signals, [signal.SIGTERM], 'Unknown proof must never escalate to SIGKILL')
+                    self.assertEqual(signals, [] if case == 'initial inspection failure' else [signal.SIGTERM],
+                                     'Unknown proof must never permit a signal or escalation to SIGKILL')
                     if case == 'persistent inspection failure':
                         self.assertGreater(len(failures), 1, 'Unknown proof must be retried within the existing deadline')
                     if case != 'transient inspection failure':
