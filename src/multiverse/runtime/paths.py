@@ -43,9 +43,31 @@ def recorded_directory(value):
     return path
 
 
+def directory_problem(directory):
+    """Name an obstruction without changing a caller's file or directory."""
+    path = Path(directory)
+    for part in (*reversed(path.parents), path):
+        try:
+            info = part.stat()
+        except FileNotFoundError:
+            if not part.is_symlink():
+                continue
+            kind = 'broken symbolic link'
+        else:
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            kind = ('regular file' if stat.S_ISREG(info.st_mode) else
+                    'FIFO' if stat.S_ISFIFO(info.st_mode) else
+                    'socket' if stat.S_ISSOCK(info.st_mode) else 'non-directory entry')
+        return f'Socket directory {path} is blocked by a {kind} at {part}. Move it aside without deleting its contents'
+    return None
+
+
 def prepare(directory=None):
     """Create a private run root; never chmod an existing user directory."""
     root = recorded_directory(directory) if directory is not None else run_directory()
+    if problem := directory_problem(root):
+        raise ValueError(problem)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = root.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o777 != 0o700:

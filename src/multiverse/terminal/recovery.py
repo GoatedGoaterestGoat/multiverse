@@ -13,6 +13,7 @@ import time
 from uuid import UUID
 
 from ..runtime.process import process_command, process_parent, process_snapshot, start_matches, valid_start
+from ..runtime.paths import directory_problem
 from ..store import write
 
 
@@ -178,7 +179,8 @@ def _probe(backend, socket):
         if reason == 'no current target':
             output = ''  # An older tmux with no sessions still answers display-message.
         elif ('no server running' in reason or 'No such file or directory' in reason and 'connecting to' in reason
-              or 'Connection refused' in reason and 'connecting to' in reason):
+              or 'Connection refused' in reason and 'connecting to' in reason
+              or 'Not a directory' in reason and 'connecting to' in reason):
             return None
         else:
             raise
@@ -335,6 +337,10 @@ def connected(backend, *, facts=None):
             if not gone:
                 raise Unreachable(f'Tmux server PID {current["pid"]} stopped answering at {socket}; '
                                   'its process identity is unavailable, so no signal or replacement server is safe; retry')
+    if problem := directory_problem(socket.parent):
+        if expected is not None:
+            raise _problem(socket, expected, problem + '; the next mv2 command will retry recovery of this server')
+        raise Unreachable(problem + '; then retry the mv2 command')
     if expected is None:
         if saved is not None:
             registry(socket).unlink(missing_ok=True)  # Its original process is proven gone.

@@ -165,6 +165,24 @@ class SocketRecoveryTest(TerminalBase):
                 write(directory / 'runtime.json', saved)
                 self.backend.snapshot(facts=saved)
 
+        with self.subTest('a file blocking the socket directory is named and left untouched'):
+            path.unlink()
+            path.parent.rmdir()
+            path.parent.write_text('keep this obstruction')
+            try:
+                _, error = self.backend.snapshot(facts=read(directory / 'runtime.json'))
+                self.assertIn('regular file', str(error))
+                self.assertIn(str(path.parent), str(error))
+                self.assertIn(f'PID {server}', str(error))
+                self.assertIn('Move it aside', str(error))
+                self.assertIn('next mv2 command', str(error))
+                self.assertEqual(path.parent.read_text(), 'keep this obstruction')
+            finally:
+                path.parent.unlink()
+                path.parent.mkdir(mode=0o700)
+                os.kill(server, signal.SIGUSR1)
+                until(path.exists)
+
         actions = [('list', listed), ('environment', lambda: self.backend.environment('PATH')),
                    ('attach', lambda: lifecycle.terminal_action(self.root, 'tester', 'attach')),
                    ('send', lambda: send.run(self.root, agent='tester', text='recover before delivery', delivery='steer')),

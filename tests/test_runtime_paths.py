@@ -42,6 +42,14 @@ class RunDirectoryTest(BaseTest):
         with self.assertRaisesRegex(ValueError, '0700'):
             paths.prepare(selected)
         self.assertEqual(selected.stat().st_mode & 0o777, 0o755)
+        blocked = self.work / 'blocked-run'
+        blocked.write_text('keep this file')
+        for candidate in (blocked, blocked / 'nested'):
+            with self.subTest(blocked_directory=candidate):
+                with self.assertRaisesRegex(ValueError, 'regular file.*Move it aside') as error:
+                    paths.prepare(candidate)
+                self.assertIn(str(blocked), str(error.exception))
+                self.assertEqual(blocked.read_text(), 'keep this file')
         for platform, limit in (('darwin', 103), ('linux', 107)):
             with self.subTest(platform=platform), patch.object(paths.sys, 'platform', platform):
                 suffix = '/native/' + identifier + '/rpc.sock'

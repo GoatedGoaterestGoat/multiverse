@@ -199,6 +199,8 @@ mv2 runs new agents on `~/.multiverse/run/tmux.sock`, or on the socket in `MV2_T
 
 If a cleaner removes the socket or its folder while tmux is still running, mv2 reconnects to that server. It verifies the saved PID, process start time and executable before sending `SIGUSR1`, recreates missing folders privately, and checks that the server answers. Starting or recovering a server shares a lock, with a bounded wait of 30 seconds. A healthy server whose PID and start time match the registry can be observed or joined without waiting on that lock; joining never starts a replacement server. Older tmux versions without a join-only command use the locked path. A different server answering at the same path is a conflict: mv2 names both PIDs and sends no signal.
 
+If a file blocks the socket folder, mv2 names the file and leaves it untouched. Move it aside, then repeat the command. For a recorded live server, that command retries recovery of the same server; it does not replace it.
+
 If recovery fails, the agent stays `unknown`, and the error names the socket and the process to check. Follow its manual recovery command only after verifying that PID still names the original tmux server. Do not remove `runtime.json` or start another server at the same path. Saved failed messages still need an explicit `mv2 deliver NAME --retry` or `--dismiss`; recovery never resends them.
 
 A server that answers remains usable when its process details are temporarily unreadable. mv2 saves no new signal authority until it can verify those details; a missing socket still requires the full process proof before recovery.
