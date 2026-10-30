@@ -11,6 +11,7 @@ import gc
 from pathlib import Path
 import sys
 import threading
+import time
 import weakref
 
 from rich.text import Text
@@ -44,6 +45,10 @@ from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
 
 HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
 
+
+# How long the refresh timer waits for the dashboard's first usage read, which parses every Claude transcript
+# (seconds); a read that hangs can't hold the listing back for longer.
+FIRST_USAGE_PATIENCE = 10.0
 
 class PluginCommands(Provider):
     """The command palette's plugin entries. A plugin's title is text, so it is shown as Text: Textual's own
@@ -134,6 +139,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self._harness_options = None
         self.scan_count = 0
         self.usage_reading = False  # a usage read is running in its daemon thread
+        self.first_usage_started, self.first_usage_done = None, False  # the dashboard's first read: cold, seconds long
         self._table_signature = None
         self.history = []
         self._restore_scroll = None
@@ -170,7 +176,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.load_plugin_registry()
         self.check_host()
         if self.refresh_interval:
-            self.set_interval(self.refresh_interval, self.refresh_snapshot)
+            self.set_interval(self.refresh_interval, self.timed_refresh)
             self.set_interval(HOST_REFRESH, lambda: self.check_host(start=False))
         self.query_one("#agents", DataTable).focus()
 
@@ -255,6 +261,15 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             if generation != self._scope_generation:
                 self.refresh_snapshot()
 
+    def timed_refresh(self):
+        """The refresh timer's tick. While the first usage read runs, for at most FIRST_USAGE_PATIENCE, it starts no
+        listing: one would compete with that read for the interpreter, and quitting waits for a listing in flight.
+        F5 and a change of scope refresh at once regardless."""
+        if (not self.first_usage_done and self.first_usage_started is not None
+                and time.monotonic() - self.first_usage_started < FIRST_USAGE_PATIENCE):
+            return
+        self.refresh_snapshot()
+
     def read_usage(self):
         """Read the shown agents' usage in a daemon thread and fill their cells when it lands. A refresh never waits
         for it and quitting leaves it behind: in a new process it parses every Claude transcript, for seconds. One
@@ -266,6 +281,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         if not rows:
             return
         self.usage_reading = True
+        if self.first_usage_started is None:
+            self.first_usage_started = time.monotonic()
 
         def run():
             try:
@@ -282,6 +299,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def apply_usage(self, found):
         """Put a usage read into the rows that still show what it was read for."""
         self.usage_reading = False
+        self.first_usage_done = True
         changed = False
         for member in (self.snapshot or {}).get("agents", []):
             reading = found.get(usage_key(member))

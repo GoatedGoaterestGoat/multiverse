@@ -1,4 +1,5 @@
 """Views written before the dashboard's columns were renamed still show those columns."""
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.runtime import native
+from multiverse.ui import app as appmod
 from multiverse.ui.backend import usage_identity, usage_key
 from multiverse.ui.views import view
 from multiverse.universe import templates
@@ -124,6 +126,44 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     d.app.apply_usage({usage_key(row): (then, reading(1000))})
                     await d.settle()
                     self.assertEqual(self.cells(d)["ada"], "82k/200k")
+
+    async def test_the_refresh_timer_starts_no_listing_during_the_first_usage_read_for_at_most_its_bound(self):
+        """While the first usage read of a dashboard runs, the refresh timer starts no listing, for at most
+        FIRST_USAGE_PATIENCE, and F5 still refreshes at once; fragile because a listing started then competes with
+        that read for the interpreter and quitting waits for it, which shows only as a slow quit on a busy machine."""
+        self.agent("ada")
+        gate, calls, started = threading.Event(), [], []
+        self.addCleanup(gate.set)
+        patience = 2.0
+
+        def usage_snapshot(scope, properties, facts, reconciled=False):  # a first read that never lands
+            calls.append(properties["name"])
+            gate.wait(30)
+            return reading(82000)["usage"]
+
+        with mock.patch.object(native, "usage_snapshot", usage_snapshot), \
+                mock.patch.object(appmod, "FIRST_USAGE_PATIENCE", patience):
+            d = self.dashboard()
+            d.app.refresh_interval = 0.2  # the driver runs without a timer; this test is about the timer
+            listing = d.app.backend.snapshot
+
+            def snapshot(root):
+                started.append(time.monotonic())
+                return listing(root)
+
+            d.app.backend.snapshot = snapshot
+            async with d:
+                await d.until(lambda: calls, "the first usage read")
+                begun = d.app.first_usage_started
+                with self.subTest("F5 still refreshes at once"):
+                    await asyncio.sleep(0.6)  # several timer ticks first
+                    before = len(started)
+                    await d.press("f5")
+                    await d.until(lambda: len(started) > before, "F5's listing")
+                    self.assertLess(started[before], begun + patience)  # F5's own, not the timer's after the bound
+                with self.subTest("the timer starts no listing while the read runs, and starts again after the bound"):
+                    await d.until(lambda: any(at >= begun + patience for at in started), "a timer listing after the bound")
+                    self.assertEqual(len([at for at in started if begun <= at < begun + patience]), 1)  # F5's alone
 
     def test_quitting_never_waits_for_a_usage_read(self):
         """q ends the process while a usage read is still running, leaving that read behind; fragile because a read
