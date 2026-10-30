@@ -126,7 +126,8 @@ class RunsTest(BaseTest):
         self.no_content()
 
     def test_housekeeping_never_hides_a_paid_reply_or_writes_to_the_callers_terminal(self):
-        """Housekeeping must not discard paid replies, write to the terminal or reject a dotfiles or universe home."""
+        """Housekeeping must preserve paid replies and allow a universe home, while linked or appended namespaces
+        must never place a real child inside agent storage or a removable trash entry."""
         for condition in ('sweep problem', 'dotfiles home', 'cleanup after success'):
             with self.subTest(condition):
                 counter = self.work / ('calls-' + condition.replace(' ', '-'))
@@ -174,12 +175,39 @@ class RunsTest(BaseTest):
             with self.subTest(universe=layout), patch.dict(os.environ, HOME=str(home)):
                 root = templates.create(home / layout, 'run-fixture')
                 before = {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()}
-                self.assertTrue(runs.options(adapter, environment=environment, root=root).supported)
+                self.assertTrue(runs.options(adapter, environment=environment, root=root, plugin='fixture').supported)
                 reply = runs.run_once(adapter, replace(REQUEST, model='haiku'), root=root, plugin='fixture',
                                       environment=environment)
                 self.assertEqual(reply.text, 'fake reply')
                 self.assertEqual(runs.base(), home / '.multiverse/runs')
                 self.assertEqual(list(runs.base().iterdir()), [])
+                self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()})
+
+        for placement in ('linked agent state', 'plugin under trash'):
+            with self.subTest(placement=placement):
+                home = self.work / placement.replace(' ', '-')
+                home.mkdir()
+                if placement == 'linked agent state':
+                    root = templates.create(home / 'universe', 'linked')
+                    external = home / 'external-store'
+                    (root / 'state').rename(external)
+                    (root / 'state').symlink_to(external, target_is_directory=True)
+                    logical = root / 'state/agents' / str(uuid4())
+                    logical.mkdir()
+                    selected_home, plugin = logical, 'fixture'
+                else:
+                    root = templates.create(home / '.multiverse/runs', 'run-base')
+                    selected_home, plugin = home, 'trash'
+                environment['HOME'] = str(selected_home)
+                before = {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                with patch.dict(os.environ, HOME=str(selected_home)):
+                    availability = runs.options(adapter, environment=environment, root=root, plugin=plugin)
+                    with self.assertRaises(RunFailure) as caught:
+                        runs.run_once(adapter, replace(REQUEST, model='haiku'), root=root, plugin=plugin,
+                                      environment=environment)
+                self.assertEqual(caught.exception.kind, 'unavailable')
+                self.assertFalse(availability.supported)
+                self.assertEqual(caught.exception.reason, availability.reason)
                 self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob('*') if p.is_file()})
 
     def test_refusals_happen_before_content_or_processes(self):
@@ -209,23 +237,35 @@ class RunsTest(BaseTest):
             other = templates.create(self.work / 'other-universe', 'other')
             alias = self.work / 'linked-state'
             alias.symlink_to(self.root / 'state', target_is_directory=True)
-            destinations = [('agent', self.work / 'other/state/agents/someone/runs'),
-                            ('linked state', alias / 'runs')]
+            destinations = [('agent', self.work / 'other/state/agents/someone/runs', 'fixture', 'fake'),
+                            ('linked state', alias / 'runs', 'fixture', 'fake')]
             for universe in (self.root, other):
                 for namespace in ('state', 'subverses', 'trash'):
-                    destinations.append((f'{universe.name}/{namespace}', universe / namespace / 'runs'))
-            for label, destination in destinations:
+                    destinations.append((f'{universe.name}/{namespace}', universe / namespace / 'runs', 'fixture', 'fake'))
+                    external = (self.work if universe == self.root else universe) / ('relocated-' + namespace)
+                    original = universe / namespace
+                    if original.exists():
+                        original.rename(external)
+                    else:
+                        external.mkdir()
+                    original.symlink_to(external, target_is_directory=True)
+                    destinations.append((f'linked {universe.name}/{namespace}', external / 'runs', 'fixture', 'fake'))
+            destinations.extend([('plugin enters trash', other, 'trash', 'fake'),
+                                 ('owner enters trash', other.parent, other.name, 'trash')])
+            for label, destination, plugin, owner in destinations:
                 with self.subTest(base=label), patch.object(runs, 'base', return_value=destination):
                     provider = Provider()
-                    availability = runs.options(provider, environment=self.environment, root=self.root)
+                    provider.name = owner
+                    existed = destination.exists()
+                    availability = runs.options(provider, environment=self.environment, root=self.root, plugin=plugin)
                     self.assertFalse(availability.supported)
                     self.assertEqual(provider.environments, [])  # Not even the version probe may run here.
                     with self.assertRaises(RunFailure) as caught:
-                        self.run_once(provider)
+                        runs.run_once(provider, REQUEST, root=self.root, plugin=plugin, environment=self.environment)
                     self.assertEqual(caught.exception.kind, 'unavailable')
                     self.assertEqual(caught.exception.reason, availability.reason)
                     self.assertEqual(provider.environments, [])
-                    self.assertFalse(destination.exists())
+                    self.assertEqual(destination.exists(), existed)
             for condition in ('agent replaced', 'universe replaced', 'another agent', 'another universe',
                               'scope without agent', 'scope with unexpected agent'):
                 with self.subTest(scope=condition):

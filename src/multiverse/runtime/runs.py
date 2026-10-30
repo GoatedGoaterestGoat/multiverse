@@ -49,11 +49,15 @@ def _environment(environment):
     return MappingProxyType(result)
 
 
-def options(adapter, *, environment, root=None):
+def options(adapter, *, environment, root=None, plugin=None, agent_directory=None):
     """Observe the provider on the same scrubbed environment used to prepare a run."""
     effects.require('run_options', getattr(adapter, 'name', 'harness'))
-    if root is not None and (problem := _storage_problem(root, base())):
-        return RunOptions(supported=False, reason=problem)
+    if root is not None:
+        destination = base()
+        if plugin is not None:
+            destination = _run_parent(adapter, plugin, agent_directory, destination)
+        if problem := _storage_problem(root, destination):
+            return RunOptions(supported=False, reason=problem)
     if not callable(getattr(adapter, 'run_options', None)):
         return RunOptions(supported=False, reason='This harness has no one-shot run provider')
     try:
@@ -183,14 +187,19 @@ def base():
     return (Path.home() / '.multiverse' / 'runs').resolve()
 
 
-def _storage_problem(root, run_base):
-    """Runs may share a home universe, but never its scanned or mutable namespaces."""
-    run_base = Path(run_base).resolve()
+def _run_parent(adapter, plugin, agent_directory, run_base):
+    owner = Path(agent_directory).name if agent_directory is not None else getattr(adapter, 'name', 'harness')
+    return run_base / run_files.component(plugin) / run_files.component(owner)
+
+
+def _storage_problem(root, destination):
+    """The final placement and protected namespaces must be compared through their links."""
+    destination = Path(destination).resolve()
     universes = {Path(root).resolve()}
-    universes.update(parent for parent in run_base.parents if (parent / 'universe.json').is_file())
-    protected = (universe / name for universe in universes for name in ('state', 'subverses', 'trash'))
-    if (agent_files.agent_folder(run_base) is not None
-            or any(run_base == folder or folder in run_base.parents for folder in protected)):
+    universes.update(parent for parent in destination.parents if (parent / 'universe.json').is_file())
+    protected = ((universe / name).resolve() for universe in universes for name in ('state', 'subverses', 'trash'))
+    if (agent_files.agent_folder(destination) is not None
+            or any(destination == folder or folder in destination.parents for folder in protected)):
         return "One-shot run storage must be outside agent folders and universes' state, subverses and trash"
     return None
 
@@ -353,14 +362,15 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
               or scope.agent_directory != (str(agent) if agent is not None else None)):
             raise RunFailure('invalid_request', 'The run scope snapshot belongs to another universe or agent')
         scopes = scope.records()
-        owner = run_files.component(agent.name if agent is not None else getattr(adapter, 'name', 'harness'))
         executor = RunExecutor(deadline=started + timeout, cancel=cancel, scopes=scopes)
         executor.check()
         run_base = base()
-        if problem := _storage_problem(root, run_base):
+        identifier = str(uuid4())
+        directory = RunDirectory(path=_run_parent(adapter, plugin, agent, run_base) / identifier, id=identifier)
+        if problem := _storage_problem(root, directory.path):
             raise RunFailure('unavailable', problem)
         environment = _environment(environment)
-        supported = options(adapter, environment=environment, root=root)
+        supported = options(adapter, environment=environment)
         executor.check()
         if not supported.supported:
             raise RunFailure('unavailable', supported.reason)
@@ -371,8 +381,6 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
         executor.check()
         if not isinstance(checked, ModelCheck) or checked.ok is not True:
             raise RunFailure('invalid_request', checked.reason if isinstance(checked, ModelCheck) else 'Invalid model check')
-        identifier = str(uuid4())
-        directory = RunDirectory(path=run_base / run_files.component(plugin) / owner / identifier, id=identifier)
         plan = effects.call(adapter, 'run_plan', request, environment=environment, run=directory)
         executor.check()
         payload = _plan(plan, directory, environment, adapter)

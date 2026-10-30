@@ -1337,7 +1337,8 @@ class Harness:
             adapter = _call(harnesses.load, self._universe.path, self.name)
             environment = _absolute_storage(adapter, _launch_environment(adapter), os.getcwd())
             return _from_core(RunOptions, _call(runs.options, adapter, environment=environment,
-                                                root=self._universe.path))
+                                                root=self._universe.path,
+                                                plugin=self._universe._plugin.name))
 
     def run_once(self, messages=(), *, prompt, system, model, effort=None, agent=None, transport_retries=None,
                  timeout=600, cancel=None):
@@ -1366,7 +1367,8 @@ class Harness:
             adapter = _call(harnesses.load, root, self.name)
             environment = self._run_environment(adapter, agent)
             _call(runs.check_scope, scope)
-            options = _call(runs.options, adapter, environment=environment, root=root)
+            options = _call(runs.options, adapter, environment=environment, root=root, plugin=plugin.name,
+                            agent_directory=agent.directory if agent is not None else None)
             _call(runs.check_scope, scope)
             self._check_against(options, messages, transport_retries)
 

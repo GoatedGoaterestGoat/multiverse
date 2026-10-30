@@ -39,7 +39,7 @@ class RunApiTest(PluginTestCase):
                 raise answer
             return answer or types.RunReply(text="Only the plugin sees this", model="claude-haiku-4-5", usage={"input": 3,
                                             "output": 1, "cache_read": 40, "cache_write": 606}, cost_usd=0.0004, stop="end_turn", duration=1.5)
-        return mock.patch.multiple(runs, run_once=run_once, options=lambda adapter, *, environment, root=None: options)
+        return mock.patch.multiple(runs, run_once=run_once, options=lambda adapter, *, environment, **where: options)
 
     def run_once(self, messages=(), **keywords):
         arguments = {"prompt": "Summarise", "system": "You summarise.", "model": "haiku", **keywords}
@@ -230,13 +230,13 @@ class RunApiTest(PluginTestCase):
                         replace(directory)  # after its storage was read
                     return info
 
-                def options_then_replace(adapter, *, environment, root=None):  # the harness may take a moment here
+                def options_then_replace(adapter, *, environment, **where):  # the harness may take a moment here
                     asked.append(True)
                     if moment.startswith("options") and directory.exists():
                         replace(directory)
                     if moment == "options-unsupported":
                         return types.RunOptions(supported=False, reason="no one-shot support")
-                    return options(adapter, environment=environment, root=root)
+                    return options(adapter, environment=environment, **where)
 
                 entered = []
 
@@ -301,6 +301,20 @@ class RunApiTest(PluginTestCase):
                     self.run_once(context)
             self.assertFalse(options.supported)  # run_options() says what every run would hit
             self.assertEqual((caught.exception.kind, str(caught.exception)), ("unavailable", options.reason))
+        with self.subTest("the run's own folder counts, not only the base: a plugin named like a universe's trash"):
+            self.write_plugin("trash", RUNNER, {"plugin.py": "def register(mv): pass\n"})
+            self.enable("trash")
+            trash = api.Plugin(loader.load(self.entry("trash"))).universe(self.root).harness("claude")
+            beside = templates.create(self.work / "beside" / ".multiverse", "beside")  # a universe at the run base
+            with mock.patch.object(runs, "base", return_value=beside):
+                self.assertTrue(self.claude.run_options().supported)  # runner/claude there is fine
+                options = trash.run_options()
+                with self.assertRaises(api.RunError) as caught:
+                    trash.run_once(context, prompt="Summarise", system="", model="haiku")
+            self.assertFalse(options.supported)
+            self.assertEqual((caught.exception.kind, str(caught.exception)), ("unavailable", options.reason))
+            self.assertFalse((beside / "trash" / "claude").exists())
+            self.assertFalse(run_records.path(self.root, "trash").exists())  # refused before it ran, as run_options()
         self.assertEqual(len(fake.requests), 3)  # the refused ones never reached the run
         self.assertEqual([item["outcome"] for item in self.records()], ["ok", "rate_limit", "invalid_request",
                                                                          "invalid_request"])  # run_options() refused that one before it ran

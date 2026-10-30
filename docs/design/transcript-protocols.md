@@ -290,9 +290,11 @@ custom harnesses report it unsupported.
   is this process's, not the agent's: launches don't record it.
 - **The run** is core's (`runtime/runs.py`): a private directory under
   `~/.multiverse/runs/`, including when `~/.multiverse` is a home-folder
-  universe. The resolved run base stays outside agent folders and every universe's
-  `state/`, `subverses/` and `trash/`, the namespaces mv2 scans or removes;
-  `run_options()` and execution share this check. The adapter's declared session
+  universe. The complete destination, including plugin, owner and run UUID,
+  stays outside agent folders and every universe's `state/`, `subverses/`
+  and `trash/`, the namespaces mv2 scans or removes. Both the destination and
+  protected folders are resolved through links. `run_options()` checks the
+  plugin/owner directory with the same rule; execution checks its exact run path. The adapter's declared session
   file is created exclusively and removed afterwards, and a small supervisor owns
   the child's process group, the deadline and `cancel`, and stops it with TERM then KILL
   when the caller ends. A reply is returned even when cleanup leaves

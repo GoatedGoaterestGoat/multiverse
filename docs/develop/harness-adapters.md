@@ -333,11 +333,14 @@ calling process's and the harness settings', as described in the
 
 Core chooses a private directory under the initiating user's
 `~/.multiverse/runs/PLUGIN/AGENT-OR-HARNESS/UUID`. This also works when
-`~/.multiverse` is the universe. The resolved run base must stay outside agent
-folders and every universe's `state/`, `subverses/` and `trash/` namespaces,
-which mv2 scans, moves or removes. Core applies the same location check before
-reporting run support and before preparing a run; an unsafe location reports
-unsupported without probing the provider. A home managed as a dotfiles repository
+`~/.multiverse` is the universe. The complete run directory must stay outside
+agent folders and every universe's `state/`, `subverses/` and `trash/`
+namespaces, which mv2 scans, moves or removes. Core resolves both the destination
+and those protected folders before comparing them, including when a namespace is
+a link. Options check this plugin's selected owner directory; execution checks
+the full path including the fresh run UUID before preparing the provider. The
+same location rule applies to both, so an unsafe location reports unsupported
+without probing the provider. A home managed as a dotfiles repository
 is allowed; the provider disables project settings and instructions for the run. Files are relative to that directory, or one declared session file under
 the adapter's selected store. That store file names this run's UUID. All files
 are created exclusively with private permissions and a metadata-only ownership
