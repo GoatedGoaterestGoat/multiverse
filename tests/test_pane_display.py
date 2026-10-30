@@ -40,6 +40,10 @@ CODEX_BUILT = {
     "a sent message over a dialog": ("› fix the bug\n\n  🔒  This conversation is open in another app\n\n"
                                      "   r retry   f fork   esc/⌃c/q exit\n", None),
 }
+# Built, not captured: rows right on a box 30 columns wide that are not Claude's own stay: conversation, and a
+# command menu row ending where a hint would.
+CLAUDE_BOX = "\n" + "─" * 30 + "\n❯\xa0\n" + "─" * 30 + "\n  Haiku 5.5"
+CLAUDE_ON_BOX = ("⏺ Earlier conversation\n  The result is SECRET-END", "    /mobile  Show QR code to")
 CAPTURE = "conversation\n  ----------\n\n────────\n❯\xa0\n────────\n  status"
 
 
@@ -72,6 +76,10 @@ class PaneDisplayTest(BaseTest):
                     self.assertEqual(frame["shown"] == frame["text"], frame["name"] in UNCHANGED)
                     if frame["name"] == "idle":
                         self.assertIn("  ---", frame["shown"].split("\n"))
+        claude = harnesses.load(self.root, "claude")
+        for above in CLAUDE_ON_BOX:
+            with self.subTest(harness="claude", screen=above):
+                self.assertEqual(claude.display_pane(above + CLAUDE_BOX), above)
         codex = harnesses.load(self.root, "codex")
         for name in ("started", "started-layouts", "loading", "resuming", "refusal"):
             for number, frame in enumerate(json.loads((FIXTURES / f"codex/{name}-0.163.0.json").read_text())):

@@ -41,11 +41,11 @@
  },
  {
   "name": "commands",
-  "note": "the command menu above the box stays, all but its last row, which is the row above the box",
+  "note": "the command menu above the box stays, with the typed /mo gone",
   "cli_version": "2.1.314",
   "width": 80,
   "text": "\n❯ Do not run any tools. Reply with exactly these lines, as plain text, then\n  stop:\n  Before the rule\n  -----------------------------------------------------------------------------\n  ---------------------------------\n  ─────────────────────────────────────────────────────────────────────────────\n  ───────────────────────────────────\n  After the rule\n\n⏺ Before the rule\n\n  ──────────────────────────────────────────────────────────────────────────────\n\n  ❯ /model                          Set the AI model for Claude Code\n                                    (currently Haiku 5.5)\n    /mobile                         Show QR code to download the Claude mobile\n                                    app\n────────────────────────────────────────────────────────────────────── haiku-a ─\n❯ /mo\n────────────────────────────────────────────────────────────────────────────────\n  ⚠ multiverse: starting\n  Haiku 5.5 medium | mv2-pane-try | 45k · 4% used | weekly 49% left\n  ⏵⏵ auto mode on (shift+tab to cycle)\n",
-  "shown": "\n❯ Do not run any tools. Reply with exactly these lines, as plain text, then\n  stop:\n  Before the rule\n  -----------------------------------------------------------------------------\n  ---------------------------------\n  ─────────────────────────────────────────────────────────────────────────────\n  ───────────────────────────────────\n  After the rule\n\n⏺ Before the rule\n\n  ──────────────────────────────────────────────────────────────────────────────\n\n  ❯ /model                          Set the AI model for Claude Code\n                                    (currently Haiku 5.5)\n    /mobile                         Show QR code to download the Claude mobile"
+  "shown": "\n❯ Do not run any tools. Reply with exactly these lines, as plain text, then\n  stop:\n  Before the rule\n  -----------------------------------------------------------------------------\n  ---------------------------------\n  ─────────────────────────────────────────────────────────────────────────────\n  ───────────────────────────────────\n  After the rule\n\n⏺ Before the rule\n\n  ──────────────────────────────────────────────────────────────────────────────\n\n  ❯ /model                          Set the AI model for Claude Code\n                                    (currently Haiku 5.5)\n    /mobile                         Show QR code to download the Claude mobile\n                                    app"
  },
  {
   "name": "narrow",
