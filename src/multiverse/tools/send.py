@@ -5,6 +5,7 @@ import sys
 from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime
+from ..terminal.recovery import Unreachable
 from ..store import lock, now, read
 from ..universe import agents, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
@@ -128,7 +129,7 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                 except access.Denied:
                     raise
                 except Exception as error:
-                    binding_error = str(error)
+                    binding_error = error
             target = properties.get('native_session_id')
             message = append_message(directory, text, sender, delivery, target_session=target)
         result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
@@ -144,7 +145,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             return ({**result, 'state': 'error', 'saved': True, 'ok': False,
                      'native_delivery': delivery_summary(receipt)}, receipt)
         if binding_error:
-            receipt = {'state': 'error', 'reason': binding_error}
+            receipt = {'state': 'error', 'reason': str(binding_error),
+                       'value': {'repair_terminal': True} if isinstance(binding_error, Unreachable) else None}
             update_message(directory, message['id'], submission_state='failed', attempts=[receipt])
             return ({**result, 'state': 'error', 'saved': True, 'ok': False,
                      'native_delivery': delivery_summary(receipt)}, receipt)
@@ -153,7 +155,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
         except access.Denied:
             raise
         except Exception as error:
-            receipt = {"state": "error", "reason": str(error)}
+            receipt = {"state": "error", "reason": str(error),
+                       'value': {'repair_terminal': True} if isinstance(error, Unreachable) else None}
             try:
                 _, tracking = message_record(directory, message['id'])
                 if tracking.get('submission_state', 'pending') == 'pending':

@@ -70,6 +70,12 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     if value.get('paused') is True:
         return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
+        if value.get('repair_terminal') is True:
+            why = failure_reason(reason, text, preserve_details=True)
+            action = 'check' if check else 'retry'
+            prefix = f'{name}: could not check delivery' if check else f'Not delivered to {name}'
+            return (f'{prefix}: {why}. Saved; resolve the named terminal problem, '
+                    f'then mv2 deliver {name} --{action}.')
         if value.get('repair_journal'):
             return (f'{name}: could not {"check delivery" if check else "retry saved message"}: {clean(reason)}. '
                     f'Saved; after repairing the journal, run mv2 deliver {name} --{"check" if check else "retry"}.')

@@ -297,6 +297,8 @@ def observe(properties, runtime, snapshots=None):
 def owned(properties, runtime, *, states=('alive',)):
     result = observe(properties, runtime)
     if result["live"] not in states:
+        if isinstance(result['reason'], recovery.UnreachableReason):
+            raise recovery.Unreachable(result['reason'])
         reason = f': {result["reason"]}' if result["reason"] else ''
         raise ValueError(f'Cannot operate on agent: {result["live"]}{reason}')
     return Tmux(runtime["tmux"]["socket"]), runtime["tmux"]["pane"]

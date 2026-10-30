@@ -25,6 +25,7 @@ from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message
 from ..harnesses.types import ObservedBinding, normalize_session_id
 from ..store import lock, now, read
 from ..terminal.tmux import owned, observe, observation_key
+from ..terminal.recovery import Unreachable
 from ..universe import agents, records
 from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
 
@@ -845,7 +846,8 @@ def _check_delivery_receipt(directory, adapter, session, executor, message, trac
     except Denied:
         raise
     except Exception as error:
-        return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
+        return {**NativeResult('error', f'Receipt check failed: {error}',
+                              {'repair_terminal': True} if isinstance(error, Unreachable) else None).to_dict(), 'ok': False}
 
 
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
@@ -871,6 +873,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
                        'reason': f'Cannot load recipient adapter: {error}', 'at': now(),
                        'value': {**({'check_error': True} if check else {}),
+                                 **({'repair_terminal': True} if isinstance(error, Unreachable) else {}),
                                  **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
             if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
                 update_message(directory, message_id, submission_state='failed',
@@ -929,7 +932,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         except Denied:
             raise
         except Exception as error:
-            result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id}
+            result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id,
+                      'value': {'repair_terminal': True} if isinstance(error, Unreachable) else None}
             update_message(directory, message_id, submission_state='failed', attempts=[*previous, result])
             return result
         launch_only = _launch_only_delivery(adapter, session, selected_mode)
@@ -1086,7 +1090,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
 def _wake_failure(directory, message_id, error):
     _, tracking = message_record(directory, message_id)
     receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
-               'value': {'wake_refused': True, **({'repair_runtime': str(error.file)}
+               'value': {'wake_refused': True, **({'repair_terminal': True} if isinstance(error, Unreachable) else {}),
+                         **({'repair_runtime': str(error.file)}
                    if isinstance(error, records.RecordError) and error.file.name == 'runtime.json' else {})}}
     # If startup was registered, uncertainty belongs to the runner. Never
     # turn a possibly submitted command-line prompt into a retryable failure.

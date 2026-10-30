@@ -177,6 +177,15 @@ class SocketRecoveryTest(TerminalBase):
                 self.assertIn('Move it aside', str(error))
                 self.assertIn('next mv2 command', str(error))
                 self.assertEqual(path.parent.read_text(), 'keep this obstruction')
+                lines = []
+                result = send.run(self.root, agent='tester', text='save behind obstruction', _present=lines.append)
+                self.assertTrue(result['saved'])
+                self.assertFalse(result['ok'])
+                self.assertIn('Move it aside', lines[0])
+                self.assertIn(str(path.parent), lines[0])
+                self.assertIn('mv2 deliver tester --retry', lines[0])
+                self.assertNotIn('resume', lines[0])
+                self.assertNotIn('mv2 kill', lines[0])
             finally:
                 path.parent.unlink()
                 path.parent.mkdir(mode=0o700)
@@ -232,6 +241,16 @@ class SocketRecoveryTest(TerminalBase):
                 with self.assertRaisesRegex(RuntimeError, 'No signal sent'):
                     lifecycle.start(self.root, name='refused', harness='fake', socket_path=self.socket)
                 self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+            lines = []
+            result = send.run(self.root, agent='tester', text='save behind conflict', _present=lines.append)
+            self.assertTrue(result['saved'])
+            self.assertFalse(result['ok'])
+            self.assertIn(f'PID {old}', lines[0])
+            self.assertIn(f'PID {other}', lines[0])
+            self.assertIn('No signal sent', lines[0])
+            self.assertIn('mv2 deliver tester --retry', lines[0])
+            self.assertNotIn('resume', lines[0])
+            self.assertNotIn('mv2 kill', lines[0])
             self.assertEqual(int(self.backend._run('display-message', '-p', '#{pid}')), other)
             original = read(directory / 'runtime.json')
             for legacy in (True, False):
