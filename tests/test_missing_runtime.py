@@ -249,6 +249,10 @@ class DiscoveryTest(BaseTest):
         launch."""
         self.properties['workspace'] = str(self.work)
         write(self.directory / 'properties.json', self.properties)
+        def identity(pane, args):
+            self.assertEqual(args[:4], ('display-message', '-p', '-t', pane['pane_id']))
+            return '\t'.join(('1234', '5678', pane['session_id'], pane['pane_id'],
+                              pane['@mv2_agent_id'], pane['@mv2_universe_id'], pane['@mv2_launch_id']))
         for replaced in ('pane', 'generation'):
             with self.subTest(replaced=replaced):
                 (self.directory / 'runtime.json').unlink(missing_ok=True)
@@ -262,11 +266,11 @@ class DiscoveryTest(BaseTest):
                         write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'running'})
                     return NativeResult('ok')
                 with patch.object(missing_runtime.Tmux, 'snapshot', return_value=({'%2': pane}, None)), \
-                        patch.object(missing_runtime.Tmux, 'run') as close, \
+                        patch.object(missing_runtime.Tmux, 'run', side_effect=lambda *args: identity(pane, args)) as control, \
                         patch.object(missing_runtime.harnesses, 'load', return_value=Mock(family='codex', stop=stop)), \
                         self.assertRaisesRegex(records.RecordError, 'ownership changed'):
                     missing_runtime.kill(self.root, self.directory)
-                close.assert_not_called()
+                self.assertEqual([call.args[0] for call in control.call_args_list], ['display-message'])
 
         def late_fallback(session, executor):
             write(self.launch / 'request.json', {**self.request, 'native_mode': {'mode': 'plain'}, 'rpc_proxy': None})
@@ -294,6 +298,8 @@ class DiscoveryTest(BaseTest):
 
                 def run(backend, *args):
                     nonlocal open_pane
+                    if args[0] == 'display-message':
+                        return identity(self.pane, args)
                     self.assertEqual(args, ('kill-pane', '-t', '%2'))
                     open_pane = False
                 with patch.object(missing_runtime.Tmux, 'snapshot', snapshot), \

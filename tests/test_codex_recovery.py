@@ -30,6 +30,7 @@ from multiverse.terminal.tmux import Tmux
 from native_safety import require_checked_codex, isolated_home
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
+from isolation import isolate
 
 
 class RecoveryProtocolTest(unittest.TestCase):
@@ -99,6 +100,7 @@ class RecoveryProtocolTest(unittest.TestCase):
 
 class RecoveryWorkerTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory(prefix='mv2-recovery-', dir='/tmp')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -446,7 +448,11 @@ class RecoveryWorkerTest(unittest.TestCase):
         pane = {'pane_id': '%1', 'pane_dead': '1', '@mv2_agent_id': self.properties['id'],
                 '@mv2_universe_id': self.properties['universe_id'], '@mv2_launch_id': self.launch}
         backend = Tmux('/fake/tmux.sock')
-        with patch.object(backend, 'run') as command:
+        def identity(*args):
+            self.assertEqual(args[:4], ('display-message', '-p', '-t', '%1'))
+            return '\t'.join(('1234', '5678', '$1', '%1', self.properties['id'],
+                              self.properties['universe_id'], self.launch))
+        with patch.object(backend, 'run') as command, patch.object(Tmux, '_run', side_effect=identity):
             for change in ({'pane_dead': '0'}, {'@mv2_launch_id': 'replacement'},
                            {'@mv2_agent_id': 'other'}, {'@mv2_universe_id': 'other'}):
                 with self.subTest(change=change), patch.object(backend, 'snapshot',
@@ -455,7 +461,7 @@ class RecoveryWorkerTest(unittest.TestCase):
             command.assert_not_called()
             with patch.object(backend, 'snapshot', return_value=({'%1': pane}, None)):
                 self.assertEqual(backend.respawn(self.properties, self.facts, self.root, ['runner']),
-                                 self.facts['tmux'])
+                                 {**self.facts['tmux'], 'server_identity': {'pid': 1234, 'epoch': 5678}})
             command.assert_called_once_with('respawn-pane', '-t', '%1', '-c', str(self.root), 'runner')
 
 

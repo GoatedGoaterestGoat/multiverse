@@ -2,17 +2,24 @@
 import unittest
 from unittest.mock import patch
 
+from isolation import isolate
+
 from multiverse.terminal.tmux import Tmux, observe, owned
 
 
 class HostOwnershipTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.properties = {'id': 'agent', 'universe_id': 'universe'}
         self.runtime = {'host': 'before', 'launch_id': 'launch',
-                        'tmux': {'socket': '/recorded/socket', 'pane': '%1'}}
+                        'tmux': {'socket': '/recorded/socket', 'session': '$1', 'pane': '%1'}}
         self.pane = {'pane_dead': '0', '@mv2_agent_id': 'agent',
                      '@mv2_universe_id': 'universe', '@mv2_launch_id': 'launch'}
         self.enterContext(patch('socket.gethostname', return_value='after'))
+        def identity(*args):
+            self.assertEqual(args[:4], ('display-message', '-p', '-t', '%1'))
+            return '1234\t5678\t$1\t%1\tagent\tuniverse\tlaunch'
+        self.enterContext(patch.object(Tmux, '_run', side_effect=identity))
 
     def snapshot(self, value):
         return patch.object(Tmux, 'snapshot', return_value=value)
@@ -27,7 +34,9 @@ class HostOwnershipTest(unittest.TestCase):
             for _ in range(2):
                 self.assertEqual(observe(self.properties, self.runtime, cache)['live'], 'alive')
             snapshot.assert_called_once()
-            self.assertEqual(owned(self.properties, self.runtime)[1], '%1')
+            backend, pane = owned(self.properties, self.runtime)
+            self.assertEqual(pane, '%1')
+            self.assertEqual(backend.identity, {'pid': 1234, 'epoch': 5678})
         for field in ('@mv2_agent_id', '@mv2_universe_id', '@mv2_launch_id'):
             for value in ('different', None):
                 with self.subTest(field=field, value=value), self.snapshot(({'%1': {**self.pane, field: value}}, None)):

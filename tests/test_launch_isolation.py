@@ -630,11 +630,13 @@ class LaunchIsolationTest(unittest.TestCase):
                         backend.environment.side_effect = {'HOME': str(account)}.get
                     if server_home:
                         backend.environment.side_effect = {key: str(old_home), 'HOME': str(self.work)}.get
-                    backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
+                    backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2',
+                                                   'server_identity': {'pid': 1234, 'epoch': 5678}}
                     servers = []
-                    def terminal(socket=None, *, legacy=False):
+                    def terminal(socket=None, *, legacy=False, identity=None):
                         from multiverse.terminal.tmux import Tmux
-                        backend.prefix = Tmux(socket, legacy=legacy).prefix
+                        backend.prefix = Tmux(socket, legacy=legacy, identity=identity).prefix
+                        backend.identity = identity
                         servers.append(socket)
                         return backend
                     from multiverse.runtime import storage_adoption
