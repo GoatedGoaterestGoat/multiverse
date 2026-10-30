@@ -1,5 +1,6 @@
 """tmux identifies terminals, not agents. Tags bind a pane to one launch."""
 import os
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -8,6 +9,12 @@ import sys
 from . import recovery, statusline
 
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
+
+
+def _no_join_only_option(error):
+    # Older tmux has no -N. Its ordinary new-session is allowed only while
+    # holding our creation/recovery lock, after the normal proof checks.
+    return re.search(r"\b(?:unknown|invalid|illegal) option(?:\s+--|\s*:)?\s+['\"]?-?N\b", str(error)) is not None
 
 
 def status_setup(root, properties, launch_id, family):
@@ -88,8 +95,7 @@ class Tmux:
 
     def snapshot(self, *, facts=None):
         try:
-            with recovery.serialized(recovery.address(self)):
-                answer = recovery.connected(self, facts=facts)
+            answer = recovery.observe(self, facts=facts)
             if answer is None:
                 return {}, None
             output, _ = answer
@@ -107,17 +113,48 @@ class Tmux:
         for key in ("PATH", "PYTHONPATH", "MV2_CLI", "MV2_PYTHON"):
             if key in os.environ:
                 options.extend(["-e", f"{key}={os.environ[key]}"])
-        with recovery.serialized(recovery.address(self)):
-            recovery.connected(self)
-            result = self._run("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
-                               "-s", name, "-c", str(cwd), *options, *argv)
-            answer = recovery.connected(self)
-            server = answer[1] if answer is not None else None
+        command = ("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
+                   "-s", name, "-c", str(cwd), *options, *argv)
+        result = None
+        unsupported = False
+        if recovery.healthy(self) is not None:
+            try:
+                # -N joins only: a cleaner after the probe must not make tmux
+                # create a second server while the first still lives.
+                result = self._run('-N', *command)
+            except RuntimeError as error:
+                unsupported = _no_join_only_option(error)
+                if not (unsupported or 'no server running' in str(error) or 'connecting to' in str(error)):
+                    raise
+            else:
+                server = self._created_server()
+        if result is None:
+            with recovery.serialized(recovery.address(self)):
+                answer = recovery.connected(self)
+                if answer is not None and not unsupported:
+                    try:
+                        result = self._run('-N', *command)
+                    except RuntimeError as error:
+                        if not _no_join_only_option(error):
+                            raise
+                if result is None:
+                    result = self._run(*command)
+                server = self._created_server(locked=True)
         if len(result.split("\t")) != 3:
             # Some tmux versions return success even if server startup failed.
             raise RuntimeError(f"tmux did not return a pane identity: {result!r}")
         socket_path, session_id, pane_id = result.split("\t")
         return {"socket": socket_path, "session": session_id, "pane": pane_id, "server": server}
+
+    def _created_server(self, *, locked=False):
+        # Once new-session returned its pane identity, hand it to lifecycle even
+        # if optional signal-proof bookkeeping fails. Otherwise that live pane
+        # would escape tagging and launch-failure cleanup.
+        try:
+            answer = recovery.connected(self) if locked else recovery.observe(self)
+            return answer[1] if answer is not None else None
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            return None
 
     def ensure(self, root):
         """Seed old launch proofs before a spawn can create a server on this path."""
@@ -151,11 +188,9 @@ class Tmux:
                     continue
             except (OSError, ValueError, TypeError, AttributeError):
                 continue  # An invalid record is never authority for a signal.
-            with recovery.serialized(socket):
-                if recovery.connected(self, facts=facts) is not None:
-                    return
-        with recovery.serialized(socket):
-            recovery.connected(self)
+            if recovery.observe(self, facts=facts) is not None:
+                return
+        recovery.observe(self)
 
     def tag(self, pane, properties, launch_id):
         for key, value in (("agent_id", properties["id"]), ("universe_id", properties["universe_id"]), ("launch_id", launch_id)):

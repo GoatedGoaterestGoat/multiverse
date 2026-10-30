@@ -1,6 +1,7 @@
 """A lost tmux address is not evidence that its recorded processes exited."""
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import signal
 import subprocess
@@ -56,6 +57,69 @@ class SocketRecoveryTest(TerminalBase):
                 for future in futures:
                     future.result(timeout=15)
             self.assertEqual(signals, [server])
+
+        with self.subTest('a healthy listing does not wait behind another creator'), \
+                patch.object(recovery, 'serialized', side_effect=AssertionError('healthy observation took the recovery lock')):
+            listed()
+        with self.subTest('joining a healthy server does not wait behind another creator'), \
+                patch.object(recovery, 'serialized', side_effect=AssertionError('healthy join took the recovery lock')):
+            extra = self.backend.create('healthy-join', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+            self.backend._run('kill-pane', '-t', extra['pane'])
+        with self.subTest('a socket lost between healthy probe and join recovers the same server'):
+            original_run = self.backend._run
+            removed = []
+            def disappear(*args):
+                if args[:2] == ('-N', 'new-session') and not removed:
+                    path.unlink()
+                    removed.append(True)
+                return original_run(*args)
+            try:
+                with patch.object(self.backend, '_run', side_effect=disappear):
+                    extra = self.backend.create('recovered-join', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                self.assertEqual(removed, [True], 'An optimistic join must use tmux -N, which cannot create another server')
+                self.assertEqual(int(original_run('display-message', '-p', '#{pid}')), server)
+                original_run('kill-pane', '-t', extra['pane'])
+            finally:
+                if not path.exists():
+                    os.kill(server, signal.SIGUSR1)
+                    until(path.exists)
+
+        for known in (True, False):
+            with self.subTest(old_tmux_without_join_only=True, known=known):
+                if not known:
+                    recovery.registry(path.resolve()).unlink()
+                serial, original_run = recovery.serialized, self.backend._run
+                held, fallback = [], []
+                @contextmanager
+                def locked(socket):
+                    with serial(socket):
+                        held.append(True)
+                        try:
+                            yield
+                        finally:
+                            held.pop()
+                def old_tmux(*args):
+                    if args[0] == '-N':
+                        raise RuntimeError('tmux: unknown option -- N')
+                    if args[0] == 'new-session':
+                        self.assertTrue(held, 'Old tmux must never start outside the recovery lock')
+                        fallback.append(True)
+                    return original_run(*args)
+                with patch.object(recovery, 'serialized', side_effect=locked), \
+                        patch.object(self.backend, '_run', side_effect=old_tmux):
+                    extra = self.backend.create('old-tmux', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                self.assertEqual(fallback, [True])
+                original_run('kill-pane', '-t', extra['pane'])
+        with self.subTest(unrelated_join_error=True):
+            original_run = self.backend._run
+            def duplicate(*args):
+                if args[0] == '-N':
+                    raise RuntimeError('duplicate session: existing')
+                return original_run(*args)
+            with patch.object(self.backend, '_run', side_effect=duplicate), \
+                    patch.object(recovery, 'serialized', side_effect=AssertionError('Unrelated failure retried')):
+                with self.assertRaisesRegex(RuntimeError, 'duplicate session'):
+                    self.backend.create('duplicate', self.work, ['/stand-in'])
 
         actions = [('list', listed), ('environment', lambda: self.backend.environment('PATH')),
                    ('attach', lambda: lifecycle.terminal_action(self.root, 'tester', 'attach')),
@@ -193,11 +257,16 @@ class RecoveryProofTest(BaseTest):
                     recovery.registry(socket).unlink(missing_ok=True)
                     if stale:
                         write(recovery.registry(socket), {**proof, 'pid': 99999})
-                    with patch.object(recovery, '_probe', side_effect=[('', {'pid': 99999, 'epoch': 100}) if stale else None, answer, answer]), \
+                    created = []
+                    def create(*args):
+                        created.append(True)
+                        return f'{socket}\t$1\t%1'
+                    with patch.object(recovery, '_probe', side_effect=lambda *args:
+                            answer if created else ('', {'pid': 99999, 'epoch': 100}) if stale else None), \
                             patch.object(recovery, 'process_snapshot', return_value=None if unavailable == 'snapshot' else (token, 'S')), \
                             patch.object(recovery, 'process_command', return_value=None if unavailable == 'executable' else 'tmux'), \
                             patch.object(recovery.os, 'kill', side_effect=ProcessLookupError) as signals, \
-                            patch.object(backend, '_run', return_value=f'{socket}\t$1\t%1'):
+                            patch.object(backend, '_run', side_effect=create):
                         terminal = backend.create('new', self.work, ['/stand-in'])
                     self.assertEqual(terminal['pane'], '%1')
                     self.assertIsNone(terminal['server'])
@@ -226,6 +295,18 @@ class RecoveryProofTest(BaseTest):
             with self.assertRaisesRegex(recovery.Unreachable, 'conflicting server identities'):
                 recovery.connected(backend)
             self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+
+        for fast in (False, True):
+            for problem in (recovery.Unreachable('proof changed'), OSError('process unreadable'),
+                            subprocess.TimeoutExpired('tmux', 10)):
+                with self.subTest(post_creation_proof=type(problem).__name__, fast=fast), \
+                        patch.object(recovery, 'healthy', return_value=('panes', proof) if fast else None), \
+                        patch.object(recovery, 'observe', side_effect=problem), \
+                        patch.object(recovery, 'connected', side_effect=[None, problem]), \
+                        patch.object(backend, '_run', return_value=f'{socket}\t$1\t%1'):
+                    terminal = backend.create('created', self.work, ['/stand-in'])
+                    self.assertEqual(terminal['pane'], '%1')
+                    self.assertIsNone(terminal['server'])
 
         # The legacy parent proof must verify both runner observations too.
         facts = {'runner_pid': 23456, 'runner_started': token}
@@ -281,6 +362,20 @@ class RecoveryProofTest(BaseTest):
                     else:
                         with self.assertRaises(recovery.Unreachable):
                             recovery.connected(backend)
+        # Startup contention is allowed beyond the old five-second recovery
+        # window, but a stuck owner still has a bounded, actionable failure.
+        with self.subTest(lock_released_after_six_seconds=True), \
+                patch.object(recovery.time, 'monotonic', side_effect=[0, 6]), \
+                patch.object(recovery.time, 'sleep'), \
+                patch.object(recovery.fcntl, 'flock', side_effect=[BlockingIOError, None, None]):
+            with recovery.serialized(path):
+                pass
+        with self.subTest(lock_never_released=True), \
+                patch.object(recovery.time, 'monotonic', side_effect=[0, 31]), \
+                patch.object(recovery.fcntl, 'flock', side_effect=BlockingIOError):
+            with self.assertRaisesRegex(recovery.Unreachable, 'Another mv2 process is starting or recovering'):
+                with recovery.serialized(path):
+                    self.fail('A stuck lock was acquired')
         # Empty older servers still answer identity separately from list-panes.
         with patch.object(backend, '_run', side_effect=[RuntimeError('no current target'), '12345\t100']):
             self.assertEqual(recovery._probe(backend, path), ('', {'pid': 12345, 'epoch': 100}))

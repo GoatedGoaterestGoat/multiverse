@@ -56,14 +56,14 @@ def serialized(socket):
     path = registry(socket).with_suffix('.lock')
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with _regular(path, create=True) as stream:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while True:
             try:
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise Unreachable(f'Timed out waiting for tmux socket recovery at {socket}; retry') from None
+                    raise Unreachable(f'Another mv2 process is starting or recovering the tmux server at {socket}; timed out waiting, retry') from None
                 time.sleep(.02)
         try:
             yield
@@ -189,6 +189,46 @@ def _remember(socket, current):
     return proof
 
 
+def _recorded(socket, facts):
+    terminal = (facts or {}).get('tmux') or {}
+    recorded = terminal.get('server') if isinstance(terminal, dict) else None
+    if recorded is not None and (not isinstance(recorded, dict) or recorded.get('socket') != str(socket)
+                                or type(recorded.get('pid')) is not int or recorded['pid'] <= 0
+                                or not valid_start(recorded.get('started'))):
+        raise Unreachable(f'Tmux server identity does not name its recorded socket {socket}; repair runtime.json')
+    return recorded
+
+
+def _matches_answer(answer, saved, recorded, facts):
+    if answer is None or saved is None:
+        return False
+    current = answer[1]
+    return (current['epoch'] is not None
+            and (current['pid'], current['epoch']) == (saved['pid'], saved.get('epoch'))
+            and (recorded is None or _same(recorded, saved)
+                 or (facts or {}).get('state') in ('stopped', 'dormant', 'failed')))
+
+
+def healthy(backend, *, facts=None):
+    """A matching answering server needs no creation/recovery lock or OS query."""
+    socket = address(backend)
+    recorded = _recorded(socket, facts)
+    try:
+        saved = _saved(socket)
+    except Unreachable:
+        return None  # The locked path can repair this from a fresh process proof.
+    answer = _probe(backend, socket)
+    return (answer[0], saved) if _matches_answer(answer, saved, recorded, facts) else None
+
+
+def observe(backend, *, facts=None):
+    answer = healthy(backend, facts=facts)
+    if answer is not None:
+        return answer
+    with serialized(address(backend)):
+        return connected(backend, facts=facts)  # Re-probe after any preceding creator/recovery.
+
+
 def connected(backend, *, facts=None):
     """Under serialized(), return (panes, signal proof), or None for a gone server.
 
@@ -201,24 +241,15 @@ def connected(backend, *, facts=None):
         saved = _saved(socket)
     except Unreachable as error:
         saved, saved_error = None, error
-    terminal = (facts or {}).get('tmux') or {}
-    recorded = terminal.get('server') if isinstance(terminal, dict) else None
-    if recorded is not None and (not isinstance(recorded, dict) or recorded.get('socket') != str(socket)
-                                or type(recorded.get('pid')) is not int or recorded['pid'] <= 0
-                                or not valid_start(recorded.get('started'))):
-        raise Unreachable(f'Tmux server identity does not name its recorded socket {socket}; repair runtime.json')
+    recorded = _recorded(socket, facts)
     answer = _probe(backend, socket)
     if answer is None and saved_error is not None:
         raise saved_error  # A missing socket cannot repair an unreadable process identity.
     # Healthy observation stays one tmux query, with no process queries. PID
     # alone is insufficient: a later server may have reused it. Old tmux without
     # start_time and older registry entries take the full proof path.
-    if answer is not None and saved is not None:
-        current = answer[1]
-        if (current['epoch'] is not None and (current['pid'], current['epoch']) == (saved['pid'], saved.get('epoch'))
-                and (recorded is None or _same(recorded, saved)
-                     or (facts or {}).get('state') in ('stopped', 'dormant', 'failed'))):
-            return answer[0], saved
+    if _matches_answer(answer, saved, recorded, facts):
+        return answer[0], saved
     legacy = runner_server(facts or {}) if recorded is None else None
     states = {}
     def state(proof):
