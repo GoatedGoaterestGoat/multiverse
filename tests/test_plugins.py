@@ -292,8 +292,8 @@ class SettingsTest(PluginTestCase):
         """A settings edit changes only named keys, DELETE removes one, a schema refusal or the plugin's own check
         (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, a plugin's
         own settings screen is had where it is off too (or why not), on request and never by listing it, and
-        enabling twice never reinstalls defaults, and notes a check returns keep the settings usable and show in info
-        and settings; fragile because the check and the screen need the plugin's code even where it is off
+        enabling twice never reinstalls defaults, and notes a check returns keep the settings usable and show in info,
+        settings and as doctor problems; fragile because the check and the screen need the plugin's code even where it is off
         (COMPACTION-2), and a break quietly writes a bad file, says "no schema" on the Plugins screen, imports off
         plugins on every mv2 plugins, or drops a note such as an ignored key nobody then sees."""
         with self.subTest("only the named keys"):
@@ -335,6 +335,9 @@ class SettingsTest(PluginTestCase):
                 result = tool.run(self.root, plugin_action=action, name="noted")
                 self.assertEqual(result["notes"] if action == "settings" else result["settings"]["notes"], [note])
                 self.assertIn(note, tool.text(action, result))
+            report = doctor.run(self.root)  # and doctor counts it, so a typo can't go unseen
+            self.assertIn(f"Plugin noted: {path}: {note}", report["problems"])
+            self.assertFalse(report["ok"])
         with self.subTest("its own check, once loaded"):
             self.greeter("scary", "def register(mv):\n"
                                   "    @mv.settings.check\n"

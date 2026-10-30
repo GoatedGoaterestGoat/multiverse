@@ -208,6 +208,11 @@ def problems(root, reserved=(), wait=None):
     for found in usable:
         if found.name in now and now[found.name].state == "unusable":
             found_problems.append(now[found.name].problem)
+        elif found.name in now and found.manifest.settings is not None:
+            # What its own check noted about usable settings (1.15), such as a key it ignores: named here too, so a
+            # typo is never only on a screen nobody opened.
+            current = loader.settings(root, now[found.name])
+            found_problems.extend(f"{found.name}: {current.path}: {note}" for note in current.notes)
     replacing = {}  # what register(mv) asked for and could not have, and core columns two plugins stand in for
     for found in usable:
         loaded = now[found.name].loaded if found.name in now else None
