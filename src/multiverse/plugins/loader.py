@@ -48,6 +48,7 @@ SOURCES = ("path", "universe", "personal", "installed", "checkout", "bundled")
 # The process plugins are loaded into: cli, dashboard, host or helper.
 process = "cli"
 _lock = threading.RLock()
+_discovering = threading.local()  # the universes this thread is finding plugins for now
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
@@ -430,13 +431,23 @@ def entries(root):
         cached = _entries.get(root)
     if cached and cached[0] == signature:
         return list(cached[1])
-    found = _entries_uncached(root)
+    discovering = _discovering.__dict__.setdefault("roots", set())
+    if root in discovering:
+        # Asked again while this thread finds this universe's plugins: a loaded plugin's settings check calling the
+        # API, whose access check asks which plugins are on. Answered without running settings checks again, which
+        # would ask again, without end; on/off, the source and the grant come out the same.
+        return list(_entries_uncached(root, checks=False))
+    discovering.add(root)
+    try:
+        found = _entries_uncached(root)
+    finally:
+        discovering.discard(root)
     with _lock:
         _entries[root] = (signature, found)
     return list(found)
 
 
-def _entries_uncached(root):
+def _entries_uncached(root, checks=True):
     settings = config.load(root) if root is not None else config.Config()
     chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
     for source, directory in _source_directories(root):
@@ -471,7 +482,8 @@ def _entries_uncached(root):
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
         try:
-            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name),
+                                  checks=checks)
         except Exception as error:  # whatever happens with one plugin, every other one is still listed
             text = str(error).strip().splitlines()
             result[name] = Entry(name, "failed", on, source, directory, found, problem=(
@@ -488,7 +500,7 @@ def _entries_uncached(root):
     return [result[name] for name in sorted(result)]
 
 
-def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None):
+def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True):
     entry = Entry(name, "on" if on else "off", on, source, directory, found, shadowed=shadowed)
     if source == "universe":
         trusted = "trusted" if fingerprint else trust.state(directory)
@@ -523,7 +535,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None)
         return entry
     if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
         entry.state, entry.loaded = "loaded", known
-    if root is not None and found.settings is not None:
+    if checks and root is not None and found.settings is not None:
         # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
         # the universe's own paths.
         problem = settings(root, entry).problem
