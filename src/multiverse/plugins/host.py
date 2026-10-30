@@ -82,6 +82,8 @@ def _recorded(root):
         return {}, (f"state/plugins/host/status.json cannot be used: it holds {json.dumps(value)[:40]}, not an "
                     "object, so the host's status is unknown")
     recorded = {key: value[key] for key in STATUS_TEXT if isinstance(value.get(key), str)}
+    if "server_identity" in value:
+        recorded["server_identity"] = value["server_identity"]  # Tmux validates before any pane command.
     if _is_pid(value.get("pid")):
         recorded["pid"] = value["pid"]
     if isinstance(value.get("workers"), dict):
@@ -323,7 +325,7 @@ def _write_status(root, started, workers, restarts, stopped, state="running"):
         path = host_directory(root) / "status.json"
         with _status_lock(root):
             previous, _ = _recorded(root)
-            write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
+            write(path, {**{key: previous[key] for key in ("socket", "session", "pane", "server_identity") if key in previous},
                          "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
                          "workers": {name: {"pid": process.pid,
                                             "state": "exited" if _exited(process) else "running",
@@ -390,7 +392,8 @@ def start(root):
         return {**status(root), "started": False}
     path = host_directory(root) / "status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    where = {"socket": terminal["socket"], "session": terminal["session"], "pane": terminal["pane"]}
+    where = {"socket": terminal["socket"], "session": terminal["session"], "pane": terminal["pane"],
+             "server_identity": terminal.get("server_identity")}
     with _status_lock(root):
         recorded, _ = _recorded(root)
         if recorded.get("state") == "running" and recorded.get("pid") and running(root):
@@ -404,7 +407,7 @@ def start(root):
 
 
 def stop(root):
-    """Stop the supervisor (it stops its workers) and remove its tmux session."""
+    """Stop the supervisor and workers; remove its tmux session only with a saved server identity."""
     from ..terminal.tmux import Tmux
     root = Path(root).resolve()
     recorded = status(root)
@@ -416,9 +419,10 @@ def stop(root):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and running(root):
             time.sleep(0.1)
-    if recorded.get("session") and recorded.get("socket"):
+    if recorded.get("session") and recorded.get("socket") and recorded.get("server_identity") is not None:
         try:
-            Tmux(recorded["socket"]).run("kill-session", "-t", recorded["session"])
+            backend = Tmux(recorded["socket"], identity=recorded["server_identity"])
+            backend.run("kill-session", "-t", recorded["session"])
         except Exception:
             pass  # already gone
     return status(root)  # its `running` says whether it stopped

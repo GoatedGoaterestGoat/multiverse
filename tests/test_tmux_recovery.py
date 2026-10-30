@@ -143,6 +143,23 @@ class SocketRecoveryTest(TerminalBase):
             for pid, started in ((str(server + 1), epoch), (str(server), str(int(epoch) + 1))):
                 self.backend._discard_created([*identity[:3], pid, started])
                 self.assertIn(extra['session'], self.backend._run('list-sessions', '-F', '#{session_id}').splitlines())
+            for pid, started in ((server + 1, int(epoch)), (server, int(epoch) + 1)):
+                with self.subTest(bound_command_pid=pid, bound_command_epoch=started):
+                    bound = Tmux(self.socket, identity={'pid': pid, 'epoch': started})
+                    with self.assertRaises(recovery.ServerConflict):
+                        bound.run('set-option', '-p', '-t', extra['pane'], '@guarded', 'wrong', ';',
+                                  'kill-session', '-t', extra['session'])
+                    self.assertEqual(self.backend._run('show-options', '-pqv', '-t', extra['pane'], '@guarded'), '')
+                    self.assertIn(extra['session'], self.backend._run('list-sessions', '-F', '#{session_id}').splitlines())
+            bound = Tmux(self.socket, identity=extra['server_identity'])
+            for value in ("x'; kill-server; '", '$HOME # ~ \\ "', 'line\nnext', 'é中', ''):
+                with self.subTest(bound_literal=value):
+                    # tmux 3.4 escapes a leading $ even on the original argv path.
+                    # The guard must preserve exactly that version's literal argv behavior.
+                    self.backend._run('set-option', '-p', '-t', extra['pane'], '@original', value)
+                    expected = self.backend._run('display-message', '-p', '-t', extra['pane'], '#{@original}')
+                    bound.run('set-option', '-p', '-t', extra['pane'], '@guarded', value)
+                    self.assertEqual(self.backend._run('display-message', '-p', '-t', extra['pane'], '#{@guarded}'), expected)
             self.backend._discard_created(identity)
             self.assertNotIn(extra['session'], self.backend._run('list-sessions', '-F', '#{session_id}').splitlines())
 
@@ -315,6 +332,70 @@ class SocketRecoveryTest(TerminalBase):
                 except RuntimeError:
                     return False
             until(restored)
+
+        # A server can disappear after creation while another reuses its numeric
+        # session/pane IDs. Neither setup nor its failure cleanup may retarget it.
+        for index, stage in enumerate(('creation reply', 'first tag', 'status setup', 'failure cleanup', 'owned command', 'owned legacy command')):
+            with self.subTest(server_replaced=stage):
+                socket = str(self.work / f'creation-{index}.sock')
+                backend = Tmux(socket)
+                track(tmux_socket=socket)
+                sleeper = [sys.executable, '-c', 'import time; time.sleep(60)']
+                original_run = Tmux._run
+                original_run(backend, 'new-session', '-d', '-s', 'seed', *sleeper)
+                old_pid = int(original_run(backend, 'display-message', '-p', '#{pid}'))
+                created, swapped, tag_attempts = [], [], []
+                def replace_server():
+                    original_run(backend, 'kill-server')
+                    until(lambda: (observed := recovery.process_snapshot(old_pid)) is None
+                          or observed[1].startswith(('Z', 'X')))
+                    original_run(backend, 'new-session', '-d', '-s', 'replacement-seed', *sleeper)
+                    victim = original_run(backend, 'new-session', '-d', '-P', '-F',
+                                          '#{session_id}\t#{pane_id}', '-s', 'unrelated', *sleeper)
+                    self.assertEqual(created[0][1:3], victim.split('\t'), 'The natural server-local IDs must collide')
+                    swapped.append(int(original_run(backend, 'display-message', '-p', '#{pid}')))
+                def boundary(instance, *args):
+                    if instance.prefix != backend.prefix:
+                        return original_run(instance, *args)
+                    if args[:2] == ('-N', 'new-session'):
+                        result = original_run(instance, *args)
+                        created.append(result.split('\t'))
+                        if stage == 'creation reply':
+                            replace_server()
+                        return result
+                    if created and args[:2] == ('set-option', '-p'):
+                        tag_attempts.append(True)
+                    if created and not swapped:
+                        tag = args[:2] == ('set-option', '-p')
+                        status = args[:2] == ('set-option', '-w')
+                        if stage == 'first tag' and tag or stage in ('status setup', 'failure cleanup') and status:
+                            replace_server()
+                            if stage == 'failure cleanup':
+                                raise RuntimeError('Injected setup failure after the server changed')
+                    return original_run(instance, *args)
+                try:
+                    with patch.object(Tmux, '_run', new=boundary):
+                        with self.assertRaisesRegex(RuntimeError, 'server identit|server changed'):
+                            launched = lifecycle.start(self.root, name='creation-' + stage.replace(' ', '-'),
+                                                       harness='fake', socket_path=socket, wait=False)
+                            if stage.startswith('owned'):
+                                agent = self.root / 'state/agents' / launched['id']
+                                facts = read(agent / 'runtime.json')
+                                if stage == 'owned legacy command':
+                                    facts['tmux'].pop('server_identity')
+                                owner, pane = tmux.owned(read(agent / 'properties.json'), facts)
+                                replace_server()
+                                owner.run('kill-pane', '-t', pane)
+                    self.assertEqual(len(swapped), 1)
+                    if stage == 'creation reply':
+                        self.assertEqual(tag_attempts, [], 'Creation must refuse before handing out colliding pane IDs')
+                    self.assertEqual(set(original_run(backend, 'list-sessions', '-F', '#{session_name}').splitlines()),
+                                     {'replacement-seed', 'unrelated'}, 'Failure cleanup removed a colliding foreign session')
+                    rows = original_run(backend, 'list-panes', '-a', '-F', '#{@mv2_agent_id}|#{window_name}').splitlines()
+                    self.assertTrue(all(row.startswith('|') for row in rows), rows)
+                    self.assertEqual(int(original_run(backend, 'display-message', '-p', '#{pid}')), swapped[0])
+                finally:
+                    original_run(backend, 'kill-server')
 
 
 class RecoveryProofTest(BaseTest):

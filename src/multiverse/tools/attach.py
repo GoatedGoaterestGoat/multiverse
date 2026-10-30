@@ -13,7 +13,7 @@ def configure(parser):
 
 def run(root=None, *, agent):
     backend, pane = lifecycle.terminal_action(universe.resolve(root), agent, "attach")
-    command = [*backend.prefix, "attach-session", "-t", pane]
+    command = backend.command("attach-session", "-t", pane)
     current = os.environ.get("TMUX", "").split(",")[0]
     if current:
         origin = os.environ.get("TMUX_PANE")

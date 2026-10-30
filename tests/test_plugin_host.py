@@ -77,7 +77,8 @@ class HostStartTest(PluginTestCase):
 
         def quicker(*arguments, **options):
             self.status()  # the supervisor comes up and writes its status before create() even returns
-            return {"socket": "s", "session": "mv2-plugins-x", "pane": "%1"}
+            return {"socket": "s", "session": "mv2-plugins-x", "pane": "%1",
+                    "server_identity": {"pid": 1234, "epoch": 5678}}
         with self.subTest("its session is there already"):
             with mock.patch.object(tmux.Tmux, "create", duplicate):
                 result = host.start(self.root)
@@ -92,6 +93,27 @@ class HostStartTest(PluginTestCase):
                              ("running", os.getpid(), "mv2-plugins-x"))
             self.assertTrue(result["running"])
             self.assertLess(time.monotonic() - start, 5)
+            self.assertEqual(recorded['server_identity'], {'pid': 1234, 'epoch': 5678})
+            host._write_status(self.root, now(), {}, {}, {})
+            self.assertEqual(json.loads(path.read_text())['server_identity'], {'pid': 1234, 'epoch': 5678})
+            calls = []
+            def stop_session(backend, *args):
+                calls.append((backend.identity, args))
+            with mock.patch.object(host, 'running', return_value=False), mock.patch.object(tmux.Tmux, 'run', stop_session):
+                host.stop(self.root)
+            self.assertEqual(calls, [({'pid': 1234, 'epoch': 5678}, ('kill-session', '-t', 'mv2-plugins-x'))])
+            for missing in (True, False):
+                with self.subTest(legacy_host_without_identity=missing):
+                    record = json.loads(path.read_text())
+                    if missing:
+                        record.pop('server_identity', None)
+                    else:
+                        record['server_identity'] = None
+                    write(path, record)
+                    with mock.patch.object(host, 'running', return_value=False), \
+                            mock.patch.object(tmux, 'Tmux', side_effect=AssertionError('Unproven host pane targeted')) as terminal:
+                        host.stop(self.root)
+                    terminal.assert_not_called()
 
 
 HOLDER = """

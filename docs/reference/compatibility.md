@@ -7,7 +7,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Requirement | Version | Notes |
 | --- | --- | --- |
 | Python | 3.11 or newer | `uv sync` or `pip install .` adds the Python dependencies, `textual>=8.2.3,<9` and `websockets>=15,<18`. |
-| tmux | Any recent release | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
+| tmux | 3.2 or newer | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
 | Platform | macOS or Linux | Windows isn't supported, because mv2 needs tmux and POSIX file locks. |
 | Harness CLI | See below | Install and sign in to at least one of Codex, Claude Code or Pi. Codex is the default harness. |
 | Git, uv | Any | Only `mv2 update` needs them. It needs a Git checkout of mv2, and it syncs its environment with `uv sync --locked` when `uv` is available. |

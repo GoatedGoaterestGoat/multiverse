@@ -543,7 +543,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             else:
                 terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
                                           [sys.executable, str(runner), str(launch)])
-            backend = Tmux(terminal["socket"])
+            backend = Tmux(terminal["socket"], identity=terminal.get("server_identity"))
             progress.mark('tagging terminal')
             backend.tag(terminal["pane"], properties, launch_id)
             progress.mark('configuring terminal status')

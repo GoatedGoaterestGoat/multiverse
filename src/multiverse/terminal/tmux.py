@@ -63,11 +63,31 @@ def status_setup(root, properties, launch_id, family):
 class Tmux:
     pane_format = "\t".join("#{" + field + "}" for field in (*FIELDS, "pid", "start_time"))
 
-    def __init__(self, socket_path=None, *, legacy=False):
+    def __init__(self, socket_path=None, *, legacy=False, identity=None):
         from ..runtime.paths import run_directory
         self.default = not socket_path and not legacy
+        self.identity = identity
+        if identity is not None and (not isinstance(identity, dict)
+                                     or any(type(identity.get(key)) is not int or identity[key] <= 0
+                                            for key in ("pid", "epoch"))):
+            raise ValueError("Invalid tmux server identity")
         self.prefix = (["tmux", "-L", "multiverse-v2"] if legacy else
                        ["tmux", "-S", str(socket_path or run_directory() / 'tmux.sock')])
+
+    @classmethod
+    def for_terminal(cls, terminal, properties, runtime):
+        """Bind operations to this server; older records prove it with their pane tags."""
+        backend = cls(terminal['socket'], identity=terminal.get('server_identity'))
+        if backend.identity is None:
+            reply = backend.run('display-message', '-p', '-t', terminal['pane'],
+                                '#{pid}\t#{start_time}\t#{session_id}\t#{pane_id}\t'
+                                '#{@mv2_agent_id}\t#{@mv2_universe_id}\t#{@mv2_launch_id}').split('\t')
+            expected = [terminal['session'], terminal['pane'], properties['id'],
+                        properties['universe_id'], runtime.get('launch_id')]
+            if len(reply) != 7 or reply[2:] != expected or not all(value.isdecimal() for value in reply[:2]):
+                raise ValueError('Pane ownership changed; refusing to bind its server')
+            backend = cls(terminal['socket'], identity={'pid': int(reply[0]), 'epoch': int(reply[1])})
+        return backend
 
     def run(self, *args):
         try:
@@ -81,11 +101,26 @@ class Tmux:
                     raise error
             return self._run(*args)
 
+    def command(self, *args):
+        """Literal argv for this server, including the fence for an interactive client."""
+        if self.identity is not None:
+            # A failed if-shell parse aborts the rest of this command group.
+            # Only the fixed failure marker is parsed as a command string:
+            # the real commands retain their literal argv, even hostile text.
+            condition = ('#{&&:#{==:#{pid},' + str(self.identity['pid'])
+                         + '},#{==:#{start_time},' + str(self.identity['epoch']) + '}}')
+            args = ('if-shell', '-F', condition, '', 'mv2-server-identity-changed', ';', *args)
+        return [*self.prefix, *args]
+
     def _run(self, *args):
         # A tmux client resets stdin's O_NONBLOCK flag, even for capture/list commands.
         # Never share the native TUI's terminal file description with these helpers.
-        result = subprocess.run([*self.prefix, *args], stdin=subprocess.DEVNULL,
+        result = subprocess.run(self.command(*args), stdin=subprocess.DEVNULL,
                                 text=True, capture_output=True, timeout=10)
+        if self.identity is not None and 'unknown command: mv2-server-identity-changed' in result.stderr:
+            raise recovery.ServerConflict(f'Tmux server identity changed at {recovery.address(self)}; '
+                                          f'expected PID {self.identity["pid"]}, epoch {self.identity["epoch"]}. '
+                                          'No pane command was run; retry after resolving the server change')
         if result.returncode or result.stderr.startswith("error "):
             raise RuntimeError(result.stderr.strip() or "tmux command failed")
         return result.stdout.rstrip("\n")
@@ -185,21 +220,31 @@ class Tmux:
                             if attempt or recovery.connected(self) is None:
                                 raise recovery.Unreachable(f'Tmux socket {recovery.address(self)} vanished while joining; retry') from error
                 server = self._created_server(result, locked=True)
-        socket_path, session_id, pane_id, _, _ = _created_identity(result)
-        return {"socket": socket_path, "session": session_id, "pane": pane_id, "server": server}
+        socket_path, session_id, pane_id, pid, epoch = _created_identity(result)
+        return {"socket": socket_path, "session": session_id, "pane": pane_id, "server": server,
+                "server_identity": {"pid": int(pid), "epoch": int(epoch)}}
 
     def _created_server(self, result, *, locked=False):
         # Unreadable bookkeeping cannot strand a created pane before lifecycle
         # can tag it. A proven conflict, however, must remove our session and fail.
         identity = _created_identity(result)
+        if not identity[4]:
+            raise recovery.Unreachable('tmux did not return its server start time; cannot safely bind the new pane')
+        previous = self.identity
+        self.identity = {"pid": int(identity[3]), "epoch": int(identity[4])}
         try:
             answer = recovery.connected(self) if locked else recovery.observe(self)
-            return answer[1] if answer is not None else None
+            proof = answer[1] if answer is not None else None
+            if proof is not None and any(proof.get(key) != value for key, value in self.identity.items()):
+                raise recovery._conflict(recovery.address(self), [('creation reply', self.identity), ('later answer', proof)])
+            return proof
         except recovery.ServerConflict:
             self._discard_created(identity)
             raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             return None
+        finally:
+            self.identity = previous
 
     def _discard_created(self, identity):
         _, session, _, pid, epoch = identity
@@ -263,8 +308,9 @@ class Tmux:
         pane = panes.get(runtime['tmux']['pane'])
         if error or not matches(pane, properties, runtime) or pane['pane_dead'] != '1':
             raise ValueError(error or 'Automatic reconnect requires the dead owned pane')
+        self.identity = self.for_terminal(runtime['tmux'], properties, runtime).identity
         self.run('respawn-pane', '-t', pane['pane_id'], '-c', str(cwd), *argv)
-        return runtime['tmux']
+        return {**runtime['tmux'], 'server_identity': dict(self.identity)}
 
     def configure_status(self, terminal, root, properties, launch_id, family, *, prepared=None):
         """Configure only a newly created, tagged agent wrapper before native startup."""
@@ -359,4 +405,4 @@ def owned(properties, runtime, *, states=('alive',)):
             raise recovery.Unreachable(result['reason'])
         reason = f': {result["reason"]}' if result["reason"] else ''
         raise ValueError(f'Cannot operate on agent: {result["live"]}{reason}')
-    return Tmux(runtime["tmux"]["socket"]), runtime["tmux"]["pane"]
+    return Tmux.for_terminal(runtime["tmux"], properties, runtime), runtime["tmux"]["pane"]
