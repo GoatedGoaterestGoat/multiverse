@@ -95,6 +95,7 @@ ChoiceScreen #choices > .option-list--option-highlighted { background: $mv-curso
 #plugin-about { height: 1fr; margin-top: 1; scrollbar-size: 1 1; }
 #plugin-details { height: auto; color: $mv-subtext0; }
 #plugin-settings-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
+#plugin-settings-notes { height: auto; color: $mv-yellow; margin-bottom: 1; }
 #plugin-settings-body { height: 1fr; scrollbar-size: 1 1; }
 #inspect-plugins { height: auto; max-height: 4; color: $mv-subtext0; }
 #inspect-plugins { display: none; }

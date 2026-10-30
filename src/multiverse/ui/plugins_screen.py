@@ -143,6 +143,7 @@ def describe(item):
     settings = item.get("settings")
     if settings:
         lines.append("Settings: " + clean(settings.get("path") or "") + (" (unusable)" if settings.get("problem") else ""))
+        lines += ["Note: " + clean(note) for note in settings.get("notes") or ()]  # its own check's advice (1.15)
     lines += ["Error: " + clean(text) for text in (item.get("errors") or [])[-3:]]
     return "\n".join(lines)
 
@@ -459,6 +460,7 @@ class PluginSettingsScreen(FieldScreen):
         with Vertical(id="plugins-dialog"):
             yield Label(f"Settings · {clean(self.item['name'])} · {clean(self.scope_name)}", classes="detail-title", markup=False)
             yield Static("", id="plugin-settings-problem", markup=False)
+            yield Static("", id="plugin-settings-notes", markup=False)
             yield VerticalScroll(id="plugin-settings-body")
             yield Static("", classes="cerror", markup=False)
         yield Footer()
@@ -469,6 +471,9 @@ class PluginSettingsScreen(FieldScreen):
         banner = self.query_one("#plugin-settings-problem", Static)
         banner.display = bool(problem)
         banner.update(f"This settings file cannot be used: {clean(problem)}" if problem else "")
+        notes = self.query_one("#plugin-settings-notes", Static)  # advice from its check; the file is still usable
+        notes.display = bool(settings.get("notes"))
+        notes.update("\n".join("Note: " + clean(note) for note in settings.get("notes") or ()))
         if settings.get("fields") is not None:
             fields, self.skipped = declared_fields(settings["fields"], settings.get("values") or {}), []
         else:
