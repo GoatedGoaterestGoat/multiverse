@@ -29,6 +29,17 @@ class HostOwnershipTest(unittest.TestCase):
         missing agent, universe or launch tag is not, and a missing pane, snapshot error, dead pane or ending state
         reads correctly; fragile because several independent checks gate every kill and send, and a break hides live
         agents or authorizes control of a foreign pane."""
+        backend = Tmux('/recorded/socket')
+        for args in (('kill-pane', '-t', '%1'), ('kill-session', '-t', '$1'), ('kill-server',),
+                     ('capture-pane', '-t%1'), ('attach-session', '-t', '%1'),
+                     ('detach-client', '-t', '/dev/ttys001'), ('new-pane-operation', '%1'),
+                     ('display-message', '-p', '-t', '%1', '#{pane_pid}'),
+                     ('display-message', '-pt', '%1', '#{pane_pid}'), ('list-panes', '-at', '%1'),
+                     ('new-session', '-d', ';', 'kill-pane', '-t', '%1'),
+                     ('list-panes', '-a;', 'kill-server'),
+                     ('list-panes', '-a', ';', 'kill-pane', '-t', '%1')):
+            with self.subTest(unbound=args), self.assertRaisesRegex(ValueError, 'proven tmux server identity'):
+                backend.command(*args)
         with self.subTest('exact tags after a hostname change'), self.snapshot(({'%1': self.pane}, None)) as snapshot:
             cache = {}
             for _ in range(2):

@@ -236,8 +236,10 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
             if key in seen:
                 continue
             seen.add(key)
-            found.append((backend, {'socket': address, 'pane': pane['pane_id'], 'session': pane['session_id']},
-                          identifier, requests.get(identifier, {})))
+            recovered = {'socket': address, 'pane': pane['pane_id'], 'session': pane['session_id']}
+            owner = Tmux.for_terminal(recovered, properties, {'launch_id': identifier})
+            recovered['server_identity'] = dict(owner.identity)
+            found.append((owner, recovered, identifier, requests.get(identifier, {})))
     return found
 
 

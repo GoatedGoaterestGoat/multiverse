@@ -9,7 +9,7 @@ from multiverse.runtime import agent_identity, lifecycle, paths
 from multiverse.store import read, uid, write
 from multiverse.terminal import recovery
 from multiverse.terminal.tmux import Tmux
-from test_multiverse import BaseTest, TerminalBase, until
+from test_multiverse import BaseTest, FixtureTmux, TerminalBase, until
 
 
 class RunDirectoryTest(BaseTest):
@@ -90,7 +90,7 @@ class RunDirectoryTest(BaseTest):
 class DurableLaunchTest(TerminalBase):
     def test_a_legacy_server_stays_visible_and_resume_moves_only_after_it_stops(self):
         """An upgrade must find old panes before starting a replacement, and children must inherit the current run folder rather than cached tools."""
-        legacy = Tmux(legacy=True)
+        legacy = FixtureTmux(legacy=True)
         self.backend = legacy
         self.socket = str(recovery.address(legacy))
         Path(self.socket).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -121,7 +121,7 @@ class DurableLaunchTest(TerminalBase):
         write(launch / 'request.json', request)
         recovery.registry(recovery.address(legacy)).unlink()
         selected = self.work / 'durable'
-        servers.append(Tmux(str(selected / 'tmux.sock')))
+        servers.append(FixtureTmux(str(selected / 'tmux.sock')))
         with patch.dict(os.environ, {'MV2_RUN_DIR': str(selected)}):
             self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
             with self.assertRaisesRegex(ValueError, 'running'):
@@ -129,7 +129,7 @@ class DurableLaunchTest(TerminalBase):
             self.assertFalse((selected / 'tmux.sock').exists())
             lifecycle.kill(self.root, directory.name)
             resumed = lifecycle.start(self.root, resume=directory.name, wait=True, wait_timeout=15)
-            self.backend = Tmux(str(selected / 'tmux.sock'))
+            self.backend = FixtureTmux(str(selected / 'tmux.sock'))
             track(tmux_socket=str(selected / 'tmux.sock'))
             self.assertTrue(resumed['ready'])
             current = read(directory / 'runtime.json')

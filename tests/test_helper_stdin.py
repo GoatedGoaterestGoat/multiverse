@@ -22,7 +22,9 @@ fd = os.dup(0)  # Codex's terminal probe duplicates stdin, then makes that descr
 original = fcntl.fcntl(fd, fcntl.F_GETFL)
 fcntl.fcntl(fd, fcntl.F_SETFL, original | os.O_NONBLOCK)
 try:
-    Tmux(sys.argv[1]).run(*json.loads(sys.argv[2]))
+    server = Tmux(sys.argv[1])
+    pid, epoch = server.run('display-message', '-p', '#{pid}\t#{start_time}').split('\t')
+    Tmux(sys.argv[1], identity={'pid': int(pid), 'epoch': int(epoch)}).run(*json.loads(sys.argv[2]))
 except RuntimeError:
     pass  # Failed tmux commands must be equally safe.
 nonblocking = bool(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK)

@@ -29,6 +29,15 @@ class DiscoveryTest(BaseTest):
         self.pane = {'pane_id': '%2', 'session_id': '$1', 'pane_pid': '1234', 'pane_dead': '0',
             '@mv2_agent_id': self.directory.name, '@mv2_universe_id': self.properties['universe_id'],
             '@mv2_launch_id': self.launch.name}
+        def identity_read(*args):
+            pane = {**self.pane, 'pane_id': args[3]}
+            return self.identity_reply(pane, args)
+        self.enterContext(patch.object(missing_runtime.Tmux, '_run', side_effect=identity_read))
+
+    def identity_reply(self, pane, args):
+        self.assertEqual(args[:4], ('display-message', '-p', '-t', pane['pane_id']))
+        return '\t'.join(('1234', '5678', pane['session_id'], pane['pane_id'],
+                          pane['@mv2_agent_id'], pane['@mv2_universe_id'], pane['@mv2_launch_id']))
 
     def test_discovery_declares_stopped_only_with_proof(self):
         """require_stopped, discover and remove call a lost launch stopped only with proof (every reachable recorded
@@ -215,6 +224,8 @@ class DiscoveryTest(BaseTest):
                 pane['@mv2_launch_id'] = uid()
             error = 'Permission denied' if label == 'unreadable server' else None
             def close(*args):
+                if args[0] == 'display-message':
+                    return self.identity_reply(pane, args)
                 self.assertEqual(args, ('kill-pane', '-t', '%2'))
                 panes.clear()
             def snapshot(backend, *, facts=None):
@@ -234,11 +245,13 @@ class DiscoveryTest(BaseTest):
                     result = lifecycle.kill(self.root, self.directory.name)
                     self.assertEqual(result['state'], 'dormant')
                     self.assertEqual(result['native_cancellation']['state'], 'unknown')
-                    control.assert_called_once()
+                    self.assertEqual([call.args[0] for call in control.call_args_list], ['display-message', 'kill-pane'])
+                    self.assertEqual(read(self.directory / 'runtime.json')['tmux']['server_identity'],
+                                     {'pid': 1234, 'epoch': 5678})
                 else:
                     with self.assertRaises(records.RecordError):
                         lifecycle.kill(self.root, self.directory.name)
-                    control.assert_not_called()
+                    self.assertTrue(all(call.args[0] == 'display-message' for call in control.call_args_list))
                     self.assertEqual(read(self.directory / 'runtime.json'), facts)
             (self.directory / 'properties.json').unlink(missing_ok=True)
 
@@ -249,10 +262,7 @@ class DiscoveryTest(BaseTest):
         launch."""
         self.properties['workspace'] = str(self.work)
         write(self.directory / 'properties.json', self.properties)
-        def identity(pane, args):
-            self.assertEqual(args[:4], ('display-message', '-p', '-t', pane['pane_id']))
-            return '\t'.join(('1234', '5678', pane['session_id'], pane['pane_id'],
-                              pane['@mv2_agent_id'], pane['@mv2_universe_id'], pane['@mv2_launch_id']))
+        identity = self.identity_reply
         for replaced in ('pane', 'generation'):
             with self.subTest(replaced=replaced):
                 (self.directory / 'runtime.json').unlink(missing_ok=True)

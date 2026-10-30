@@ -19,7 +19,7 @@ from multiverse.universe.mailbox import message_record
 from multiverse.terminal import recovery, tmux
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import send
-from test_multiverse import BaseTest, TerminalBase, until
+from test_multiverse import BaseTest, FixtureTmux, TerminalBase, until
 
 
 class SocketRecoveryTest(TerminalBase):
@@ -28,7 +28,7 @@ class SocketRecoveryTest(TerminalBase):
         folder = self.work / 'terminal'
         folder.mkdir(mode=0o700)
         self.socket = str(folder / 'tmux.sock')
-        self.backend = Tmux(self.socket)
+        self.backend = FixtureTmux(self.socket)
         track(tmux_socket=self.socket)
 
     def test_a_missing_socket_and_folder_do_not_hide_a_live_agent(self):
@@ -335,10 +335,11 @@ class SocketRecoveryTest(TerminalBase):
 
         # A server can disappear after creation while another reuses its numeric
         # session/pane IDs. Neither setup nor its failure cleanup may retarget it.
-        for index, stage in enumerate(('creation reply', 'first tag', 'status setup', 'failure cleanup', 'owned command', 'owned legacy command')):
+        for index, stage in enumerate(('creation reply', 'first tag', 'status setup', 'failure cleanup',
+                                       'owned command', 'owned legacy command', 'damaged close')):
             with self.subTest(server_replaced=stage):
                 socket = str(self.work / f'creation-{index}.sock')
-                backend = Tmux(socket)
+                backend = FixtureTmux(socket)
                 track(tmux_socket=socket)
                 sleeper = [sys.executable, '-c', 'import time; time.sleep(60)']
                 original_run = Tmux._run
@@ -372,12 +373,19 @@ class SocketRecoveryTest(TerminalBase):
                             replace_server()
                             if stage == 'failure cleanup':
                                 raise RuntimeError('Injected setup failure after the server changed')
+                        if stage == 'damaged close' and args[0] == 'kill-pane':
+                            replace_server()
                     return original_run(instance, *args)
                 try:
                     with patch.object(Tmux, '_run', new=boundary):
                         with self.assertRaisesRegex(RuntimeError, 'server identit|server changed'):
                             launched = lifecycle.start(self.root, name='creation-' + stage.replace(' ', '-'),
                                                        harness='fake', socket_path=socket, wait=False)
+                            if stage == 'damaged close':
+                                agent = self.root / 'state/agents' / launched['id']
+                                until(lambda: read(agent / 'runtime.json').get('pid_started'))
+                                (agent / 'runtime.json').unlink()
+                                lifecycle.kill(self.root, agent.name, attachment_only=True)
                             if stage.startswith('owned'):
                                 agent = self.root / 'state/agents' / launched['id']
                                 facts = read(agent / 'runtime.json')

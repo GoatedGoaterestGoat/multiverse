@@ -10,6 +10,12 @@ import sys
 from . import recovery, statusline
 
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
+IDENTITY_FORMAT = '#{pid}\t#{start_time}\t#{session_id}\t#{pane_id}\t#{@mv2_agent_id}\t#{@mv2_universe_id}\t#{@mv2_launch_id}'
+ORIGIN_FORMAT = IDENTITY_FORMAT + '\t#{pane_tty}\t#{client_name}'
+
+
+class UnboundTarget(ValueError):
+    """A pane, session or client operation lacks its server identity."""
 
 
 @lru_cache(maxsize=1)
@@ -80,14 +86,20 @@ class Tmux:
         backend = cls(terminal['socket'], identity=terminal.get('server_identity'))
         if backend.identity is None:
             reply = backend.run('display-message', '-p', '-t', terminal['pane'],
-                                '#{pid}\t#{start_time}\t#{session_id}\t#{pane_id}\t'
-                                '#{@mv2_agent_id}\t#{@mv2_universe_id}\t#{@mv2_launch_id}').split('\t')
+                                IDENTITY_FORMAT).split('\t')
             expected = [terminal['session'], terminal['pane'], properties['id'],
                         properties['universe_id'], runtime.get('launch_id')]
             if len(reply) != 7 or reply[2:] != expected or not all(value.isdecimal() for value in reply[:2]):
                 raise ValueError('Pane ownership changed; refusing to bind its server')
             backend = cls(terminal['socket'], identity={'pid': int(reply[0]), 'epoch': int(reply[1])})
         return backend
+
+    def origin(self, pane):
+        """Read origin identity and terminal/client metadata in the same response."""
+        reply = self.run('display-message', '-p', '-t', pane, ORIGIN_FORMAT).split('\t')
+        if len(reply) != 9 or reply[3] != pane or not all(value.isdecimal() for value in reply[:2]):
+            raise ValueError('Cannot confirm the originating tmux pane')
+        return Tmux(str(recovery.address(self)), identity={'pid': int(reply[0]), 'epoch': int(reply[1])}), reply[7], reply[8]
 
     def run(self, *args):
         try:
@@ -103,6 +115,24 @@ class Tmux:
 
     def command(self, *args):
         """Literal argv for this server, including the fence for an interactive client."""
+        if self.identity is None:
+            # Only fixed metadata reads may select a pane before its server is
+            # known. They confer no authority until their caller checks the tags
+            # or its own terminal. Unknown commands fail closed, including new
+            # callers and abbreviations; do not parse arbitrary tmux command text.
+            identity_read = (len(args) == 5 and args[:3] == ('display-message', '-p', '-t')
+                             and re.fullmatch(r'%\d+', args[3])
+                             and args[4] in (IDENTITY_FORMAT, ORIGIN_FORMAT))
+            # tmux also splits an argv word ending in an unescaped semicolon.
+            # Refuse any such group boundary before considering the allowlist.
+            single_command = not any(word.endswith(';') for word in args)
+            creation = (single_command and
+                        (args[:1] == ('new-session',) or args[:2] == ('-N', 'new-session')))
+            server_wide = (args and args[0] in ('list-panes', 'list-sessions', 'list-clients', 'list-keys',
+                                               'display-message', 'show-environment')
+                           and single_command and not any(re.match(r'^-[A-Za-z]*[ts]', word) for word in args[1:]))
+            if not (identity_read or creation or server_wide):
+                raise UnboundTarget('A proven tmux server identity is required before targeting a pane, session or client')
         if self.identity is not None:
             # A failed if-shell parse aborts the rest of this command group.
             # Only the fixed failure marker is parsed as a command string:

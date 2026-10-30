@@ -24,7 +24,24 @@ from multiverse.universe import templates
 from multiverse.tools import send
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write
-from multiverse.terminal.tmux import Tmux
+from multiverse.terminal.tmux import Tmux, UnboundTarget
+
+
+class FixtureTmux(Tmux):
+    """Bind a deliberate fixture operation to the private server being inspected.
+
+    Production paths use Tmux and must bring their own launch/origin proof.
+    This helper is only for a test's deliberate edits to its private server.
+    """
+    def command(self, *args):
+        try:
+            return super().command(*args)
+        except UnboundTarget:
+            from multiverse.terminal.recovery import address
+            pid, epoch = self._run('display-message', '-p', '#{pid}\t#{start_time}').split('\t')
+            if not pid.isdecimal() or not epoch.isdecimal() or min(int(pid), int(epoch)) <= 0:
+                raise AssertionError('Fixture server did not supply its identity')
+            return Tmux(str(address(self)), identity={'pid': int(pid), 'epoch': int(epoch)}).command(*args)
 
 
 def append_many(args):
@@ -79,7 +96,7 @@ class TerminalBase(BaseTest):
     def setUp(self):
         super().setUp()
         self.socket = str(self.work / "tmux.sock")
-        self.backend = Tmux(self.socket)
+        self.backend = FixtureTmux(self.socket)
         track(tmux_socket=self.socket)  # its server runs in its own session: tests/run.py ends it if this test can't
         self.addCleanup(self.kill_server)
         harness = self.root / "harnesses" / "fake"
