@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -132,9 +133,9 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         FIRST_USAGE_PATIENCE, and F5 still refreshes at once; fragile because a listing started then competes with
         that read for the interpreter and quitting waits for it, which shows only as a slow quit on a busy machine."""
         self.agent("ada")
-        gate, calls, started = threading.Event(), [], []
+        gate, calls, listings, ticks = threading.Event(), [], [], []
         self.addCleanup(gate.set)
-        patience = 2.0
+        clock = [100.0]  # the app's monotonic clock, moved by hand: the bound never depends on how busy the machine is
 
         def usage_snapshot(scope, properties, facts, reconciled=False):  # a first read that never lands
             calls.append(properties["name"])
@@ -142,28 +143,38 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             return reading(82000)["usage"]
 
         with mock.patch.object(native, "usage_snapshot", usage_snapshot), \
-                mock.patch.object(appmod, "FIRST_USAGE_PATIENCE", patience):
+                mock.patch.object(appmod, "time", SimpleNamespace(monotonic=lambda: clock[0])):
             d = self.dashboard()
             d.app.refresh_interval = 0.2  # the driver runs without a timer; this test is about the timer
-            listing = d.app.backend.snapshot
+            listing, tick = d.app.backend.snapshot, d.app.timed_refresh
 
             def snapshot(root):
-                started.append(time.monotonic())
+                listings.append(clock[0])
                 return listing(root)
 
-            d.app.backend.snapshot = snapshot
+            def timed_refresh():
+                ticks.append(clock[0])
+                tick()
+
+            d.app.backend.snapshot, d.app.timed_refresh = snapshot, timed_refresh  # before the timer is set up
             async with d:
                 await d.until(lambda: calls, "the first usage read")
-                begun = d.app.first_usage_started
+                self.assertEqual(d.app.first_usage_started, 100.0)
+                with self.subTest("the timer starts no listing while the read runs"):
+                    before, seen = len(listings), len(ticks)
+                    await d.until(lambda: len(ticks) >= seen + 5, "five timer ticks")
+                    self.assertEqual(len(listings), before)
                 with self.subTest("F5 still refreshes at once"):
-                    await asyncio.sleep(0.6)  # several timer ticks first
-                    before = len(started)
-                    await d.press("f5")
-                    await d.until(lambda: len(started) > before, "F5's listing")
-                    self.assertLess(started[before], begun + patience)  # F5's own, not the timer's after the bound
-                with self.subTest("the timer starts no listing while the read runs, and starts again after the bound"):
-                    await d.until(lambda: any(at >= begun + patience for at in started), "a timer listing after the bound")
-                    self.assertEqual(len([at for at in started if begun <= at < begun + patience]), 1)  # F5's alone
+                    before = len(listings)
+                    await d.press("f5")  # the clock stays inside the bound, so this listing can only be F5's
+                    await d.until(lambda: len(listings) > before, "F5's listing")
+                with self.subTest("past the bound, the timer starts listings again while the read still hangs"):
+                    clock[0] += appmod.FIRST_USAGE_PATIENCE - 0.5
+                    before, seen = len(listings), len(ticks)
+                    await d.until(lambda: len(ticks) >= seen + 3, "three timer ticks just inside the bound")
+                    self.assertEqual(len(listings), before)
+                    clock[0] += 1.0
+                    await d.until(lambda: len(listings) > before, "a timer listing after the bound")
 
     def test_quitting_never_waits_for_a_usage_read(self):
         """q ends the process while a usage read is still running, leaving that read behind; fragile because a read
