@@ -77,7 +77,10 @@ class DurableLaunchTest(TerminalBase):
                     pass
         self.addCleanup(cleanup)
         first, directory = self.spawn()
-        until(lambda: read(directory / 'runtime.json').get('runner_started'))
+        # Rewrite the legacy fixture only after the child identity is published;
+        # the stand-in can write seen.json before the runner records its PID.
+        until(lambda: (facts := read(directory / 'runtime.json')).get('runner_started')
+              and facts.get('pid') and facts.get('pid_started'))
         facts = read(directory / 'runtime.json')
         facts.pop('run_directory')
         facts['tmux'].pop('server')
