@@ -158,12 +158,22 @@ class GuardTest(StandInHome):
                 os.mkdir(live_run)
             self.assertEqual([item["event"] for item in self.new_violations()],
                              ["socket.bind", "socket.connect"] * 2 + ["os.mkdir"])
-            # Under Claude's or Codex's home a socket is left to their own guards: native_safety refuses the Codex
-            # daemon's, and its test of that must not fail here too. A folder never there: nothing is reached.
+            # Connecting under Claude's or Codex's home is left to their own guards: native_safety refuses the Codex
+            # daemon's socket, and its test of that must not fail here too. A folder never there: nothing is reached.
             for harness in (".claude", ".codex"):
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix, self.assertRaises(FileNotFoundError):
                     unix.connect(str(Path(testing._REAL_HOME).parent / harness / never / "p.sock"))
             self.assertEqual(self.new_violations(), [])
+            # But binding makes a socket file there, so it stays refused, as any write (a stand-in harness home).
+            for harness in (".claude", ".codex"):
+                stand_in = self.work / f"stand-in-{harness}"
+                stand_in.mkdir()
+                with mock.patch.object(testing, "_protected", {*testing._protected, str(stand_in)}), \
+                        mock.patch.object(testing, "_harness", {*testing._harness, str(stand_in)}), \
+                        socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unix, self.assertRaises(PermissionError):
+                    unix.bind(str(stand_in / "p.sock"))
+                self.assertFalse((stand_in / "p.sock").exists())
+            self.assertEqual([item["event"] for item in self.new_violations()], ["socket.bind"] * 2)
         with self.subTest("check raises once for what is not reported"):
             testing._record("open", str(self.protected / "late.json"))
             with self.assertRaisesRegex(AssertionError, "late.json"):

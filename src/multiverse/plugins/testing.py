@@ -176,8 +176,9 @@ def _hook(event, args):
         targets = [(args[0], getattr(_open_context, "dir_fd", None))]
     elif event in ("socket.bind", "socket.connect"):
         # A Unix socket by path: under mv2's own protected state, one the live tmux server or an agent serves on.
-        # Claude's and Codex's homes are left to their own guards (native_safety refuses the Codex daemon's
-        # socket), so a test proving that one refuses is not counted here as well.
+        # Connecting under Claude's or Codex's home is left to their own guards (native_safety refuses the Codex
+        # daemon's socket), so a test proving that one refuses is not counted here as well; binding there makes a
+        # socket file, so it stays refused, as any write.
         if len(args) < 2 or getattr(args[0], "family", None) != socket.AF_UNIX or not isinstance(args[1], (str, bytes)):
             return
         if not args[1] or args[1][:1] in ("\0", b"\0"):  # Linux's abstract names are no file
@@ -195,7 +196,7 @@ def _hook(event, args):
         # As written and as resolved: a link elsewhere may point into the home. realpath resolves the links that
         # exist and keeps a new file's own name, so a file about to be made through one is judged by where it goes.
         for candidate in dict.fromkeys((where, os.path.realpath(where))):
-            if event.startswith("socket.") and _in_harness_home(candidate):
+            if event == "socket.connect" and _in_harness_home(candidate):
                 continue
             if _guarded(candidate):
                 _record(event, candidate)
