@@ -67,13 +67,14 @@ class Inspector(Vertical):
         accent = row["accent"]
         self.query_one("#inspect-name", Static).update(Text(clean(row["name"]), style=f"bold {accent}"))
         self.query_one("#inspect-meta", Static).update(self.app.scope_trail(row))
+        dormant = not group and row.get("live") == "dormant"  # no terminal to show; v says why
         self.query_one("#inspect-hint", Static).update(
-            "v full details · p / Esc close")
+            ("r resume · " if dormant else "") + "v full details · p / Esc close")
         self.query_one("#inspect-label", Static).update("PURPOSE" if group else "CURRENT WORK")
         self.query_one("#inspect-work", Static).update(clean(
             row.get("description", "No description yet.") if group else row.get("summary") or row.get("task") or "No work reported yet."))
         self.query_one("#inspect-group").display = group
-        self.query_one("#pane-scroll").display = not group
+        self.query_one("#pane-scroll").display = not group and not dormant
         if group:
             state = f'{row["alive"]}/{row["total"]} live · {row["waiting"]} waiting · {row["blocked"]} blocked'
             members = [a for a in self.app.snapshot["agents"] if within(a, Path(row["path"]))]
@@ -85,7 +86,7 @@ class Inspector(Vertical):
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 message = ('Native work is ending.' if live == 'ending' else
                            'Native process stopped; tmux wrapper remains. Resume with r.' if live == 'stopped' else
-                           'No tmux wrapper. Resume with r.' if live == 'dormant' else 'Terminal state is unknown.')
+                           'Terminal state is unknown.')
                 if row.get('launch_error'):
                     self.query_one('#pane-scroll').border_title = 'SAVED LAUNCH OUTPUT'
                 self.query_one("#preview", Static).update(Text('\n'.join(

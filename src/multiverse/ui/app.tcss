@@ -58,7 +58,7 @@ Footer { background: $mv-mantle; }
     scrollbar-size: 1 1;
 }
 #preview { height: auto; color: $mv-subtext0; }
-#inspect-hint { height: 1; color: $mv-overlay1; }
+#inspect-hint { dock: bottom; height: 1; color: $mv-overlay1; }
 .drawer #body { layout: vertical; }
 .drawer #local-view { width: 100%; height: 45%; border-left: none; border-top: solid $mv-surface1; }
 .drawer #inspector { width: 100%; max-width: 100%; height: 12; max-height: 60%; border-left: none; border-top: solid $mv-surface1; }

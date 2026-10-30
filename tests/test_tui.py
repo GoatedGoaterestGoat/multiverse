@@ -409,6 +409,24 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                     await self.settle(pilot)
                     self.assertTrue(done(), f"Ctrl+Enter on the {title} confirmation did nothing")
 
+    async def test_a_dormant_agent_has_no_terminal_box(self):
+        """The inspector shows no terminal box for a dormant agent and offers r instead, and the box is back once r
+        resumes it; a break shows an observation such as "Pane belongs to a different launch" as if it were the pane."""
+        agent = self.backend.agents[0]
+        self.backend.stop(Path(agent["universe"]), agent["id"])
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.select_key(agent_key(agent))
+            await pilot.press("p")
+            await self.settle(pilot)
+            self.assertEqual(self.app.inspector.row["id"], agent["id"])
+            self.assertFalse(self.app.query_one("#pane-scroll").display)
+            self.assertIn("r resume", str(self.app.query_one("#inspect-hint", Static).render()))
+            await pilot.press("r")
+            await self.settle(pilot)
+            self.assertEqual(self.app.inspector.row["live"], "alive")
+            self.assertTrue(self.app.query_one("#pane-scroll").display)
+
     async def test_enter_uses_cursor_before_highlight_message_is_dispatched(self):
         """Enter acts on the row under the cursor even before Textual has dispatched the highlight message; kept for
         the lab finding, since a fast key after a move otherwise opens or attaches the previously highlighted row and
