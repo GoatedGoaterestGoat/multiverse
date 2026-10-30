@@ -104,6 +104,12 @@ def process_command(pid):
     return _query(pid, 'comm=')
 
 
+def process_parent(pid):
+    """The current parent, to relate a start-token-verified runner to its tmux server."""
+    value = _query(pid, 'ppid=')
+    return int(value) if value and value.isdecimal() and int(value) > 0 else None
+
+
 def _query(pid, fields):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None

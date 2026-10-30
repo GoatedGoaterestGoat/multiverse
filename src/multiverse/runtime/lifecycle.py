@@ -169,6 +169,9 @@ def listing(root, recursive=False, only=None, *, usage=True):
                     usage_fields = {'usage': measured, 'tokens': display.usage_total(measured),
                                     'usage_detail': display.usage_details(measured)}
                 relay = facts.get('native_relay') or {}
+                relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
+                if relay_problem and observation['live'] == 'alive':
+                    relay_problem = native.missing_socket_problem(scope, properties, facts) or relay_problem
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = (None if facts.get('exit_code') in (-15, 143) else
                                 facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
@@ -182,7 +185,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
                              "connection_error": (facts.get('native_refusal') or {}).get('message')
-                                 or (relay.get('reason') if relay.get('state') == 'lost' else None)
+                                 or relay_problem
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
@@ -247,6 +250,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         properties["native_session_id"] = properties["id"]
     if not shutil.which("tmux"):
         raise ValueError("tmux is required to spawn agents")
+    Tmux(socket_path).ensure(root)
     # A universe can contain agents assigned to different worktrees. Resume in
     # the agent's recorded workspace even if the universe default has changed.
     workdir = Path(properties["workspace"]).resolve() if resume and properties.get("workspace") else universe.workspace(root)

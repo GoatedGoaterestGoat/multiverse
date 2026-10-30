@@ -359,9 +359,48 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
     return current, agents.runtime(directory)
 
 
+def missing_socket_problem(root, properties, facts):
+    """Name a vanished launch-local endpoint only while its original child is proven live."""
+    from .process import process_snapshot, start_matches
+    try:
+        launch = normalize_session_id(facts.get('launch_id'))
+        directory = root / 'state' / 'agents' / properties['id']
+        request = read(directory / 'launches' / launch / 'request.json')
+        env = request.get('env') or {}
+        expected = {'MV2_UNIVERSE': str(root), 'MV2_AGENT_ID': properties['id'],
+                    'MV2_AGENT_DIR': str(directory), 'MV2_LAUNCH_ID': launch}
+        if any(env.get(key) != value for key, value in expected.items()):
+            return None
+        proxy, endpoint = request.get('rpc_proxy') or {}, request.get('control_endpoint') or {}
+        # The proxy is launch-local; Codex's control_endpoint names the shared
+        # daemon and must never be mistaken for a lost frontend socket.
+        address = proxy.get('socket_path') or (endpoint.get('address')
+                  if endpoint.get('transport') in ('unix-lines', 'unix-websocket') else None)
+        if not isinstance(address, str) or not Path(address).is_absolute() or env.get('MV2_CONTROL_SOCKET') != address:
+            return None
+        try:
+            Path(address).stat()
+            return None
+        except FileNotFoundError:
+            pass
+        pid = facts.get('pid')
+        observed = process_snapshot(pid)
+        if (observed is None or observed[1].startswith(('Z', 'X'))
+                or not start_matches(facts.get('pid_started'), pid, observed=observed[0])):
+            return None
+        name = properties.get('name') or properties['id']
+        return (f'Native socket {address} is missing while process PID {pid} is still running. '
+                f'Stop this launch with mv2 kill {name}, then mv2 resume {name} to recreate its socket. '
+                'Saved messages are not resent automatically')
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def connection_problem(root, properties, facts):
     """A provider diagnostic cannot erase a valid listing row."""
     try:
+        if problem := missing_socket_problem(root, properties, facts):
+            return problem
         adapter = harnesses.load(root, properties['harness'])
         hook = adapter_hook(adapter, 'connection_problem')
         result = hook(SessionHandle.from_records(properties, facts, root / 'state' / 'agents' / properties['id'])) if hook else None
@@ -933,6 +972,9 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             raise
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
+        if result.state in ('unavailable', 'error', 'unknown'):
+            if problem := missing_socket_problem(root, executor.properties, executor.facts):
+                result = replace(result, reason=f'{result.reason}; {problem}' if result.reason else problem)
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
         state = {'native_queued': 'accepted', 'ok': 'accepted', 'pending': 'pending',
                  'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]

@@ -197,6 +197,14 @@ The message ends with a restart command for the agent's selected Codex home, lik
 
 mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socket in `MV2_TMUX_SOCKET`. `spawn` and `resume` read the variable from your environment, so set it the same way each time. Each agent remembers its socket, and mv2 always observes the agent there. Agents get their own server's socket, so the agents they start land on the same server.
 
+If a cleaner removes the socket or its folder while tmux is still running, mv2 reconnects to that server. It verifies the saved PID, process start time and executable before sending `SIGUSR1`, recreates missing folders privately, and checks that the server answers. Concurrent callers share a short recovery lock. A different server answering at the same path is a conflict: mv2 names both PIDs and sends no signal.
+
+If recovery fails, the agent stays `unknown`, and the error names the socket and the process to check. Follow its manual recovery command only after verifying that PID still names the original tmux server. Do not remove `runtime.json` or start another server at the same path. Saved failed messages still need an explicit `mv2 deliver NAME --retry` or `--dismiss`; recovery never resends them.
+
+mv2 keeps server identities under `~/.multiverse/tmux-servers/`. Older launches can prove their server through a still-running runner. If both the registry and socket are deleted, a new universe with no launch records cannot discover that old server; restore its address before spawning there.
+
+A missing native bridge socket has a different remedy: if its recorded process is still alive, stop and resume that agent to recreate the socket. A working alternate delivery path remains usable. Codex's shared daemon socket is separate from this launch-local socket.
+
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |

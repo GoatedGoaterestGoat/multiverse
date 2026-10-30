@@ -125,8 +125,11 @@ runtime.json tmux.pane --> pane missing           -> dormant
                        --> tags match, pane dead    -> stopped
                        --> tags match, ending_at    -> ending
                        --> tags match               -> alive
-tmux unreachable                                   -> unknown
+tmux unreachable, verified server alive             -> recover socket, observe again
+recovery unavailable or server identity uncertain    -> unknown
 ```
+
+Socket recovery checks the original server process before signalling it and is serialized per canonical address. The answering server supplies its PID and start epoch with the pane tags, so an unchanged healthy server needs no process queries. New launches retain its process identity, and the per-user registry covers future callers in other universes. Legacy launches can prove the server through their verified runner's parent. A conflicting answering server is never displaced.
 
 Window and session names are only labels, so renaming them changes nothing. Every command that signals or captures a pane checks the tags first (`tmux.owned`).
 

@@ -5,7 +5,7 @@ import shlex
 import subprocess
 import sys
 
-from . import statusline
+from . import recovery, statusline
 
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
 
@@ -25,10 +25,24 @@ def status_setup(root, properties, launch_id, family):
 
 
 class Tmux:
+    pane_format = "\t".join("#{" + field + "}" for field in (*FIELDS, "pid", "start_time"))
+
     def __init__(self, socket_path=None):
         self.prefix = ["tmux", "-S", socket_path] if socket_path else ["tmux", "-L", "multiverse-v2"]
 
     def run(self, *args):
+        try:
+            return self._run(*args)
+        except RuntimeError as error:
+            reason = str(error)
+            if not ('no server running' in reason or 'connecting to' in reason):
+                raise
+            with recovery.serialized(recovery.address(self)):
+                if recovery.connected(self) is None:
+                    raise error
+            return self._run(*args)
+
+    def _run(self, *args):
         # A tmux client resets stdin's O_NONBLOCK flag, even for capture/list commands.
         # Never share the native TUI's terminal file description with these helpers.
         result = subprocess.run([*self.prefix, *args], stdin=subprocess.DEVNULL,
@@ -39,6 +53,17 @@ class Tmux:
 
     def environment(self, name):
         """One global value, preserving embedded/trailing newlines and explicit empty."""
+        try:
+            return self._environment(name)
+        except RuntimeError as error:
+            if not ('no server running' in str(error) or 'connecting to' in str(error)):
+                raise
+            with recovery.serialized(recovery.address(self)):
+                if recovery.connected(self) is None:
+                    raise error
+            return self._environment(name)
+
+    def _environment(self, name):
         result = subprocess.run([*self.prefix, 'show-environment', '-g', name], stdin=subprocess.DEVNULL,
                                 capture_output=True, timeout=10)
         if (result.returncode == 1 and not result.stdout
@@ -58,19 +83,16 @@ class Tmux:
             raise ValueError(f'tmux returned ambiguous escaped output for {name}')
         return value
 
-    def snapshot(self):
+    def snapshot(self, *, facts=None):
         try:
-            output = self.run("list-panes", "-a", "-F", "\t".join("#{" + field + "}" for field in FIELDS))
+            with recovery.serialized(recovery.address(self)):
+                output = recovery.connected(self, facts=facts)
+            if output is None:
+                return {}, None
             return {row[0]: dict(zip(FIELDS, row)) for line in output.splitlines()
                     if len(row := line.split("\t")) == len(FIELDS)}, None
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
-            reason = str(error)
-            # An absent server is different from one we lack permission to inspect.
-            # tmux before 3.3 fails `list-panes -a` on a running server with no
-            # sessions ("no current target"); that server has no panes either.
-            if ("no server running" in reason or "No such file or directory" in reason and "connecting to" in reason
-                    or reason == "no current target"):
-                return {}, None
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            reason = recovery.UnreachableReason(str(error)) if isinstance(error, recovery.Unreachable) else str(error)
             return {}, reason
 
     def create(self, name, cwd, argv):
@@ -78,13 +100,55 @@ class Tmux:
         for key in ("PATH", "PYTHONPATH", "MV2_CLI", "MV2_PYTHON"):
             if key in os.environ:
                 options.extend(["-e", f"{key}={os.environ[key]}"])
-        result = self.run("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
-                          "-s", name, "-c", str(cwd), *options, *argv)
+        with recovery.serialized(recovery.address(self)):
+            recovery.connected(self)
+            result = self._run("new-session", "-d", "-P", "-F", "#{socket_path}\t#{session_id}\t#{pane_id}",
+                               "-s", name, "-c", str(cwd), *options, *argv)
+            recovery.connected(self)
+            server = recovery._saved(recovery.address(self))
         if len(result.split("\t")) != 3:
             # Some tmux versions return success even if server startup failed.
             raise RuntimeError(f"tmux did not return a pane identity: {result!r}")
         socket_path, session_id, pane_id = result.split("\t")
-        return {"socket": socket_path, "session": session_id, "pane": pane_id}
+        return {"socket": socket_path, "session": session_id, "pane": pane_id, "server": server}
+
+    def ensure(self, root):
+        """Seed old launch proofs before a spawn can create a server on this path."""
+        from .. import universe
+        from ..universe import records
+        socket = recovery.address(self)
+        while parent := universe.parent(root):
+            root = parent
+        paths = [path for scope in universe.tree(root)
+                 for path in (scope / 'state' / 'agents').glob('*/runtime.json')]
+        # calling_socket already verified this caller before lifecycle selects
+        # the backend. A child may be created in a different universe.
+        caller = os.environ.get('MV2_AGENT_DIR')
+        if caller:
+            from ..runtime.agent_identity import sender_actor
+            try:
+                actor = sender_actor()
+            except (OSError, ValueError):
+                actor = None
+            if actor is not None:
+                paths.append(actor.directory / 'runtime.json')
+        for path in paths:
+            try:
+                facts = records.runtime(path)
+                terminal = facts.get('tmux') or {}
+                named = terminal.get('socket')
+                if not named or Path(named).resolve() != socket:
+                    continue
+                server = terminal.get('server')
+                if isinstance(server, dict) and server.get('socket') != str(socket):
+                    continue
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue  # An invalid record is never authority for a signal.
+            with recovery.serialized(socket):
+                if recovery.connected(self, facts=facts) is not None:
+                    return
+        with recovery.serialized(socket):
+            recovery.connected(self)
 
     def tag(self, pane, properties, launch_id):
         for key, value in (("agent_id", properties["id"]), ("universe_id", properties["universe_id"]), ("launch_id", launch_id)):
@@ -170,10 +234,10 @@ def observe(properties, runtime, snapshots=None):
     backend = Tmux(terminal["socket"])
     if snapshots is not None:
         if terminal["socket"] not in snapshots:
-            snapshots[terminal["socket"]] = backend.snapshot()
+            snapshots[terminal["socket"]] = backend.snapshot(facts=runtime)
         panes, error = snapshots[terminal["socket"]]
     else:
-        panes, error = backend.snapshot()
+        panes, error = backend.snapshot(facts=runtime)
     # Observe the recorded local terminal; a saved hostname is provenance,
     # not proof that a missing pane is running somewhere else.
     if error:
