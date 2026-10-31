@@ -1,10 +1,11 @@
 """Missing or damaged runtime authority: discovery declares a launch stopped only with proof."""
+from copy import deepcopy
 from pathlib import Path
 import shutil
 from unittest.mock import patch, Mock
 
 from multiverse.harnesses.types import NativeResult
-from multiverse.runtime import missing_runtime, attachments, lifecycle
+from multiverse.runtime import missing_runtime, attachments, lifecycle, paths
 from multiverse.store import read, uid, write
 from multiverse.universe import records, relocate
 from test_multiverse import BaseTest
@@ -28,6 +29,15 @@ class DiscoveryTest(BaseTest):
         self.pane = {'pane_id': '%2', 'session_id': '$1', 'pane_pid': '1234', 'pane_dead': '0',
             '@mv2_agent_id': self.directory.name, '@mv2_universe_id': self.properties['universe_id'],
             '@mv2_launch_id': self.launch.name}
+        def identity_read(*args):
+            pane = {**self.pane, 'pane_id': args[3]}
+            return self.identity_reply(pane, args)
+        self.enterContext(patch.object(missing_runtime.Tmux, '_run', side_effect=identity_read))
+
+    def identity_reply(self, pane, args):
+        self.assertEqual(args[:4], ('display-message', '-p', '-t', pane['pane_id']))
+        return '\t'.join(('1234', '5678', pane['session_id'], pane['pane_id'],
+                          pane['@mv2_agent_id'], pane['@mv2_universe_id'], pane['@mv2_launch_id']))
 
     def test_discovery_declares_stopped_only_with_proof(self):
         """require_stopped, discover and remove call a lost launch stopped only with proof (every reachable recorded
@@ -39,7 +49,7 @@ class DiscoveryTest(BaseTest):
                                            'tmux': {'socket': '/recorded-runtime.sock'}}, '/recorded-runtime.sock')):
             calls = []
 
-            def snapshot(backend):
+            def snapshot(backend, *, facts=None):
                 calls.append(backend.prefix)
                 return {}, ('Permission denied' if unreachable in backend.prefix else None)
             with self.subTest(server=label), patch.object(missing_runtime.Tmux, 'snapshot', snapshot), \
@@ -57,6 +67,21 @@ class DiscoveryTest(BaseTest):
                 self.assertRaisesRegex(records.RecordError, 'multiple tagged terminals'):
             missing_runtime.kill(self.root, self.directory)
         self.assertFalse((self.directory / 'runtime.json').exists())
+        from multiverse.terminal.recovery import address
+        legacy = str(address(missing_runtime.Tmux(legacy=True)))
+        def legacy_only(backend, *, facts=None):
+            return ({'%2': self.pane} if backend.prefix[-1] == legacy else {}), None
+        with self.subTest('legacy default remains in discovery'), \
+                patch.object(missing_runtime.Tmux, 'snapshot', legacy_only):
+            found = missing_runtime.discover(self.directory, self.properties)
+            self.assertEqual([item[2] for item in found], [self.launch.name])
+        current = str(address(missing_runtime.Tmux()))
+        def current_only(backend, *, facts=None):
+            return ({'%2': self.pane} if backend.prefix[-1] == current else {}), None
+        with self.subTest('the default is saved as its exact socket'), \
+                patch.object(missing_runtime.Tmux, 'snapshot', current_only):
+            found = missing_runtime.discover(self.directory, self.properties)
+            self.assertEqual(found[0][1]['socket'], current)
         path = self.launch / 'request.json'
         for content in ('[]', '{"env":[]}', '{"env":{"MV2_TMUX_SOCKET":5}}'):
             path.write_text(content)
@@ -149,6 +174,24 @@ class DiscoveryTest(BaseTest):
         self.assertEqual(facts['control_endpoint']['address'], self.request['rpc_proxy']['socket_path'])
         self.assertNotIn('native_service', facts)
         self.assertNotIn('pid', facts)
+        # A saved request attests its own path, even when this caller selected
+        # another run folder. Shared upstreams never become cancellation targets.
+        durable = deepcopy(self.request)
+        run_root = self.work / 'run'
+        endpoint = str(run_root / 'native' / self.launch.name / 'rpc.sock')
+        durable['env'].update(MV2_RUN_DIR=str(run_root), MV2_CONTROL_SOCKET=endpoint)
+        durable['rpc_proxy']['socket_path'] = endpoint
+        with patch.object(paths, 'run_directory', return_value=self.work / 'later'):
+            facts = missing_runtime._qualified_facts(self.root, self.directory, self.properties, terminal,
+                                                    self.launch.name, durable, adapter)
+        self.assertEqual(facts['control_endpoint']['address'], endpoint)
+        for invalid in ('relative', None, [], ''):
+            refused = deepcopy(durable)
+            refused['env']['MV2_RUN_DIR'] = invalid
+            with self.subTest(run_directory=invalid):
+                facts = missing_runtime._qualified_facts(self.root, self.directory, self.properties, terminal,
+                                                        self.launch.name, refused, adapter)
+                self.assertNotIn('control_endpoint', facts)
         bad = [
             {**self.request, 'native_mode': {'mode': 'plain'}},
             {**self.request, 'rpc_proxy': None},
@@ -181,9 +224,11 @@ class DiscoveryTest(BaseTest):
                 pane['@mv2_launch_id'] = uid()
             error = 'Permission denied' if label == 'unreadable server' else None
             def close(*args):
+                if args[0] == 'display-message':
+                    return self.identity_reply(pane, args)
                 self.assertEqual(args, ('kill-pane', '-t', '%2'))
                 panes.clear()
-            def snapshot(backend):
+            def snapshot(backend, *, facts=None):
                 if label == 'replaced record':
                     write(self.directory / 'properties.json', self.properties)
                 return dict(panes), error
@@ -200,11 +245,13 @@ class DiscoveryTest(BaseTest):
                     result = lifecycle.kill(self.root, self.directory.name)
                     self.assertEqual(result['state'], 'dormant')
                     self.assertEqual(result['native_cancellation']['state'], 'unknown')
-                    control.assert_called_once()
+                    self.assertEqual([call.args[0] for call in control.call_args_list], ['display-message', 'kill-pane'])
+                    self.assertEqual(read(self.directory / 'runtime.json')['tmux']['server_identity'],
+                                     {'pid': 1234, 'epoch': 5678})
                 else:
                     with self.assertRaises(records.RecordError):
                         lifecycle.kill(self.root, self.directory.name)
-                    control.assert_not_called()
+                    self.assertTrue(all(call.args[0] == 'display-message' for call in control.call_args_list))
                     self.assertEqual(read(self.directory / 'runtime.json'), facts)
             (self.directory / 'properties.json').unlink(missing_ok=True)
 
@@ -215,6 +262,7 @@ class DiscoveryTest(BaseTest):
         launch."""
         self.properties['workspace'] = str(self.work)
         write(self.directory / 'properties.json', self.properties)
+        identity = self.identity_reply
         for replaced in ('pane', 'generation'):
             with self.subTest(replaced=replaced):
                 (self.directory / 'runtime.json').unlink(missing_ok=True)
@@ -228,11 +276,11 @@ class DiscoveryTest(BaseTest):
                         write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'running'})
                     return NativeResult('ok')
                 with patch.object(missing_runtime.Tmux, 'snapshot', return_value=({'%2': pane}, None)), \
-                        patch.object(missing_runtime.Tmux, 'run') as close, \
+                        patch.object(missing_runtime.Tmux, 'run', side_effect=lambda *args: identity(pane, args)) as control, \
                         patch.object(missing_runtime.harnesses, 'load', return_value=Mock(family='codex', stop=stop)), \
                         self.assertRaisesRegex(records.RecordError, 'ownership changed'):
                     missing_runtime.kill(self.root, self.directory)
-                close.assert_not_called()
+                self.assertEqual([call.args[0] for call in control.call_args_list], ['display-message'])
 
         def late_fallback(session, executor):
             write(self.launch / 'request.json', {**self.request, 'native_mode': {'mode': 'plain'}, 'rpc_proxy': None})
@@ -255,11 +303,13 @@ class DiscoveryTest(BaseTest):
                     write(self.directory / 'properties.json', {**self.properties, 'native_session_id': uid()})
                 open_pane = True
 
-                def snapshot(backend):
+                def snapshot(backend, *, facts=None):
                     return ({'%2': self.pane} if open_pane else {}), None
 
                 def run(backend, *args):
                     nonlocal open_pane
+                    if args[0] == 'display-message':
+                        return identity(self.pane, args)
                     self.assertEqual(args, ('kill-pane', '-t', '%2'))
                     open_pane = False
                 with patch.object(missing_runtime.Tmux, 'snapshot', snapshot), \

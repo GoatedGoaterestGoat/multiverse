@@ -3,7 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from unittest.mock import patch
 
-from multiverse import display
+from multiverse import display, harnesses
+from multiverse.harnesses.types import NativeResult
+from types import SimpleNamespace
 from multiverse.runtime import lifecycle, native, missing_runtime
 from multiverse.store import lock, read, uid, write
 from multiverse.terminal.tmux import Tmux
@@ -33,6 +35,69 @@ class LaunchDisplayFollowupTest(BaseTest):
                 '@mv2_agent_id': identity, '@mv2_universe_id': properties['universe_id'],
                 '@mv2_launch_id': facts['launch_id'], 'pane_pid': str(number)}
         return directory, facts, pane
+
+    def test_listing_can_skip_usage_without_changing_identity_or_display(self):
+        """A projected listing must not parse transcripts, and its allowed fields must cover healthy, damaged and preparing rows."""
+        measured = {'state': 'ok', 'value': {'total_tokens': 123}}
+        for state in ('healthy', 'damaged', 'preparing'):
+            with self.subTest(state=state):
+                directory, _, pane = self.record(1, state='running' if state == 'healthy' else 'starting',
+                                                  terminal=state != 'preparing')
+                if state == 'damaged':
+                    (directory / 'properties.json').write_text('[]')
+                with lock(directory / '.launch.lock'), \
+                        patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)), \
+                        patch.object(native, 'usage_snapshot', return_value=measured) as reader:
+                    full = lifecycle.listing(self.root)[0]
+                    self.assertEqual(reader.call_count, 0 if state == 'damaged' else 1)
+                    reader.reset_mock()
+                    light = lifecycle.listing(self.root, usage=False)[0]
+                    reader.assert_not_called()
+                self.assertEqual(light, {key: value for key, value in full.items()
+                                         if key not in ('usage', 'tokens', 'usage_detail')})
+                self.assertLessEqual(full.keys(), lifecycle.ROW_FIELDS)
+                if state == 'healthy':
+                    self.assertEqual(full['usage'], measured)
+                    self.assertEqual(full['tokens'], '123')
+                elif state == 'damaged':
+                    self.assertIn('damaged', light)
+                else:
+                    self.assertEqual(display.live_label(light), 'starting')
+
+    def test_a_deferred_usage_read_never_reconciles_or_repairs_an_identity_error(self):
+        """A usage thread may be left at exit only if it cannot append a session transition or replace error evidence."""
+        directory, _, pane = self.record(1, state='running')
+        with patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)):
+            row = lifecycle.listing(self.root, usage=False)[0]
+        before = {name: (directory / name).read_bytes() for name in ('properties.json', 'runtime.json')}
+        measured = NativeResult('ok', value={'total_tokens': 456})
+        calls = []
+        def usage(session):
+            calls.append(session)
+            return measured
+        with patch.object(harnesses, 'load', return_value=SimpleNamespace(get_usage=usage)), \
+                patch.object(native, 'session_snapshot', side_effect=AssertionError('usage must never reconcile')) as reconcile:
+            result = lifecycle.row_usage(row)
+            self.assertEqual(result['usage'], measured.to_dict())
+            self.assertEqual(result['tokens'], '456')
+            self.assertEqual(set(result), {'usage', 'tokens', 'usage_detail'})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(lifecycle.row_usage({**row, 'damaged': {'reason': 'broken'}}), {})
+            error = lifecycle.row_usage({**row, 'identity_error': 'Cannot read the session journal'})
+            self.assertEqual(error['usage']['state'], 'error')
+            self.assertIn('Cannot read the session journal', error['usage_detail'])
+            self.assertEqual(len(calls), 1)
+            reconcile.assert_not_called()
+        self.assertEqual({name: (directory / name).read_bytes() for name in before}, before)
+        self.assertFalse((directory / 'sessions.jsonl').exists())
+        with patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)), \
+                patch.object(native, 'session_snapshot', side_effect=ValueError('Cannot read the session journal')), \
+                patch.object(native, 'usage_snapshot') as reader:
+            for enabled in (False, True):
+                failed = lifecycle.listing(self.root, usage=enabled)[0]
+                self.assertEqual(failed['identity_error'], 'Cannot read the session journal')
+                self.assertLessEqual(failed.keys(), lifecycle.ROW_FIELDS)
+            reader.assert_not_called()
 
     def test_publication_stages_read_as_starting_never_damaged_or_absent(self):
         """Each stage of a launch's publication, a cached absence and an unknown server read as starting, alive or

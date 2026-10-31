@@ -1,0 +1,34 @@
+[
+ {
+  "name": "configured status line",
+  "note": "idle after a reply; a status line of model and effort, branch, approvals, context, limits, tokens and the agent name, then the shortcut hint; the last 12 rows of a real tmux capture of an agent on this machine",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "    + Show details\n\n• Item 6 is closed. All four files in integrated d8efc682 match the approved fix exactly. No Codex adapter change was needed. Lifecycle’s macOS/Linux gates passed; completion\n  report sent to lead.\n\n  Worked for 39s • 00:56\n\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol xhigh · bug-fixes · never · Context 76% left · weekly 83% left · 10.9M used · plugins-codex\n  ? for shortcuts\n",
+  "shown": "    + Show details\n\n• Item 6 is closed. All four files in integrated d8efc682 match the approved fix exactly. No Codex adapter change was needed. Lifecycle’s macOS/Linux gates passed; completion\n  report sent to lead.\n\n  Worked for 39s • 00:56\n\n"
+ },
+ {
+  "name": "status line cut short",
+  "note": "the same status line cut with … at the right edge; the last 12 rows of a real tmux capture of an agent on this machine",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "\n• Approved revision 5. The configuration dialog and footerless prompt are\n  preserved. All 3 focused tests passed; reviewed files stayed unchanged. Sent\n  approval to pane-display.\n\n  Worked for 58s • 21:28\n\n\n› Ask Codex to do anything\n\n  GPT-6-Astra xhigh · bug-fixes · never · Context 40% left · weekly 83% left · …\n  ? for shortcuts\n",
+  "shown": "\n• Approved revision 5. The configuration dialog and footerless prompt are\n  preserved. All 3 focused tests passed; reviewed files stayed unchanged. Sent\n  approval to pane-display.\n\n  Worked for 58s • 21:28\n\n"
+ },
+ {
+  "name": "warning count under the status line",
+  "note": "an unsent draft over the status line and, at the right of the hint row, \"⚠ 1 warning · f2 to view\"; a real tmux capture from QA (a private Codex home, so Codex warned about the default config), redacted by QA",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "\n  >_ OpenAI Codex (v0.164.0)\n     /private/tmp/qc254-jmfef931/w\n  permissions: YOLO mode\n\n\n› Reply exactly QA_WARNING_REPRO_254.\n\n\n• QA_WARNING_REPRO_254\n\n  Worked for 4s • 00:18\n\n\n\n\n\n\n\n\n› QA_DRAFT_REPRO2_254 unsent private draft\n\n  GPT-6-Luna low · /private/tmp/qc254-jmfef931/w · warning\n                                                       ⚠ 1 warning · f2 to view\n",
+  "shown": "\n  >_ OpenAI Codex (v0.164.0)\n     /private/tmp/qc254-jmfef931/w\n  permissions: YOLO mode\n\n\n› Reply exactly QA_WARNING_REPRO_254.\n\n\n• QA_WARNING_REPRO_254\n\n  Worked for 4s • 00:18\n\n\n\n\n\n\n\n"
+ },
+ {
+  "name": "warning dialog",
+  "note": "the warnings dialog opened from that count, in place of the composer: unchanged; a real tmux capture from QA",
+  "cli_version": "0.164.0",
+  "width": null,
+  "text": "› QA black-box probe. Run python3 /private/tmp/qc254-y8m2t7du/w/probe.py\n  seed_fresh once, then answer exactly QA_DONE_seed_fresh. Do not create\n  agents. Use no other tools.\n\n\n• Ran python3 /private/tmp/qc254-y8m2t7du/w/probe.py seed_fresh\n  └ PROBE_DONE_seed_fresh\n\n• QA_DONE_seed_fresh\n\n  Worked for 5s • 00:10\n\n  Warnings · 1 of 1 · Startup\n\n  Project-local config, hooks, and exec policies are disabled in the following\n  folders until the project is trusted, but skills still load.\n      1. /private/tmp/qc254-y8m2t7du/h/.codex\n         To load project-local config, hooks, and exec policies, add /private/\n  tmp/qc254-y8m2t7du/h as a trusted project in /private/tmp/qc254-y8m2t7du/\n  h/.cxnew/config.toml.\n\n\n\n  k keep & next · esc dismiss & close · ⌃o copy · ←/→ warning · ↓ scroll\n",
+  "shown": "› QA black-box probe. Run python3 /private/tmp/qc254-y8m2t7du/w/probe.py\n  seed_fresh once, then answer exactly QA_DONE_seed_fresh. Do not create\n  agents. Use no other tools.\n\n\n• Ran python3 /private/tmp/qc254-y8m2t7du/w/probe.py seed_fresh\n  └ PROBE_DONE_seed_fresh\n\n• QA_DONE_seed_fresh\n\n  Worked for 5s • 00:10\n\n  Warnings · 1 of 1 · Startup\n\n  Project-local config, hooks, and exec policies are disabled in the following\n  folders until the project is trusted, but skills still load.\n      1. /private/tmp/qc254-y8m2t7du/h/.codex\n         To load project-local config, hooks, and exec policies, add /private/\n  tmp/qc254-y8m2t7du/h as a trusted project in /private/tmp/qc254-y8m2t7du/\n  h/.cxnew/config.toml.\n\n\n\n  k keep & next · esc dismiss & close · ⌃o copy · ←/→ warning · ↓ scroll\n"
+ }
+]

@@ -6,11 +6,13 @@ import subprocess
 import sys
 import time
 from uuid import uuid4
+from isolation import track
 
-from test_multiverse import ROOT, TerminalBase, until as base_until
+from test_multiverse import ROOT, FixtureTmux, TerminalBase, until as base_until
 from multiverse.universe import agents
 from multiverse.terminal.tmux import Tmux
 from multiverse.store import read
+from multiverse.runtime.process import process_snapshot
 
 
 PATIENCE = 30  # seconds: waits return as soon as their condition holds; a loaded runner needs the room
@@ -169,11 +171,37 @@ class AttachReturnTest(TerminalBase):
         with self.subTest('same server'):
             self.check_host_return(self.backend, 'dashboard')
         with self.subTest('nested server with a quoted socket path'):
-            outer = Tmux(str(self.work / "outer 'quoted'.sock"))
+            outer = FixtureTmux(str(self.work / "outer 'quoted'.sock"))
             subprocess.run([*outer.prefix, '-f', '/dev/null', 'new-session', '-d',
                             '-s', 'unrelated', 'sleep 120'], check=True)
             self.addCleanup(outer.run, 'kill-server')
             self.check_host_return(outer, 'dashboard')
+        with self.subTest('the origin server is replaced while attached to the agent'):
+            outer = FixtureTmux(str(self.work / 'replaced-origin.sock'))
+            track(tmux_socket=outer.prefix[2])
+            sleeper = [sys.executable, '-c', 'import time; time.sleep(60)']
+            outer._run('new-session', '-d', '-s', 'origin-seed', *sleeper)
+            def cleanup():
+                try:
+                    outer._run('kill-server')
+                except RuntimeError:
+                    pass
+            self.addCleanup(cleanup)
+            dashboard = outer.create('dashboard', self.work, self.tui_command())
+            old = int(outer._run('display-message', '-p', '#{pid}'))
+            master, process = self.client([*outer.prefix, 'attach-session', '-t', dashboard['pane']])
+            self.read_until(master, b'tester')
+            self.open_agent(master)
+            self.clients_equal('', outer)
+            outer._run('kill-server')
+            until(lambda: (seen := process_snapshot(old)) is None or seen[1].startswith(('Z', 'X')))
+            outer._run('new-session', '-d', '-s', 'replacement-seed', *sleeper)
+            victim = outer._run('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', 'foreign-dashboard', *sleeper)
+            self.assertEqual(victim, dashboard['pane'])
+            os.write(master, b'\x02d')
+            self.read_until(master, b'mv2-server-identity-changed')
+            self.assertNotEqual(self.wait_exit(master, process), 0)
+            self.assertEqual(self.clients(outer), '', 'A delayed return must never attach a replacement origin')
         with self.subTest('custom prefix and d binding'):
             self.backend.run('set-option', '-g', 'prefix', 'C-a')
             self.backend.run('bind-key', '-T', 'prefix', 'd', 'display-message', 'CUSTOM DETACH')

@@ -88,7 +88,7 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 | `usage` | `mv.usage.adjust(fn)`: `fn(session, usage)` returns the usage record | A change to what `mv2 get-usage` and the dashboard report, after the harness measured it. Its changes to `context`, mv2's measured reading, are dropped (1.13): show an estimate in a [column](#columns) of your own |
 | `events` | `mv.events.on("agent.status", fn)`: `fn(event)` | A handler in the plugin host; see [events and the host](#events-and-the-host) |
 | `service` | `mv.service(start, stop=None)` | Long-running work in the plugin host |
-| `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `"$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`. `mv.helper.command("ping", *args)` gives that argv |
+| `helper` | `mv.helper.action("ping", fn)`: `fn(arguments)` returns an exit code | An action that harness code runs as `PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.plugins run my-plugin ping ARGS`, so the mv2 that launched the agent runs it. `mv.helper.command("ping", *args)` gives an argv that runs it with the mv2 running your plugin |
 
 ### Columns
 
@@ -298,6 +298,7 @@ def check(settings):                            # or check(settings, universe_di
 - `read` gives the file as written, or the defaults while there is no file. Keys a person removed aren't filled in, so merge your own defaults, as notifier does.
 - `edit` changes only the named keys (dotted paths). It writes nothing unless the whole result passes the schema and your check.
 - Settings that fail the schema or your check make the plugin act as off in that universe. Its command still runs, after a line saying why.
+- **Notes (1.15):** a check that returns a list of strings passes and reports them, for something worth saying that isn't a refusal, such as a key you ignore. `mv2 plugins info` and `mv2 plugins settings` show each, its first line up to 200 characters, at most 20, and `mv2 doctor` names each as a problem, with the settings file, so it exits 1 until the cause is fixed. Don't report the same thing from your own doctor check too. A check that raises still refuses.
 - Configure on `P` builds fields from the schema for strings, numbers, booleans and enums. `mv.dashboard.settings(fields=[...])` chooses and labels them with `api.Field(path, label, kind="text", options=(), placeholder="", help="")`, where `kind` is `text`, `int`, `float`, `bool` or `choice`.
 - `screen="screens:Settings"` names your own screen, built on `multiverse.plugins.ui.FieldScreen`. That module's docstring lists what it promises.
 
@@ -373,8 +374,8 @@ class MyPluginTest(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 Each test gets:
 
 - a temporary universe from the base template (`self.root`), with the plugin found and on;
-- a temporary home, `CLAUDE_CONFIG_DIR` and `bin/` first on `PATH`;
-- no inherited agent identity;
+- a temporary home, `CLAUDE_CONFIG_DIR`, tmux socket folder (`TMUX_TMPDIR`, so the default tmux server, where your agents run, is out of reach) and run folder (`MV2_RUN_DIR`), and `bin/` first on `PATH`;
+- no inherited agent identity, and no `MV2_TMUX_SOCKET`;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
 - `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
 - a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.

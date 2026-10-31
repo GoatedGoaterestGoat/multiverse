@@ -11,7 +11,7 @@ from uuid import uuid4
 from multiverse.universe import agents, records, relocate, templates
 from multiverse.runtime import attachments, lifecycle
 from multiverse.runtime import native
-from multiverse.store import read
+from multiverse.store import read, write
 from multiverse.terminal.tmux import Tmux
 from test_multiverse import TerminalBase, until
 
@@ -164,7 +164,8 @@ class KillTest(TerminalBase):
 
     def test_kill_never_controls_a_pane_or_process_it_cannot_prove_is_its_own(self):
         """kill never controls a pane tagged with another launch or signals a pid that is not its child, and both
-        agents can still be stopped once the evidence is right; fragile because panes and pids get reused and every
+        agents can still be stopped once the evidence is right, retrying transient inspection failures without
+        escalating unknown proof; fragile because panes and pids get reused and every
         agent runs as the same user, so a break signals an unrelated process."""
         with self.subTest('a pane tagged with another launch'):
             launched, directory = self.start('foreign-pane')
@@ -202,6 +203,58 @@ class KillTest(TerminalBase):
             agents.update_runtime(directory, facts['launch_id'], pid=facts['pid'])
             lifecycle.kill(self.root, launched['id'])
             self.assertEqual(self.live(launched), 'dormant')
+        for number, case in enumerate(('initial inspection failure', 'transient inspection failure',
+                                       'persistent inspection failure', 'replacement during inspection')):
+            with self.subTest(case=case):
+                launched, directory = self.start('inspection-' + str(number))
+                until(lambda: agents.runtime(directory).get('pid_started'))
+                saved = agents.runtime(directory)
+                signal_child, observe, stop = Tmux.signal_child, lifecycle.observe, native.stop
+                signals, failures, cancellations = [], [], []
+                def stop_native(*args, **kwargs):
+                    result = stop(*args, **kwargs)
+                    if case == 'initial inspection failure':
+                        # Native cancellation can end its child before core tries
+                        # to observe exit or sends any terminal signal itself.
+                        signal_child(self.backend, read(directory / 'properties.json'), saved, signal.SIGTERM)
+                    cancellations.append(True)
+                    return result
+                def signal_native(backend, properties, facts, number):
+                    signals.append(number)
+                    if case == 'transient inspection failure':
+                        return signal_child(backend, properties, facts, number)
+                def inspect(properties, facts, *args, **kwargs):
+                    if failures and case == 'replacement during inspection':
+                        self.fail('A replacement launch was observed during the old launch exit wait')
+                    if (case == 'initial inspection failure' and cancellations or
+                            signals and (not failures or case == 'persistent inspection failure')):
+                        failures.append(True)
+                        if case == 'replacement during inspection':
+                            write(directory / 'runtime.json', {**saved, 'launch_id': str(uuid4())})
+                        return {'live': 'unknown', 'reason': 'Process inspection unavailable'}
+                    return observe(properties, facts, *args, **kwargs)
+                try:
+                    with patch.object(Tmux, 'signal_child', signal_native), \
+                            patch.object(native, 'stop', side_effect=stop_native), \
+                            patch.object(lifecycle, 'observe', side_effect=inspect):
+                        if case == 'transient inspection failure':
+                            self.assertEqual(lifecycle.kill(self.root, launched['id'])['state'], 'dormant')
+                        else:
+                            message = 'Outdated launch' if case == 'replacement during inspection' else 'Run mv2 kill'
+                            with self.assertRaisesRegex((RuntimeError, ValueError), message):
+                                lifecycle.kill(self.root, launched['id'])
+                    self.assertEqual(signals, [] if case == 'initial inspection failure' else [signal.SIGTERM],
+                                     'Unknown proof must never permit a signal or escalation to SIGKILL')
+                    if case == 'persistent inspection failure':
+                        self.assertGreater(len(failures), 1, 'Unknown proof must be retried within the existing deadline')
+                    if case != 'transient inspection failure':
+                        self.assertIn(saved['tmux']['pane'], self.backend.snapshot()[0])
+                finally:
+                    if case == 'replacement during inspection':
+                        write(directory / 'runtime.json', saved)
+                    # Retrying after process access returns must finish normally.
+                    lifecycle.kill(self.root, launched['id'])
+                self.assertEqual(self.live(launched), 'dormant')
 
     def test_native_stop_failure_keeps_identity_and_reports_alive(self):
         """An unreachable daemon during kill keeps a live terminal and reports it alive without signalling it, and on

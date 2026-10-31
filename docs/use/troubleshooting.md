@@ -7,6 +7,8 @@ record; callbacks from an agent still require their verified identity.
 A leftover folder with damaged records may conservatively reserve a name when
 that text appears in a surviving record. Repair the named damaged file. If `properties.json` is missing, list, inspect and doctor offer `mv2 remove UUID` even when other records survive. Removal checks those records and the agent's processes before moving the leftover folder to the trash; a live or unprovable process still blocks it. A present but damaged properties file must be repaired instead: list, inspect, doctor and a refused remove show its full path and advise repairing it from a backup or restoring an intact copy. They never offer removal for that file.
 
+If `runtime.json` is readable but damaged, repair or restore it from a verified backup. The advice mentions restoring read access only when mv2 cannot read the file.
+
 Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
 
 ## Start here
@@ -195,13 +197,39 @@ The message ends with a restart command for the agent's selected Codex home, lik
 
 ### tmux socket or permission problems
 
-mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socket in `MV2_TMUX_SOCKET`. `spawn` and `resume` read the variable from your environment, so set it the same way each time. Each agent remembers its socket, and mv2 always observes the agent there. Agents get their own server's socket, so the agents they start land on the same server.
+New launches require tmux 3.2 or newer. Check `tmux -V` and upgrade if mv2 names an older version. Version 3.2 added the per-session environment option (`new-session -e`) that mv2 uses; see the [upstream 3.2 command](https://github.com/tmux/tmux/blob/3.2/cmd-new-session.c). This check applies to spawn and resume, not observing or stopping existing agents. Unrecognized development and OpenBSD version strings are left to tmux itself.
+
+mv2 runs new agents on `~/.multiverse/run/tmux.sock`, or on the socket in `MV2_TMUX_SOCKET`. `MV2_RUN_DIR` overrides the private run directory and also moves new native bridge sockets. `spawn` and `resume` use the current selection; existing agents stay at their saved addresses. Children inherit their verified parent's current server and run directory. Discovery also checks the old `tmux -L multiverse-v2` server, so an upgrade sees agents still running there.
+
+A message that wakes a stopped agent rejoins its recorded server if it still answers or can be recovered. A live peer's record can prove that server even after the recipient's own runner has exited. With no recorded socket, or a proven-gone default, an operator's wake uses the same socket and run directory as an explicit resume. This includes a swept `tmux-UID/multiverse-v2` folder, even when `TMUX_TMPDIR` has changed, and honors the operator's current `MV2_TMUX_SOCKET`. An agent sender can use its verified current placement only within the same universe tree; otherwise an operator must resume the recipient with an explicit socket. This also applies to `deliver --retry`. A custom recorded socket keeps its address; if its folder is gone, wake refuses and asks you to resume with `MV2_TMUX_SOCKET` set explicitly. An unknown server never causes a switch, and saved messages are never retried automatically.
+
+Explicit resume does not deliver the saved message. After resuming with a working bridge, use `mv2 deliver NAME --retry`. For a launch-only agent, resend with `--delivery inbox-only` for manual reading instead.
+
+If a cleaner removes the socket or its folder while tmux is still running, mv2 reconnects to that server. It verifies the saved PID, process start time and executable before sending `SIGUSR1`, recreates missing folders privately, and checks that the server answers. Starting or recovering a server shares a lock, with a bounded wait of 30 seconds. A healthy server whose PID and start time match the registry can be observed or joined without waiting on that lock; joining never starts a replacement server. If an unrecognized build rejects the join-only flag (`-N`), mv2 also refuses the launch with the tmux 3.2 requirement; it never falls back to a command that could start a second server. The server PID and start time returned when a session is created stay attached to its pane operations. If another server takes the socket, tagging, status setup and cleanup refuse even when that server has reused the same pane or session number. A proven conflict after a session was created removes only that new session, guarded by the replying server’s PID and start time; it never removes another server’s sessions. A different server answering at the same path is a conflict: mv2 names both PIDs and sends no signal.
+
+If a file blocks the socket folder, mv2 names the file and leaves it untouched. Move it aside, then repeat the command. For a recorded live server, that command retries recovery of the same server; it does not replace it.
+
+If recovery fails, the agent stays `unknown`, and the error names the socket and the process to check. Follow its manual recovery command only after verifying that PID still names the original tmux server. Do not remove `runtime.json` or start another server at the same path. Saved failed messages still need an explicit `mv2 deliver NAME --retry` or `--dismiss`; recovery never resends them.
+
+A server that answers remains usable when its process details are temporarily unreadable. mv2 saves no new signal authority until it can verify those details; a missing socket still requires the full process proof before recovery.
+
+If only the server's reply identity was saved, a missing socket does not prove that server exited. mv2 refuses to move that agent's wake, or create a replacement for an active launch there, while that PID could still exist. It sends no signal. This includes PID reuse when no OS start token was saved. An ended record does not block unrelated launches. Restore access to the original server, or resume as an operator with `MV2_TMUX_SOCKET` selecting another server. An agent sender missing its own recorded run directory must also ask an operator to resume the recipient; its ambient `HOME` and `MV2_RUN_DIR` cannot fill that gap for a wake.
+
+After a reboot or process exit, another user's process may reuse a saved server or runner PID. A readable, different start time proves the old process is gone even when checking that PID returns permission denied. If the identity cannot be distinguished, mv2 keeps it unknown and sends no signal. A permission refusal during recovery asks you to restore access as the server owner; it never recommends signalling that PID yourself. A refusal at the final check immediately before signalling also gives no manual signal command.
+
+mv2 keeps server identities under `~/.multiverse/tmux-servers/`. Older launches identify a healthy server by their exact saved pane, session and launch tag. If that pane is absent, an active launch must prove its server through its runner; a registry entry learned from another server cannot replace that proof. If that runner may be alive but its process identity cannot be read, mv2 refuses to start a replacement server until the inspection succeeds. If both the registry and socket are deleted, a new universe with no launch records cannot discover that old server; restore its address before spawning there.
+
+A runner observed as a zombie has exited, even if its older record has no process start token. A live or unreadable runner without that token remains unverified and cannot authorize a replacement or a signal.
+
+When a locked command finishes, it removes that socket's registry entry only if the recorded server is proven gone, and removes the matching lock too. A lock without a record is also removed. It keeps live, uncertain or damaged records and does not sweep other sockets' entries.
+
+A missing native bridge socket has a different remedy: once that launch has been ready, if its recorded process is still alive, stop and resume that agent to recreate the socket. A bridge still starting may not have created its socket yet; mv2 does not call that a lost connection. A working alternate delivery path remains usable. Codex's shared daemon socket is separate from this launch-local socket.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |
-| `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET` |
-| `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -L multiverse-v2 ls` |
+| `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET`; for a native socket, set a shorter absolute `MV2_RUN_DIR` |
+| `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -S "${MV2_RUN_DIR:-$HOME/.multiverse/run}/tmux.sock" ls`; older launches use `tmux -L multiverse-v2 ls` |
 | `server exited unexpectedly` on spawn, and the server's other sessions are gone | `MV2_TMUX_SOCKET` names a server with a global `window-size manual`; tmux 3.6a crashes on any new session there, with or without mv2 | Use mv2's own server, or unset `window-size` on yours (`tmux set -gu window-size`) |
 
 ### The dashboard doesn't show your agents

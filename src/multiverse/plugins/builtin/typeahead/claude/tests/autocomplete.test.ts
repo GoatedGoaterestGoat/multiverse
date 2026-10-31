@@ -3,7 +3,7 @@
 // The test's hooks stand in for the host: `mv2` runs and the engine's own rows.
 import type { On, PromptAutocompleteInput, PromptAutocompleteResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { agentRows, catalogEntries, catalogRows, suggest } from '../hooks/index'
+import { agentRows, catalogEntries, catalogRows, suggest, LIST_FIELDS } from '../hooks/index'
 
 // What `mv2 catalog --json` prints.
 const CATALOG = JSON.stringify([
@@ -63,6 +63,18 @@ describe('reading the catalog and the agents', () => {
       .toEqual([{ text: 'viewer', description: '' }])
     expect(agentRows({ agents: [] })).toEqual([])
   })
+
+  // The typeahead asks mv2 list for LIST_FIELDS alone: a field agentRows starts reading that isn't asked
+  // for silently drops out of every description, and asking for a usage field brings back the 11 s read.
+  test('the agent rows read nothing the listing is not asked for', async () => {
+    const asked = new Set(LIST_FIELDS.split(','))
+    const full = [{ id: 'a', name: 'alpha', universe: UNIVERSE, live: 'alive', status: 'working', phase: 'done',
+                    harness: 'claude', summary: 'busy', usage: { tokens: 1 }, tokens: 1 },
+                  { id: 'b', name: 'beta', universe: UNIVERSE, live: 'dormant', damaged: { file: 'runtime.json', reason: 'torn' } }]
+    const trimmed = full.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => asked.has(key))))
+    expect(agentRows(trimmed, undefined, UNIVERSE)).toEqual(agentRows(full, undefined, UNIVERSE))
+    expect([...asked].some((key) => ['usage', 'tokens', 'usage_detail'].includes(key))).toBe(false)
+  })
 })
 
 describe('which rows each position offers', () => {
@@ -118,7 +130,7 @@ function world(on: On, reply: (argv: readonly string[]) => Reply, env: Record<st
 const healthy = (argv: readonly string[]): Reply =>
   argv[1] === 'catalog' ? { stdout: CATALOG } : { stdout: JSON.stringify(AGENTS) }
 // mv2 is asked for JSON both times.
-const ASKED = ['catalog --json', 'list --json']
+const ASKED = ['catalog --json', `list --json --columns ${LIST_FIELDS}`]
 
 type Autocomplete = (input: PromptAutocompleteInput) => Promise<PromptAutocompleteResult>
 
@@ -155,16 +167,26 @@ describe('reading in the background', () => {
     expect(w.runs.length).toBe(4)  // and read again, once each
   })
 
-  test('typing never waits on a slow mv2, and a read under way is not started twice', async ($, on) => {
-    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 3000 }))
-    expect(await ask($, '/multi')).toEqual(['engine-row'])
-    await w.clock.settle()
-    expect(await ask($, '/multiverse h')).toEqual(['engine-row'])  // nothing kept yet, and no wait for it
-    expect(await ask($, '/multiverse he')).toEqual(['engine-row'])
-    await w.clock.settle()
+  // The first query past the command's name answers with the first read's rows: answered at once, its rows were never
+  // drawn until another key (qa-claude, 4 of 4: a pasted prefix showed nothing). Bounded, so a stuck read can't hold it.
+  test('the first query waits for the first read; a slow one is bounded; a read under way is not started twice', async ($, on) => {
+    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 2000 }))
+    expect(await ask($, '/multi')).toEqual(['engine-row'])  // reading ahead: nothing to offer yet, no wait
+    const first = ask($, '/multiverse h')
+    await w.clock.advance(2000)
+    expect(await first).toEqual(['engine-row', 'help'])  // the first read's rows, with no further key
     expect(w.runs.length).toBe(2)
+  })
+
+  test('a stuck first read holds the first answer only up to its bound, and is not started twice', async ($, on) => {
+    const w = world(on, (argv) => ({ ...healthy(argv), waitMs: 10000 }))
+    expect(await ask($, '/multi')).toEqual(['engine-row'])
+    const bounded = ask($, '/multiverse h')
     await w.clock.advance(3000)
-    expect(await ask($, '/multiverse he')).toEqual(['engine-row', 'help'])
+    expect(await bounded).toEqual(['engine-row'])  // the bound, not the read, ended the wait
+    await w.clock.advance(7000)
+    expect(await ask($, '/multiverse he')).toEqual(['engine-row', 'help'])  // the read landed: kept now
+    expect(w.runs.length).toBe(2)  // one read of each kind, never started twice
   })
 
   test('a failed or broken read offers no rows, never an error', async ($, on) => {

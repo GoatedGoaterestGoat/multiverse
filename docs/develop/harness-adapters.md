@@ -55,6 +55,7 @@ Core also looks for these optional methods and attributes:
 | `status_watch(session)` | A passive status stream the runner follows |
 | `attachment_recovery(session)` | A read-only check that an idle terminal can be reconnected |
 | `retained_usage(session, runtime)` | The last usage reading, kept across resume |
+| `display_pane(text)` | The dashboard's live pane without the harness's input box and the rows under it; see [pane display](#pane-display) |
 
 Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Unreadable or malformed metadata, compressed-only or linked storage, entries that disappear during traversal and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
 
@@ -123,11 +124,11 @@ An optional relay view's `primary_event(direction, value)` describes exact-prima
 A bridged launch takes messages once it is ready. Until then, core holds them as `pending`, and the runner delivers them in order. Readiness comes from the integration registering itself, or from the relay validating the binding:
 
 ```sh
-"$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v2 --status idle
-"$MV2_PYTHON" -m multiverse.tools.runtime_update --usage-json '{"context": {"tokens": 82000, "window": 200000}}'
+PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.tools.runtime_update --bridge claude-mod-v2 --status idle
+PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON" -m multiverse.tools.runtime_update --usage-json '{"context": {"tokens": 82000, "window": 200000}}'
 ```
 
-Integrations report `--status` (`idle`, `working`, `waiting`, `unknown`) and `--usage-json` the same way. `runtime_update` checks `MV2_LAUNCH_ID` and refuses an outdated launch. The adapter compares the reported bridge ID with its own constant.
+Integrations report `--status` (`idle`, `working`, `waiting`, `unknown`) and `--usage-json` the same way. `MV2_SOURCE` names the running package's import root. Prepend it to `PYTHONPATH` for each callback child only, preserving any existing path. When `MV2_SOURCE` is unset, leave `PYTHONPATH` alone. Do not export that change to the agent or its tool shells. `runtime_update` checks `MV2_LAUNCH_ID` and refuses an outdated launch. The adapter compares the reported bridge ID with its own constant.
 
 ## Plugin launch contributions
 
@@ -375,3 +376,13 @@ gone and all file ownership still matches. After the supervisor records that a r
 ended, the calling dashboard or plugin worker need not exit before cleanup. A
 cleanup problem does not discard a successful reply: the journal stays for the
 next sweep and `mv2 doctor`, which reports leftovers without deleting them.
+
+## Pane display
+
+The optional `PaneDisplay` method `display_pane(text)` is observe. The dashboard inspector's live pane passes each capture of an agent's pane through it, before it keeps the last 100 lines. Claude and Codex implement it; without it, the live pane shows the capture as it is. `mv2 inspect` keeps every row of the terminal.
+
+- **Pure.** It is a function of the text alone, run on every refresh. It reads no files, starts no process and uses no network, and its cost stays linear in the size of the text.
+- **The input box and what is under it.** It drops the input box with any text typed in it, and the rows the harness draws around it: rules across the pane, status rows or footer, hints, tips and blank padding. It never drops or rewrites conversation text, so a line of dashes in the conversation stays.
+- **Unchanged when unsure.** A screen it doesn't recognize comes back unchanged: a dialog in place of the input box, which the person answers in the pane, a narrow pane or another release's layout.
+
+Core shows the raw capture when the adapter has no `display_pane`, fails to load, raises, returns something other than a string, returns nothing for a non-empty capture, or returns lines that aren't a subset of the capture's lines in their order. A broken adapter can't blank or rewrite the pane. `tests/test_pane_display.py` keeps screens of each checked release with the lines they should show, so a release that changes the screen fails a test.

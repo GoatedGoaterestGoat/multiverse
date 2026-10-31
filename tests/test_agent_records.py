@@ -195,11 +195,13 @@ class DamagedListingTests(PluginTestCase):
     def test_list_columns_prints_what_was_asked_and_one_column_prints_only_values(self):
         """mv2 list shows name, status, phase and summary; with --columns, one column prints one value per agent, a
         damaged one included, and nothing else, several columns keep the ! problem lines, and a list that names
-        nothing, has an empty entry or names a column twice is refused; fragile because agents and leads are told to
+        nothing, has an empty entry or names a column twice is refused; a text listing, and --json --columns without a
+        usage field, read no usage, while plain --json and a usage field still do; fragile because agents and leads are told to
         read the phase in the plain listing (the bootstrap, the coordination skill), and scripts loop over the
         one-column form ($(mv2 list --columns name)), so a padded value, a problem line or the whole table (from
         --columns "$EMPTY") read as agents' names sends to agents that do not exist, and a lost phase or problem line
-        goes unnoticed."""
+        goes unnoticed; and reading usage takes seconds, so a listing that reads it unasked makes the typeahead
+        that runs mv2 list --json --columns slow again, with every output still right."""
         (self.victim / "properties.json").write_text("[]")
         names = sorted(row["name"] for row in self.rows().values())
 
@@ -220,9 +222,47 @@ class DamagedListingTests(PluginTestCase):
             healthy = next(line for line in lines if "healthy" in line)
             self.assertEqual(healthy.split(), ["working", "healthy"])
             self.assertTrue(any(line.startswith("  ! ") and "properties.json" in line for line in lines), lines)
+        reads = []
+        real = native.usage_snapshot
+
+        def counted(*args, **kwargs):
+            reads.append(1)
+            return real(*args, **kwargs)
+
+        def usage_reads(*args):  # what listing with these arguments prints, and how often it read an agent's usage
+            reads.clear()
+            with mock.patch.object(native, "usage_snapshot", counted):
+                return listed(*args), len(reads)
+
+        with self.subTest("a text listing never reads usage, which none of its columns shows"):
+            for args in ((), ("--columns", "name"), ("--columns", "name,summary,harness,universe,id")):
+                self.assertEqual(usage_reads(*args)[1], 0, args)
+        with self.subTest("plain --json is unchanged: every field, usage included"):
+            out, count = usage_reads("--json")
+            self.assertGreater(count, 0)
+            healthy = next(row for row in json.loads(out) if row["name"] == "healthy")
+            self.assertTrue({"usage", "tokens", "usage_detail", "runtime", "live"} <= set(healthy))
+        with self.subTest("--json --columns: the fields asked, raw and in order, and no usage read"):
+            asked = ["id", "name", "universe", "live", "status", "phase", "damaged"]  # what the typeahead reads
+            out, count = usage_reads("--json", "--columns", ",".join(asked))
+            self.assertEqual(count, 0)
+            full = {row["id"]: row for row in json.loads(usage_reads("--json")[0])}
+            rows = json.loads(out)
+            self.assertEqual(sorted(row["name"] for row in rows), names)
+            for row in rows:
+                self.assertEqual(list(row), [key for key in asked if key in full[row["id"]]])
+                self.assertEqual(row, {key: full[row["id"]][key] for key in row})  # as plain --json gives them
+            self.assertEqual([row["id"] for row in rows if "damaged" in row], [self.victim.name])
+        with self.subTest("--json --columns with a usage field reads usage"):
+            out, count = usage_reads("--json", "--columns", "name,tokens")
+            self.assertGreater(count, 0)
+            self.assertEqual([list(row) for row in json.loads(out) if row["name"] == "healthy"], [["name", "tokens"]])
         for args, said in ((["--columns="], "Name at least one column"), (["--columns", ""], "Name at least one column"),
                            (["--columns", ","], "Name at least one column"), (["--columns", "name,,phase"], "empty"),
-                           (["--columns", "name,phase,name"], "name more than once")):
+                           (["--columns", "name,phase,name"], "name more than once"),
+                           (["--json", "--columns", "name,nmae"], "nmae"), (["--json", "--columns", "id,id"], "more than once"),
+                           (["--json", "--columns="], "id,name,live,status"), (["--json", "--columns", ","], "plain mv2 list --json"),
+                           (["--json", "--columns", "nmae"], "plain mv2 list --json")):
             with self.subTest("refused", args=args):
                 err = io.StringIO()
                 with self.assertRaises(SystemExit) as exited:

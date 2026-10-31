@@ -87,6 +87,11 @@ class CodexAdapter(ConfiguredAdapter):
         from .refusal import plain_started
         return plain_started(evidence)
 
+    def display_pane(self, text):
+        """The live pane without Codex's composer and what is under it (pane.py)."""
+        from .pane import display
+        return display(text)
+
     def _configure_launch(self):
         if self.settings.get('inbox_bridge') is True:
             for key in ('args', 'spawn_args', 'resume_args'):

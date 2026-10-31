@@ -9,9 +9,10 @@ import type { EngineInterface, Register } from 'claude-code'
 // Claude refuses a module that hooks it. The Claude adapter loads this plugin only for 2.1.292 or
 // newer, so the multiverse mod itself keeps working everywhere.
 //
-// The catalog (`mv2 catalog --json`) and the agent list (`mv2 list --json`) are read in the background and kept a few seconds. Typing
-// never waits on them: a hook answers from what is kept, and reading starts after it returns, first
-// while `/mu...` is still being typed. A failed read leaves no rows.
+// The catalog (`mv2 catalog --json`) and the agent list (`mv2 list --json --columns ...`) are read in the background and kept a few seconds,
+// first while `/mu...` is still being typed. Typing never waits on them: Claude draws a plugin's rows whenever its
+// answer comes. A hook answers from what is kept; only a query before anything was ever read waits (up to
+// FIRST_WAIT_MS) for that first read, so its rows appear without another key. A failed read leaves no rows.
 
 // Kept equal to the multiverse mod's command and subcommands (a Python test compares them).
 export const COMMAND = "multiverse"
@@ -20,6 +21,7 @@ const RESERVED = new Set(["list", "send", "inbox"])
 const RUNNABLE: Record<string, string> = { commands: "command", workflows: "workflow", skills: "skill" }
 const FRESH_MS = 5000
 const LOAD_TIMEOUT_MS = 5000
+const FIRST_WAIT_MS = 3000
 
 export type Suggestion = { text: string; label?: string; description?: string }
 export type CatalogEntry = { kind: string; name: string; description: string }
@@ -55,6 +57,8 @@ export function catalogRows(entries: readonly CatalogEntry[]): Suggestion[] {
 }
 
 type Listed = { id?: unknown; name?: unknown; universe?: unknown; live?: unknown; status?: unknown; phase?: unknown; damaged?: unknown }
+// Exactly the fields agentRows reads: asking for no usage field keeps mv2 from reading every agent's transcript.
+export const LIST_FIELDS = "id,name,universe,live,status,phase,damaged"
 
 // The agents `mv2 send` can reach from here: `mv2 list --json` also shows other universes' agents,
 // which it cannot. This agent is left out, and so is a name `send` could not take as one word, and a row
@@ -90,7 +94,7 @@ export function suggest(before: string, token: string, known: Known): Suggestion
   return []
 }
 
-type Kept = { rows: Suggestion[]; at: number; loading: boolean }
+type Kept = { rows: Suggestion[]; at: number; loading: boolean; pending?: Promise<void> }
 const kept: Record<"catalog" | "agents", Kept> = {
   catalog: { rows: [], at: -Infinity, loading: false },
   agents: { rows: [], at: -Infinity, loading: false },
@@ -100,7 +104,7 @@ const kept: Record<"catalog" | "agents", Kept> = {
 async function load($: EngineInterface, which: "catalog" | "agents", cli: string) {
   const entry = kept[which]
   try {
-    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog", "--json"] : ["list", "--json"])],
+    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog", "--json"] : ["list", "--json", "--columns", LIST_FIELDS])],
                                        { timeoutMs: LOAD_TIMEOUT_MS })
     if (result.exitCode !== 0) entry.rows = []
     else if (which === "catalog") entry.rows = catalogRows(catalogEntries(JSON.parse(result.stdout)))
@@ -132,9 +136,14 @@ export const register: Register = (on) => {
       const entry = kept[which]
       if (!entry.loading && now - entry.at >= FRESH_MS) {
         entry.loading = true
-        // After this hook returns: typing never waits on mv2.
-        $.clock.after(0, () => load($, which, cli))
+        entry.pending = load($, which, cli)  // not awaited here: the answer below uses what is kept
       }
+    }
+    // Past the command's name, a query that comes before anything was ever read waits for that first read:
+    // answering at once would leave its rows undrawn until another key is pressed.
+    const unread = Object.values(kept).filter((entry) => entry.at === -Infinity && entry.pending)
+    if (before !== "" && unread.length) {
+      await Promise.race([Promise.all(unread.map((entry) => entry.pending)), $.clock.sleep(FIRST_WAIT_MS)])
     }
     const mine = suggest(before, e.token, { catalog: kept.catalog.rows, agents: kept.agents.rows })
     return mine.length ? { suggestions: [...theirs.suggestions, ...mine] } : theirs

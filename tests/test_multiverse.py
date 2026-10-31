@@ -24,7 +24,24 @@ from multiverse.universe import templates
 from multiverse.tools import send
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write
-from multiverse.terminal.tmux import Tmux
+from multiverse.terminal.tmux import Tmux, UnboundTarget
+
+
+class FixtureTmux(Tmux):
+    """Bind a deliberate fixture operation to the private server being inspected.
+
+    Production paths use Tmux and must bring their own launch/origin proof.
+    This helper is only for a test's deliberate edits to its private server.
+    """
+    def command(self, *args):
+        try:
+            return super().command(*args)
+        except UnboundTarget:
+            from multiverse.terminal.recovery import address
+            pid, epoch = self._run('display-message', '-p', '#{pid}\t#{start_time}').split('\t')
+            if not pid.isdecimal() or not epoch.isdecimal() or min(int(pid), int(epoch)) <= 0:
+                raise AssertionError('Fixture server did not supply its identity')
+            return Tmux(str(address(self)), identity={'pid': int(pid), 'epoch': int(epoch)}).command(*args)
 
 
 def append_many(args):
@@ -79,7 +96,7 @@ class TerminalBase(BaseTest):
     def setUp(self):
         super().setUp()
         self.socket = str(self.work / "tmux.sock")
-        self.backend = Tmux(self.socket)
+        self.backend = FixtureTmux(self.socket)
         track(tmux_socket=self.socket)  # its server runs in its own session: tests/run.py ends it if this test can't
         self.addCleanup(self.kill_server)
         harness = self.root / "harnesses" / "fake"
@@ -125,7 +142,7 @@ class TerminalBase(BaseTest):
         except AssertionError:
             remaining = sorted(pid for pid in pids if not exited(pid))
             try:
-                detail = subprocess.run(['ps', '-o', 'pid,ppid,stat,etime,comm', '-p', ','.join(map(str, remaining))],
+                detail = subprocess.run(['ps', '-ww', '-o', 'pid,ppid,stat,etime,args', '-p', ','.join(map(str, remaining))],
                                         text=True, capture_output=True, check=False, timeout=5).stdout.strip()
             except (OSError, subprocess.SubprocessError) as error:
                 detail = f'Process inspection unavailable: {error}'
@@ -142,12 +159,13 @@ class TerminalBase(BaseTest):
 
 class TerminalCleanupTest(BaseTest):
     def test_cleanup_waits_for_running_processes_but_not_unreaped_exits(self):
-        """An unreaped exit cannot write fixture state, but a live or uninspectable process must still block cleanup."""
+        """Teardown must wait for live or unknown processes and identify their full command; only a proven exit can stop writing fixture state."""
         original_until = until
+        marker = 'mv2-cleanup-survivor-' + 'x' * 160
         for state in ('running', 'uninspectable', 'exited but unreaped'):
             with self.subTest(state=state):
                 child = subprocess.Popen([sys.executable, '-c', 'pass' if state == 'exited but unreaped'
-                                           else 'import time; time.sleep(60)'],
+                                           else 'import time; time.sleep(60)', marker],
                                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 try:
                     if state == 'exited but unreaped':
@@ -164,6 +182,8 @@ class TerminalCleanupTest(BaseTest):
                             with self.assertRaises(AssertionError) as caught:
                                 TerminalBase.kill_server(self)
                             self.assertIn(str(child.pid), str(caught.exception))
+                            self.assertIn('import time; time.sleep(60)', str(caught.exception))
+                            self.assertIn(marker, str(caught.exception), 'The complete argv identifies a surviving runner or child')
                 finally:
                     if child.poll() is None:
                         child.terminate()

@@ -37,7 +37,9 @@ mv2 list --columns name         # one name per line, for scripts
 
 Each line shows the agent's name, status, reported phase and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
-`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at. `--json` always gives every field.
+`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
+
+`--json` gives every field of each agent. With `--columns`, it gives only the fields named, in that order, such as `mv2 list --json --columns id,name,live,status`. Their values are the same as in the full `--json` output, and a field an agent doesn't have is left out of its entry. Reading each agent's token usage is the slow part of a listing, so mv2 reads it only for plain `--json`, or when `--columns` names `usage`, `tokens` or `usage_detail`. The text listing never reads it.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
@@ -82,6 +84,8 @@ be removed with `mv2 remove NAME`; `--start-fresh` cannot discover an unknown
 conversation by guessing an ID.
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, readable UTC start time when available, and record path, and says whether the recorded process is still running or its identity is uncertain. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
+
+While waiting for native exit, `kill` retries a temporarily unavailable observation within its existing shutdown wait. If the final observation is still unknown, it keeps the terminal and asks you to run `kill` again. This advice also applies when exit could not be observed before any terminal signal was sent. It never escalates to `SIGKILL` on unknown evidence, and each observation must still name the same launch.
 
 Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.
 

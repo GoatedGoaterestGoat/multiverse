@@ -110,6 +110,8 @@ Each plugin keeps its settings for a universe in `plugin-settings/NAME.json`. If
 
 Settings that can't be used never stop a launch. Instead, the plugin acts as off in that universe until they're fixed: `mv2 plugins` lists it as `unusable`, and `mv2 plugins settings NAME` and `mv2 doctor` say why.
 
+A plugin's own check can also pass the settings with notes, such as a key it ignores. The settings stay usable, and `mv2 plugins info`, `mv2 plugins settings` and the Plugins screen show each note as `Note: ...`. `mv2 doctor` lists each one as a problem, naming the settings file, until it's fixed.
+
 Some plugins used a settings file before they became plugins, such as `compaction.json`. The next `mv2` command that runs in the universe converts that file to `plugin-settings/`. `mv2 plugins migrate` shows what it would convert, and `--apply` converts it now. Once converted, an old file found again (brought back by an old branch, say) is ignored, and `mv2 doctor` says so: remove it.
 
 ## Trust a universe's own plugins

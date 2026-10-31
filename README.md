@@ -31,7 +31,7 @@ mv2 is in early development. It runs Claude Code, Codex and Pi on Linux and macO
 
 ## Install
 
-You need Linux or macOS, Python 3.11 or newer, tmux, and at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or [Pi](https://github.com/earendil-works/pi), installed and logged in.
+You need Linux or macOS, Python 3.11 or newer, tmux 3.2 or newer, and at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or [Pi](https://github.com/earendil-works/pi), installed and logged in.
 
 ```sh
 git clone https://github.com/GoatedGoaterestGoat/multiverse.git

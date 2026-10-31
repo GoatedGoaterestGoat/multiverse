@@ -15,6 +15,7 @@ import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 
 from isolation import isolate
 
@@ -39,6 +40,12 @@ class RunnerTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name).resolve()
         self.slots = self.work / "slots"  # never the machine's: these runners must not wait for the suite's
+        # The runners these tests start, some killed on purpose, keep their scratch and run folders in here, which
+        # goes when the test ends, never in the machine's temporary folder; short, so that native sockets' paths in
+        # a run folder under it fit.
+        short = tempfile.TemporaryDirectory(prefix="mv2-", dir="/tmp")
+        self.addCleanup(short.cleanup)
+        self.enterContext(mock.patch.dict(os.environ, TMPDIR=short.name))
         self.fresh("main")
 
     def fresh(self, name):
@@ -354,6 +361,95 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("Ran 1 tests", result.stdout)
         for value in planted.values():
             self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_no_test_or_child_reaches_the_live_agents_tmux_servers_or_sockets(self):
+        """The live agents' default tmux server and native sockets are in the run folder (MV2_RUN_DIR, or
+        ~/.multiverse/run), their legacy default server under TMUX_TMPDIR, or /tmp, and an agent's MV2_TMUX_SOCKET
+        names its server: so the runner gives each run, and isolate() and PluginTestCase each test, a run folder and
+        a TMUX_TMPDIR of its own, short enough for native sockets' paths (isolate()'s HOME too, for tests that drop
+        MV2_*), and no MV2_TMUX_SOCKET; otherwise a test
+        that reaches discovery or a launch without naming a socket inspects, or kills panes on, the user's agents,
+        and nothing shows it."""
+        self.module("test_tmux_folder", """
+            import json, os, subprocess, sys, unittest, uuid
+            from isolation import isolate
+            from multiverse.plugins import testing as guard
+            from multiverse.plugins.testing import PluginTestCase
+            from multiverse.runtime import paths
+            SRC = os.path.dirname(os.path.dirname(os.path.dirname(paths.__file__)))
+            LIVE_RUN = os.environ["LIVE_RUN"]  # the person's run folder, which the agents use
+            VIEW = ("import json, os, sys; sys.path.insert(0, sys.argv[1]); from multiverse.runtime import paths; "
+                    "print(json.dumps([os.environ.get('TMUX_TMPDIR'), os.environ.get('MV2_TMUX_SOCKET'), "
+                    "str(paths.run_directory())]))")
+            def here():
+                return [os.environ.get("TMUX_TMPDIR"), os.environ.get("MV2_TMUX_SOCKET"), str(paths.run_directory())]
+            def child():
+                return json.loads(subprocess.run([sys.executable, "-c", VIEW, SRC], capture_output=True, text=True,
+                                                 check=True).stdout)
+            AT_IMPORT = here()
+            RUNS = AT_IMPORT[0], AT_IMPORT[2]
+            def private(path):  # the folder, or the nearest one above it that exists, is ours and no one else's
+                while path and not os.path.isdir(path):
+                    path = os.path.dirname(path)
+                return bool(path) and os.stat(path).st_uid == os.getuid() and not os.stat(path).st_mode & 0o077
+            def fits(run):
+                try:
+                    paths.native_socket(str(uuid.UUID(int=0)), directory=run)
+                except ValueError:
+                    return False
+                return True
+            def describe(folder, socket, run):
+                return {"tmux folder": bool(folder) and os.path.isdir(folder) and private(folder), "socket": socket,
+                        "run folder": run != LIVE_RUN and private(run) and fits(run)}
+            def check(test, seen, own):
+                print("SEEN " + test.id() + " " + json.dumps(seen))
+                test.assertEqual({key: describe(*value) for key, value in seen.items()},
+                                 dict.fromkeys(seen, {"tmux folder": True, "socket": None, "run folder": True}))
+                if own:  # its own folders, not the run's
+                    test.assertFalse({value[0] for value in seen.values()} & {RUNS[0]}
+                                     or {value[2] for value in seen.values()} & {RUNS[1]})
+            class Folders(unittest.TestCase):
+                def test_plain(self):
+                    check(self, {"import": AT_IMPORT, "test": here(), "child": child()}, own=False)
+                    # The run's folder replaced the person's only after the home guard recorded theirs.
+                    self.assertIn(LIVE_RUN, guard._protected)
+                def test_isolated(self):
+                    isolate(self)
+                    check(self, {"test": here(), "child": child()}, own=True)
+                    # A test that drops every MV2_* variable, a common way to shed the agent's identity, still gets a
+                    # run folder its native sockets fit in: the default one under its HOME.
+                    del os.environ["MV2_RUN_DIR"]
+                    default = str(paths.run_directory())
+                    self.assertEqual((default != LIVE_RUN, fits(default)), (True, True), default)
+            class PluginFolders(PluginTestCase):
+                def setUp(self):
+                    # As when its tests run without the runner, which has dropped the agent's socket by now.
+                    self.addCleanup(os.environ.pop, "MV2_TMUX_SOCKET", None)
+                    os.environ["MV2_TMUX_SOCKET"] = "/the-live-agents/tmux.sock"
+                    super().setUp()
+                def test_plugin_test(self):
+                    check(self, {"test": here(), "child": child()}, own=True)
+            """)
+        planted = self.row / "the-agents-folders"
+        planted.mkdir(mode=0o700)
+        agent = {"MV2_TMUX_SOCKET": str(planted / "tmux-501" / "live-agents")}  # an agent's own server
+        unset = {key: value for key, value in os.environ.items() if key not in ("TMUX_TMPDIR", "MV2_RUN_DIR")}
+        live_default = str(Path(os.environ["HOME"]).resolve() / ".multiverse" / "run")
+        long_tmp = self.row / ("long-" * 12)
+        long_tmp.mkdir()
+        for name, environment in (
+                ("an agent's TMUX_TMPDIR and MV2_RUN_DIR",
+                 {**unset, **agent, "TMUX_TMPDIR": str(planted), "MV2_RUN_DIR": str(planted / "run"),
+                  "LIVE_RUN": str(planted / "run")}),
+                ("none: tmux uses /tmp, mv2 ~/.multiverse/run", {**unset, **agent, "LIVE_RUN": live_default}),
+                ("a TMPDIR too long for native sockets, as macOS's is",
+                 {**unset, **agent, "LIVE_RUN": live_default, "TMPDIR": str(long_tmp)})):
+            with self.subTest(name):
+                result = subprocess.run(self.command("-v", "test_tmux_folder"), env=environment, text=True,
+                                        capture_output=True, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Ran 3 tests", result.stdout)
+                self.assertNotIn(str(planted), result.stdout + result.stderr)
 
     def interrupted(self, how):
         """Start a run whose second unit waits, stop the runner with signal `how` once the first unit has failed and

@@ -22,7 +22,7 @@ from .manifest import LATER_CORE_ITEMS
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
 CORE_ENVIRONMENT = frozenset({"MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
-                              "MV2_CLI", "MV2_PYTHON", "MV2_TMUX_SOCKET", "MV2_PLUGINS", "MV2_PLUGIN_PATH",
+                              "MV2_CLI", "MV2_PYTHON", "MV2_SOURCE", "MV2_RUN_DIR", "MV2_TMUX_SOCKET", "MV2_PLUGINS", "MV2_PLUGIN_PATH",
                               # The shared-agent authority an adapter declares: a plugin never overrides it.
                               "MV2_IDENTITY_MODE",
                               # Where a session's account, history and executables come from: core and the

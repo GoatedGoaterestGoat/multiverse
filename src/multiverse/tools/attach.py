@@ -13,15 +13,13 @@ def configure(parser):
 
 def run(root=None, *, agent):
     backend, pane = lifecycle.terminal_action(universe.resolve(root), agent, "attach")
-    command = [*backend.prefix, "attach-session", "-t", pane]
+    command = backend.command("attach-session", "-t", pane)
     current = os.environ.get("TMUX", "").split(",")[0]
     if current:
         origin = os.environ.get("TMUX_PANE")
         if not origin:
             raise RuntimeError("Cannot identify the originating tmux pane")
-        host = Tmux(current)
-        tty, client = host.run("display-message", "-p", "-t", origin,
-                               "#{pane_tty}\t#{client_name}").split("\t")
+        host, tty, client = Tmux(current).origin(origin)
         # A separate terminal can inherit TMUX from its launcher. It must not
         # replace that launcher's client just because its environment matches.
         if os.isatty(0) and os.ttyname(0) == tty:
@@ -30,7 +28,7 @@ def run(root=None, *, agent):
                 raise RuntimeError("No tmux client is attached to the originating dashboard")
             # Replace the host client, not the dashboard process. A nested attach
             # lets the host consume prefix+d; switch-client detaches the whole host.
-            return_command = [*host.prefix, "attach-session", "-t", origin]
+            return_command = host.command("attach-session", "-t", origin)
             route = "unset TMUX TMUX_PANE; " + shlex.join(command) + "; exec " + shlex.join(return_command)
             host.run("detach-client", "-t", client, "-E", route)
             return

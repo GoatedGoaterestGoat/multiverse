@@ -533,12 +533,12 @@ class ServiceContext:
 
 class Helpers(_Points):
     def command(self, name, *arguments, universe=None):
-        """The argv that runs this plugin's helper action `name` (to start a sibling, e.g. a detached worker)."""
-        import sys
+        """The argv that runs this plugin's helper action `name` (to start a sibling, e.g. a detached worker), with
+        the mv2 running this plugin, not whichever the interpreter finds."""
         if name not in self._loaded.registrations.helpers:
             raise Error(f"{self._loaded.name} has no helper action {name!r}")
         scope = ["-u", str(_root(universe))] if universe is not None else []
-        return [sys.executable, "-m", "multiverse.plugins", *scope, "run", self._loaded.name, name, *map(str, arguments)]
+        return loader.module_command("multiverse.plugins", *scope, "run", self._loaded.name, name, *arguments)
 
     def action(self, name, function=None, *, effect="act"):
         """`python -m multiverse.plugins run PLUGIN NAME ARGS...` runs function(ARGS) -> exit code.
@@ -787,7 +787,8 @@ class SettingsAccess:
 
     def check(self, function):
         """function(settings), or function(settings, universe directory), raises ValueError naming what is
-        wrong. It sees the whole file. Usable as a decorator."""
+        wrong. It sees the whole file. It may return a list of strings, notes that keep the settings usable and
+        that mv2 plugins info and settings show (1.15). Usable as a decorator."""
         self._loaded.registrations.settings_check = _declared(self._loaded, "observe", "settings check", function)
         return function
 

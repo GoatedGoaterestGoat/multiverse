@@ -1,13 +1,14 @@
-"""One test's environment: its own HOME, and nothing the shell or agent running the suite would pass on: no agent
-identity, and no variable that looks like a credential.
+"""One test's environment: its own HOME, tmux socket folder (TMUX_TMPDIR) and run folder (MV2_RUN_DIR), and nothing
+the shell or agent running the suite would pass on: no agent identity, and no variable that looks like a credential.
 
     from isolation import isolate
 
     def setUp(self):
         isolate(self)   # first in setUp, before anything reads HOME or starts a process; returns the HOME
 
-The processes a test starts inherit its HOME, so neither the test nor the runners, relays and CLI calls it
-starts can write the real ~/.multiverse. BaseTest calls it; a TestCase that is not a BaseTest can too.
+The processes a test starts inherit them, so neither the test nor the runners, relays and CLI calls it starts can
+write the real ~/.multiverse or reach the live agents' tmux servers and native sockets. BaseTest calls it; a
+TestCase that is not a BaseTest can too.
 
     track(tmux_socket=socket)   # a tmux server, or track(pid=pid) a daemon, started outside the test's process group
 
@@ -40,12 +41,16 @@ def _inherited(key, value):
 
 
 def isolated_environment(home):
-    """os.environ without what was inherited, and HOME `home` unless the test already gave itself one."""
+    """os.environ without what was inherited, with HOME and TMUX_TMPDIR `home` and MV2_RUN_DIR `home`/run, each unless
+    the test already gave itself one."""
     environment = {key: value for key, value in os.environ.items() if not _inherited(key, value)}
     for key, value in OWN.items():
         environment.setdefault(key, value)  # unless the test set its own
-    if os.environ.get("HOME") == STARTED_WITH.get("HOME"):
-        environment["HOME"] = str(home)
+    # TMUX_TMPDIR and MV2_RUN_DIR: where the live agents' default tmux servers and native sockets are. The run folder
+    # is short, for the native sockets' paths.
+    for key, value in (("HOME", home), ("TMUX_TMPDIR", home), ("MV2_RUN_DIR", home / "run")):
+        if os.environ.get(key) == STARTED_WITH.get(key):
+            environment[key] = str(value)
     return environment
 
 
@@ -55,7 +60,9 @@ def isolate(test):
     home_safety.running(test.id())
     test.addCleanup(home_safety.check, test.id())  # registered first, so it runs last: this test's refused writes
     test.addCleanup(home_safety.running, None)
-    temporary = tempfile.TemporaryDirectory(prefix="mv2-test-home-", dir="/tmp")
+    # Short: many tests drop every MV2_* variable, MV2_RUN_DIR with it, and then a launch's native socket is in the
+    # default run folder under this HOME, ~/.multiverse/run/native/<launch>/rpc.sock, within macOS's 103 bytes.
+    temporary = tempfile.TemporaryDirectory(prefix="mv2-h-", dir="/tmp")
     test.addCleanup(temporary.cleanup)
     test.enterContext(mock.patch.dict(os.environ, isolated_environment(Path(temporary.name).resolve()),
                                       clear=True))

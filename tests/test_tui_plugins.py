@@ -547,5 +547,68 @@ class FollowingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.until(lambda: "Access here: act" in details(), "the change made while the chooser was open")
 
 
+NOTED = """def register(mv):
+    @mv.settings.check
+    def check(values):
+        if values.get("loud"):
+            return ["loud: ignored, this plugin has no such setting"]
+"""
+
+
+class SettingsNotesTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_the_plugins_screen_shows_the_notes_a_plugins_settings_check_returns(self):
+        """A note a plugin's settings check returns (1.15) shows on the Plugins screen, under the settings line and on
+        its settings form, and leaves the settings usable; the screen names it once, under the plugin's settings while
+        that plugin is selected and among the universe's problems otherwise; fragile and unnoticed because a note is
+        advice, so the settings keep working without it while the setting it names (an unknown key compaction ignores)
+        silently does nothing, and a note named twice reads as two problems."""
+        self.write_plugin("noted", {"module": "plugin", "settings": {
+            "version": 1, "schema": "schema.json", "defaults": "defaults.json"}}, {
+            "plugin.py": NOTED, "schema.json": json.dumps({"type": "object", "properties": {
+                "greeting": {"type": "string"}, "loud": {"type": "boolean"}}}),
+            "defaults.json": json.dumps({"schema": 1, "greeting": "hello"})})
+        plugins.set_enabled(self.root, "noted", True)
+        self.write_plugin("plain", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
+        plugins.set_enabled(self.root, "plain", True)
+        note = "Note: loud: ignored, this plugin has no such setting"
+        said = note.removeprefix("Note: ")
+        async with self.dashboard() as d:
+            for written, says in (({"schema": 1, "greeting": "hello"}, False),
+                                  ({"schema": 1, "greeting": "hello", "loud": True}, True)):
+                with self.subTest(note=says):
+                    plugins.settings_of(self.root, "noted")[2].write_text(json.dumps(written))
+                    shown = await d.open_plugins()
+                    await d.until(lambda: "noted" in [item["name"] for item in shown.items], "noted in the list")
+                    shown.query_one("#plugins-table", DataTable).move_cursor(
+                        row=[item["name"] for item in shown.items].index("noted"), animate=False)
+                    await d.until(lambda: str(shown.query_one("#plugin-details").render()).startswith("noted"),
+                                  "noted's details")
+                    lines = str(shown.query_one("#plugin-details").render()).splitlines()
+                    settings_line = next(i for i, line in enumerate(lines) if line.startswith("Settings: "))
+                    self.assertNotIn("(unusable)", lines[settings_line])
+                    if says:
+                        self.assertEqual(lines[settings_line + 1:settings_line + 2], [note])  # right under it
+                        await d.until(lambda: any(said in problem for problem in shown.problems), "the universe's problems")
+                        details = lambda: " ".join(str(shown.query_one("#plugin-details").render()).split())
+                        self.assertEqual(details().count(said), 1, details())  # not again as a problem below
+                        shown.query_one("#plugins-table", DataTable).move_cursor(
+                            row=[item["name"] for item in shown.items].index("plain"), animate=False)
+                        await d.until(lambda: details().startswith("plain"), "plain's details")
+                        self.assertEqual(details().count(said), 1, details())  # another plugin selected: still named
+                        shown.query_one("#plugins-table", DataTable).move_cursor(
+                            row=[item["name"] for item in shown.items].index("noted"), animate=False)
+                        await d.until(lambda: details().startswith("noted"), "noted's details again")
+                    else:
+                        self.assertFalse(any(line.startswith("Note:") for line in lines))
+                    await d.press("enter")
+                    await d.until(lambda: isinstance(d.screen, PluginSettingsScreen), "the settings form")
+                    form = d.screen
+                    self.assertFalse(form.query_one("#plugin-settings-problem").display)  # still usable
+                    notes = form.query_one("#plugin-settings-notes")
+                    self.assertEqual((notes.display, str(notes.render())), (says, note if says else ""))
+                    await d.close_screen()
+                    await d.close_screen()
+
+
 if __name__ == "__main__":
     unittest.main()

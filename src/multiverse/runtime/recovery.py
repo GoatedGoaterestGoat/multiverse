@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from .. import harnesses
+from .. import harnesses, source_environment
 from ..harnesses.types import NativeActivity, NativeResult, RpcSpec, SessionHandle
 from ..store import existing_lock, now, read
 from ..terminal.tmux import owned, matches
@@ -209,7 +209,7 @@ def schedule(directory, launch_id):
         try:
             subprocess.Popen([sys.executable, '-m', 'multiverse.runtime.recovery', str(directory), launch_id, str(worker.path)],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+                             start_new_session=True, env=source_environment())
         except OSError as error:
             worker.close()
             agents.record_recovery(directory, launch_id, 'failed', f'Could not start automatic reconnect: {error}')

@@ -119,6 +119,14 @@ def damage(directory, facts):
                 if not isinstance(terminal.get(field), str) or not re.fullmatch(pattern, terminal[field]):
                     reason = f'tmux.{field} is missing or invalid'
                     break
+            server = terminal.get('server')
+            if server is not None and (not isinstance(server, dict)
+                    or type(server.get('pid')) is not int or server['pid'] <= 0
+                    or not attachments.valid_start(server.get('started'))
+                    or not isinstance(server.get('socket'), str)
+                    or not isinstance(terminal.get('socket'), str)
+                    or server['socket'] != str(Path(terminal['socket']).resolve())):
+                reason = 'tmux.server must name this socket and a valid server process identity'
     if reason is None:
         for key in ('pid', 'runner_pid'):
             if key in facts and (type(facts[key]) is not int or facts[key] <= 0):
@@ -161,7 +169,8 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
     if (properties.get('id') != directory.name
             or properties.get('universe_id') != read(root / 'universe.json').get('id')):
         raise _problem(directory, 'saved agent/universe identity does not match its directory')
-    sockets = {None}
+    from ..terminal.recovery import address as terminal_address
+    sockets = {str(terminal_address(Tmux())), str(terminal_address(Tmux(legacy=True)))}
     terminal = (facts or {}).get('tmux')
     if isinstance(terminal, dict):
         saved = terminal.get('socket')
@@ -199,8 +208,17 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
     found, seen = [], set()
     for address in sorted(sockets, key=lambda item: item or ''):
         backend = Tmux(address)
-        panes, error = backend.snapshot()
+        # A malformed terminal cannot lend its runner to a different candidate
+        # address. Saved requests still let independent discovery find its pane.
+        qualified = (isinstance(terminal, dict) and isinstance(address, str)
+                     and address == terminal.get('socket')
+                     and (not isinstance(terminal.get('server'), dict)
+                          or terminal['server'].get('socket') == str(Path(address).resolve())))
+        panes, error = backend.snapshot(facts=facts if qualified else None)
         if error:
+            from ..terminal.recovery import Unreachable, UnreachableReason
+            if isinstance(error, UnreachableReason):
+                raise Unreachable(error)
             raise _problem(directory, f'cannot inspect terminal server {address or "multiverse-v2"}: {error}')
         for pane in panes.values():
             if (pane.get('@mv2_agent_id') != properties['id']
@@ -218,15 +236,22 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
             if key in seen:
                 continue
             seen.add(key)
-            found.append((backend, {'socket': address, 'pane': pane['pane_id'], 'session': pane['session_id']},
-                          identifier, requests.get(identifier, {})))
+            recovered = {'socket': address, 'pane': pane['pane_id'], 'session': pane['session_id']}
+            owner = Tmux.for_terminal(recovered, properties, {'launch_id': identifier})
+            recovered['server_identity'] = dict(owner.identity)
+            found.append((owner, recovered, identifier, requests.get(identifier, {})))
     return found
 
 
 def require_stopped(directory, properties, socket_path=None, *, facts=None, operation=None, orphan=False):
     if discover(directory, properties, socket_path, facts=facts, orphan=orphan):
         refusal = f'refusing to {operation} this agent' if operation else 'refusing a duplicate launch'
-        raise _problem(directory, 'a running terminal is still tagged for this agent; ' + refusal,
+        terminal = (facts or {}).get('tmux')
+        inconsistent = (isinstance(terminal, dict) and isinstance(terminal.get('server'), dict)
+                        and isinstance(terminal.get('socket'), str)
+                        and terminal['server'].get('socket') != str(Path(terminal['socket']).resolve()))
+        raise _problem(directory, ('terminal identity is inconsistent; ' if inconsistent else '') +
+                       'a running terminal is still tagged for this agent; ' + refusal,
                        recommend_kill=operation != 'kill')
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
         raise _problem(directory, reason, recommend_kill=False)
@@ -244,7 +269,13 @@ def _qualified_facts(root, directory, properties, terminal, launch_id, request, 
     facts = {'launch_id': launch_id, 'tmux': terminal, 'state': 'ending',
              'status': 'unknown', 'ending_at': now()}
     env = request.get('env')
-    expected = str(Path('/tmp') / ('mv2-native-' + launch_id) / 'rpc.sock')
+    from .paths import launch_socket
+    if not isinstance(env, dict):
+        return facts
+    try:
+        expected = str(launch_socket(launch_id, env))
+    except ValueError:
+        return facts
     proof = {'MV2_CONTROL_SOCKET': expected, 'MV2_UNIVERSE': str(root), 'MV2_AGENT_ID': properties['id'],
              'MV2_AGENT_DIR': str(directory), 'MV2_LAUNCH_ID': launch_id}
     if not isinstance(env, dict) or any(env.get(key) != value for key, value in proof.items()):

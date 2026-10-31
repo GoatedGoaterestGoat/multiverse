@@ -2,17 +2,24 @@
 import unittest
 from unittest.mock import patch
 
+from isolation import isolate
+
 from multiverse.terminal.tmux import Tmux, observe, owned
 
 
 class HostOwnershipTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.properties = {'id': 'agent', 'universe_id': 'universe'}
         self.runtime = {'host': 'before', 'launch_id': 'launch',
-                        'tmux': {'socket': '/recorded/socket', 'pane': '%1'}}
+                        'tmux': {'socket': '/recorded/socket', 'session': '$1', 'pane': '%1'}}
         self.pane = {'pane_dead': '0', '@mv2_agent_id': 'agent',
                      '@mv2_universe_id': 'universe', '@mv2_launch_id': 'launch'}
         self.enterContext(patch('socket.gethostname', return_value='after'))
+        def identity(*args):
+            self.assertEqual(args[:4], ('display-message', '-p', '-t', '%1'))
+            return '1234\t5678\t$1\t%1\tagent\tuniverse\tlaunch'
+        self.enterContext(patch.object(Tmux, '_run', side_effect=identity))
 
     def snapshot(self, value):
         return patch.object(Tmux, 'snapshot', return_value=value)
@@ -22,12 +29,25 @@ class HostOwnershipTest(unittest.TestCase):
         missing agent, universe or launch tag is not, and a missing pane, snapshot error, dead pane or ending state
         reads correctly; fragile because several independent checks gate every kill and send, and a break hides live
         agents or authorizes control of a foreign pane."""
+        backend = Tmux('/recorded/socket')
+        for args in (('kill-pane', '-t', '%1'), ('kill-session', '-t', '$1'), ('kill-server',),
+                     ('capture-pane', '-t%1'), ('attach-session', '-t', '%1'),
+                     ('detach-client', '-t', '/dev/ttys001'), ('new-pane-operation', '%1'),
+                     ('display-message', '-p', '-t', '%1', '#{pane_pid}'),
+                     ('display-message', '-pt', '%1', '#{pane_pid}'), ('list-panes', '-at', '%1'),
+                     ('new-session', '-d', ';', 'kill-pane', '-t', '%1'),
+                     ('list-panes', '-a;', 'kill-server'),
+                     ('list-panes', '-a', ';', 'kill-pane', '-t', '%1')):
+            with self.subTest(unbound=args), self.assertRaisesRegex(ValueError, 'proven tmux server identity'):
+                backend.command(*args)
         with self.subTest('exact tags after a hostname change'), self.snapshot(({'%1': self.pane}, None)) as snapshot:
             cache = {}
             for _ in range(2):
                 self.assertEqual(observe(self.properties, self.runtime, cache)['live'], 'alive')
             snapshot.assert_called_once()
-            self.assertEqual(owned(self.properties, self.runtime)[1], '%1')
+            backend, pane = owned(self.properties, self.runtime)
+            self.assertEqual(pane, '%1')
+            self.assertEqual(backend.identity, {'pid': 1234, 'epoch': 5678})
         for field in ('@mv2_agent_id', '@mv2_universe_id', '@mv2_launch_id'):
             for value in ('different', None):
                 with self.subTest(field=field, value=value), self.snapshot(({'%1': {**self.pane, field: value}}, None)):

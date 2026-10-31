@@ -87,6 +87,32 @@ class AgentIdentityTest(BaseTest):
                 self.assertIn('identity could not be verified', err)
         self.assertNotIn('summary', read(self.directory / 'properties.json'))
 
+    def test_child_paths_follow_current_runtime_instead_of_cached_tool_settings(self):
+        """A resumed conversation may keep old tool environment, so its children must use the current recorded run directory and socket together."""
+        stale = str(self.work / 'cached-run')
+        env = {**self.env, 'MV2_RUN_DIR': stale, 'MV2_TMUX_SOCKET': str(self.work / 'cached.sock')}
+        for label in ('first', 'replacement'):
+            root = self.work / label
+            facts = {'launch_id': uid(), 'state': 'running', 'run_directory': str(root),
+                     'tmux': {'socket': str(root / 'tmux.sock')}}
+            write(self.directory / 'runtime.json', facts)
+            with self.subTest(launch=label):
+                self.assertEqual(agent_identity.calling_paths(env), (str(root / 'tmux.sock'), root))
+                self.assertEqual(agent_identity.calling_socket(env), str(root / 'tmux.sock'))
+        facts.pop('run_directory')
+        write(self.directory / 'runtime.json', facts)
+        self.assertEqual(agent_identity.calling_paths(env)[1], Path(stale))
+        with self.assertRaisesRegex(ValueError, 'no recorded run directory'):
+            agent_identity.calling_paths(env, require_recorded_run=True)
+        for invalid in ('relative', None, [], ''):
+            with self.subTest(run_directory=invalid):
+                write(self.directory / 'runtime.json', {**facts, 'run_directory': invalid})
+                with self.assertRaisesRegex(ValueError, 'run directory'):
+                    agent_identity.calling_paths(env)
+        (self.directory / 'runtime.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'runtime record'):
+            agent_identity.calling_paths(env)
+
     def test_report_and_inbox_follow_the_agent_across_launches(self):
         """report and inbox follow the stable agent across a failed or replaced attachment, and an inbox wait
         survives a resume; fragile because authority checks sit beside launch-generation checks and are easily

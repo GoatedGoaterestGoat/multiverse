@@ -1,0 +1,110 @@
+[
+ {
+  "name": "idle after reply",
+  "note": "Upstream VT100 snapshot after a final answer.",
+  "cli_version": "0.164.0",
+  "width": 40,
+  "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "\n› count to 1\n\n\n• 1\n\n\n› Ask Codex to do anything\n\n  gpt-5 default · /tmp/project\n",
+  "shown": "\n› count to 1\n\n\n• 1\n\n"
+ },
+ {
+  "name": "working partial reply",
+  "note": "Upstream VT100 snapshot while an answer remains incomplete.",
+  "cli_version": "0.164.0",
+  "width": 40,
+  "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_partial_answer_keeps_working_status.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "\n\n• 1\n\n• Working (0s • esc to interrupt)\n\n\n› Ask Codex to do anything\n\n  gpt-5 default · /tmp/project\n",
+  "shown": "\n\n• 1\n\n• Working (0s • esc to interrupt)\n\n"
+ },
+ {
+  "name": "queued followup",
+  "note": "Queued user text above the composer must be retained.",
+  "cli_version": "0.164.0",
+  "width": 48,
+  "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_and_queued_messages_snapshot.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "• Working (0s • esc to interrupt)               \n                                                \n• Queued follow-up inputs                       \n  ↳ Queued follow-up question                   \n    ⇧← edit last queued message                 \n                                                \n› Ask Codex to do anything                      \n                                                \n  ? for shortcuts            100% context left\n",
+  "shown": "• Working (0s • esc to interrupt)               \n                                                \n• Queued follow-up inputs                       \n  ↳ Queued follow-up question                   \n    ⇧← edit last queued message                 \n                                                "
+ },
+ {
+  "name": "multiline recovered draft",
+  "note": "Recovered multiline composer content, not a manually typed live draft. Blank lines within it are meaningful.",
+  "cli_version": "0.164.0",
+  "width": 80,
+  "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__question_turn_end_tests__question_turn_end_recovered_composer.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "› $tool existing draft\n\n  > Which style?\n\n  Over-ear\n\n  > What budget?\n\n  Under 250\n\n  GPT-5.6-Sol default · /tmp/project\n",
+  "shown": ""
+ },
+ {
+  "name": "singleline draft",
+  "note": "Single-line draft renderer snapshot.",
+  "cli_version": "0.164.0",
+  "width": 60,
+  "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__draft_composer.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "                                                            \n› Explore the night sky                                     \n                                                            \n                                         100% context left\n",
+  "shown": "                                                            "
+ },
+ {
+  "name": "command approval",
+  "note": "Negative control: approval dialog must remain unchanged.",
+  "cli_version": "0.164.0",
+  "width": 100,
+  "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__approval_modal_exec.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)                                                                               \n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n",
+  "shown": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)                                                                               \n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+ },
+ {
+  "name": "permissions selection",
+  "note": "Negative control: selection dialog must remain unchanged.",
+  "cli_version": "0.164.0",
+  "width": 80,
+  "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__approvals_selection_popup.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "  Update Model Permissions\n\n\n› 1. Ask for approval  Read and edit workspace files and run commands, with\n                       approval required for internet access or edits outside\n                       the workspace\n  2. Full Access       Use with caution: Codex can edit files outside this\n                       workspace and access the internet without approval\n\n  enter select · esc back\n",
+  "shown": "  Update Model Permissions\n\n\n› 1. Ask for approval  Read and edit workspace files and run commands, with\n                       approval required for internet access or edits outside\n                       the workspace\n  2. Full Access       Use with caution: Codex can edit files outside this\n                       workspace and access the internet without approval\n\n  enter select · esc back\n"
+ },
+ {
+  "name": "history search",
+  "note": "Footer contains the active reverse-search query; preserve it.",
+  "cli_version": "0.164.0",
+  "width": 100,
+  "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_history_search.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "                                                                                                    \n› cargo test                                                                                        \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  reverse-i-search: c  enter accept · esc cancel                                                    \n",
+  "shown": "                                                                                                    \n› cargo test                                                                                        \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  reverse-i-search: c  enter accept · esc cancel                                                    \n"
+ },
+ {
+  "name": "reconnecting with draft",
+  "note": "Upstream fixture combines transcript and bottom popup; preserve draft, queue and reconnect state.",
+  "cli_version": "0.164.0",
+  "width": 80,
+  "source": "upstream renderer snapshot codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__disconnect__offline_draft.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "\n› only once\n\n• Reconnecting to server… (0s)\n\n• Queued follow-up inputs\n  ↳ queued before disconnect\n    ⇧← edit last queued message\n\n› keep this draft!\n\n  ⌃c quit\n",
+  "shown": "\n› only once\n\n• Reconnecting to server… (0s)\n\n• Queued follow-up inputs\n  ↳ queued before disconnect\n    ⇧← edit last queued message\n\n› keep this draft!\n\n  ⌃c quit\n"
+ },
+ {
+  "name": "config dialog",
+  "note": "Negative control: a configuration dialog whose hint row has \"/ search\"; it must remain unchanged.",
+  "cli_version": "0.164.0",
+  "width": 140,
+  "source": "upstream renderer snapshot codex-rs/tui/src/config_panel/snapshots/codex_tui__config_panel__tests__config_Text selection.snap at rust-v0.164.0 (6aaac6948030), not a tmux capture",
+  "text": "\n  Configuration\n  Changes save automatically\n\n   Appearance   Notifications   Input   Sessions   Text selection\n\n› Copy on select        Auto · On ›          Copy transcript, footer, and composer selections on release; Auto follows terminal defaults\n  Deselect after copy   [ ] Off              Remove read-only transcript and footer highlights after automatic copy succeeds\n  Right-click paste     Auto · Off ›         Paste when nothing is selected, with Auto following platform defaults and On also enabling mac…\n\n\n\n\n  left/right group · / search · enter open · esc clear search/close\n",
+  "shown": "\n  Configuration\n  Changes save automatically\n\n   Appearance   Notifications   Input   Sessions   Text selection\n\n› Copy on select        Auto · On ›          Copy transcript, footer, and composer selections on release; Auto follows terminal defaults\n  Deselect after copy   [ ] Off              Remove read-only transcript and footer highlights after automatic copy succeeds\n  Right-click paste     Auto · Off ›         Paste when nothing is selected, with Auto following platform defaults and On also enabling mac…\n\n\n\n\n  left/right group · / search · enter open · esc clear search/close\n"
+ },
+ {
+  "name": "status line with the model first",
+  "note": "a status line known only by its model and effort first: \"gpt-5.2 high · Roadmap cleanup\"",
+  "cli_version": "0.164.0",
+  "width": 80,
+  "source": "upstream renderer snapshot tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap at rust-v0.164.0 (6aaac6948030, sha256 bfccb15349d6bc26); its JSON-quoted rows decoded, padding kept; not a tmux capture",
+  "text": "                                                                                \n                                                                                \n› Ask Codex to do anything                                                      \n                                                                                \n  gpt-5.2 high · Roadmap cleanup                                                \n",
+  "shown": "                                                                                \n                                                                                "
+ },
+ {
+  "name": "status line with a context reading",
+  "note": "a status line known only by its context reading: \"gpt-5.4 xhigh fast · Context 100% left · /tmp/project\"",
+  "cli_version": "0.164.0",
+  "width": 80,
+  "source": "upstream renderer snapshot tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap at rust-v0.164.0 (6aaac6948030, sha256 905f793760291a1f); its JSON-quoted rows decoded, padding kept; not a tmux capture",
+  "text": "                                                                                \n                                                                                \n› Ask Codex to do anything                                                      \n                                                                                \n  gpt-5.4 xhigh fast · Context 100% left · /tmp/project                         \n",
+  "shown": "                                                                                \n                                                                                "
+ }
+]

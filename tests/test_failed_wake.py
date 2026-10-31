@@ -1,9 +1,10 @@
 """A startup exit is retryable only after exact harness negative evidence."""
 import json
 import os
+import subprocess
 import sys
 from unittest.mock import Mock, patch
-from multiverse.harnesses.claude import project_key
+from multiverse.harnesses.claude import ClaudeAdapter, project_key
 from multiverse.runtime import lifecycle, native, runner
 from multiverse.store import read, uid, write
 from multiverse.tools import deliver
@@ -170,3 +171,104 @@ class FailedWakeTest(BaseTest):
                 elif consumed is False:
                     self.assertIn('unknown option', lines[-1])
                     self.assertIn('--retry', lines[-1])
+
+    def test_a_started_wake_is_settled_only_by_its_own_prompt_evidence(self):
+        """A started wake is confirmed once its prompt is recorded and called lost only after its launch provably
+        ended without it: a live launch can still hold the prompt (behind a resume dialog), so calling it lost
+        there invites a duplicate, while never checking it lets a lost wake go unnoticed."""
+        config = self.work / 'private-config'
+        project = config / 'projects' / project_key(os.path.realpath(self.work))  # as Claude names the launch's folder
+        project.mkdir(parents=True)
+        self.addCleanup(project.chmod, 0o700)
+        properties = {**read(self.directory / 'properties.json'), 'native_session_home': str(config)}
+        write(self.directory / 'properties.json', properties)
+        write(self.directory / 'runtime.json', {**read(self.directory / 'runtime.json'), 'state': 'running'})
+        env = {**self.env, 'HOME': str(self.work)}
+        transcript = project / (properties['native_session_id'] + '.jsonl')
+        prompt = (self.launch / 'task.md').read_text()
+        row = json.dumps({'type': 'user', 'timestamp': '2026-10-17T12:00:01+00:00', 'message': {'content': prompt}}) + '\n'
+        finished = subprocess.Popen([sys.executable, '-c', 'pass'])
+        finished.wait()
+        cleanup = self.launch / 'cleanup.json'
+        cases = [('recorded', row, False, False, 'accepted', None),
+                 ('recorded after its launch ended', row, True, False, 'accepted', None),
+                 ('absent while its launch runs', '', False, False, 'accepted', 'no confirmation yet'),
+                 ('absent after its launch ended', '', True, False, 'cancelled', 'lost when the agent stopped'),
+                 ('unreadable after its launch ended', '', True, True, 'accepted', str(project)),
+                 ('kept no evidence (an older wake)', '', True, False, 'accepted', '')]
+        for case, text, ended, unreadable, expected, line in cases:
+            with self.subTest(case=case):
+                self.reset()
+                mailbox.update_message(self.directory, self.message['id'], target_session=properties['native_session_id'])
+                snapshot = runner.started_wake_snapshot(self.launch, env, self.message['id'])
+                self.assertIsNotNone(snapshot)
+                mailbox.finish_wake(self.directory, self.launch.name, self.message['id'], True,
+                                    prompt_context=None if case.startswith('kept no') else snapshot)
+                transcript.write_text(text)
+                if ended:
+                    write(cleanup, {'schema': 1, 'launch_id': self.launch.name, 'state': 'complete',
+                                    'pid': finished.pid, 'child_pid': finished.pid})
+                else:
+                    cleanup.unlink(missing_ok=True)
+                if unreadable:
+                    project.chmod(0)
+                first, second = [], []
+                try:
+                    with patch.object(native, 'send_or_wake', side_effect=AssertionError('a wake is never resent')), \
+                            patch.dict(os.environ, {'HOME': str(self.work / 'foreign'), 'CLAUDE_CONFIG_DIR': str(self.work / 'foreign')}):
+                        checked = deliver.run(self.root, agent='wake', check=True, _present=first.append)
+                        deliver.run(self.root, agent='wake', check=True, _present=second.append)
+                        deliver.run(self.root, agent='wake', retry=True)
+                finally:
+                    project.chmod(0o700)
+                tracking = mailbox.message_record(self.directory, self.message['id'])[1]
+                self.assertEqual(tracking['submission_state'], expected)
+                settled = ['wake: no messages to check.']
+                if line is None:  # confirmed once, then settled
+                    self.assertTrue(checked['ok'])
+                    self.assertIs(tracking['native_receipt']['transcript_confirmed'], True)
+                    self.assertEqual((first, second), (['wake: 1 confirmed.'], settled))
+                elif line == '':  # an older wake stays out of --check
+                    self.assertEqual((first, second), (settled, settled))
+                    self.assertIsNone(tracking['native_receipt']['transcript_confirmed'])
+                else:
+                    detail = [text for text in first if line in text]
+                    self.assertEqual(len(detail), 1, first)
+                    self.assertIn('Do not resend' if expected == 'accepted' else 'Send a new message', detail[0])
+                    # A loss is reported once; an unsettled wake is asked again at every check.
+                    if expected == 'cancelled':
+                        self.assertEqual(second, settled)
+                    else:
+                        self.assertEqual([text for text in second if line in text], detail)
+        with self.subTest(case='stored and ended just after the first read'):
+            # The launch stores the prompt and exits between a negative read and the end proof:
+            # the proof taken before the read still saw it running, so that read can't mean lost.
+            self.reset()
+            mailbox.update_message(self.directory, self.message['id'], target_session=properties['native_session_id'])
+            snapshot = runner.started_wake_snapshot(self.launch, env, self.message['id'])
+            mailbox.finish_wake(self.directory, self.launch.name, self.message['id'], True, prompt_context=snapshot)
+            transcript.write_text('')
+            cleanup.unlink(missing_ok=True)
+            real, raced = ClaudeAdapter.startup_prompt_evidence, []
+
+            def racing(adapter, *args):
+                answer = real(adapter, *args)
+                if not raced:
+                    raced.append(answer)
+                    transcript.write_text(row)
+                    write(cleanup, {'schema': 1, 'launch_id': self.launch.name, 'state': 'complete',
+                                    'pid': finished.pid, 'child_pid': finished.pid})
+                return answer
+            first, second = [], []
+            with patch.object(ClaudeAdapter, 'startup_prompt_evidence', racing), \
+                    patch.object(native, 'send_or_wake', side_effect=AssertionError('a wake is never resent')):
+                deliver.run(self.root, agent='wake', check=True, _present=first.append)
+                deliver.run(self.root, agent='wake', check=True, _present=second.append)
+            self.assertEqual(raced, [False])
+            self.assertTrue(any('no confirmation yet' in text for text in first), first)
+            self.assertEqual(second, ['wake: 1 confirmed.'])
+            tracking = mailbox.message_record(self.directory, self.message['id'])[1]
+            self.assertEqual(tracking['submission_state'], 'accepted')
+            self.assertIs(tracking['native_receipt']['transcript_confirmed'], True)
+        with patch('multiverse.harnesses.load', return_value=object()):
+            self.assertIsNone(runner.started_wake_snapshot(self.launch, env, self.message['id']))

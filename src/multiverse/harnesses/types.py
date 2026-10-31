@@ -19,7 +19,7 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
-        'models', 'check_model', 'run_options',
+        'models', 'check_model', 'run_options', 'display_pane',
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
@@ -582,3 +582,11 @@ class RunProvider(Protocol):
     def run_options(self, *, environment: Mapping[str, str | None]) -> RunOptions: ...
     def run_plan(self, request: RunRequest, *, environment: Mapping[str, str | None],
                  run: RunDirectory) -> RunPlan: ...
+
+
+class PaneDisplay(Protocol):
+    """Optional: a live pane's captured text as the dashboard shows it (observe). A pure function of `text`: no
+    files, processes or network. It only drops the harness's own chrome (input-box rules, status rows, footer,
+    padding) and returns `text` unchanged when it doesn't recognize the screen. Core shows the raw text when the
+    result is not an in-order subset of the lines of `text`."""
+    def display_pane(self, text: str) -> str: ...

@@ -116,6 +116,9 @@ class NativeBackendTest(BaseTest):
         self.terminal = {'socket': '/fake', 'session': '$1', 'pane': '%1'}
         self.backend.create.return_value = self.backend.respawn.return_value = self.terminal
         self.enterContext(patch.object(lifecycle, 'Tmux', return_value=self.backend))
+        # This fake terminal has an answering server, including during a wake's
+        # recorded-socket check; it never invokes a real tmux client.
+        self.enterContext(patch('multiverse.terminal.recovery.observe', return_value=('', None)))
         self.result = lifecycle.start(self.root, name='service-worker', harness='service-test')
         self.directory = agents.directory(self.root, self.result['id'])
         self.addCleanup(self.clean_sockets)
@@ -399,6 +402,11 @@ class NativeBackendTest(BaseTest):
         request = read(launch / 'request.json')
         request.pop('attachment')
         request['rpc_proxy'].pop('binds_session')
+        # A runner started before the move keeps its exact /tmp endpoint.
+        request['env'].pop('MV2_RUN_DIR')
+        old_socket = '/tmp/mv2-native-' + self.launch + '/rpc.sock'
+        request['env']['MV2_CONTROL_SOCKET'] = old_socket
+        request['rpc_proxy']['socket_path'] = old_socket
         write(launch / 'request.json', request)
         facts = {k: v for k, v in self.facts.items() if k not in ('attachment', 'native_service', 'native_relay')}
         write(self.directory / 'runtime.json', facts)

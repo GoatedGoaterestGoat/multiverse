@@ -1,8 +1,8 @@
 """Show an agent's key facts and the end of its live terminal."""
 import re
 from ..universe import agents, focus
-from ..runtime import lifecycle
-from .. import universe
+from ..runtime import effects, lifecycle
+from .. import harnesses, universe
 from ..display import error_text, label, mode, state, notice_lines
 
 TAIL_LINES = 30
@@ -16,6 +16,25 @@ def configure(parser):
 
 def run(root=None, *, agent, lines=None, json=False):  # `lines` and `json` only shape the command line's text
     return lifecycle.terminal_action(universe.resolve(root), agent, "inspect")
+
+
+def display(root, harness, text):
+    """`text`, a capture of an agent's pane, as the dashboard shows it: through its harness's display_pane (the pane
+    display protocol), which drops the harness's own chrome. The raw text when the harness has none or doesn't
+    load, or when the call fails or returns anything but some of the lines of `text`, in order: a broken adapter
+    can't blank or rewrite the pane. Never raises."""
+    try:
+        adapter = harnesses.load(universe.resolve(root), harness)
+        if not isinstance(text, str) or not callable(getattr(adapter, 'display_pane', None)):
+            return text
+        shown = effects.call(adapter, 'display_pane', text)
+        lines = iter(text.split('\n'))
+        if isinstance(shown, str) and (shown.strip() or not text.strip()) and all(
+                line in lines for line in shown.split('\n')):  # `in` moves on through `lines`: an in-order subset
+            return shown
+    except Exception:
+        pass
+    return text
 
 
 def tail(capture, lines):

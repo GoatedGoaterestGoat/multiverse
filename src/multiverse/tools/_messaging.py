@@ -16,8 +16,8 @@ def failure_reason(reason, text='', *, preserve_details=False):
             reason = re.sub(pattern, 'the message', reason)
     if preserve_details:
         # Wake refusals carry actionable record paths and recovery instructions.
-        # Keep them whole, while still removing reflected message bodies above.
-        return clean(reason)
+        # Keep them whole; the summary supplies the final sentence separator.
+        return clean(reason).removesuffix('.')
     lower = reason.lower()
     if 'cannot wake' in lower:
         return 'this harness cannot resume with a message'
@@ -70,6 +70,16 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     if value.get('paused') is True:
         return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
+        if value.get('repair_terminal') is True:
+            why = failure_reason(reason, text, preserve_details=True)
+            action = 'check' if check else 'retry'
+            prefix = f'{name}: could not check delivery' if check else f'Not delivered to {name}'
+            if value.get('wake_refused') is True and not check:
+                return (f'{prefix}: {why}. Saved; resolve the named terminal problem. '
+                        f'With a working bridge, run mv2 deliver {name} --retry. '
+                        'For a launch-only agent, resend with --delivery inbox-only for manual reading.')
+            return (f'{prefix}: {why}. Saved; resolve the named terminal problem, '
+                    f'then mv2 deliver {name} --{action}.')
         if value.get('repair_journal'):
             return (f'{name}: could not {"check delivery" if check else "retry saved message"}: {clean(reason)}. '
                     f'Saved; after repairing the journal, run mv2 deliver {name} --{"check" if check else "retry"}.')
@@ -98,6 +108,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
                     f"then mv2 resume {name}, then mv2 deliver {name} --retry or --dismiss.")
         return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry or --dismiss."
     if state == 'unknown':
+        if accepted and value.get('evidence_problem'):
+            return (f"{name}: message accepted; cannot yet tell whether it arrived. {clean(value['evidence_problem']).rstrip('.')}; "
+                    f"then run mv2 deliver {name} --check. Do not resend.") + dismiss
         if accepted:
             return f'{name}: message accepted; no confirmation yet. Do not resend.' + dismiss
         if value.get('evidence_problem'):

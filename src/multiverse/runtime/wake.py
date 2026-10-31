@@ -49,17 +49,43 @@ def _legacy_context(root, directory, message, tracking, launch_id):
 
 def check(root, directory, message, tracking):
     """Caller holds launch/delivery locks. This path never reconciles identity or sends."""
-    from .native import adapter_hook
     message_id = message['id']
     previous = (tracking.get('attempts') or [{}])[-1]
     if tracking.get('submission_state') == 'accepted':
         value = tracking.get('native_receipt') or {}
         if value.get('transcript_confirmed') is True:
             return {**previous, 'ok': True, 'value': value, 'reused': True}
+        if isinstance(tracking.get('wake_prompt_context'), dict):
+            return _started(root, directory, message, tracking, previous)
         return {'state': 'unknown', 'ok': False,
                 'reason': 'Interactive resume prompt has no correlatable native receipt; no resend',
                 'value': {'transcript_confirmed': None}}
-    snapshot = tracking.get('wake_prompt_context')
+    evidence, problem, snapshot = _evidence(root, directory, message, tracking, tracking.get('wake_prompt_context'))
+    confirmed, failed = evidence is True, evidence is False
+    value = {'transcript_confirmed': True if confirmed else False if failed else None}
+    if failed:
+        value['definite_failure'] = True
+    elif not confirmed:
+        value['evidence_problem'] = problem or 'The original starting prompt is still unconfirmed; restore access to its conversation records'
+    receipt = {**previous, 'state': 'ok' if confirmed else 'error' if failed else 'unknown',
+               'ok': confirmed, 'message_id': message_id, 'checked_at': now(), 'value': value}
+    if confirmed:
+        receipt['reason'] = 'Starting prompt confirmed in its original conversation'
+    elif failed:
+        receipt['reason'] = previous.get('reason') or 'The harness recorded no consumption of this starting prompt'
+    changes = {'submission_state': 'accepted' if confirmed else 'failed' if failed else 'unknown',
+               'attempts': [*tracking.get('attempts', [])[:-1], receipt], 'native_receipt': value}
+    if snapshot is not None and evidence in (True, False, None):
+        changes['wake_prompt_context'] = snapshot
+    if confirmed:
+        changes['transcript_confirmed_at'] = now()
+    update_message(directory, message_id, **changes)
+    return receipt
+
+
+def _evidence(root, directory, message, tracking, snapshot):
+    """The harness's answer for this wake's exact launch, prompt and storage: (True, False or None, why, snapshot)."""
+    from .native import adapter_hook
     evidence, problem = None, None
     try:
         launch_id = tracking.get('wake_launch_id')
@@ -93,23 +119,40 @@ def check(root, directory, message, tracking):
                         pass  # An optional diagnostic must never alter the evidence.
     except Exception as error:
         evidence, problem = None, f'Cannot read the original startup evidence: {error}'
-    confirmed, failed = evidence is True, evidence is False
-    value = {'transcript_confirmed': True if confirmed else False if failed else None}
-    if failed:
-        value['definite_failure'] = True
-    elif not confirmed:
-        value['evidence_problem'] = problem or 'The original starting prompt is still unconfirmed; restore access to its conversation records'
-    receipt = {**previous, 'state': 'ok' if confirmed else 'error' if failed else 'unknown',
-               'ok': confirmed, 'message_id': message_id, 'checked_at': now(), 'value': value}
-    if confirmed:
-        receipt['reason'] = 'Starting prompt confirmed in its original conversation'
-    elif failed:
-        receipt['reason'] = previous.get('reason') or 'The harness recorded no consumption of this starting prompt'
-    changes = {'submission_state': 'accepted' if confirmed else 'failed' if failed else 'unknown',
-               'attempts': [*tracking.get('attempts', [])[:-1], receipt], 'native_receipt': value}
-    if snapshot is not None and evidence in (True, False, None):
-        changes['wake_prompt_context'] = snapshot
-    if confirmed:
-        changes['transcript_confirmed_at'] = now()
-    update_message(directory, message_id, **changes)
-    return receipt
+    return evidence, problem, snapshot
+
+
+def _started(root, directory, message, tracking, previous):
+    """A wake that started: confirmed once its prompt is recorded; lost only once its launch has provably ended
+    without it. Until then nothing is recorded, so the next --check asks again; nothing is ever resent."""
+    from .delivery_evidence import launch_ended
+    message_id = message['id']
+    # Prove the end first: a launch that stores the prompt and exits between a
+    # read and a later proof would turn that read's False into a false loss.
+    try:
+        ended = launch_ended(directory, tracking['wake_launch_id'])
+    except (OSError, ValueError, TypeError):
+        ended = False  # No readable exit proof: the launch may still be holding the prompt.
+    evidence, problem, _ = _evidence(root, directory, message, tracking, tracking['wake_prompt_context'])
+    if evidence is True:
+        value = {'transcript_confirmed': True}
+        receipt = {**previous, 'state': 'ok', 'ok': True, 'message_id': message_id, 'checked_at': now(),
+                   'reason': 'Starting prompt confirmed in its original conversation', 'value': value}
+        update_message(directory, message_id, attempts=[*tracking.get('attempts', [])[:-1], receipt],
+                       native_receipt=value, transcript_confirmed_at=now())
+        return receipt
+    if evidence is False and ended:
+        value = {'lost_when_stopped': True, 'transcript_confirmed': False}
+        receipt = {'state': 'cancelled', 'ok': False, 'message_id': message_id, 'checked_at': now(),
+                   'reason': 'Message was lost when the agent stopped', 'value': value}
+        update_message(directory, message_id, submission_state='cancelled', final_reason='lost',
+                       last_receipt=receipt, native_receipt=value, cancelled_at=now())
+        return receipt
+    value = {'transcript_confirmed': None}
+    if evidence is None:
+        value['evidence_problem'] = problem or 'The starting prompt cannot be checked yet; restore access to its conversation records'
+    # A live launch can still be holding its command-line prompt (behind a
+    # resume dialog, for example), so an absent row there is no loss.
+    return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+            'reason': value.get('evidence_problem') or 'The starting prompt is not recorded yet while its launch runs; no resend',
+            'value': value}

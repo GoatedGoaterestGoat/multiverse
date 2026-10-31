@@ -77,6 +77,11 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
             outside_lineage = bool(state != 'cancelled' and not confirmed and target and target != native_id
                                    and not native._session_changes(directory, properties, target))
             accepted = check and state == 'accepted' and not confirmed and tracking.get('delivery_method') != 'resume_prompt'
+            # A started wake that kept its exact prompt evidence is settled by --check;
+            # older wakes without it stay out, as before.
+            started_wake = (check and state == 'accepted' and not confirmed
+                            and tracking.get('delivery_method') == 'resume_prompt'
+                            and isinstance(tracking.get('wake_prompt_context'), dict))
             if accepted:
                 same_session = bool(native_id and target == native_id)
                 queued = same_session and isinstance(evidence, dict) and evidence.get('queued_submission_id') and attempts[-1].get('native_session_id') == native_id
@@ -85,6 +90,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                     adapter = harnesses.load(root, properties['harness'])
                     old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
                 accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
+            accepted = accepted or started_wake
             if not outside_lineage and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
                 continue
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None

@@ -326,3 +326,42 @@ class AccessTest(PluginTestCase):
                 with self.assertRaisesRegex(plugins.PluginError, "can't raise.*observe access recorded here now"):
                     plugins.set_grant(self.root, "planner", "spend")  # a lowering from act, raising from observe
             self.assertEqual(config.load(self.root).access["planner"], "observe")  # the person's lowering stays
+
+
+CHECKER = """
+DEPTHS, LEVELS = [], []
+def register(mv):
+    depth = [0]
+    @mv.settings.check
+    def check(settings, universe):
+        depth[0] += 1
+        try:
+            DEPTHS.append(depth[0])
+            LEVELS.append(mv.access(universe))  # an API call that asks which plugins are on here
+        finally:
+            depth[0] -= 1
+"""
+
+
+class SettingsCheckReentryTest(PluginTestCase):
+    def test_a_settings_check_that_asks_the_api_runs_once_and_sees_the_same_answer(self):
+        """A plugin's settings check that calls the API while its universe's plugins are being found runs once, not
+        nested, and sees the same on/off and grant as the outer answer; fragile because the nested call found the
+        plugins again, ran the check again, about 50 levels deep until a swallowed RecursionError, and under a
+        deeper caller the failing level is the top one: the plugin reads unusable and is left out of launches."""
+        self.write_plugin("checker", {"module": "plugin", "api": "1.13",
+                                      "access": {"request": "act", "minimum": "observe"},
+                                      "settings": {"version": 1, "schema": "settings.schema.json",
+                                                   "defaults": "defaults/settings.json"}},
+                          {"plugin.py": CHECKER, "settings.schema.json": json.dumps({"type": "object"}),
+                           "defaults/settings.json": json.dumps({"schema": 1})})
+        config.set_enabled(self.root, "checker", True, grant="observe")
+        found = self.entry("checker")
+        module = sys.modules[loader.load(found).package + ".plugin"]
+        loader._entries.clear()  # found afresh below, as in a new process
+        module.DEPTHS.clear(), module.LEVELS.clear()
+        outer = self.entry("checker")  # found afresh: its settings check runs, asking the API
+        self.assertEqual((outer.state, outer.problem), ("loaded", None))
+        self.assertEqual(module.DEPTHS, [1])  # once, never inside itself
+        self.assertEqual(module.LEVELS, [loader.access_level(self.root, outer)])
+        self.assertEqual(module.LEVELS, ["observe"])

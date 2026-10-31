@@ -25,6 +25,7 @@ from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message
 from ..harnesses.types import ObservedBinding, normalize_session_id
 from ..store import lock, now, read
 from ..terminal.tmux import owned, observe, observation_key
+from ..terminal.recovery import Unreachable
 from ..universe import agents, records
 from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
 
@@ -359,9 +360,54 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
     return current, agents.runtime(directory)
 
 
+def missing_socket_problem(root, properties, facts):
+    """Name a vanished endpoint only after readiness, with its original child proven live."""
+    from .process import process_snapshot, start_matches
+    try:
+        relay = facts.get('native_relay') or {}
+        was_ready = (facts.get('startup_delivery') == 'ready' or relay.get('state') == 'ready'
+                     or relay.get('state') == 'lost' and facts.get('state') == 'running'
+                     and (facts.get('attachment') or {}).get('readiness') in ('binding', 'legacy-binding'))
+        if not was_ready:
+            return None  # A starting bridge may not have created its socket yet.
+        launch = normalize_session_id(facts.get('launch_id'))
+        directory = root / 'state' / 'agents' / properties['id']
+        request = read(directory / 'launches' / launch / 'request.json')
+        env = request.get('env') or {}
+        expected = {'MV2_UNIVERSE': str(root), 'MV2_AGENT_ID': properties['id'],
+                    'MV2_AGENT_DIR': str(directory), 'MV2_LAUNCH_ID': launch}
+        if any(env.get(key) != value for key, value in expected.items()):
+            return None
+        proxy, endpoint = request.get('rpc_proxy') or {}, request.get('control_endpoint') or {}
+        # The proxy is launch-local; Codex's control_endpoint names the shared
+        # daemon and must never be mistaken for a lost frontend socket.
+        address = proxy.get('socket_path') or (endpoint.get('address')
+                  if endpoint.get('transport') in ('unix-lines', 'unix-websocket') else None)
+        if not isinstance(address, str) or not Path(address).is_absolute() or env.get('MV2_CONTROL_SOCKET') != address:
+            return None
+        try:
+            Path(address).stat()
+            return None
+        except FileNotFoundError:
+            pass
+        pid = facts.get('pid')
+        observed = process_snapshot(pid)
+        if (observed is None or observed[1].startswith(('Z', 'X'))
+                or not start_matches(facts.get('pid_started'), pid, observed=observed[0])):
+            return None
+        name = properties.get('name') or properties['id']
+        return (f'Native socket {address} is missing while process PID {pid} is still running. '
+                f'Stop this launch with mv2 kill {name}, then mv2 resume {name} to recreate its socket. '
+                'Saved messages are not resent automatically')
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def connection_problem(root, properties, facts):
     """A provider diagnostic cannot erase a valid listing row."""
     try:
+        if problem := missing_socket_problem(root, properties, facts):
+            return problem
         adapter = harnesses.load(root, properties['harness'])
         hook = adapter_hook(adapter, 'connection_problem')
         result = hook(SessionHandle.from_records(properties, facts, root / 'state' / 'agents' / properties['id'])) if hook else None
@@ -806,7 +852,8 @@ def _check_delivery_receipt(directory, adapter, session, executor, message, trac
     except Denied:
         raise
     except Exception as error:
-        return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
+        return {**NativeResult('error', f'Receipt check failed: {error}',
+                              {'repair_terminal': True} if isinstance(error, Unreachable) else None).to_dict(), 'ok': False}
 
 
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
@@ -832,6 +879,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
                        'reason': f'Cannot load recipient adapter: {error}', 'at': now(),
                        'value': {**({'check_error': True} if check else {}),
+                                 **({'repair_terminal': True} if isinstance(error, Unreachable) else {}),
                                  **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
             if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
                 update_message(directory, message_id, submission_state='failed',
@@ -890,7 +938,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         except Denied:
             raise
         except Exception as error:
-            result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id}
+            result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id,
+                      'value': {'repair_terminal': True} if isinstance(error, Unreachable) else None}
             update_message(directory, message_id, submission_state='failed', attempts=[*previous, result])
             return result
         launch_only = _launch_only_delivery(adapter, session, selected_mode)
@@ -933,6 +982,9 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             raise
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
+        if result.state in ('unavailable', 'error', 'unknown'):
+            if problem := missing_socket_problem(root, executor.properties, executor.facts):
+                result = replace(result, reason=f'{result.reason}; {problem}' if result.reason else problem)
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
         state = {'native_queued': 'accepted', 'ok': 'accepted', 'pending': 'pending',
                  'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]
@@ -1044,7 +1096,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
 def _wake_failure(directory, message_id, error):
     _, tracking = message_record(directory, message_id)
     receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
-               'value': {'wake_refused': True, **({'repair_runtime': str(error.file)}
+               'value': {'wake_refused': True, **({'repair_terminal': True} if isinstance(error, Unreachable) else {}),
+                         **({'repair_runtime': str(error.file)}
                    if isinstance(error, records.RecordError) and error.file.name == 'runtime.json' else {})}}
     # If startup was registered, uncertainty belongs to the runner. Never
     # turn a possibly submitted command-line prompt into a retryable failure.

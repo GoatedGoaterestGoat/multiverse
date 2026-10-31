@@ -15,7 +15,7 @@ from multiverse.store import read, write, uid
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import doctor, send
 from multiverse.universe import records, relocate, templates
-from test_multiverse import BaseTest, TerminalBase, until
+from test_multiverse import BaseTest, FixtureTmux, TerminalBase, until
 
 
 @unittest.skipUnless(shutil.which("tmux"), "tmux is required for terminal integration")
@@ -38,7 +38,7 @@ class DamagedRuntimeTest(unittest.TestCase):
         cls.lab = templates.create(cls.root / 'subverses/lab', 'lab', workdir=cls.work)
         cls.review = templates.create(cls.root / 'subverses/review', 'review', workdir=cls.work)
         cls.socket = str(cls.work / 'tmux.sock')
-        cls.backend = Tmux(cls.socket)
+        cls.backend = FixtureTmux(cls.socket)
         track(tmux_socket=cls.socket)
         cls.addClassCleanup(TerminalBase.kill_server, cls)
         argv = ['/bin/sh', '-c', 'exec sleep 600']  # a wake's prompt arguments only fill $0 and $1

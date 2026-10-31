@@ -1,4 +1,5 @@
 import type { EngineInterface, On, SessionUsage } from 'claude-code'
+import { pythonEnv } from './python'
 
 // Reports the session's context fill, cost and rate-limit windows to
 // Multiverse, which stores them in this launch's runtime.json. session.measure
@@ -35,7 +36,7 @@ async function report($: EngineInterface, value: string) {
     while (latest !== undefined && latest !== reported) {
       const sending = latest
       const result = await $.process.run(
-        [python, "-m", "multiverse.tools.runtime_update", "--usage-json", sending], { timeoutMs: 10000 })
+        [python, "-m", "multiverse.tools.runtime_update", "--usage-json", sending], { timeoutMs: 10000, env: await pythonEnv($) })
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: usage report failed: ${result.stderr.trim()}`)
         return

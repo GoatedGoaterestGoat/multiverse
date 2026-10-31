@@ -29,8 +29,8 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
-function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void>; holdUnsure?: Promise<void> } = {}) {
-  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
+function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void>; holdUnsure?: Promise<void>; env?: Record<string, string>; statusThrows?: number } = {}) {
+  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', ...options.env })
   const clock = mock.clock(on, { now: options.now ?? 0 })
   // Claude's core for the engine events the tests raise: each passes through.
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -58,9 +58,16 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
   const statuses: string[] = []
   const moves: string[][] = []
   const reads: (string | undefined)[] = []
+  // Each Python callback's runtime_update flag and the PYTHONPATH it was given.
+  const pythons: [string, string | undefined][] = []
+  const reports: string[][] = []
+  let thrown = 0
   on('process.run', async ($, e) => {
+    if (e.argv[1] === '-m') pythons.push([e.argv[3] ?? '', e.init?.env?.PYTHONPATH])
     const index = e.argv.indexOf('--status')
-    if (index >= 0) statuses.push(e.argv[index + 1] ?? '')
+    // A status report the test makes throw, as a timeout or a refusal does, before anything is recorded.
+    if (index >= 0 && thrown < (options.statusThrows ?? 0)) { thrown += 1; throw new Error('timed out after 10000 ms') }
+    if (index >= 0) { statuses.push(e.argv[index + 1] ?? ''); reports.push([...e.argv]) }
     if (e.argv[0] === 'sh') {  // the mod reading Claude's process file
       reads.push(options.file?.())
       const id = reads.at(-1)
@@ -83,7 +90,7 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
     if (options.refuse !== undefined && e.origin.kind === 'plugin') return { drop: options.refuse }
     return { text: e.text, origin: e.origin }
   })
-  return { clock, files, statuses, submitted, appended, moves, logs, reads }
+  return { clock, files, statuses, submitted, appended, moves, logs, reads, pythons, reports }
 }
 
 // The text as the mod hands it to Claude: tagged with its ID (and send time), stripped where the row is stored.
@@ -163,7 +170,49 @@ describe('session moves', () => {
   })
 })
 
+// Every Python callback runs mv2's own checkout: without MV2_SOURCE first on its PYTHONPATH,
+// `python -m` imports whatever mv2 the interpreter has installed (a stale install, or none, so
+// the bridge never registers), and nothing shows that the wrong code ran.
+describe('the mv2 a callback imports', () => {
+  const NEW = '22222222-2222-4222-8222-222222222222'
+  const rows: [string, Record<string, string>, string | undefined][] = [
+    ['MV2_SOURCE comes before a PYTHONPATH already set', { MV2_SOURCE: '/src', PYTHONPATH: '/mine' }, '/src:/mine'],
+    ['MV2_SOURCE alone is the PYTHONPATH', { MV2_SOURCE: '/src' }, '/src'],
+    ['without MV2_SOURCE, PYTHONPATH is left as it is', { PYTHONPATH: '/mine' }, undefined],
+    ['a PYTHONPATH that already starts with MV2_SOURCE is left as it is', { MV2_SOURCE: '/src', PYTHONPATH: '/src:/mine' }, undefined],
+    ['MV2_SOURCE later on PYTHONPATH still goes first', { MV2_SOURCE: '/src', PYTHONPATH: '/mine:/src' }, '/src:/mine:/src'],
+  ]
+  for (const [name, env, expected] of rows) {
+    test(name, async ($, on) => {
+      const w = world(on, { env, file: () => NEW })
+      on('session.measure', async () => ({ changed: [] }))
+      await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+      await w.clock.settle()
+      await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
+      await w.clock.settle()
+      await $.session.measure({ context: { window: 200000, tokens: 1000 }, rateLimits: [] } as never)
+      await w.clock.settle()
+      expect(w.pythons.map(([flag]) => flag).sort()).toEqual(['--native-session-id', '--status', '--usage-json'])
+      for (const [, path] of w.pythons) expect(path).toBe(expected)
+    })
+  }
+})
+
 describe('status', () => {
+  // A status report that throws (a timeout, or a refusal before Claude's trust prompt is answered) is logged like
+  // one that exits non-zero, and the next status change retries it: unlogged, a first registration that failed
+  // left no trace in the pane.
+  test('a status report that throws is logged, and the next change retries it', async ($, on) => {
+    const w = world(on, { statusThrows: 1 })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    expect(w.logs.filter((line) => line.includes('status report failed'))).toHaveLength(1)
+    expect(w.reports).toEqual([])
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await w.clock.settle()
+    expect(w.reports.at(-1)).toEqual(['/python', '-m', 'multiverse.tools.runtime_update', '--status', 'working', '--bridge', 'claude-mod-v2'])
+  })
+
   test('idle when the session starts, working in a turn, waiting on a question, idle after', async ($, on) => {
     const w = world(on)
     let answer!: () => void

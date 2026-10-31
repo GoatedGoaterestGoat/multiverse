@@ -4,7 +4,7 @@ Install mv2, start your first agent, work with it, and stop it. This takes about
 
 ## What you need
 
-- Linux or macOS, Python 3.11 or newer, and tmux.
+- Linux or macOS, Python 3.11 or newer, and tmux 3.2 or newer.
 - At least one agent program, installed and logged in: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or [Pi](https://github.com/earendil-works/pi).
 
 Tested versions are listed in [compatibility](reference/compatibility.md).

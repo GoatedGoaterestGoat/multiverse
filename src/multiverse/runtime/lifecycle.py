@@ -13,14 +13,14 @@ import sys
 import time
 import tempfile
 
-from .. import display, harnesses, universe
+from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import effects, native, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
 
 TEARDOWN_TIMEOUT = 10
 
@@ -103,11 +103,39 @@ def _listing_runtime(directory, facts, *, prepare=False):
             facts = current
 
 
-def listing(root, recursive=False, only=None):
+# Built-in fields accepted by JSON projections. Full rows also preserve any
+# additional legacy properties; projecting never changes the stored record.
+ROW_FIELDS = frozenset((
+    'id', 'universe_id', 'name', 'harness', 'model', 'task', 'phase', 'summary',
+    'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
+    'native_session_homes', 'native_session_provider', 'native_session_transition',
+    'native_storage_environment', 'native_environment', 'native_service_identity',
+    'agent_identity', 'agent_environment', 'native_fresh_pending',
+    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error', 'identity_error',
+    'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
+    'usage', 'tokens', 'usage_detail',
+))
+
+
+def row_usage(row):
+    """Measure an already reconciled row, without rebinding or writing core records.
+
+    The caller must discard a result if the displayed row's universe, agent,
+    launch, native ID or storage changed while the reader ran. A damaged or
+    identity-error row never becomes a valid measurement through this helper.
+    """
+    if row.get('damaged'):
+        return {}
+    measured = (NativeResult('error', row['identity_error']).to_dict() if 'identity_error' in row else
+                native.usage_snapshot(Path(row['universe']), row, row['runtime'], reconciled=True))
+    return {'usage': measured, 'tokens': display.usage_total(measured), 'usage_detail': display.usage_details(measured)}
+
+
+def listing(root, recursive=False, only=None, *, usage=True):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
     One agent's damaged records never stop the others: that agent's row says which file is unusable and why
-    (see damaged_row)."""
+    (see damaged_row). With usage=False, omit usage fields without reading native transcripts."""
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
@@ -148,9 +176,12 @@ def listing(root, recursive=False, only=None):
                     facts, observation = _listing_observation(properties, facts, snapshots)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
-                measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
-                            native.usage_snapshot(scope, properties, facts, reconciled=True))
+                identity_fields = {'identity_error': identity_problem} if identity_problem is not None else {}
+                usage_fields = row_usage({**properties, **identity_fields, 'universe': str(scope), 'runtime': facts}) if usage else {}
                 relay = facts.get('native_relay') or {}
+                relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
+                if relay_problem and observation['live'] == 'alive':
+                    relay_problem = native.missing_socket_problem(scope, properties, facts) or relay_problem
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = (None if facts.get('exit_code') in (-15, 143) else
                                 facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
@@ -159,13 +190,12 @@ def listing(root, recursive=False, only=None):
                         is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
-                rows.append(text_defaults({**properties, "usage": measured, "tokens": display.usage_total(measured),
-                             "usage_detail": display.usage_details(measured), "universe": str(scope), **observation,
+                rows.append(text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
                              "connection_error": (facts.get('native_refusal') or {}).get('message')
-                                 or (relay.get('reason') if relay.get('state') == 'lost' else None)
+                                 or relay_problem
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
@@ -205,6 +235,49 @@ def plain_fallback(command, error):
                    native_mode={**(command.fallback.native_mode or {}), 'fallback_reason': str(error)})
 
 
+def _wake_socket(root, previous, run_root, socket_path):
+    """Keep a recorded address, or return None when a proven-gone default may move."""
+    from ..terminal import recovery
+    backend = Tmux(socket_path)
+    if recovery.observe(backend, facts=previous) is not None:
+        return socket_path  # Answering or recovered: keep this server.
+    # A stopped main-era target has no server proof once its runner exits.
+    # A live peer's record may still recover that same server.
+    backend.ensure(root)
+    if recovery.observe(backend, facts=previous) is not None:
+        return socket_path
+    recovery.require_exited(recovery.address(backend), previous)
+    selected = Path(socket_path).resolve()
+    legacy = selected.name == 'multiverse-v2' and selected.parent.name == f'tmux-{os.getuid()}'
+    saved_root = previous.get('run_directory')
+    previous_default = paths.recorded_directory(saved_root) / 'tmux.sock' if saved_root is not None else None
+    if legacy or selected == (run_root / 'tmux.sock').resolve() or (
+            previous_default is not None and selected == previous_default.resolve()):
+        return None
+    if not selected.parent.is_dir():
+        raise recovery.Unreachable(f'The recorded tmux socket folder {selected.parent} is gone; '
+                                   'resume this agent with MV2_TMUX_SOCKET set to choose a server')
+    return socket_path  # Preserve a deliberately isolated custom address.
+
+
+def _wake_fallback(root):
+    """Use ordinary resume placement, without crossing an agent sender's universe tree."""
+    from ..terminal import recovery
+    def top(path):
+        path = Path(path).resolve()
+        while parent := universe.parent(path):
+            path = parent
+        return path
+    try:
+        caller = agent_identity.sender_actor(acting='select a wake terminal')
+        if caller is not None and top(caller.root) != top(root):
+            raise ValueError('the sender and recipient are in different universe trees')
+        return agent_identity.calling_paths(require_recorded_run=True)
+    except (OSError, ValueError, RuntimeError) as error:
+        raise recovery.Unreachable(f'Cannot select a wake terminal: {error}. '
+                                   'Resume this agent as an operator with MV2_TMUX_SOCKET set to choose a server') from None
+
+
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
           _queue_wake=False, _restart_queue=False, start_fresh=False):
@@ -217,9 +290,23 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
+    recorded_wake_socket = resume_message_id is not None and socket_path is not None
+    calling_socket, run_root = ((_wake_fallback(root) if resume_message_id is not None else agent_identity.calling_paths())
+                                if socket_path is None and not _recovery else (None, None))
     socket_path = (_recovery['terminal']['socket'] if _recovery else
-                   socket_path if socket_path is not None else agent_identity.calling_socket())
+                   socket_path if socket_path is not None else calling_socket)
+    storage_socket = socket_path  # Only an explicit caller selection contributes storage evidence.
     agent_dir, properties, harness, model = _record(root, name, task, harness, model, resume)
+    if run_root is None:
+        # An explicit terminal resumes this target, rather than placing a new
+        # child of the caller (notably when another agent wakes it).
+        saved_root = runtime(agent_dir).get('run_directory') if resume else None
+        run_root = paths.recorded_directory(saved_root) if saved_root is not None else paths.run_directory()
+    socket_path = socket_path or str(run_root / 'tmux.sock')
+    planned_launch = uid()
+    service_dir = paths.native_socket(planned_launch, directory=run_root).parent
+    paths.socket_path(socket_path, variable=('MV2_RUN_DIR' if Path(socket_path).is_relative_to(run_root)
+                                            else 'MV2_TMUX_SOCKET'))
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
     adapter = harnesses.load(root, harness)
@@ -244,7 +331,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 raise error
             if observation['live'] in ('stopped', 'dormant'):
                 attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
-    proposed_launch = uid() if not resume else None
+    proposed_launch = planned_launch if not resume else None
     if not resume:
         launch_lock = lambda path: _publish_record(root, agent_dir, properties, proposed_launch)
     elif _recovery:
@@ -299,19 +386,24 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         if previous and (closing := attachments.problem(agent_dir, previous)):
             raise RuntimeError(closing + '; retry after terminal cleanup finishes')
+        if recorded_wake_socket and _wake_socket(root, previous, run_root, socket_path) is None:
+            # A gone default falls back exactly like an explicit resume. Select
+            # both paths before preparing the adapter's control endpoint/env.
+            storage_socket, run_root = _wake_fallback(root)
+            socket_path = storage_socket or str(run_root / 'tmux.sock')
+            service_dir = paths.native_socket(planned_launch, directory=run_root).parent
+            paths.socket_path(socket_path, variable=('MV2_RUN_DIR' if Path(socket_path).is_relative_to(run_root)
+                                                    else 'MV2_TMUX_SOCKET'))
         if resume_message_id is not None:
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
             if _queue_wake:
                 resume_prompt = None
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
-        launch_id = proposed_launch or uid()
+        launch_id = planned_launch
         launch = agent_dir / "launches" / launch_id
         bootstrap = catalog.bootstrap(root, properties)
         if adapter.bootstrap:
             bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
-        # A short private path avoids Unix socket length limits in deep worktrees.
-        # Created only when the adapter requests a native service below.
-        service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
         if resume:
             values['task'] = resume_prompt or ''
@@ -320,8 +412,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # can name it, e.g. in a plugin's MCP server. It always wins over ambient or saved values, and the
         # parent's MV2 identity never reaches the child. The tmux socket is added once the pane is owned.
         target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
-                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
-                  "MV2_PYTHON": sys.executable, "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
+                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_RUN_DIR": str(run_root), "MV2_CLI": cli_path,
+                  "MV2_PYTHON": sys.executable, "MV2_SOURCE": source(),
+                  "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
         policy_hook = native.adapter_hook(adapter, 'agent_identity_policy')
         policy_spec = policy_hook() if policy_hook else None
         agent_environment = agent_identity.environment(target, policy_spec, properties.get('agent_environment'))
@@ -333,7 +426,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         fresh = start_fresh or agents.sessions.pending_fresh(agent_dir, properties)
         if start_fresh:
             storage_notices.append(storage_adoption.prove_missing(adapter, properties, previous, agent_dir,
-                                                                  ambient, _storage_terminals(previous, agent_dir, socket_path, adapter.storage_env)))
+                                                                  ambient, _storage_terminals(previous, agent_dir, storage_socket, adapter.storage_env)))
             # Preparation is still read-only. The old binding is retired only
             # once the replacement command is valid and ready to be published.
             for key in agents.sessions.FRESH_FIELDS:
@@ -345,7 +438,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             mode, session = 'spawn', None
             values['session_id'] = properties.get('native_session_id') or ''
         storage = _storage_environment(adapter, properties, environment, ambient, resume and not start_fresh, agent_dir, previous,
-                                       storage_notices, socket_path=socket_path)
+                                       storage_notices, socket_path=storage_socket)
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
@@ -408,6 +501,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
+        # Preparation can refuse without changing runtime storage or tmux.
+        # Recovery still precedes any terminal creation or native service start.
+        Tmux.require_launch_version()
+        paths.prepare(run_root)
+        Tmux(socket_path).ensure(root)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
             # Resume creates a fresh pane; remove only the old owned wrapper.
             old_backend, old_pane = owned(properties, previous, states=('stopped',))
@@ -451,7 +549,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
-              _initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery))
+              {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
+               'run_directory': str(run_root)})
         if fresh:
             # The replacement launch has now been published. If retirement
             # crashed earlier, its next resume used spawn preparation above.
@@ -482,6 +581,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         command = plain_fallback(command, error)
             if command.control_endpoint:
                 try:
+                    paths.prepare(service_dir.parent)
                     service_dir.mkdir(mode=0o700)
                     service_directory_created = True
                 except OSError as error:
@@ -495,7 +595,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             else:
                 terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
                                           [sys.executable, str(runner), str(launch)])
-            backend = Tmux(terminal["socket"])
+            backend = Tmux(terminal["socket"], identity=terminal.get("server_identity"))
             progress.mark('tagging terminal')
             backend.tag(terminal["pane"], properties, launch_id)
             progress.mark('configuring terminal status')
@@ -1165,6 +1265,9 @@ def kill(root, reference, *, attachment_only=False):
             raise ValueError('Outdated launch; refusing to kill a replacement')
         return latest
 
+    unknown_exit = ('Native exit not confirmed: process state unknown; terminal retained. '
+                    f"Run mv2 kill {properties.get('name') or agent_dir.name} again")
+
     def wait_for_exit(timeout):
         deadline = time.monotonic() + timeout
         while True:
@@ -1172,9 +1275,9 @@ def kill(root, reference, *, attachment_only=False):
             live = observe(properties, latest)['live']
             if live in ('stopped', 'dormant'):
                 return
-            if live == 'unknown':
-                raise RuntimeError('Cannot verify native exit; terminal retained')
             if time.monotonic() >= deadline:
+                if live == 'unknown':
+                    raise RuntimeError(unknown_exit)
                 raise TimeoutError('Native process has not exited; terminal retained')
             time.sleep(.05)
 
@@ -1197,7 +1300,8 @@ def kill(root, reference, *, attachment_only=False):
                 update_runtime(agent_dir, launch_id, state='stopped', status='unknown', stopped_at=now())
                 backend.run('kill-pane', '-t', pane)
             elif live != 'dormant':
-                raise RuntimeError(f'Native exit not confirmed ({live}); terminal retained')
+                raise RuntimeError(unknown_exit if live == 'unknown' else
+                                   f'Native exit not confirmed ({live}); terminal retained')
             update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now(),
                            error=cancellation.reason if cancellation and cancellation.state != 'ok' else None,
                            native_cancellation=cancellation.to_dict() if cancellation else None)

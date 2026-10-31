@@ -8,6 +8,7 @@ import sys
 from dataclasses import replace
 import hashlib
 import json
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -33,11 +34,11 @@ class CodexPluginsTest(PluginTestCase):
             session_id=str(uuid4()), task='--literal prompt', control_socket=str(self.work / 'rpc.sock'))
         self.context = LaunchContext('spawn', self.values, environment={'PATH': '/bin', 'MV2_AGENT_ID': 'target', 'MV2_UNIVERSE': str(self.root),
             'MV2_AGENT_DIR': str(self.agent), 'MV2_LAUNCH_ID': 'launch',
-            'MV2_CLI': '/target/bin/mv2', 'MV2_PYTHON': '/target/python',
+            'MV2_CLI': '/target/bin/mv2', 'MV2_PYTHON': '/target/python', 'MV2_SOURCE': '/target/src',
             'MV2_CONTROL_SOCKET': self.values['control_socket']},
             endpoint=NativeEndpoint('unix-websocket', str(self.work / 'native.sock')))
         self.context = replace(self.context, agent_environment={key: value for key, value in self.context.environment.items()
-            if key in ('PATH', 'MV2_AGENT_ID', 'MV2_UNIVERSE', 'MV2_AGENT_DIR', 'MV2_CLI', 'MV2_PYTHON')})
+            if key in ('PATH', 'MV2_AGENT_ID', 'MV2_UNIVERSE', 'MV2_AGENT_DIR', 'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE')})
         version = patch.object(codex, 'codex_version', return_value=(0, 162, 1))
         version.start()
         self.addCleanup(version.stop)
@@ -80,14 +81,14 @@ class CodexPluginsTest(PluginTestCase):
     def test_secrets_and_harness_env_reach_codex_only_through_env_or_config(self):
         """Harness and plugin env, secrets included, reaches Codex tools only through the process env or the relay's
         thread config (shell_environment_policy, MCP env), on bridge, plain and auto's fallback, never argv or the
-        saved plugin record; a break goes unnoticed because the variable is just missing in tool calls, or the secret
-        shows in ps and state files."""
+        saved plugin record; a break can silently import the wrong checkout, omit a tool variable, or expose a secret
+        in ps and state files."""
         with self.subTest('plain record'):
             directory = self.add_plugin(fields={'config': {'model_verbosity': 'low',
                 'tui.notifications': ['agent-turn-complete']}, 'instructions': 'notes.md',
                 'mcp_servers': {'lookup': {'command': 'python3',
                     'args': ['{plugin_dir}/server.py', '$(touch /never)', ''], 'env': {'LABEL': 'literal'},
-                    'env_vars': ['MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_CLI', 'MV2_PYTHON']}}},
+                    'env_vars': ['MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE']}}},
                 files={'notes.md': 'Use lookup for facts.'})
             command = self.command()
             config = self.config(command)
@@ -96,6 +97,7 @@ class CodexPluginsTest(PluginTestCase):
             self.assertEqual(server['env'], {'LABEL': 'literal'})
             self.assertIn('MV2_AGENT_ID', server['env_vars'])
             self.assertIn('MV2_PYTHON', server['env_vars'])
+            self.assertIn('MV2_SOURCE', server['env_vars'])
             self.assertFalse(server['required'])
             self.assertIn('<plugin_instructions name="demo">\nUse lookup for facts.', config['developer_instructions'])
             self.assertEqual(self.detail(command)['instructions']['sha256'],
@@ -138,13 +140,15 @@ class CodexPluginsTest(PluginTestCase):
             outgoing = LaunchProtocol(command.rpc_proxy.settings).outgoing(frame)
             self.assertEqual(outgoing['params']['config']['shell_environment_policy']['set']['APP_TOKEN'],
                              'resume-secret')
+            self.assertEqual(outgoing['params']['config']['shell_environment_policy']['set']['MV2_SOURCE'], '/target/src')
             self.assertEqual(outgoing['params']['sandbox'], 'read-only')
             self.assertEqual(outgoing['params']['approvalPolicy'], 'never')
             self.assertEqual(outgoing['params']['threadId'], self.values['session_id'])
             self.assertEqual(frame['params'], {'threadId': self.values['session_id']})
         with self.subTest('auto bridge and its fallback'):
             env = {'IS_SANDBOX': '1', 'LITERAL': 'a "quoted" é'}
-            environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current', 'PATH': '/tools'}
+            environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current',
+                           'MV2_SOURCE': '/sender/src', 'PATH': '/tools'}
             command = self.command({'inbox_bridge': None, 'env': env},
                                    context=replace(self.context, environment=environment))
             self.assertIn('--remote', command.argv)
@@ -154,6 +158,7 @@ class CodexPluginsTest(PluginTestCase):
             forwarded = outgoing['params']['config']['shell_environment_policy']['set']
             self.assertEqual({key: forwarded[key] for key in env}, env)
             self.assertEqual(forwarded['MV2_IDENTITY_MODE'], 'codex-agent-v1')
+            self.assertEqual(forwarded['MV2_SOURCE'], '/target/src')
             self.assertEqual(forwarded['CODEX_HOME'], environment['CODEX_HOME'])
             self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.argv))
             self.assertNotIn('a "quoted" é', '\n'.join(command.argv))
@@ -200,7 +205,7 @@ class CodexPluginsTest(PluginTestCase):
             MV2_CLI='/sender/mv2', MV2_TMUX_SOCKET='/stale-sender/tmux')
         self.add_plugin(fields={'mcp_servers': {'tools': {'command': 'python3', 'env_vars': [
             'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET',
-            'MV2_CLI', 'MV2_PYTHON', 'PATH']}}})
+            'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE', 'PATH']}}})
         for setting in (False, None):
             settings = {} if setting is None else {'inbox_bridge': setting}
             adapter = CodexAdapter.configured('codex', settings)
@@ -222,9 +227,10 @@ class CodexPluginsTest(PluginTestCase):
                 server = self.config(candidate)['mcp_servers']['mv2_demo_tools']
                 self.assertEqual(server.get('env', {}), {})
                 self.assertEqual(set(server['env_vars']), {'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
-                    'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_CLI', 'MV2_PYTHON', 'PATH'})
+                    'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_CLI', 'MV2_PYTHON', 'MV2_SOURCE', 'PATH'})
                 self.assertEqual(context.environment['MV2_CLI'], '/target/bin/mv2')
                 self.assertEqual(context.environment['MV2_PYTHON'], sys.executable)
+                self.assertEqual(context.environment['MV2_SOURCE'], str(Path(__file__).resolve().parents[1] / 'src'))
                 self.assertNotEqual(context.environment['MV2_AGENT_ID'], properties['id'])
                 self.assertNotIn('MV2_TMUX_SOCKET', context.environment)
 

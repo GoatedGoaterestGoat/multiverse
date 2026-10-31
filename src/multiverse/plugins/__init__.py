@@ -208,6 +208,11 @@ def problems(root, reserved=(), wait=None):
     for found in usable:
         if found.name in now and now[found.name].state == "unusable":
             found_problems.append(now[found.name].problem)
+        elif found.name in now and found.manifest.settings is not None:
+            # What its own check noted about usable settings (1.15), such as a key it ignores: named here too, so a
+            # typo is never only on a screen nobody opened.
+            current = loader.settings(root, now[found.name])
+            found_problems.extend(f"{found.name}: {current.path}: {note}" for note in current.notes)
     replacing = {}  # what register(mv) asked for and could not have, and core columns two plugins stand in for
     for found in usable:
         loaded = now[found.name].loaded if found.name in now else None
@@ -333,6 +338,7 @@ def listing(root, wait=loader.REFRESH_WAIT):
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
                                 or schema_problem, "schema": schema,  # the settings file's problem, nothing else
+                                "notes": [] if waiting else list(current.notes),  # its own check's, 1.15
                                 "own_view": "dashboard.settings" in manifest.extends,
                                 "values": {} if waiting else current.values,
                                 "screen": registered.settings_screen if registered else None,
@@ -1077,7 +1083,7 @@ def reappeared(root):
 
 
 def settings_of(root, name):
-    """(values, problem, path) of a plugin's settings in this universe, judged by its own check too."""
+    """(values, problem, path, notes) of a plugin's settings in this universe, judged by its own check too."""
     check, _ = _own_check(root, name)
     found = entry(root, name)
     if found.manifest is None:
@@ -1085,8 +1091,8 @@ def settings_of(root, name):
     current = settings_files.read(root, found.manifest, check)
     waiting = _waiting_old_file(root, found)
     if waiting:  # its real settings are in the old file: the defaults never stand in for them
-        return {}, _waiting_problem(waiting), current.path
-    return current.values, current.problem, current.path
+        return {}, _waiting_problem(waiting), current.path, ()
+    return current.values, current.problem, current.path, current.notes
 
 
 def _waiting_old_file(root, found):

@@ -7,7 +7,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Requirement | Version | Notes |
 | --- | --- | --- |
 | Python | 3.11 or newer | `uv sync` or `pip install .` adds the Python dependencies, `textual>=8.2.3,<9` and `websockets>=15,<18`. |
-| tmux | Any recent release | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
+| tmux | 3.2 or newer | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
 | Platform | macOS or Linux | Windows isn't supported, because mv2 needs tmux and POSIX file locks. |
 | Harness CLI | See below | Install and sign in to at least one of Codex, Claude Code or Pi. Codex is the default harness. |
 | Git, uv | Any | Only `mv2 update` needs them. It needs a Git checkout of mv2, and it syncs its environment with `uv sync --locked` when `uv` is available. |
@@ -16,8 +16,8 @@ mv2's requirements and the harness versions it was checked against are listed he
 
 | Harness | Version | What was checked |
 | --- | --- | --- |
-| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals and conversation restoration after a daemon restart. |
-| Claude Code | 2.1.314 | Launch and resume flags, and the multiverse mod. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Codex CLI | 0.164.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and the composer and footer the dashboard's live pane leaves out, from its panes and its renderer's snapshots. |
+| Claude Code | 2.1.314 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 The Codex check compared generated experimental app-server schemas and the
@@ -35,6 +35,12 @@ on, with no older-release notice.
 
 When checking a new Codex release, also regenerate the adapter's bundled model
 catalog from that release's source and review changes to the rollout format.
+
+When checking a new Claude Code or Codex release, also add its screens to
+`tests/fixtures/`: real captures, or Codex's renderer snapshots labelled as
+such. Then run `tests/test_pane_display.py`. The dashboard's live pane must
+still leave out the input box and the rows under it, and keep dialogs
+unchanged.
 
 Other releases may behave differently. The Claude Code mod API is early access and can change between releases.
 

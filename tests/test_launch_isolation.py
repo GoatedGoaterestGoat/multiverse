@@ -630,9 +630,13 @@ class LaunchIsolationTest(unittest.TestCase):
                         backend.environment.side_effect = {'HOME': str(account)}.get
                     if server_home:
                         backend.environment.side_effect = {key: str(old_home), 'HOME': str(self.work)}.get
-                    backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2'}
+                    backend.create.return_value = {'socket': str(self.work / 'fresh-new.sock'), 'session': '$2', 'pane': '%2',
+                                                   'server_identity': {'pid': 1234, 'epoch': 5678}}
                     servers = []
-                    def terminal(socket=None):
+                    def terminal(socket=None, *, legacy=False, identity=None):
+                        from multiverse.terminal.tmux import Tmux
+                        backend.prefix = Tmux(socket, legacy=legacy, identity=identity).prefix
+                        backend.identity = identity
                         servers.append(socket)
                         return backend
                     from multiverse.runtime import storage_adoption
@@ -662,7 +666,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             raise PermissionError('unreadable conversation file')
                         return original_lstat(path, *args, **kwargs)
                     with patch.object(lifecycle, 'Tmux', side_effect=terminal), \
-                            patch('multiverse.runtime.missing_runtime.Tmux', return_value=backend), \
+                            patch('multiverse.runtime.missing_runtime.Tmux', side_effect=terminal), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
                             patch.object(Path, 'read_bytes', read_bytes), \
@@ -891,18 +895,22 @@ class LaunchIsolationTest(unittest.TestCase):
         backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}
         with self.subTest(part='harness env'), patch.object(lifecycle, "Tmux", return_value=backend), \
                 patch.object(lifecycle.shutil, "which", return_value="/fake/executable"), \
-                patch.object(lifecycle, "observe", return_value={"live": "dormant"}):
+                patch.object(lifecycle, "observe", return_value={"live": "dormant"}), \
+                patch.dict(os.environ, {'MV2_SOURCE': '/other/installation', 'PYTHONPATH': '/user/imports'}):
             first = lifecycle.start(self.root, "env", "task", "pi")
             directory = agents.directory(self.root, first["id"])
             session(directory)
             for result in (first, lifecycle.start(self.root, resume=first["id"])):
                 request = read(directory / "launches" / result["runtime"]["launch_id"] / "request.json")
-                with patch.dict(os.environ, {"INHERITED": "tmux server", "MV2_AGENT_ID": "parent"}):
+                with patch.dict(os.environ, {"INHERITED": "tmux server", "MV2_AGENT_ID": "parent",
+                                             "MV2_SOURCE": "/old/server/installation"}):
                     env = runner.launch_environment(request)
                 # The harness's value replaces the inherited one; this launch's identity still wins.
                 self.assertEqual(env["IS_SANDBOX"], "1")
                 self.assertEqual(env["INHERITED"], "harness")
                 self.assertEqual(env["MV2_AGENT_ID"], first["id"])
+                self.assertEqual(env['MV2_SOURCE'], str(Path(lifecycle.__file__).resolve().parents[2]))
+                self.assertEqual(env['PYTHONPATH'], '/user/imports')
 
         env = {'IS_SANDBOX': '1', 'NO_COLOR': '1', 'LITERAL': 'a "quoted" $(false) é'}
         values = self.adapter_values()
@@ -1037,6 +1045,7 @@ class LaunchIsolationTest(unittest.TestCase):
         with patch.object(lifecycle, 'Tmux', return_value=backend), \
                 patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                 patch.object(native, 'observe', return_value={'live': 'dormant'}), patch.object(native, 'owned'), \
+                patch('multiverse.terminal.recovery.observe', return_value=('', None)), \
                 patch.object(ClaudeAdapter, 'get_delivery', return_value=failure):
             spawned = lifecycle.start(self.root, name='retry-wake', harness='claude')
             directory = self.root / 'state/agents' / spawned['id']

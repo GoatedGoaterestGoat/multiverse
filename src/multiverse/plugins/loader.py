@@ -34,7 +34,7 @@ import types
 from ..store import now
 from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 14)
+API_VERSION = (1, 15)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -48,6 +48,7 @@ SOURCES = ("path", "universe", "personal", "installed", "checkout", "bundled")
 # The process plugins are loaded into: cli, dashboard, host or helper.
 process = "cli"
 _lock = threading.RLock()
+_discovering = threading.local()  # the universes this thread is finding plugins for now
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
@@ -59,6 +60,18 @@ _generation = 0  # rises whenever a plugin is loaded or fails to load
 SYNCHRONOUS_BUDGET = 2.0
 REFRESH_WAIT = 0.5  # seconds a dashboard refresh waits, in all, for plugins still loading
 UNUSABLE = "its settings cannot be used: "  # how an `unusable` entry's problem begins, after the plugin's name  # seconds a guarded call may take where a person waits on it
+
+
+# A child that runs a module of this mv2 as __main__, with this mv2 first on its path rather than whatever mv2 the
+# interpreter finds itself (MV2_SOURCE's rule): the source folder is an argument, never part of the code.
+_RUN_MODULE = ("import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
+               "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)")
+
+
+def module_command(module, *arguments):
+    """The argv that runs `module` of this running mv2, like `python -m module ARGUMENTS`."""
+    import multiverse
+    return [sys.executable, "-c", _RUN_MODULE, multiverse.source(), module, *map(str, arguments)]
 
 
 class PluginError(ValueError):
@@ -418,13 +431,23 @@ def entries(root):
         cached = _entries.get(root)
     if cached and cached[0] == signature:
         return list(cached[1])
-    found = _entries_uncached(root)
+    discovering = _discovering.__dict__.setdefault("roots", set())
+    if root in discovering:
+        # Asked again while this thread finds this universe's plugins: a loaded plugin's settings check calling the
+        # API, whose access check asks which plugins are on. Answered without running settings checks again, which
+        # would ask again, without end; on/off, the source and the grant come out the same.
+        return list(_entries_uncached(root, checks=False))
+    discovering.add(root)
+    try:
+        found = _entries_uncached(root)
+    finally:
+        discovering.discard(root)
     with _lock:
         _entries[root] = (signature, found)
     return list(found)
 
 
-def _entries_uncached(root):
+def _entries_uncached(root, checks=True):
     settings = config.load(root) if root is not None else config.Config()
     chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
     for source, directory in _source_directories(root):
@@ -459,7 +482,8 @@ def _entries_uncached(root):
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
         try:
-            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name),
+                                  checks=checks)
         except Exception as error:  # whatever happens with one plugin, every other one is still listed
             text = str(error).strip().splitlines()
             result[name] = Entry(name, "failed", on, source, directory, found, problem=(
@@ -476,7 +500,7 @@ def _entries_uncached(root):
     return [result[name] for name in sorted(result)]
 
 
-def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None):
+def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True):
     entry = Entry(name, "on" if on else "off", on, source, directory, found, shadowed=shadowed)
     if source == "universe":
         trusted = "trusted" if fingerprint else trust.state(directory)
@@ -511,7 +535,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None)
         return entry
     if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
         entry.state, entry.loaded = "loaded", known
-    if root is not None and found.settings is not None:
+    if checks and root is not None and found.settings is not None:
         # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
         # the universe's own paths.
         problem = settings(root, entry).problem

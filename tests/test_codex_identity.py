@@ -193,7 +193,8 @@ class PlainStartupTest(unittest.TestCase):
 class SharedIdentityTest(unittest.TestCase):
     def context(self, launch):
         stable = {'MV2_AGENT_ID': 'agent', 'MV2_AGENT_DIR': '/outside/state/agents/agent',
-                  'MV2_UNIVERSE': '/outside', 'MV2_CLI': '/tools/mv2', 'MV2_PYTHON': '/tools/python', 'PATH': '/tools'}
+                  'MV2_UNIVERSE': '/outside', 'MV2_CLI': '/tools/mv2', 'MV2_PYTHON': '/tools/python', 'PATH': '/tools',
+                  'MV2_RUN_DIR': f'/selected-run/{launch}'}
         return LaunchContext('spawn', {'name': 'worker', 'workspace': '/workspace',
             'agent_dir': stable['MV2_AGENT_DIR'], 'agent_id': 'agent', 'bootstrap_json': json.dumps('core bootstrap'),
             'task': 'hello', 'session_id': str(uuid4()), 'control_socket': f'/tmp/{launch}/rpc.sock'},
@@ -206,7 +207,7 @@ class SharedIdentityTest(unittest.TestCase):
             'params': {'config': config or {}}})
 
     def test_tool_shell_identity_is_stable_and_never_per_launch(self):
-        """Codex tools keep stable identity and storage, including another harness's values or absence; drift can silently authorize the wrong launch or open another home."""
+        """Codex tools keep stable identity and storage while launch sockets move; drift can silently authorize the wrong launch, open another home or split the terminal from its proxy."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
         for selection, permitted in ((None, False), ({}, False), ({'mode': 'plain'}, False),
                                      ({'mode': 'unknown'}, False), (['bridge'], False),
@@ -217,14 +218,29 @@ class SharedIdentityTest(unittest.TestCase):
                 hook = getattr(adapter, 'allow_recorded_launch', lambda session: False)
                 self.assertIs(hook(session), permitted)
         with self.subTest(source='two launches'):
-            a, b = (adapter.spawn(self.context(launch)) for launch in ('old', 'new'))
+            commands = []
+            for launch, socket_path in (('old', '/tmp/mv2-native-old/rpc.sock'),
+                                        ('new', '/recorded-home/.multiverse/run/native/new/rpc.sock')):
+                context = self.context(launch)
+                context = replace(context, values={**context.values, 'control_socket': socket_path},
+                                  environment={**context.environment, 'MV2_CONTROL_SOCKET': socket_path})
+                spawned = adapter.spawn(context)
+                session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
+                for mode, command in (('spawn', spawned), ('resume', adapter.resume(session, context))):
+                    with self.subTest(launch=launch, mode=mode):
+                        self.assertEqual(command.rpc_proxy.socket_path, socket_path)
+                        self.assertEqual(command.control_endpoint.address, socket_path)
+                        self.assertEqual(command.argv[command.argv.index('--remote') + 1], 'unix://' + socket_path)
+                        self.assertEqual(command.rpc_proxy.upstream_path, '/native.sock')
+                commands.append(spawned)
+            a, b = commands
             self.assertNotEqual(a.rpc_proxy.socket_path, b.rpc_proxy.socket_path)
             first = self.native_frame(a)['params']['config']['shell_environment_policy']
             second = self.native_frame(b)['params']['config']['shell_environment_policy']
             self.assertEqual(first, second)
             self.assertEqual(first['set']['MV2_IDENTITY_MODE'], 'codex-agent-v1')
             self.assertEqual(first['set']['CODEX_HOME'], '/native/home')
-            for key in ('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET', 'CODEX_THREAD_ID'):
+            for key in ('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET', 'MV2_RUN_DIR', 'CODEX_THREAD_ID'):
                 self.assertNotIn(key, first['set'])
             self.assertFalse(any('shell_environment_policy.set.MV2_' in arg for arg in a.argv))
             self.assertEqual(a.agent_identity, adapter.agent_identity_policy())

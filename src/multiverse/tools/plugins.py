@@ -182,8 +182,9 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         unchecked = plugins.settings_checked(root, name)  # its own check, run before anything is written
         if changes:
             plugins.edit_settings(root, name, changes)
-        values, problem, path = plugins.settings_of(root, name)
+        values, problem, path, notes = plugins.settings_of(root, name)
         return {"universe": str(root), "name": name, "path": str(path), "values": values, "problem": problem,
+                "notes": list(notes),
                 "changed": sorted(changes), "unchecked": unchecked}
     # This universe's own copy, even when another source has a plugin of that name: while untrusted it hides
     # nothing, so looking the name up would find the other one.
@@ -445,6 +446,7 @@ def text(action, result):
             settings = result["settings"]
             lines.append(f'Settings: {settings["path"]} ({settings["source"]})'
                          + (f'; cannot be used: {settings["problem"]}' if settings["problem"] else ""))
+            lines.extend(f"  Note: {note}" for note in settings.get("notes") or ())
         for shadow in result["shadowed"]:
             lines.append(f'Shadows its {shadow["source"]} copy at {shadow["directory"]}')
         lines.extend(f"Recent error: {error}" for error in result["errors"])
@@ -483,6 +485,7 @@ def text(action, result):
             lines.append(f'Changed: {", ".join(result["changed"])}')
         if result["problem"]:
             lines.append(f'! Cannot be used, so the plugin is off here until fixed: {result["problem"]}')
+        lines.extend(f"Note: {note}" for note in result.get("notes") or ())
         if result.get("unchecked"):
             lines.append(f'! {result["name"]}\'s own settings check did not run ({result["unchecked"]}): '
                          'only its schema was checked.')

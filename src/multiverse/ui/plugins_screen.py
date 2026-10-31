@@ -143,6 +143,7 @@ def describe(item):
     settings = item.get("settings")
     if settings:
         lines.append("Settings: " + clean(settings.get("path") or "") + (" (unusable)" if settings.get("problem") else ""))
+        lines += ["Note: " + clean(note) for note in settings.get("notes") or ()]  # its own check's advice (1.15)
     lines += ["Error: " + clean(text) for text in (item.get("errors") or [])[-3:]]
     return "\n".join(lines)
 
@@ -241,8 +242,13 @@ class PluginsScreen(ModalScreen):
                 state += " · status unknown"
             text = f"Plugin host: {state}" + "".join(f"\n  {clean(name)}: {clean(why)}" for name, why in self.host["stopped"].items()) \
                 + (f"\n  {clean(self.host['problem'])}" if self.host.get("problem") else "") + "\n\n" + text
-        if self.problems:
-            text += "\n\n" + "\n".join("• " + clean(problem) for problem in self.problems)
+        # The universe's problems include each plugin's settings notes, so that one is never only on a screen nobody
+        # opened; the selected plugin's own are already its Note lines above, and are not named twice.
+        notes = ((item or {}).get("settings") or {}).get("notes") or ()
+        problems = [problem for problem in self.problems
+                    if not (item and problem.startswith(f"{item['name']}: ") and any(problem.endswith(note) for note in notes))]
+        if problems:
+            text += "\n\n" + "\n".join("• " + clean(problem) for problem in problems)
         self.query_one("#plugin-details", Static).update(text)
 
     def on_data_table_row_highlighted(self, event):
@@ -459,6 +465,7 @@ class PluginSettingsScreen(FieldScreen):
         with Vertical(id="plugins-dialog"):
             yield Label(f"Settings · {clean(self.item['name'])} · {clean(self.scope_name)}", classes="detail-title", markup=False)
             yield Static("", id="plugin-settings-problem", markup=False)
+            yield Static("", id="plugin-settings-notes", markup=False)
             yield VerticalScroll(id="plugin-settings-body")
             yield Static("", classes="cerror", markup=False)
         yield Footer()
@@ -469,6 +476,9 @@ class PluginSettingsScreen(FieldScreen):
         banner = self.query_one("#plugin-settings-problem", Static)
         banner.display = bool(problem)
         banner.update(f"This settings file cannot be used: {clean(problem)}" if problem else "")
+        notes = self.query_one("#plugin-settings-notes", Static)  # advice from its check; the file is still usable
+        notes.display = bool(settings.get("notes"))
+        notes.update("\n".join("Note: " + clean(note) for note in settings.get("notes") or ()))
         if settings.get("fields") is not None:
             fields, self.skipped = declared_fields(settings["fields"], settings.get("values") or {}), []
         else:

@@ -33,11 +33,13 @@ TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
 
 @dataclass(frozen=True)
 class Settings:
-    """`values`: the settings in effect (the file, else the defaults). `problem`: why they cannot be used."""
+    """`values`: the settings in effect (the file, else the defaults). `problem`: why they cannot be used. `notes`:
+    what the plugin's own check said about usable settings (1.15), each one line."""
     values: dict
     path: Path
     source: str  # "file", "defaults" or "none"
     problem: str | None = None
+    notes: tuple = ()
 
 
 def path(root, name):
@@ -197,7 +199,8 @@ def defaults_of(manifest):
 
 
 def run_check(check, data, root):
-    """A plugin's settings check: check(settings), or check(settings, universe directory) when it takes two."""
+    """A plugin's settings check: check(settings), or check(settings, universe directory) when it takes two. Returns
+    what it returned: notes, or anything else (None) for none."""
     import inspect
     try:
         parameters = [parameter for parameter in inspect.signature(check).parameters.values()
@@ -207,8 +210,19 @@ def run_check(check, data, root):
     return check(data, Path(root) if root is not None else None) if len(parameters) >= 2 else check(data)
 
 
+NOTES, NOTE_CHARACTERS = 20, 200
+
+
+def _notes(value):
+    """A check's notes: the strings of a list or tuple it returned, each its first line, bounded; else none."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    lines = (note.strip().splitlines()[0][:NOTE_CHARACTERS] for note in value if isinstance(note, str) and note.strip())
+    return tuple(lines)[:NOTES]
+
+
 def _accept(manifest, data, check, where, root=None):
-    """Raise ValueError when `data` cannot be this plugin's settings."""
+    """Raise ValueError when `data` cannot be this plugin's settings; else the notes its check gave."""
     expected = manifest.settings.version
     found = data.get("schema")
     if found != expected:
@@ -221,8 +235,7 @@ def _accept(manifest, data, check, where, root=None):
             validate({key: value for key, value in data.items() if key != "schema"}, schema)
         except ValueError as error:
             raise ValueError(f"{where}: {error}") from None
-    if check is not None:
-        run_check(check, data, root)
+    return _notes(run_check(check, data, root)) if check is not None else ()
 
 
 def read(root, manifest, check=None):
@@ -241,8 +254,8 @@ def read(root, manifest, check=None):
             data, source, where = _json(file), "file", str(file)
         else:
             data, source, where = defaults_of(manifest), "defaults", f"{manifest.name} default settings"
-        _accept(manifest, data, check, where, root)
-        return Settings(data, file, source)
+        notes = _accept(manifest, data, check, where, root)
+        return Settings(data, file, source, notes=notes)
     except ValueError as error:
         return Settings({}, file, "file" if file.is_file() else "defaults", str(error))
     except Exception as error:  # a plugin's own check must not break its caller

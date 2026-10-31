@@ -1012,7 +1012,7 @@ universe, full agent UUID, directory, CLI/Python paths and pinned native storage
 proof is an error, never an operator fallback. `MV2_LAUNCH_ID` and launch-private
 control/tmux addresses are absent. The attachment's `--remote` relay remains
 private to that launch; there is no stable raw-native relay. Each new launch requests
-`MV2_CLI`, `MV2_PYTHON` and `PATH` from the launching mv2 installation. The
+`MV2_CLI`, `MV2_PYTHON`, `MV2_SOURCE` and `PATH` from the launching mv2 installation. The
 requested map is kept in that launch's `request.json.agent_environment` and the
 agent's latest `properties.json.agent_environment`; it is not an attestation of
 the environment in an already-loaded shared conversation. Executable paths are
@@ -1438,8 +1438,13 @@ workflows and skills (`kind/name` when a bare name is shared or reserved); after
 `send` it offers this universe's agents, except this one and any row built from a
 damaged record, which `send` can't reach (a comma list
 completes its last name); a catalog entry's arguments get nothing. It reads `mv2
-catalog` and `mv2 list --json` in the background and keeps them five seconds, so
-typing never waits on mv2, and a failed read offers no rows. It is separate
+catalog` and `mv2 list --json --columns id,name,universe,live,status,phase,damaged`
+(the fields its rows use, and no usage field, so mv2 doesn't read every agent's
+transcript) in the background and keeps them five seconds. Typing never waits on
+mv2: Claude draws a plugin's rows whenever its answer comes. A query made before
+anything was read answers when that first read lands (at most 3 s), so its rows
+appear without another key; later queries answer from what is kept. A failed read
+offers no rows. It is separate
 because it hooks `prompt.autocomplete`, which older Claude refuses: there the
 adapter does not load it, and the mod keeps working without it.
 
@@ -1484,7 +1489,14 @@ when the tag gains a part an older mod can't read: a mod still on `claude-mod-v1
 until it reloads stays connected and gets tags without a send time) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
-multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
+multiverse.tools.runtime_update --status`, which is not an `mv2` command. Each
+such `python -m` call (status, usage, the /clear move, and Pi's status) puts
+`MV2_SOURCE`, the package root of the mv2 that launched the agent, first on that
+call's `PYTHONPATH` (left as it is when it already starts there), so it runs the same code even when the interpreter has another
+mv2 installed or none; the agent's own shells never get it. A report that
+exits non-zero or throws (a timeout, or a call Claude refuses before its trust
+prompt is answered) is logged in the pane and tried again at the next status
+change. Agents
 report their phase with `mv2 report` but never set their status: `working` while a main-loop turn runs; `waiting` while an
 `AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched

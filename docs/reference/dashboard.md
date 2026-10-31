@@ -14,7 +14,7 @@ mv2 -u .multiverse/subverses/review tui
 
 - **The list** is one tree. The universe and each subverse are folders, with their agents underneath. Folders fold and unfold.
 - **The header** counts live agents, agents waiting for you (an orange `●` marks them) and focused agents (a `◉` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
-- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a `Plugins:` line with the plugins the launch left out and any it started with less. The fallback reason is the harness's own; what the plugins did is on the `Plugins:` line. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode, fallback reason and plugins.
+- **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. The live view leaves out the harness's input box, with any text typed in it, and the rows under it: Claude's status line, permission mode, tips and notices such as an installed update, and Codex's footer. A dialog in place of the input box, such as a permission prompt, stays, and so does a screen with nothing but the input box on it. `mv2 inspect` keeps every row. A dormant agent has no terminal, so the inspector shows none and offers `r` to resume it; `v` shows why it is dormant. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a `Plugins:` line with the plugins the launch left out and any it started with less. The fallback reason is the harness's own; what the plugins did is on the `Plugins:` line. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode, fallback reason and plugins.
 - **The bottom line** shows key hints and the result of your last action. The hints are clickable.
 
 In a narrow terminal, the optional columns are hidden first. The whole tree fits in 60×20. The dashboard respects `NO_COLOR`.
@@ -26,8 +26,8 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `name` | The agent's name (always shown) |
 | `live` | `alive`, `ending`, `stopped`, `dormant`, `starting` (a new agent still being prepared) or `unknown` |
 | `status` | `working`, `waiting`, `idle` or `disconnected`, from the harness over a live connection |
-| `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90% |
-| `cost` | The session's cost so far (off by default) |
+| `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90%. It shows `…` until the agent's usage has been read, which can take a few seconds after the dashboard opens; the agents are listed before then. An agent whose conversation can't be confirmed shows `N/A`, never an earlier reading |
+| `cost` | The session's cost so far (off by default), or `…` until it has been read |
 | `phase`, `summary` | What the agent last reported with `mv2 report` |
 | `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |
