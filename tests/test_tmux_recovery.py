@@ -506,7 +506,8 @@ class RecoveryProofTest(BaseTest):
             self.assertIn('Permission denied', str(caught.exception))
             self.assertNotIn('kill -USR1', str(caught.exception))
             self.assertEqual([call.args for call in signals.call_args_list if call.args[1]], [(12345, signal.SIGUSR1)])
-        for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal', 'permission denied before signal',
+        for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal',
+                     'permission denied before signal', 'foreign reuse before signal',
                      'registry conflict', 'new answering server', 'different PID with unreadable start', 'healthy fast path', 'same PID new epoch',
                      'old tmux without epoch', 'stopped old record'):
             with self.subTest(case=case):
@@ -542,11 +543,12 @@ class RecoveryProofTest(BaseTest):
                         patch.object(recovery, 'process_command', return_value=command), \
                         patch.object(recovery.os, 'kill') as signals, \
                         patch.object(recovery, '_probe', side_effect=probes):
-                    if case == 'changed before signal':
+                    if case in ('changed before signal', 'foreign reuse before signal'):
                         snapshot.side_effect = [(token, 'S'), (later, 'S')]
-                    if case == 'permission denied before signal':
+                    if case in ('permission denied before signal', 'foreign reuse before signal'):
                         signals.side_effect = [None, PermissionError('fresh observation denied')]
-                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'permission denied before signal', 'registry conflict', 'new answering server', 'different PID with unreadable start'):
+                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'permission denied before signal',
+                                'foreign reuse before signal', 'registry conflict', 'new answering server', 'different PID with unreadable start'):
                         with self.assertRaises(recovery.Unreachable) as caught:
                             recovery.connected(backend, facts=facts)
                         if case in ('registry conflict', 'new answering server', 'different PID with unreadable start'):
@@ -556,13 +558,15 @@ class RecoveryProofTest(BaseTest):
                         else:
                             self.assertIn(str(socket), str(caught.exception))
                             self.assertIn('PID 12345', str(caught.exception))
-                            if case == 'permission denied before signal':
+                            if case in ('changed before signal', 'permission denied before signal', 'foreign reuse before signal'):
                                 self.assertNotIn('kill -USR1', str(caught.exception))
                     else:
                         result = recovery.connected(backend, facts=facts)
                         self.assertEqual(result[0] if result is not None else None, None if case == 'reused PID' else 'panes')
                     signalled = [call.args for call in signals.call_args_list if call.args[1] == signal.SIGUSR1]
                     self.assertEqual(signalled, [(12345, signal.SIGUSR1)] if case == 'verified' else [])
+                    if case == 'foreign reuse before signal':
+                        self.assertEqual([call.args for call in signals.call_args_list], [(12345, 0), (12345, 0)])
                     if case in ('healthy fast path', 'stopped old record'):
                         snapshot.assert_not_called()
                     elif case in ('same PID new epoch', 'old tmux without epoch', 'stopped old record'):

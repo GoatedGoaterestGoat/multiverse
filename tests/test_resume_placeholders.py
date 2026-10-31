@@ -1,6 +1,7 @@
 """Custom recipes receive this resume's prompt, never the saved original task."""
 import os
 from pathlib import Path
+import signal
 import sys
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -55,7 +56,7 @@ class ResumePlaceholderTest(TerminalBase):
         # A wake must survive a swept legacy default without silently moving a
         # custom, isolated server onto the operator's default server.
         self.kill_server()
-        for case in ('legacy swept', 'legacy retry', 'legacy live', 'legacy recover', 'legacy peer recover',
+        for case in ('legacy swept', 'legacy retry', 'legacy live', 'legacy recover', 'legacy peer recover', 'legacy peer unknown',
                      'legacy changed tmp', 'legacy operator', 'default operator',
                      'custom present', 'custom live', 'custom swept', 'explicit resume', 'operator custom'):
             with self.subTest(socket_selection=case):
@@ -71,11 +72,11 @@ class ResumePlaceholderTest(TerminalBase):
                     first, _, _ = launched(name='socket-' + case.replace(' ', '-'), task='ORIGINAL', harness='recorder')
                     directory = self.root / 'state/agents' / first['id']
                     pid = self.backend.run('display-message', '-p', '#{pid}')
-                    live = case in ('legacy live', 'legacy recover', 'legacy peer recover', 'custom live')
+                    live = case in ('legacy live', 'legacy recover', 'legacy peer recover', 'legacy peer unknown', 'custom live')
                     peer_facts = None
                     if live:
-                        if case == 'legacy peer recover':
-                            peer, _, _ = launched(name='main-era-peer', task='KEEPER', harness='recorder')
+                        if case.startswith('legacy peer'):
+                            peer, _, _ = launched(name=case.replace(' ', '-'), task='KEEPER', harness='recorder')
                             peer_dir = self.root / 'state/agents' / peer['id']
                             peer_facts = read(peer_dir / 'runtime.json')
                             peer_facts.pop('run_directory', None)
@@ -131,6 +132,28 @@ class ResumePlaceholderTest(TerminalBase):
                                 failed = send.run(self.root, agent=first['id'], text='WAKE:' + case)
                             self.assertFalse(failed['ok'])
                             result = deliver.run(self.root, agent=first['id'], retry=True)
+                        elif case == 'legacy peer unknown':
+                            # Earlier rows can leave a socket inode after their
+                            # server exits. Start this refusal check with absent
+                            # candidates, after independently proving each gone.
+                            for candidate in (run_root / 'tmux.sock', Path(os.environ['MV2_TMUX_SOCKET'])):
+                                self.assertEqual(type(self.backend)(str(candidate)).snapshot(), ({}, None))
+                                candidate.unlink(missing_ok=True)
+                            observed = recovery.process_snapshot
+                            def unreadable(peer_pid):
+                                return None if peer_pid == peer_facts['runner_pid'] else observed(peer_pid)
+                            with patch.object(recovery, 'process_snapshot', side_effect=unreadable), \
+                                    patch.object(recovery.os, 'kill', wraps=os.kill) as signals, \
+                                    patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Unknown peer permitted creation')) as create:
+                                result = send.run(self.root, agent=first['id'], text='WAKE:' + case)
+                            self.assertFalse(result['ok'], result)
+                            self.assertIn(str(peer_facts['runner_pid']), result['native_delivery']['reason'])
+                            create.assert_not_called()
+                            self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+                            self.assertFalse(old.exists())
+                            self.assertFalse((run_root / 'tmux.sock').exists())
+                            self.assertFalse(Path(os.environ['MV2_TMUX_SOCKET']).exists())
+                            continue
                         else:
                             guard = (patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('A refused wake created a server'))
                                      if case == 'custom swept' else nullcontext())
