@@ -308,6 +308,7 @@ class Tmux:
                 actor = None
             if actor is not None:
                 paths.append(actor.directory / 'runtime.json')
+        unanswered = []
         for path in paths:
             try:
                 facts = records.runtime(path)
@@ -322,7 +323,14 @@ class Tmux:
                 continue  # An invalid record is never authority for a signal.
             if recovery.observe(self, facts=facts) is not None:
                 return
-        recovery.observe(self)
+            unanswered.append(facts)
+        if recovery.observe(self) is not None:
+            return
+        # Exhaust peer proofs before refusing: another launch can still recover
+        # this server when an ended target retained only its native reply.
+        for facts in unanswered:
+            if facts.get('state') in ('starting', 'running', 'ending'):
+                recovery.require_exited(socket, facts)
 
     def tag(self, pane, properties, launch_id):
         for key, value in (("agent_id", properties["id"]), ("universe_id", properties["universe_id"]), ("launch_id", launch_id)):

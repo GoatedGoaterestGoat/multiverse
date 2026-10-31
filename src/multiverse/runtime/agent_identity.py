@@ -92,7 +92,7 @@ def calling_socket(environment=None):
     return calling_paths(environment)[0]
 
 
-def calling_paths(environment=None):
+def calling_paths(environment=None, *, require_recorded_run=False):
     """Resolve terminal and run directory from the same verified current runtime."""
     from . import paths
     env = os.environ if environment is None else environment
@@ -125,6 +125,8 @@ def calling_paths(environment=None):
     socket = terminal.get('socket') if isinstance(terminal, dict) else None
     if not isinstance(socket, str) or not socket or '\0' in socket:
         raise ValueError('Calling agent has no recorded tmux server')
+    if require_recorded_run and 'run_directory' not in facts:
+        raise ValueError('Calling agent has no recorded run directory')
     run_root = (paths.recorded_directory(facts['run_directory']) if 'run_directory' in facts else
                 paths.run_directory(env))
     return socket, run_root

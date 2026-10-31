@@ -102,6 +102,8 @@ class AgentIdentityTest(BaseTest):
         facts.pop('run_directory')
         write(self.directory / 'runtime.json', facts)
         self.assertEqual(agent_identity.calling_paths(env)[1], Path(stale))
+        with self.assertRaisesRegex(ValueError, 'no recorded run directory'):
+            agent_identity.calling_paths(env, require_recorded_run=True)
         for invalid in ('relative', None, [], ''):
             with self.subTest(run_directory=invalid):
                 write(self.directory / 'runtime.json', {**facts, 'run_directory': invalid})

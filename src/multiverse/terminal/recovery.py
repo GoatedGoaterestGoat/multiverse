@@ -269,6 +269,33 @@ def _recorded(socket, facts):
     return recorded
 
 
+def require_exited(socket, facts):
+    """A saved reply cannot signal a server, but cannot be discarded as gone either."""
+    terminal = facts.get('tmux') or {}
+    identity = terminal.get('server_identity')
+    if identity is None:
+        return  # Main-era records have only the runner/OS proofs checked by observe().
+    if (not isinstance(identity, dict)
+            or any(type(identity.get(key)) is not int or identity[key] <= 0 for key in ('pid', 'epoch'))):
+        raise Unreachable(f'Invalid tmux server reply identity at {socket}; repair runtime.json before retrying')
+    proof = _recorded(socket, facts)
+    if (proof is not None and all(proof.get(key) == identity[key] for key in ('pid', 'epoch'))
+            and _state(proof) == 'gone'):
+        return
+    try:
+        os.kill(identity['pid'], 0)
+    except ProcessLookupError:
+        return
+    except (PermissionError, OverflowError):
+        pass  # An inaccessible or reused PID is not exit proof without a start token.
+    observed = process_snapshot(identity['pid'])
+    if observed is not None and observed[1].startswith(('Z', 'X')):
+        return
+    raise Unreachable(f'Tmux server PID {identity["pid"]} no longer answers at {socket}, but its exit is not proven; '
+                      'the saved reply cannot authorize recovery. No signal or replacement server is safe. '
+                      'Restore access to that server, or resume this agent as an operator with MV2_TMUX_SOCKET set to choose a server')
+
+
 def _owns_pane(answer, facts):
     """An exact saved pane/session/launch tag proves which server holds this launch."""
     if answer is None or not facts:

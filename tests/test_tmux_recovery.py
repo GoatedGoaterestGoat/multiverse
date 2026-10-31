@@ -453,6 +453,24 @@ class RecoveryProofTest(BaseTest):
         later = 'Thu Oct 29 20:00:01 2026'
         proof = {'pid': 12345, 'started': token, 'socket': str(socket), 'epoch': 100}
         answer = ('panes', {'pid': 12345, 'epoch': 100})
+        for case in ('live reply only', 'unreadable reply only', 'denied reply only', 'gone reply only',
+                     'zombie reply only', 'reused with OS proof', 'unrelated OS proof'):
+            with self.subTest(reply_exit_proof=case):
+                terminal = {'server_identity': answer[1]}
+                if case.endswith('OS proof'):
+                    terminal['server'] = {**proof, 'epoch': 101 if case == 'unrelated OS proof' else 100}
+                observed = (later if case.endswith('OS proof') else token,
+                            'Z' if case == 'zombie reply only' else 'S')
+                with patch.object(recovery, 'process_snapshot', return_value=None if case == 'unreadable reply only' else observed), \
+                        patch.object(recovery.os, 'kill', side_effect=(ProcessLookupError if case == 'gone reply only' else
+                                     PermissionError if case in ('denied reply only', 'reused with OS proof') else None)) as signals:
+                    if case in ('gone reply only', 'zombie reply only', 'reused with OS proof'):
+                        recovery.require_exited(socket, {'tmux': terminal})
+                    else:
+                        with self.assertRaisesRegex(recovery.Unreachable, 'exit is not proven') as caught:
+                            recovery.require_exited(socket, {'tmux': terminal})
+                        self.assertNotIn('kill -USR1', str(caught.exception))
+                    self.assertFalse(any(call.args[1] != 0 for call in signals.call_args_list))
         # After a reboot, a saved server or main-era runner PID can belong to
         # root. EPERM is not evidence that the original process survived.
         for source in ('registry', 'runtime', 'legacy runner'):

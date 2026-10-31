@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -226,7 +227,8 @@ class ResumePlaceholderTest(TerminalBase):
 
         # Recordless wakes use an operator's current choice or a verified
         # same-tree sender's placement. No cross-tree or unprovable fallback.
-        for caller in ('operator default', 'operator custom', 'operator legacy', 'same tree', 'cross tree', 'unprovable'):
+        for caller in ('operator default', 'operator custom', 'operator legacy', 'same tree', 'cross tree', 'unprovable',
+                       'legacy sender HOME', 'legacy sender override'):
             with self.subTest(recordless_wake=caller):
                 environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
                 environment['MV2_RUN_DIR'] = str(self.work / 'recordless-run')
@@ -253,12 +255,18 @@ class ResumePlaceholderTest(TerminalBase):
                     environment.update(MV2_AGENT_ID=sender_id, MV2_AGENT_DIR=str(sender_dir), MV2_UNIVERSE=str(sender_root),
                                        MV2_LAUNCH_ID='stale' if caller == 'unprovable' else sender_launch,
                                        MV2_TMUX_SOCKET=str(self.work / 'cached.sock'))
+                    if caller.startswith('legacy sender'):
+                        sender_facts = read(sender_dir / 'runtime.json')
+                        sender_facts.pop('run_directory')
+                        write(sender_dir / 'runtime.json', sender_facts)
+                        if caller.endswith('HOME'):
+                            environment.pop('MV2_RUN_DIR')
                     expected = selected
                 write(directory / 'runtime.json', {})
                 message = mailbox.append_message(directory, 'NO-PARENT', {'name': 'user'}, delivery='follow-up')
                 with patch.dict(os.environ, environment, clear=True), patch.object(harnesses, 'load', return_value=adapter):
                     try:
-                        if caller in ('cross tree', 'unprovable'):
+                        if caller in ('cross tree', 'unprovable') or caller.startswith('legacy sender'):
                             with patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Unproven wake created a server')):
                                 with self.assertRaisesRegex(recovery.Unreachable, 'operator with MV2_TMUX_SOCKET'):
                                     lifecycle.start(self.root, resume=first['id'], resume_message_id=message['id'], wait=True)
@@ -283,3 +291,102 @@ class ResumePlaceholderTest(TerminalBase):
                                 pass
                         self.backend = type(self.backend)(expected)
                         self.kill_server()
+
+        # An answering creation can legitimately lack OS signal bookkeeping.
+        # Its retained native reply must still block migration after a sweep.
+        old_root, next_root = self.work / 'reply-run', self.work / 'reply-next'
+        self.socket, self.backend = str(old_root / 'tmux.sock'), type(self.backend)(str(old_root / 'tmux.sock'))
+        environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+        environment['MV2_RUN_DIR'] = str(old_root)
+        cleanup_facts = None
+        with patch.dict(os.environ, environment, clear=True), patch.object(harnesses, 'load', return_value=adapter):
+            try:
+                with patch.object(recovery, '_remember', return_value=None):
+                    first, _, _ = launched(name='reply-only', task='ORIGINAL', harness='recorder')
+                    directory = self.root / 'state/agents' / first['id']
+                    self.backend.create('reply-keeper', self.work, [sys.executable, '-c', 'import time; time.sleep(120)'])
+                    lifecycle.kill(self.root, first['id'])
+                facts = read(directory / 'runtime.json')
+                self.assertIsNone(facts['tmux']['server'])
+                identity = facts['tmux']['server_identity']
+                pid = identity['pid']
+                # This independent positive proof is only for fixture cleanup.
+                observed = recovery.process_snapshot(pid)
+                self.assertIsNotNone(observed)
+                self.assertTrue(recovery._tmux(pid))
+                proof = {**identity, 'started': observed[0], 'socket': self.socket}
+                cleanup_facts = {**facts, 'tmux': {**facts['tmux'], 'server': proof}}
+                self.assertFalse(recovery.registry(Path(self.socket).resolve()).exists())
+                Path(self.socket).unlink()
+                old_root.rmdir()
+                os.environ['MV2_RUN_DIR'] = str(next_root)
+                actual_snapshot, actual_kill = recovery.process_snapshot, os.kill
+                for condition in ('live', 'unreadable', 'permission denied', 'gone'):
+                    with self.subTest(reply_only_server=condition):
+                        if condition == 'gone':
+                            recovery.observe(self.backend, facts=cleanup_facts)
+                            self.kill_server()
+                            until(lambda: recovery._state(proof) == 'gone')
+                            cleanup_facts = None
+                            resumed = send.run(self.root, agent=first['id'], text='PROVEN-GONE', delivery='follow-up')
+                            self.assertTrue(resumed['ok'], resumed)
+                            until(lambda: read(directory / 'runtime.json').get('state') == 'running')
+                            self.assertEqual(read(directory / 'runtime.json')['tmux']['socket'], str(next_root / 'tmux.sock'))
+                            continue
+                        def snapshot(candidate):
+                            return None if candidate == pid and condition == 'unreadable' else actual_snapshot(candidate)
+                        def signal_process(candidate, number):
+                            if candidate == pid and number == 0 and condition == 'permission denied':
+                                raise PermissionError('fixture access denied')
+                            return actual_kill(candidate, number)
+                        with patch.object(recovery, 'process_snapshot', side_effect=snapshot), \
+                                patch.object(recovery.os, 'kill', side_effect=signal_process) as signals, \
+                                patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Reply-only server allowed creation')) as create:
+                            # An ended record cannot block unrelated creation.
+                            # Active records still protect their missing server.
+                            self.backend.ensure(self.root)
+                            try:
+                                for state in ('starting', 'running', 'ending'):
+                                    write(directory / 'runtime.json', {**facts, 'state': state})
+                                    with self.assertRaisesRegex(recovery.Unreachable, 'exit is not proven'):
+                                        self.backend.ensure(self.root)
+                            finally:
+                                write(directory / 'runtime.json', facts)
+                            result = send.run(self.root, agent=first['id'], text='UNKNOWN:' + condition, delivery='follow-up')
+                        self.assertFalse(result['ok'], result)
+                        self.assertIn(str(pid), result['native_delivery']['reason'])
+                        self.assertIn('operator with MV2_TMUX_SOCKET', result['native_delivery']['reason'])
+                        create.assert_not_called()
+                        self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+                        self.assertFalse(Path(self.socket).exists())
+                        self.assertFalse((next_root / 'tmux.sock').exists())
+            finally:
+                if cleanup_facts is not None:
+                    recovery.observe(self.backend, facts=cleanup_facts)
+                for candidate in (self.socket, str(next_root / 'tmux.sock')):
+                    try:
+                        type(self.backend)(candidate).run('kill-server')
+                    except (OSError, RuntimeError):
+                        pass
+                self.kill_server()
+
+        with self.subTest('a dormant reply-only PID cannot block unrelated launches'):
+            self.socket = str(self.work / 'reused-run' / 'tmux.sock')
+            self.backend = type(self.backend)(self.socket)
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+            try:
+                # This unrelated child stands in for a PID reused after reboot.
+                old = {'launch_id': uid(), 'state': 'dormant', 'run_directory': str(self.work / 'reused-run'),
+                       'tmux': {'socket': self.socket, 'session': '$0', 'pane': '%0', 'server': None,
+                                'server_identity': {'pid': child.pid, 'epoch': 1}}}
+                write(self.root / 'state/agents' / uid() / 'runtime.json', old)
+                with self.assertRaisesRegex(recovery.Unreachable, 'operator with MV2_TMUX_SOCKET'):
+                    lifecycle._wake_socket(self.root, old, self.work / 'reused-run', self.socket)
+                Path(self.socket).parent.mkdir(mode=0o700)
+                fresh, _, _ = launched(name='unrelated-after-reuse', task='FRESH', harness='recorder')
+                self.assertTrue(fresh['ready'], fresh)
+                self.assertIsNone(child.poll())
+            finally:
+                child.terminate()
+                child.wait(timeout=5)
+                self.kill_server()

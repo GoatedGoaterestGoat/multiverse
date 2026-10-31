@@ -246,6 +246,7 @@ def _wake_socket(root, previous, run_root, socket_path):
     backend.ensure(root)
     if recovery.observe(backend, facts=previous) is not None:
         return socket_path
+    recovery.require_exited(recovery.address(backend), previous)
     selected = Path(socket_path).resolve()
     legacy = selected.name == 'multiverse-v2' and selected.parent.name == f'tmux-{os.getuid()}'
     saved_root = previous.get('run_directory')
@@ -271,7 +272,7 @@ def _wake_fallback(root):
         caller = agent_identity.sender_actor(acting='select a wake terminal')
         if caller is not None and top(caller.root) != top(root):
             raise ValueError('the sender and recipient are in different universe trees')
-        return agent_identity.calling_paths()
+        return agent_identity.calling_paths(require_recorded_run=True)
     except (OSError, ValueError, RuntimeError) as error:
         raise recovery.Unreachable(f'Cannot select a wake terminal: {error}. '
                                    'Resume this agent as an operator with MV2_TMUX_SOCKET set to choose a server') from None
