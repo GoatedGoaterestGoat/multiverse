@@ -121,11 +121,14 @@ def _state(proof):
     pid, started = proof.get('pid'), proof.get('started')
     if type(pid) is not int or pid <= 0 or not valid_start(started):
         return 'unknown'
+    denied = False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return 'gone'
-    except (PermissionError, OverflowError):
+    except PermissionError:
+        denied = True  # A readable start token can still prove this PID was reused.
+    except OverflowError:
         return 'unknown'
     observed = process_snapshot(pid)
     if observed is None:
@@ -134,7 +137,7 @@ def _state(proof):
         return 'gone'
     if not start_matches(started, pid, observed=observed[0]):
         return 'gone'  # This PID belongs to a later process. Never signal it.
-    return 'live' if _tmux(pid) else 'unknown'
+    return 'live' if not denied and _tmux(pid) else 'unknown'
 
 
 def runner_server(facts):
@@ -145,11 +148,14 @@ def runner_server(facts):
     if type(pid) is not int or pid <= 0:
         return None
     problem = f'Cannot verify live runner PID {pid}; no signal or replacement server is safe; retry after restoring process access'
+    denied = False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return None
-    except (PermissionError, OverflowError):
+    except PermissionError:
+        denied = True
+    except OverflowError:
         raise Unreachable(problem) from None
     observed = process_snapshot(pid)
     if observed is None:
@@ -164,6 +170,8 @@ def runner_server(facts):
         if started.startswith('linux:') != observed[0].startswith('linux:'):
             raise Unreachable(problem)
         return None
+    if denied:
+        raise Unreachable(problem)
     parent = process_parent(pid)
     if parent == 1:
         return None  # Its tmux exited; the orphaned runner may still be draining cleanup.
@@ -378,6 +386,10 @@ def connected(backend, *, facts=None):
             if not gone:
                 raise Unreachable(f'Tmux server PID {current["pid"]} stopped answering at {socket}; '
                                   'its process identity is unavailable, so no signal or replacement server is safe; retry')
+    if expected is not None and state(expected) != 'live':
+        raise Unreachable(f'Tmux server PID {expected["pid"]} is unreachable at {socket}: '
+                          'its process identity, executable or signal permission could not be verified; '
+                          'no signal sent; retry after restoring process access')
     if problem := directory_problem(socket.parent):
         if expected is not None:
             raise _problem(socket, expected, problem + '; the next mv2 command will retry recovery of this server')
@@ -386,8 +398,6 @@ def connected(backend, *, facts=None):
         if saved is not None:
             registry(socket).unlink(missing_ok=True)  # Its original process is proven gone.
         return None
-    if state(expected) != 'live':
-        raise _problem(socket, expected, 'its process identity or executable could not be verified; no signal sent')
     try:
         socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if socket.parent.stat().st_uid != os.getuid():
@@ -412,5 +422,9 @@ def connected(backend, *, facts=None):
         return output, _remember(socket, current)
     except Unreachable:
         raise
+    except PermissionError:
+        raise Unreachable(f'Permission denied recovering tmux server PID {expected["pid"]} at {socket}; '
+                          'another user may own the process or a sandbox may block access. '
+                          'Restore access as the server owner before retrying') from None
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         raise _problem(socket, expected, str(error)) from None

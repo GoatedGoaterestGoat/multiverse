@@ -453,6 +453,59 @@ class RecoveryProofTest(BaseTest):
         later = 'Thu Oct 29 20:00:01 2026'
         proof = {'pid': 12345, 'started': token, 'socket': str(socket), 'epoch': 100}
         answer = ('panes', {'pid': 12345, 'epoch': 100})
+        # After a reboot, a saved server or main-era runner PID can belong to
+        # root. EPERM is not evidence that the original process survived.
+        for source in ('registry', 'runtime', 'legacy runner'):
+            for state in ('reused', 'matching', 'matching blocked folder', 'unreadable', 'zombie', 'overflow'):
+                with self.subTest(foreign_pid_source=source, process=state):
+                    recovery.registry(socket).unlink(missing_ok=True)
+                    directory = self.root / 'state/agents' / uid()
+                    foreign = {**proof, 'pid': 1}
+                    facts = {'state': 'running', 'launch_id': uid(),
+                             'tmux': {'socket': str(socket), 'session': '$1', 'pane': '%1'}}
+                    if source == 'registry':
+                        write(recovery.registry(socket), foreign)
+                    elif source == 'runtime':
+                        facts['tmux']['server'] = foreign
+                    else:
+                        facts.update(runner_pid=1, runner_started=token)
+                    write(directory / 'runtime.json', facts)
+                    if state == 'matching blocked folder':
+                        socket.parent.write_text('not a directory')
+                    observed = None if state == 'unreadable' else (later if state == 'reused' else token,
+                                                                  'Z' if state == 'zombie' else 'S')
+                    try:
+                        with patch.object(recovery, '_probe', return_value=None), \
+                                patch.object(recovery, 'process_snapshot', return_value=observed), \
+                                patch.object(recovery, 'process_command', return_value='tmux'), \
+                                patch.object(recovery, 'process_parent', side_effect=AssertionError('Denied runner used as authority')), \
+                                patch.object(recovery.os, 'kill', side_effect=OverflowError if state == 'overflow' else PermissionError) as signals:
+                            if state in ('reused', 'zombie'):
+                                backend.ensure(self.root)
+                                self.assertEqual(backend.snapshot(facts=facts), ({}, None))
+                            else:
+                                with self.assertRaises(recovery.Unreachable) as caught:
+                                    backend.ensure(self.root)
+                                self.assertNotIn('kill -USR1', str(caught.exception))
+                            self.assertFalse(any(call.args[1] != 0 for call in signals.call_args_list))
+                    finally:
+                        (directory / 'runtime.json').unlink()
+                        if state == 'matching blocked folder':
+                            socket.parent.unlink()
+        recovery.registry(socket).unlink(missing_ok=True)
+        def deny_signal(pid, sig):
+            if sig:
+                raise PermissionError('signal denied')
+        with self.subTest(recovery_signal_denied=True), \
+                patch.object(recovery, '_probe', return_value=None), \
+                patch.object(recovery, 'process_snapshot', return_value=(token, 'S')), \
+                patch.object(recovery, 'process_command', return_value='tmux'), \
+                patch.object(recovery.os, 'kill', side_effect=deny_signal) as signals:
+            with self.assertRaises(recovery.Unreachable) as caught:
+                recovery.connected(backend, facts={'tmux': {'server': proof}})
+            self.assertIn('Permission denied', str(caught.exception))
+            self.assertNotIn('kill -USR1', str(caught.exception))
+            self.assertEqual([call.args for call in signals.call_args_list if call.args[1]], [(12345, signal.SIGUSR1)])
         for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal',
                      'registry conflict', 'new answering server', 'different PID with unreadable start', 'healthy fast path', 'same PID new epoch',
                      'old tmux without epoch', 'stopped old record'):
