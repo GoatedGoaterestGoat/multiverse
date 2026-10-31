@@ -235,23 +235,46 @@ def plain_fallback(command, error):
                    native_mode={**(command.fallback.native_mode or {}), 'fallback_reason': str(error)})
 
 
-def _wake_socket(previous, run_root, socket_path):
-    """A recorded address is a preference; only a proven-gone default may move."""
+def _wake_socket(root, previous, run_root, socket_path):
+    """Keep a recorded address, or return None when a proven-gone default may move."""
     from ..terminal import recovery
     backend = Tmux(socket_path)
     if recovery.observe(backend, facts=previous) is not None:
         return socket_path  # Answering or recovered: keep this server.
+    # A stopped main-era target has no server proof once its runner exits.
+    # A live peer's record may still recover that same server.
+    backend.ensure(root)
+    if recovery.observe(backend, facts=previous) is not None:
+        return socket_path
     selected = Path(socket_path).resolve()
-    legacy = recovery.address(Tmux(legacy=True))
+    legacy = selected.name == 'multiverse-v2' and selected.parent.name == f'tmux-{os.getuid()}'
     saved_root = previous.get('run_directory')
     previous_default = paths.recorded_directory(saved_root) / 'tmux.sock' if saved_root is not None else None
-    if selected == legacy or selected == (run_root / 'tmux.sock').resolve() or (
+    if legacy or selected == (run_root / 'tmux.sock').resolve() or (
             previous_default is not None and selected == previous_default.resolve()):
-        return str(run_root / 'tmux.sock')
+        return None
     if not selected.parent.is_dir():
         raise recovery.Unreachable(f'The recorded tmux socket folder {selected.parent} is gone; '
                                    'resume this agent with MV2_TMUX_SOCKET set to choose a server')
     return socket_path  # Preserve a deliberately isolated custom address.
+
+
+def _wake_fallback(root):
+    """Use ordinary resume placement, without crossing an agent sender's universe tree."""
+    from ..terminal import recovery
+    def top(path):
+        path = Path(path).resolve()
+        while parent := universe.parent(path):
+            path = parent
+        return path
+    try:
+        caller = agent_identity.sender_actor(acting='select a wake terminal')
+        if caller is not None and top(caller.root) != top(root):
+            raise ValueError('the sender and recipient are in different universe trees')
+        return agent_identity.calling_paths()
+    except (OSError, ValueError, RuntimeError) as error:
+        raise recovery.Unreachable(f'Cannot select a wake terminal: {error}. '
+                                   'Resume this agent as an operator with MV2_TMUX_SOCKET set to choose a server') from None
 
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
@@ -266,8 +289,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
-    calling_socket, run_root = (agent_identity.calling_paths() if socket_path is None and not _recovery and resume_message_id is None
-                                else (None, None))
+    recorded_wake_socket = resume_message_id is not None and socket_path is not None
+    calling_socket, run_root = ((_wake_fallback(root) if resume_message_id is not None else agent_identity.calling_paths())
+                                if socket_path is None and not _recovery else (None, None))
     socket_path = (_recovery['terminal']['socket'] if _recovery else
                    socket_path if socket_path is not None else calling_socket)
     storage_socket = socket_path  # Only an explicit caller selection contributes storage evidence.
@@ -361,6 +385,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         if previous and (closing := attachments.problem(agent_dir, previous)):
             raise RuntimeError(closing + '; retry after terminal cleanup finishes')
+        if recorded_wake_socket and _wake_socket(root, previous, run_root, socket_path) is None:
+            # A gone default falls back exactly like an explicit resume. Select
+            # both paths before preparing the adapter's control endpoint/env.
+            storage_socket, run_root = _wake_fallback(root)
+            socket_path = storage_socket or str(run_root / 'tmux.sock')
+            service_dir = paths.native_socket(planned_launch, directory=run_root).parent
+            paths.socket_path(socket_path, variable=('MV2_RUN_DIR' if Path(socket_path).is_relative_to(run_root)
+                                                    else 'MV2_TMUX_SOCKET'))
         if resume_message_id is not None:
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
             if _queue_wake:
@@ -471,8 +503,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Preparation can refuse without changing runtime storage or tmux.
         # Recovery still precedes any terminal creation or native service start.
         Tmux.require_launch_version()
-        if resume_message_id is not None:
-            socket_path = _wake_socket(previous, run_root, socket_path)
         paths.prepare(run_root)
         Tmux(socket_path).ensure(root)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
