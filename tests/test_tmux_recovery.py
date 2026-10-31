@@ -506,7 +506,7 @@ class RecoveryProofTest(BaseTest):
             self.assertIn('Permission denied', str(caught.exception))
             self.assertNotIn('kill -USR1', str(caught.exception))
             self.assertEqual([call.args for call in signals.call_args_list if call.args[1]], [(12345, signal.SIGUSR1)])
-        for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal',
+        for case in ('verified', 'unreadable', 'wrong executable', 'reused PID', 'changed before signal', 'permission denied before signal',
                      'registry conflict', 'new answering server', 'different PID with unreadable start', 'healthy fast path', 'same PID new epoch',
                      'old tmux without epoch', 'stopped old record'):
             with self.subTest(case=case):
@@ -544,7 +544,9 @@ class RecoveryProofTest(BaseTest):
                         patch.object(recovery, '_probe', side_effect=probes):
                     if case == 'changed before signal':
                         snapshot.side_effect = [(token, 'S'), (later, 'S')]
-                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'registry conflict', 'new answering server', 'different PID with unreadable start'):
+                    if case == 'permission denied before signal':
+                        signals.side_effect = [None, PermissionError('fresh observation denied')]
+                    if case in ('unreadable', 'wrong executable', 'changed before signal', 'permission denied before signal', 'registry conflict', 'new answering server', 'different PID with unreadable start'):
                         with self.assertRaises(recovery.Unreachable) as caught:
                             recovery.connected(backend, facts=facts)
                         if case in ('registry conflict', 'new answering server', 'different PID with unreadable start'):
@@ -554,6 +556,8 @@ class RecoveryProofTest(BaseTest):
                         else:
                             self.assertIn(str(socket), str(caught.exception))
                             self.assertIn('PID 12345', str(caught.exception))
+                            if case == 'permission denied before signal':
+                                self.assertNotIn('kill -USR1', str(caught.exception))
                     else:
                         result = recovery.connected(backend, facts=facts)
                         self.assertEqual(result[0] if result is not None else None, None if case == 'reused PID' else 'panes')

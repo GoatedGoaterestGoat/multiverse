@@ -407,7 +407,8 @@ def connected(backend, *, facts=None):
         answer = _probe(backend, socket)
         if answer is None:
             if _state(expected) != 'live':
-                raise OSError('the recorded server changed before recovery')
+                raise Unreachable(f'Tmux server PID {expected["pid"]} at {socket} could not be verified '
+                                  'immediately before recovery; no signal sent; retry after restoring process access')
             os.kill(expected['pid'], signal.SIGUSR1)
         deadline = time.monotonic() + 3
         while answer is None and time.monotonic() < deadline:
