@@ -235,6 +235,25 @@ def plain_fallback(command, error):
                    native_mode={**(command.fallback.native_mode or {}), 'fallback_reason': str(error)})
 
 
+def _wake_socket(previous, run_root, socket_path):
+    """A recorded address is a preference; only a proven-gone default may move."""
+    from ..terminal import recovery
+    backend = Tmux(socket_path)
+    if recovery.observe(backend, facts=previous) is not None:
+        return socket_path  # Answering or recovered: keep this server.
+    selected = Path(socket_path).resolve()
+    legacy = recovery.address(Tmux(legacy=True))
+    saved_root = previous.get('run_directory')
+    previous_default = paths.recorded_directory(saved_root) / 'tmux.sock' if saved_root is not None else None
+    if selected == legacy or selected == (run_root / 'tmux.sock').resolve() or (
+            previous_default is not None and selected == previous_default.resolve()):
+        return str(run_root / 'tmux.sock')
+    if not selected.parent.is_dir():
+        raise recovery.Unreachable(f'The recorded tmux socket folder {selected.parent} is gone; '
+                                   'resume this agent with MV2_TMUX_SOCKET set to choose a server')
+    return socket_path  # Preserve a deliberately isolated custom address.
+
+
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
           _queue_wake=False, _restart_queue=False, start_fresh=False):
@@ -247,7 +266,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
-    calling_socket, run_root = (agent_identity.calling_paths() if socket_path is None and not _recovery
+    calling_socket, run_root = (agent_identity.calling_paths() if socket_path is None and not _recovery and resume_message_id is None
                                 else (None, None))
     socket_path = (_recovery['terminal']['socket'] if _recovery else
                    socket_path if socket_path is not None else calling_socket)
@@ -452,6 +471,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Preparation can refuse without changing runtime storage or tmux.
         # Recovery still precedes any terminal creation or native service start.
         Tmux.require_launch_version()
+        if resume_message_id is not None:
+            socket_path = _wake_socket(previous, run_root, socket_path)
         paths.prepare(run_root)
         Tmux(socket_path).ensure(root)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':

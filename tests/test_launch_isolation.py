@@ -1045,6 +1045,7 @@ class LaunchIsolationTest(unittest.TestCase):
         with patch.object(lifecycle, 'Tmux', return_value=backend), \
                 patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                 patch.object(native, 'observe', return_value={'live': 'dormant'}), patch.object(native, 'owned'), \
+                patch('multiverse.terminal.recovery.observe', return_value=('', None)), \
                 patch.object(ClaudeAdapter, 'get_delivery', return_value=failure):
             spawned = lifecycle.start(self.root, name='retry-wake', harness='claude')
             directory = self.root / 'state/agents' / spawned['id']
