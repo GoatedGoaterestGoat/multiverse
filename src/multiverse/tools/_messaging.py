@@ -74,6 +74,10 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
             why = failure_reason(reason, text, preserve_details=True)
             action = 'check' if check else 'retry'
             prefix = f'{name}: could not check delivery' if check else f'Not delivered to {name}'
+            if value.get('wake_refused') is True and not check:
+                return (f'{prefix}: {why}. Saved; resolve the named terminal problem. '
+                        f'With a working bridge, run mv2 deliver {name} --retry. '
+                        'For a launch-only agent, resend with --delivery inbox-only for manual reading.')
             return (f'{prefix}: {why}. Saved; resolve the named terminal problem, '
                     f'then mv2 deliver {name} --{action}.')
         if value.get('repair_journal'):

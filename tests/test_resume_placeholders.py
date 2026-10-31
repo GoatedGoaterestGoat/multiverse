@@ -5,6 +5,7 @@ import sys
 from contextlib import nullcontext
 from unittest.mock import patch
 from multiverse import harnesses
+from multiverse.harnesses.types import Capability, NativeResult
 from multiverse.runtime import lifecycle
 from multiverse.terminal import recovery
 from multiverse.store import read, write
@@ -25,7 +26,7 @@ class ResumePlaceholderTest(TerminalBase):
         # Each launch writes both values whole, then renames them into place, so a file that exists is complete.
         command = ['/bin/sh', '-c', 'printf "%s" "$1" > "$3.new"; cat "$2" > "$4.new"; mv "$3.new" "$3"; '
                    'mv "$4.new" "$4"; exec sleep 600', 'sh', '{task}', '{task_file}', str(output), str(file_output)]
-        write(folder / 'harness.json', {'schema': 1, 'spawn': command, 'resume': command})
+        write(folder / 'harness.json', {'schema': 1, 'session': 'assigned', 'spawn': command, 'resume': command})
         adapter = harnesses.load(self.root, 'recorder')
         # This declared adapter consumes its verified interactive prompt through
         # its recipe; unlike a built-in it needs no additional positional args.
@@ -90,6 +91,7 @@ class ResumePlaceholderTest(TerminalBase):
                     expected = str(old) if live or case in ('custom present', 'operator custom') else str(run_root / 'tmux.sock')
                     if case == 'operator custom':
                         os.environ['MV2_TMUX_SOCKET'] = str(old)
+                    advice = []
                     try:
                         if case in ('explicit resume', 'operator custom'):
                             result = lifecycle.start(self.root, resume=first['id'], wait=True)
@@ -102,13 +104,35 @@ class ResumePlaceholderTest(TerminalBase):
                             guard = (patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('A refused wake created a server'))
                                      if case == 'custom swept' else nullcontext())
                             with guard:
-                                result = send.run(self.root, agent=first['id'], text='WAKE:' + case)
+                                result = send.run(self.root, agent=first['id'], text='WAKE:' + case, _present=advice.append)
                         if case == 'custom swept':
                             self.assertFalse(result['ok'], result)
                             self.assertIn('recorded tmux socket folder', result['native_delivery']['reason'])
                             self.assertIn('MV2_TMUX_SOCKET', result['native_delivery']['reason'])
                             self.assertFalse(old.parent.exists())
                             self.assertEqual(type(self.backend)(str(run_root / 'tmux.sock')).snapshot(), ({}, None))
+                            # Following the resume advice does not deliver the
+                            # saved prompt: retry needs a bridge, while a plain
+                            # agent can only receive manual inbox delivery.
+                            os.environ['MV2_TMUX_SOCKET'] = expected
+                            resumed = lifecycle.start(self.root, resume=first['id'], wait=True)
+                            self.assertTrue(resumed['ready'], resumed)
+                            plain = deliver.run(self.root, agent=first['id'], retry=True)
+                            self.assertFalse(plain['ok'], plain)
+                            self.assertIn('launch-only', plain['messages'][0]['reason'])
+                            manual = send.run(self.root, agent=first['id'], text='MANUAL', delivery='inbox-only')
+                            self.assertTrue(manual['saved'])
+                            self.assertEqual(manual['state'], 'queued')
+                            capabilities = {**adapter.capabilities(None), 'send_steer': Capability('supported')}
+                            with patch.object(adapter, 'capabilities', return_value=capabilities), \
+                                    patch.object(adapter, 'send', return_value=NativeResult('native_queued')) as submit:
+                                bridged = deliver.run(self.root, agent=first['id'], retry=True)
+                                self.assertTrue(bridged['ok'], bridged)
+                                submit.assert_called_once()
+                                self.assertIn('WAKE:' + case, submit.call_args.args[1].text)
+                            self.assertIn('With a working bridge', advice[0])
+                            self.assertIn('For a launch-only agent', advice[0])
+                            self.assertIn('--delivery inbox-only', advice[0])
                         else:
                             self.assertTrue(result['ok'] if 'ok' in result else result['ready'], result)
                             until(lambda: output.exists() and file_output.exists())
