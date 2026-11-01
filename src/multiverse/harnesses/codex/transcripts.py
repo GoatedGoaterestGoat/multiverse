@@ -1,4 +1,4 @@
-"""Read Codex 0.164.0 rollout rows without connecting to a native service.
+"""Read the checked Codex releases' rollout rows without connecting to a native service.
 
 Only the exact recorded thread and home are searched. Recovery's stronger
 absence proof in storage.py is independent of this display reader.

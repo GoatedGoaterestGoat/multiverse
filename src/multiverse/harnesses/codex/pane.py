@@ -1,5 +1,5 @@
-"""The live pane without Codex's composer and what is under it (the pane display protocol), as Codex 0.164.0
-draws them.
+"""The live pane without Codex's composer and what is under it (the pane display protocol), as the checked Codex releases
+draw them.
 
 Codex ends its screen with the composer (`› ` and the draft, or a fixed placeholder when it is empty), a blank row
 and the footer. The composer, any draft in it and everything under it go when the footer proves the composer: the

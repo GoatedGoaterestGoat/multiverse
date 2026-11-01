@@ -3,7 +3,8 @@
 The box is the bottom of the screen: a rule across the pane (the session's name may sit at its right end), the
 prompt rows, the same rule without the name, then a few status rows (the mod's line, the status line, the
 permission mode). The row above the box may be Claude's too: a hint or notice at the right (the effort, "ctrl+g
-to edit", "✔ Update installed · /restart to apply") or a notice it starts at the left (tmux focus events). A tip may
+to edit", "✔ Update installed · /restart to apply") or a notice it starts at the left (tmux focus events), but
+not the command menu's last row. A tip may
 stand at the first column near the box. The whole box goes, typed text included, with the status rows, that hint or
 notice, tips and the blank rows around them; any other row above the box stays. Any other screen (a dialog in place
 of the box, another layout) comes back unchanged. Conversation text never matches: Claude indents it, and the rules
@@ -33,7 +34,7 @@ def display(text):
     if (not prompt or prompt[0][:1] not in PROMPTS or prompt[0][1:2] not in ('', ' ', '\xa0')
             or not all(indented(row) for row in prompt[1:])):
         return text
-    if top and notice(lines[top - 1], len(lines[bottom])):
+    if top and notice(lines[top - 1], lines[top - 2] if top > 1 else '', len(lines[bottom])):
         top -= 1
     while top and (not lines[top - 1].strip() or lines[top - 1].startswith(TIP)):
         top -= 1
@@ -54,10 +55,22 @@ def named_rule(line, width):
     return cells(line) == width and set(head) == {RULE} and (not name or name.endswith(' ' + RULE))
 
 
-def notice(row, width):
-    """Claude's hint or notice in the row above the box: ending two columns before the right edge and starting
-    further in than conversation and the command menu (two and four spaces), or one it starts at the left."""
-    return row.startswith(' ' * 8) and cells(row) == width - 2 or row.strip().startswith(NOTICES)
+def notice(row, above, width):
+    """Claude's hint or notice in the row above the box, or one it starts at the left. A hint ends two columns
+    before the right edge and starts further in than conversation and the command menu's names (two and four
+    spaces); a wrapped description of the command menu ends there too, but starts under a word of the row above."""
+    lead = len(row) - len(row.lstrip(' '))
+    wrapped = at(above, lead - 1) == ' ' and at(above, lead) not in ('', ' ')
+    return lead >= 8 and cells(row) == width - 2 and not wrapped or row.strip().startswith(NOTICES)
+
+
+def at(line, column):
+    """The character covering a screen column of `line`, counting wide characters as two; '' past its end."""
+    for char in line:
+        column -= cells(char)
+        if column < 0:
+            return char
+    return ''
 
 
 def cells(line):

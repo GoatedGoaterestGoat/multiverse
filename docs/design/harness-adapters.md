@@ -727,6 +727,25 @@ refuses in-TUI resume during its
 [remote permission preflight](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/resume_config.rs),
 before reaching the relay. Neither path silently changes mv2's conversation.
 
+### Codex 0.166.0 compatibility audit
+
+This audit compares official tags `rust-v0.164.0` (`6aaac694803004a63c6f393d153c96d22521a6b9`) and `rust-v0.166.0` (`6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`). The [0.165.0](https://github.com/openai/codex/releases/tag/rust-v0.165.0) and [0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0) release notes were read together. The installed 0.166.0 CLI's generated experimental schema matches all 467 official schema files. The comparison adds nine files, removes none and changes 40, including aggregate schemas.
+
+| Surface used by mv2 | Finding |
+| --- | --- |
+| Initialize, thread start/resume/read/turns/naming, queue operations, steer/interrupt, status, usage and cleanup | Existing request fields remain compatible. Of 44 directly reviewed types, only fork parameters add a field: optional `attachToSource`. mv2's ephemeral `/btw` does not use it. Nested additions include optional item timestamps, additional-context names and error variants; mv2 tolerates them. |
+| CLI and release layout | The TUI flag declarations are unchanged. Installed help and private fixtures cover `--remote`, `--cd`, `--add-dir`, model, sandbox/approval, `-c` and exact-ID resume. Canonical CLI and app-server packages also ship the standalone executor; daemon discovery and private startup still work. |
+| Config and plugin allowlist | All eight allowed config keys retain their types, as do MCP server configuration, shell environment policy, developer instructions and update suppression. Every allowed status item and alias remains valid. Native additions such as `profile` and `provider` do not expand mv2's allowlist. The existing config and MCP minimum versions stay unchanged. |
+| Side conversations and queue control | The private native `/btw` fixture confirms primary-only delivery and receipts while the side runs and after it closes. Queue fixtures confirm FIFO restart, interrupted pause, explicit restart and exact-ID stop/resume. The server queue RPC shapes are unchanged; the new `codex queue --resume` CLI feature is not used by mv2. |
+| Startup and live pane | The checked gate includes 0.166.0 alongside 0.163.0 and 0.164.0. Private native refusal and plain-permission fixtures pass, including inline read-only retry. Fourteen labelled 0.166.0 renderer snapshots cover composers, drafts, queues, status and warning footers, plus dialogs, history search and reconnect controls. They are upstream snapshots, not claimed tmux captures. |
+| Rollouts and models | A private 0.166.0 rollout preserves provenance, prompt/steer echoes, tool results and interrupted turn endings. It passes the existing reader alongside the retained 0.164.0 capture. Compaction and rollback shapes remain supported. The new approved-prefix metadata also retains the older text marker used by the reader. `scripts/gen_codex_models.py` regenerates the release table, adding GPT-6.1 Terra. |
+
+The [loaded resume branch](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server/src/request_processors/thread_processor.rs#L4698) still rebuilds a changed configuration only for a direct-input thread with no subscribers, idle status and no running agent, after completed shutdown. Otherwise it rejoins the existing configuration. The cold path waits for its initial history checkpoint and reads stored metadata for nested `thread.cwd`; top-level `cwd` alone is not proof. mv2 keeps its exact nested UUID, workspace and permission checks. The private shared-identity fixture tests subscribed rejoin versus an idle, unsubscribed resume; the timing fixture retains the same thread through resume.
+
+The native default `thread_unload_delay_secs` changed from 1800 to 60 ([config source](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/config/mod.rs#L4143)). It remains configurable and depends on inactivity, subscriber state and completed shutdown. A fixed wait or frontend restart does not prove that a thread is unloaded.
+
+Native checks ran on macOS with private homes and daemons, both updaters disabled, and scripted localhost providers or no model turn. They exercised plain and bridge permissions, read-only retry, concurrent daemon startup, recovery, refusal, shared identity, generated plugin configuration, side conversations and queue timing. No user home, shared daemon or login was used. The checked-in rollout and renderer fixtures also run without a Codex binary. Earlier release captures keep their original filenames and provenance.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -1521,7 +1540,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.314; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.316; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

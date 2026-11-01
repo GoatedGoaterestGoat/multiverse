@@ -7,8 +7,8 @@
 <p align="center">
   <a href="https://github.com/GoatedGoaterestGoat/multiverse/stargazers"><img src="https://img.shields.io/github/stars/GoatedGoaterestGoat/multiverse?logo=github&labelColor=1e1e2e&color=cba6f7" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-cba6f7?labelColor=1e1e2e" alt="MIT license"></a>
-  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.314-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.314"></a>
-  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.164.0-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.164.0"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.316-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.316"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.166.0-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.166.0"></a>
 </p>
 
 **A harness-agnostic, extensible manager for agent teams.**

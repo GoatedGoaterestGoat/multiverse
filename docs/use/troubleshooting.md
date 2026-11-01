@@ -106,7 +106,7 @@ env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 i
 
 Current launches omit the launch ID from connected Codex tools; older loaded conversations can retain it. Their data callbacks use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
 
-Use the current mv2 installation for an older connected Codex conversation. Its own retained bridge request and current conversation proof can authorize data callbacks without replacing cached tool settings. Codex can keep an idle conversation loaded for up to 30 minutes after its last client leaves; restarting the frontend does not guarantee fresh settings. A separate old checkout still runs old code. If the current installation refuses the identity, inspect the saved records; do not copy identity values into the conversation. See [the upgrade rules](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
+Use the current mv2 installation for an older connected Codex conversation. Its own retained bridge request and current conversation proof can authorize data callbacks without replacing cached tool settings. Codex can keep an idle conversation loaded after its last client leaves; restarting the frontend does not guarantee fresh settings. A separate old checkout still runs old code. If the current installation refuses the identity, inspect the saved records; do not copy identity values into the conversation. See [the upgrade rules](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### A name is taken or ambiguous
 
@@ -176,7 +176,7 @@ If the reason says `Kill this unbound launch and spawn again.`, the launch never
 
 Run the callback through the current mv2 installation. It accepts an older bridge conversation when the retained launch request and current thread, storage and agent records all match. If it refuses, inspect the named identity or request record; a different thread, changed storage or missing proof remains refused.
 
-Codex can retain an idle conversation's tool settings for up to 30 minutes after its last client leaves by default. Stopping and resuming the frontend does not guarantee that those settings reload. If `MV2_CLI` points at a separate older checkout, that checkout still runs its old checks; use the current installation. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
+Codex can retain an idle conversation's tool settings after its last client leaves. Stopping and resuming the frontend does not guarantee that those settings reload. If `MV2_CLI` points at a separate older checkout, that checkout still runs its old checks; use the current installation. See [upgrade identity proof](../design/shared-conversations.md#upgrade-running-codex-bridge-agents).
 
 ### Codex: "This conversation is open in another app"
 

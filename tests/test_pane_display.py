@@ -20,7 +20,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # One capture set per checked release, with the lines the live pane shows; a release whose screen differs fails here,
 # not as an untidy pane. Codex's upstream screens are its own renderer's snapshots, not tmux captures.
 SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("codex", FIXTURES / "codex/screens-0.164.0.json"),
-           ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"))
+           ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"),
+           ("codex", FIXTURES / "codex/upstream-screens-0.166.0.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
@@ -45,7 +46,8 @@ CODEX_BUILT = {
 # Built, not captured: rows right on a box 30 columns wide that are not Claude's own stay: conversation, and a
 # command menu row ending where a hint would.
 CLAUDE_BOX = "\n" + "─" * 30 + "\n❯\xa0\n" + "─" * 30 + "\n  Haiku 5.5"
-CLAUDE_ON_BOX = ("⏺ Earlier conversation\n  The result is SECRET-END", "    /mobile  Show QR code to")
+CLAUDE_ON_BOX = ("⏺ Earlier conversation\n  The result is SECRET-END", "    /mobile  Show QR code to",
+                 "    /mo漢ng  Render the brief\n" + " " * 13 + "as a styled HT…")  # wrapped under a wide character
 CAPTURE = "conversation\n  ----------\n\n────────\n❯\xa0\n────────\n  status"
 
 

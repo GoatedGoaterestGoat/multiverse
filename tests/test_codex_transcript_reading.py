@@ -121,29 +121,31 @@ class CodexTranscriptReadingTest(BaseTest):
 
     def test_checked_native_rollout_labels_steering_followups_and_interruptions(self):
         """The checked release uses provenance and item_completed echoes, so legacy-only parsing silently loses every prompt."""
-        raw = (Path(__file__).parent / 'fixtures/codex/rollout-0.164.0.jsonl').read_bytes()
-        native_rows = [json.loads(line) for line in raw.splitlines()]
-        self.native = native_rows[0]['payload']['id']
-        self.session = replace(self.session, native_id=self.native)
-        self.path = self.path.with_name(f'rollout-2026-10-25T10-00-00-{self.native}.jsonl')
-        self.path.write_bytes(raw)
-        view = self.adapter.transcript_view(self.session)
-        self.assertEqual((view.source.state, view.source.version, len(view.rows)), ('supported', '0.164.0', 111))
-        expected = {8: 'injected', 12: 'prompt', 13: 'meta', 14: 'response', 17: 'tool_result',
-                    19: 'mid_turn', 20: 'meta', 27: 'response', 30: 'meta', 33: 'prompt',
-                    43: 'prompt', 52: 'prompt', 58: 'injected', 59: 'injected', 63: 'prompt'}
-        for number, label in expected.items():
-            with self.subTest(number):
-                self.assertEqual(view.rows[number].label, label)
-        self.assertEqual(sum(fact.label == 'prompt' for fact in view.rows), 9)
-        self.assertEqual(sum(fact.label == 'mid_turn' for fact in view.rows), 1)
-        self.assertEqual(sum(fact.ends_turn for fact in view.rows), 9)
-        self.assertTrue(all(fact.source is None for fact in view.rows))
-        self.assertEqual(view.rows[12].preview, 'Run the offline tool sequence.')
-        self.assertEqual(view.rows[17].call_id, native_rows[17]['payload']['call_id'])
-        # Provenance is sufficient even before the UI echo is written.
-        self.path.write_bytes(b'\n'.join(raw.splitlines()[:13]) + b'\n')
-        self.assertEqual(self.adapter.transcript_view(self.session).rows[12].label, 'prompt')
+        for version, count in (('0.164.0', 111), ('0.166.0', 110)):
+            with self.subTest(version=version):
+                raw = (Path(__file__).parent / f'fixtures/codex/rollout-{version}.jsonl').read_bytes()
+                native_rows = [json.loads(line) for line in raw.splitlines()]
+                self.native = native_rows[0]['payload']['id']
+                self.session = replace(self.session, native_id=self.native)
+                self.path = self.path.with_name(f'rollout-2026-10-25T10-00-00-{self.native}.jsonl')
+                self.path.write_bytes(raw)
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual((view.source.state, view.source.version, len(view.rows)), ('supported', version, count))
+                expected = {8: 'injected', 12: 'prompt', 13: 'meta', 14: 'response', 17: 'tool_result',
+                            19: 'mid_turn', 20: 'meta', 27: 'response', 30: 'meta', 33: 'prompt',
+                            43: 'prompt', 52: 'prompt', 58: 'injected', 59: 'injected', 63: 'prompt'}
+                for number, label in expected.items():
+                    with self.subTest(number):
+                        self.assertEqual(view.rows[number].label, label)
+                self.assertEqual(sum(fact.label == 'prompt' for fact in view.rows), 9)
+                self.assertEqual(sum(fact.label == 'mid_turn' for fact in view.rows), 1)
+                self.assertEqual(sum(fact.ends_turn for fact in view.rows), 9)
+                self.assertTrue(all(fact.source is None for fact in view.rows))
+                self.assertEqual(view.rows[12].preview, 'Run the offline tool sequence.')
+                self.assertEqual(view.rows[17].call_id, native_rows[17]['payload']['call_id'])
+                # Provenance is sufficient even before the UI echo is written.
+                self.path.write_bytes(b'\n'.join(raw.splitlines()[:13]) + b'\n')
+                self.assertEqual(self.adapter.transcript_view(self.session).rows[12].label, 'prompt')
 
     def test_rollbacks_abandon_native_turns_and_restore_the_prior_context_boundary(self):
         """Native rollback counts every ordinary input, including steers, while uncertain old boundaries must never delete a proven prompt."""
