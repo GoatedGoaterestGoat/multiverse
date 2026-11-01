@@ -46,7 +46,8 @@ CODEX_BUILT = {
 # Built, not captured: rows right on a box 30 columns wide that are not Claude's own stay: conversation, and a
 # command menu row ending where a hint would.
 CLAUDE_BOX = "\n" + "─" * 30 + "\n❯\xa0\n" + "─" * 30 + "\n  Haiku 5.5"
-CLAUDE_ON_BOX = ("⏺ Earlier conversation\n  The result is SECRET-END", "    /mobile  Show QR code to")
+CLAUDE_ON_BOX = ("⏺ Earlier conversation\n  The result is SECRET-END", "    /mobile  Show QR code to",
+                 "    /mo漢ng  Render the brief\n" + " " * 13 + "as a styled HT…")  # wrapped under a wide character
 CAPTURE = "conversation\n  ----------\n\n────────\n❯\xa0\n────────\n  status"
 
 

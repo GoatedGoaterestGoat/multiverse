@@ -110,5 +110,13 @@
   "width": 141,
   "text": "Cogitated for 21s · done 9:14 PM · 1 shell still running\n                                                                                                     ✔ Update installed · /restart to apply\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── prod-runner ─\n❯\n─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  ⚠ multiverse: working · trees 22/22\n  Opus 5.5 xhigh │ itw_3dbox_det │ ⎇ main │ 329k (33% used) │ weekly 47% left\n  ⏵⏵ bypass permissions on · 1 shell · shift+click to native select\n",
   "shown": "Cogitated for 21s · done 9:14 PM · 1 shell still running"
+ },
+ {
+  "name": "wrapped menu row",
+  "note": "the command menu's last row is a wrapped description, starting 44 spaces in and cut to two columns before the edge like a hint; it stays because it starts under a word of the row above. A real capture from claude-support's version check",
+  "cli_version": "2.1.314",
+  "width": 100,
+  "text": "\n ▐▛███▛█   Claude Code v2.1.314\n▝▜██████▀  Haiku 5.5 · Claude Ultra\n ▝▝   ▝▝   /private/tmp/mv2v.R2vE/root/u\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  ❯ /model                                  Set the AI model for Claude Code (currently Haiku 5.5)\n    /mobile                                 Show QR code to download the Claude mobile app\n    /morning                                Render the user's morning brief as a styled HTML\n                                            artifact, or set it up as a recurring weekday task. U…\n────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ /mo\n────────────────────────────────────────────────────────────────────────────────────────────────────\n  Haiku 5.5 medium | u\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+  "shown": "\n ▐▛███▛█   Claude Code v2.1.314\n▝▜██████▀  Haiku 5.5 · Claude Ultra\n ▝▝   ▝▝   /private/tmp/mv2v.R2vE/root/u\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  ❯ /model                                  Set the AI model for Claude Code (currently Haiku 5.5)\n    /mobile                                 Show QR code to download the Claude mobile app\n    /morning                                Render the user's morning brief as a styled HTML\n                                            artifact, or set it up as a recurring weekday task. U…"
  }
 ]
