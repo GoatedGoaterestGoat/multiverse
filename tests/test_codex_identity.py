@@ -12,6 +12,7 @@ from pathlib import Path
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.identity import storage_environment
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHandle
 
 
@@ -79,8 +80,9 @@ class PlainRefusalTest(unittest.TestCase):
         it scrapes Codex's TUI text, and a false positive marks a healthy agent refused (3a83ea2, 661fc41)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
-        # 0.164.0 kept 0.163.0's layouts: both checked releases keep the refusal check.
-        for version in ('0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0],
+        # Each checked layout keeps refusal detection when the newest checked release changes.
+        for version in ('0.166.0', 'codex-cli 0.166.0', (0, 166, 0), [0, 166, 0],
+                        '0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0],
                         '0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
             with self.subTest(version=version):
                 self.assertTrue(adapter.supports_launch_refusal(version))
@@ -96,7 +98,7 @@ class PlainRefusalTest(unittest.TestCase):
                 self.assertIn('This conversation is open in another app', refusal['message'])
                 self.assertIsNone(refusal['code'])
                 self.assertEqual(refusal['source'], 'native-screen')
-        for capture, version in ((capture, version) for capture in captures for version in ('0.163.0', '0.164.0')):
+        for capture, version in ((capture, version) for capture in captures for version in ('0.163.0', '0.164.0', '0.166.0')):
             with self.subTest(captured_width=capture['width'], version=version):
                 evidence = {**capture, 'cli_version': version, 'native_id': str(uuid4())}
                 self.assertEqual(adapter.launch_refusal(evidence)['source'], 'native-screen')
@@ -123,7 +125,7 @@ class PlainStartupTest(unittest.TestCase):
         self.fixtures = Path(__file__).parent / 'fixtures/codex'
 
     def capture(self, name):
-        return [{**frame, 'cli_version': '0.164.0'}
+        return [{**frame, 'cli_version': version_text(CHECKED_VERSION)}
                 for frame in json.loads((self.fixtures / name).read_text())]
 
     def test_startup_detector_on_real_0163_frames(self):
@@ -133,7 +135,8 @@ class PlainStartupTest(unittest.TestCase):
         for frame in self.capture('started-0.163.0.json'):
             with self.subTest(ready=frame['width']):
                 self.assertTrue(self.adapter.launch_started(frame))
-                self.assertTrue(self.adapter.launch_started({**frame, 'cli_version': '0.163.0'}))  # its own release
+                for version in ('0.163.0', '0.164.0'):
+                    self.assertTrue(self.adapter.launch_started({**frame, 'cli_version': version}))
                 self.assertIsNone(self.adapter.launch_refusal(frame))
         layouts = self.capture('started-layouts-0.163.0.json')
         self.assertEqual(len(layouts), 12)

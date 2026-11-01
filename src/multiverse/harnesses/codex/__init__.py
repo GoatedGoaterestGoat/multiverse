@@ -68,7 +68,7 @@ class CodexAdapter(ConfiguredAdapter):
                 and (session.native_mode or {}).get('mode') == 'bridge'):
             return ('This Codex conversation has an unverified cached tool identity. Use the current mv2 '
                     "installation and inspect this agent's saved launch records. Codex can retain an idle "
-                    'conversation for up to 30 minutes after its last client leaves.')
+                    'conversation after its last client leaves; restarting the frontend does not guarantee fresh tool settings.')
         return None
 
     def supports_launch_refusal(self, cli_version):

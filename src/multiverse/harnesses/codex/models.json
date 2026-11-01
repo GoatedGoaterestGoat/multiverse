@@ -1,7 +1,7 @@
 {
-  "codex": "0.164.0",
+  "codex": "0.166.0",
   "source": "codex-rs/models-manager/models.json",
-  "sha256": "943ca7fe1d19ed019054158303f0dbbd80b3bef43b3aa425a71aa7cb3fb52c2b",
+  "sha256": "1384625c0b6b3e67d3c60da29becea2b017f2c283fc1e2d05b8edafb4698eb10",
   "models": [
     {
       "id": "gpt-6.1-sol",
@@ -103,6 +103,27 @@
         "image"
       ],
       "context_window": 272000,
+      "hidden": false,
+      "supported_in_api": true,
+      "default": false
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "name": "GPT-6.1 Terra",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default_effort": "low",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 500000,
       "hidden": false,
       "supported_in_api": true,
       "default": false

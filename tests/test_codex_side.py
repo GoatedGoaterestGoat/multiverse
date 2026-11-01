@@ -24,7 +24,7 @@ class CodexSideTest(unittest.TestCase):
         factory = getattr(self.protocol, 'for_connection', None)
         return factory(name, owner) if factory else self.protocol
 
-    def initialize(self, view, version='codex/0.164.0'):
+    def initialize(self, view, version='codex/0.166.0'):
         view.outgoing({'id': 1, 'method': 'initialize', 'params': {}})
         view.incoming({'id': 1, 'result': {'userAgent': version}})
 
@@ -138,10 +138,11 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        with self.subTest('0.163.0, the earlier checked release, keeps /btw'):
-            view = self.connection('checked-0.163.0', lambda: True)
-            self.initialize(view, 'codex/0.163.0')
-            self.assertEqual(view.outgoing(self.fork()), self.fork())
+        for version in ('0.163.0', '0.164.0', '0.166.0'):
+            with self.subTest(supported=version):
+                view = self.connection('checked-' + version, lambda: True)
+                self.initialize(view, 'codex/' + version)
+                self.assertEqual(view.outgoing(self.fork()), self.fork())
         for change in ({'ephemeral': None}, {'ephemeral': 1}, {'threadId': self.side},
                        {'path': '/other/rollout'}, {'lastTurnId': 'turn'}, {'beforeTurnId': 'turn'},
                        {'excludeTurns': False}, {'experimentalPredictionMode': True}, {'cwd': '/other/workspace'}):

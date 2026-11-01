@@ -15,7 +15,7 @@ class CodexModelsTest(BaseTest):
         adapter = harnesses.load(self.root, 'codex')
         with patch('os.environ', {'CODEX_HOME': '/never/read', 'OPENAI_API_KEY': 'not-a-credential'}):
             catalog = adapter.models(environment={'CODEX_HOME': None})
-        self.assertEqual((catalog.source, catalog.version, catalog.provider, catalog.free_form), ('table', '0.164.0', None, True))
+        self.assertEqual((catalog.source, catalog.version, catalog.provider, catalog.free_form), ('table', '0.166.0', None, True))
         self.assertEqual(sum(model.default for model in catalog.models), 1)
         for model in catalog.models:
             with self.subTest(model.id):

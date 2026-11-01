@@ -20,7 +20,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # One capture set per checked release, with the lines the live pane shows; a release whose screen differs fails here,
 # not as an untidy pane. Codex's upstream screens are its own renderer's snapshots, not tmux captures.
 SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("codex", FIXTURES / "codex/screens-0.164.0.json"),
-           ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"))
+           ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"),
+           ("codex", FIXTURES / "codex/upstream-screens-0.166.0.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
