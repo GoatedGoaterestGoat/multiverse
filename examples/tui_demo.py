@@ -71,7 +71,8 @@ class DemoBackend:
                 return {"delivery": delivery, "state": "focused", "saved": False, "ok": False,
                         "reason": f'{agent["name"]} is focused {focus.ends(agent["focus"])}.', "focus": agent["focus"]}
             self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text,
-                                  "delivery": delivery})
+                                  "delivery": delivery, "at": datetime.now(timezone.utc).isoformat(),
+                                  "from": {"name": "user"}})
             return {"delivery": delivery, "state": "queued", "saved": True}
 
     def focus(self, root, reference, duration=None, turn=False):
@@ -105,6 +106,12 @@ class DemoBackend:
         with self.lock:
             agent = self.find(root, reference)
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
+
+    def unread(self, root, reference):
+        """Messages sent inbox-only to the agent; the demo's agents never read them."""
+        with self.lock:
+            return [{key: message[key] for key in ("at", "from", "text", "delivery")} for message in self.messages
+                    if message["to"] == reference and message["delivery"] == "inbox-only"]
 
     def live_pane(self, root, reference, harness):
         return self.inspect(root, reference)

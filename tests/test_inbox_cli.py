@@ -38,10 +38,10 @@ class InboxCliTest(BaseTest):
         return output.getvalue()
 
     def test_reads_that_must_not_consume_never_move_the_cursor(self):
-        """--peek, --all, --last, --since, invalid combinations, wait timeouts, report's unread count and doctor never
-        move the read cursor, and an unread page consumes only its 50; fragile because every new read option is a
-        new way to advance it, and a break silently marks messages read; an operator must still read and report
-        when runtime is damaged, without bypassing a launch caller's authority."""
+        """--peek, --all, --last, --since, invalid combinations, wait timeouts, report's unread count, the dashboard's
+        unread view and doctor never move the read cursor, and an unread page consumes only its 50; fragile because
+        every new read option is a new way to advance it, and a break silently marks messages read; an operator must
+        still read and report when runtime is damaged, without bypassing a launch caller's authority."""
         with self.subTest('an operator can read and report despite a torn runtime'):
             runtime = self.directory / 'runtime.json'
             original = runtime.read_bytes()
@@ -87,6 +87,9 @@ class InboxCliTest(BaseTest):
             unchanged('--peek --json')
             self.assertEqual(self.output('--peek').count('Message from user:'), len(page))
             unchanged('--peek')
+            self.assertEqual([message['text'] for message in inbox_tool.unread(self.root, self.agent)],
+                             [message['text'] for message in unread[start:]])
+            unchanged("the dashboard's unread view")
             self.assertEqual(self.output('--all').count('Message from user:'), 107)
             unchanged('--all')
             last = json.loads(self.output('--all', '--last', '100', '--json'))['messages']

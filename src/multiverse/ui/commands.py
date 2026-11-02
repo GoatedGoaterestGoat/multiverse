@@ -1,14 +1,16 @@
-"""Commands on an agent (message, focus, kill, resume, attach) and the runner that keeps backend calls off the event loop."""
+"""Commands on an agent (message, focus, inbox, kill, resume, attach) and the runner that keeps backend calls off the
+event loop."""
 import asyncio
 from pathlib import Path
 
 from textual import work
 
 from ..display import clean
+from ..tools.inbox import readable
 from ..tools.unfocus import summary as unfocus_summary
 from ..universe import focus
-from .plugin_service import in_daemon
-from .screens import ChoiceScreen, Form
+from .plugin_service import error_text, in_daemon
+from .screens import ChoiceScreen, Details, Form
 
 # The focus lengths the dashboard offers: (choice, label, backend arguments).
 FOCUS_LENGTHS = (("5m", "5 minutes", {"duration": "5m"}), ("20m", "20 minutes", {"duration": "20m"}),
@@ -108,6 +110,29 @@ class AgentCommands:
         self.push_screen(ChoiceScreen(f"Focus {name}", [entry[:2] for entry in lengths], description=clean(
             f"While {name} is focused, steer and follow-up messages to it are refused and their senders are "
             f"told to send inbox-only, so nothing buries what it needs from you. Esc cancels.")), chosen)
+
+    def action_inbox(self):
+        if self.ready() and self.selected:
+            self.show_inbox(dict(self.selected))
+
+    @work(group="inbox-view", exclusive=True, exit_on_error=False)
+    async def show_inbox(self, row):
+        """The agent's unread inbox messages as it will read them; showing them here never marks them read."""
+        name = clean(row["name"])
+        try:
+            messages = await asyncio.to_thread(self.backend.unread, Path(row["universe"]), row["id"])
+            text = readable(Path(row["universe"]), {"messages": messages})  # reads each sender's record
+        except Exception as error:
+            self.set_status(f"{name}: its inbox can't be read: {error_text(error, kind=False)}", error=True)
+            return
+        if not messages:
+            self.set_status(f"{name} has no unread inbox messages.")
+            return
+        one = len(messages) == 1
+        note = (f"{'This message stays' if one else 'These messages stay'} unread for {name}: showing "
+                f"{'it' if one else 'them'} here doesn't mark {'it' if one else 'them'} read.")
+        self.push_screen(Details(f"{name} · {len(messages)} unread inbox message{'' if one else 's'}",
+                                 note + "\n\n" + "\n".join(clean(line) for line in text.splitlines())))
 
     def action_stop(self):
         self.action_kill()

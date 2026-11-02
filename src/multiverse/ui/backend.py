@@ -5,7 +5,7 @@ import threading
 from .. import universe
 from ..harnesses import load as load_harness
 from ..store import read
-from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inspect, kill, list_agents, move,
+from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse, unfocus)
 from .. import display, plugins
 from ..runtime import lifecycle
@@ -184,6 +184,10 @@ class LocalBackend:
 
     def inspect(self, root, reference):
         return inspect.run(root, agent=reference)
+
+    def unread(self, root, reference):
+        """The agent's unread inbox messages, oldest first; reading them here leaves them unread for the agent."""
+        return inbox.unread(root, reference)
 
     def live_pane(self, root, reference, harness):
         """The terminal as the inspector shows it: without the harness's own chrome, where it can say what that is."""

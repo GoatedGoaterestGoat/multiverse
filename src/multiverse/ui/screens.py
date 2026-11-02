@@ -29,6 +29,7 @@ f              Focus the selected agent (5 min, 20 min, 1 hour, its next turn or
 K / s          Kill (with confirmation); s is an alias
 r              Resume a stopped or dormant agent
 v              Full agent details or group configuration
+i              The selected agent's unread inbox messages; they stay unread for it
 p              Show / hide the inspector (opens only with this key)
 P              Plugins of the selected group: on / off here, what each adds, and its settings
 g              New subverse inside the selected group (inline, name only)
