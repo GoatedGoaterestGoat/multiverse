@@ -21,7 +21,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from ..harnesses.base import PARENT_CLAUDE
-from ..harnesses.types import (CommandSpec, ModelCheck, RunDirectory, RunFailure, RunFile, RunImage,
+from ..harnesses.types import (CommandSpec, ModelCheck, RunDirectory, RunFailure, RunFile, RunImage, RunLink,
                               RunMessage, RunOptions, RunOutcome, RunPlan, RunReply, RunRequest, RunRow, RunText)
 from ..plugins import access, agent_files
 from . import effects, run_files, run_supervisor
@@ -285,7 +285,8 @@ class RunExecutor:
 
 
 def _plan(plan, directory, environment, adapter):
-    if not isinstance(plan, RunPlan) or not isinstance(plan.command, CommandSpec) or not callable(plan.interpret):
+    if (not isinstance(plan, RunPlan) or not isinstance(plan.command, CommandSpec)
+            or callable(plan.interpret) == callable(plan.dialogue)):
         raise RunFailure('invalid_request', 'Invalid one-shot run plan')
     command = plan.command
     allowed = {'argv', 'environment', 'unset_env'}
@@ -322,7 +323,24 @@ def _plan(plan, directory, environment, adapter):
         wire.append({'root': item.root, 'path': item.path, 'content': base64.b64encode(item.content).decode('ascii')})
     if size > INPUT_BYTES:
         raise RunFailure('too_long', 'The prepared run input exceeds 32 MiB')
-    return {'argv': list(command.argv), 'environment': final_env, 'files': wire, 'store': store}
+    trees = plan.disposable
+    if (not isinstance(trees, tuple) or len(trees) > 4 or len(set(trees)) != len(trees)
+            or any(len(run_files.relative(name).parts) != 1 or name == 'run.json' for name in trees)):
+        raise RunFailure('invalid_request', 'Invalid private disposable trees')
+    if not isinstance(plan.links, tuple) or len(plan.links) > 16:
+        raise RunFailure('invalid_request', 'Invalid private run links')
+    links = []
+    for link in plan.links:
+        if (not isinstance(link, RunLink) or not isinstance(link.target, str) or '\0' in link.target
+                or not Path(link.target).is_absolute() or '..' in Path(link.target).parts):
+            raise RunFailure('invalid_request', 'Invalid private run link target')
+        rel = run_files.relative(link.path)
+        if len(rel.parts) < 2 or rel.parts[0] not in trees or ('run', link.path) in targets:
+            raise RunFailure('invalid_request', 'A borrowed link must be inside a disposable tree without collisions')
+        targets.add(('run', link.path))
+        links.append({'path': link.path, 'target': link.target})
+    return {'argv': list(command.argv), 'environment': final_env, 'files': wire, 'store': store,
+            'rpc': plan.dialogue is not None, 'disposable': list(trees), 'links': links}
 
 
 def _reply(value):
@@ -337,6 +355,11 @@ def _reply(value):
 
 def _execute(executor, plan, payload):
     """The supervised run and the plan's reading of it: all that PluginTestCase's fake runs replace."""
+    if plan.dialogue is not None:
+        from .run_rpc import execute
+        value = _reply(execute(executor, payload, plan.dialogue))
+        executor.check()
+        return value
     response = executor.execute(payload)
     executor.check()
     value = _reply(plan.interpret(RunOutcome(**response['outcome'])))
@@ -344,7 +367,8 @@ def _execute(executor, plan, payload):
     return value
 
 
-def run_once(adapter, request, *, root, plugin, environment, agent_directory=None, timeout=600, cancel=None, scope=None):
+def run_once(adapter, request, *, root, plugin, environment, agent_directory=None, timeout=600, cancel=None, scope=None,
+             before_start=None):
     started = time.monotonic()
     effects.require('run_plan', getattr(adapter, 'name', 'harness'))
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
@@ -393,6 +417,9 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
             raise RunFailure('unavailable', 'Cannot record the calling process identity')
         payload.update(directory=str(directory.path), universe=str(root.resolve()), deadline=executor.deadline,
                        scopes=scopes, owner={'pid': os.getpid(), 'started': owner_start})
+        if before_start is not None:
+            before_start()
+            executor.check()
         value = _execute(executor, plan, payload)
         executor.check()
         return replace(value, duration=time.monotonic() - started)

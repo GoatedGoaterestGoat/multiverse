@@ -158,8 +158,37 @@ def create(directory, record):
             os.close(fd)
         finally:
             os.close(parent)
-    record.update(schema=1, phase='preparing', files=[], directories=[])
+    record.update(schema=1, phase='preparing', files=[], directories=[], trees=[])
     save(directory, record)  # No content can precede this journal.
+
+
+def create_tree(directory, record, name):
+    """Record an exclusive root before the native child can populate it."""
+    path = directory / relative(name)
+    if len(relative(name).parts) != 1:
+        raise ValueError('A disposable tree must be a direct child of its run')
+    parent = _open_directory(directory)
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+        descriptor = os.open(name, FLAGS, dir_fd=parent)
+        try:
+            record['trees'].append({'path': str(path), 'identity': identity(os.fstat(descriptor))})
+            save(directory, record)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
+def write_link(directory, record, name, target):
+    path = directory / relative(name)
+    if not any(_inside(path, Path(tree['path'])) for tree in record.get('trees', [])):
+        raise ValueError('Run links must belong to disposable trees')
+    parent = _mkdir(path.parent, [])
+    try:
+        os.symlink(target, path.name, dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 def write_file(directory, record, path, content):
@@ -213,6 +242,17 @@ def _validate(directory, record):
     if not isinstance(declared, list) or len(declared) > 16:
         raise ValueError('Invalid run file declarations')
     targets = set()
+    trees = record.get('trees', [])
+    declared_trees = record.get('disposable', [])
+    if not isinstance(trees, list) or len(trees) > 4 or not isinstance(declared_trees, list):
+        raise ValueError('Invalid disposable trees')
+    for tree in trees:
+        if (not isinstance(tree, dict) or tree.get('path') not in
+                {str(directory / relative(name)) for name in declared_trees}
+                or not isinstance(tree.get('identity'), list) or len(tree['identity']) != 2
+                or not all(type(n) is int and n >= 0 for n in tree['identity'])
+                or Path(tree['path']).parent != directory):
+            raise ValueError('Invalid disposable tree ownership')
     for item in declared:
         root = directory if item.get('root') == 'run' else home if item.get('root') == 'store' else None
         rel = relative(item.get('path'))
@@ -272,15 +312,22 @@ def cleanup(directory, record):
         _validate(directory, record)
     except FileNotFoundError:
         return True
+    trees = record.get('trees', [])
+    in_tree = lambda path: any(_inside(Path(path), Path(tree['path'])) for tree in trees)
     for entry in record['files']:
-        _unlink(entry)
+        if not in_tree(entry['path']):
+            _unlink(entry)
     store = Path(record['store']) if record.get('store') else None
     parents = [store / relative(item['path']).parent for item in record['declared'] if item['root'] == 'store']
     for entry in reversed(record['directories']):
+        if in_tree(entry['path']):
+            continue
         # Another run may now use a store ancestor (e.g. projects/). Its nonempty
         # directory is left alone; a run's own final folder still needs a complete cleanup.
         shared = any(Path(entry['path']) in parent.parents for parent in parents)
         _unlink(entry, directory=True, shared_parent=shared)
+    for tree in trees:
+        remove_tree(tree)
     with _namespace_lock(directory):
         descriptor = _open_directory(directory)
         try:
@@ -296,6 +343,53 @@ def cleanup(directory, record):
             except (OSError, ValueError):
                 break  # Shared parents are best effort; never remove a replacement or anything nonempty.
     return True
+
+
+def remove_tree(entry):
+    """Only an inode-bound private tree may be recursively removed; links are unlinked, never followed."""
+    path = Path(entry['path'])
+    parent = _open_directory(path.parent)
+    remaining = [100000]
+
+    def clear(descriptor, device, depth=0):
+        if depth > 64:
+            raise ValueError('A disposable tree exceeds its depth bound')
+        for name in os.listdir(descriptor):
+            remaining[0] -= 1
+            if remaining[0] < 0:
+                raise ValueError('A disposable tree exceeds its entry bound')
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(name, FLAGS, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if identity(opened) != identity(info) or opened.st_dev != device:
+                        raise ValueError('A disposable directory was replaced or mounted')
+                    clear(child, device, depth + 1)
+                    if identity(os.stat(name, dir_fd=descriptor, follow_symlinks=False)) != identity(opened):
+                        raise ValueError('A disposable directory was replaced')
+                    os.rmdir(name, dir_fd=descriptor)
+                finally:
+                    os.close(child)
+            else:
+                os.unlink(name, dir_fd=descriptor)
+    try:
+        try:
+            descriptor = os.open(path.name, FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            return
+        try:
+            info = os.fstat(descriptor)
+            if identity(info) != entry['identity']:
+                raise ValueError('A disposable tree was replaced')
+            clear(descriptor, info.st_dev)
+            if identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != entry['identity']:
+                raise ValueError('A disposable tree was replaced')
+            os.rmdir(path.name, dir_fd=parent)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
 
 
 def ended(record):

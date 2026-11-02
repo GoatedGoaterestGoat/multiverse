@@ -22,6 +22,7 @@ class CodexAdapter(ConfiguredAdapter):
     family = 'codex'
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
+    ask_snapshot_only = True
 
     def transcript_view(self, session, *, tip=None, reader=None):
         from .transcripts import view
@@ -42,6 +43,40 @@ class CodexAdapter(ConfiguredAdapter):
     def check_model(self, model, *, effort=None, environment):
         from .models import check
         return check(model, effort, environment)
+
+    def run_options(self, *, environment):
+        from .run import options
+        return options(self.spec, environment)
+
+    def run_plan(self, request, *, environment, run):
+        from .run import plan
+        return plan(self.spec, request, source=environment, directory=run)
+
+    def ask(self, session, question, executor):
+        from .ask import AskRequest, AskUnavailable, snapshot
+        from .run import catalogue, model_info
+        from ..types import RunFailure
+
+        def prepare():
+            captured = snapshot(self, session)
+            instructions = captured.base_instructions
+            if instructions is None:
+                info, _ = model_info(captured.model, captured.effort)
+                instructions = (info.get('model_messages') or {}).get('instructions_template')
+                if instructions is None:
+                    instructions = catalogue()['default_instructions']
+            return AskRequest(messages=captured.messages, prompt=question, system=instructions,
+                              model=captured.model, effort=captured.effort)
+        try:
+            reply = executor.run_once(self, session, prepare)
+            return NativeResult('ok', 'Answered from a private copy; nothing was added to the agent conversation',
+                                {'answer': reply.text, 'usage': dict(reply.usage), 'model': reply.model,
+                                 'lost': list(reply.lost)})
+        except AskUnavailable as error:
+            return NativeResult('unavailable', str(error))
+        except RunFailure as error:
+            return NativeResult('unavailable' if error.kind in ('unavailable', 'invalid_request') else 'error',
+                                error.reason)
 
     def session_home(self, environment):
         from .storage import session_home
@@ -285,6 +320,9 @@ class CodexAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        result['ask'] = (Capability('supported', mechanism='private-codex-copy')
+                         if session.native_id and session.home and session.session_file else
+                         Capability('unavailable', 'No recorded Codex conversation and home'))
         selection = session.native_mode
         if selection:
             reason = f'Native mode: {selection["mode"]} ({selection["policy"]})'

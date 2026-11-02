@@ -31,7 +31,7 @@ Claude Code and Codex keep the storage recorded at spawn. If a resume ignores a 
 | A message wakes a stopped agent | Yes | Yes | Yes | No |
 | Live status | With the connection | With the connection, plus `disconnected` | With the connection: `working`, `idle` | No |
 | Context use | Yes; the connection adds the window, cost and rate limits | With the connection | No | No |
-| `mv2 ask` side questions | With the connection | No | No | No |
+| `mv2 ask` side questions | With the connection | Via a [private copy](#codexs-questions-and-one-shot-runs), with or without the connection | No | No |
 | Tree compaction ([plugin](plugins.md)) | With the connection | No | No | No |
 | `/multiverse` in the session | With the connection | No | With the connection | No |
 | Reconnects a lost terminal | No | With the connection, when idle | No | No |
@@ -122,7 +122,7 @@ Codex's public events report every aborted turn as interrupted, without its orig
 
 **Shared conversations.** Another Codex client on the same daemon can open an agent's conversation at the same time, for example `codex resume` in another window. It is still the same agent, so its `mv2 report` and `mv2 inbox` work from either client. While another client has it open, Codex keeps the conversation's current settings. A resume can't change its permissions then, and `mv2 inspect NAME` names the settings that differ. See [shared conversations](../design/shared-conversations.md).
 
-**Side conversations.** Connected Codex terminals on the [supported releases](../reference/compatibility.md) support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent, but it can run unscoped mv2 commands as the operator. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. `mv2 ask` remains unavailable for Codex.
+**Side conversations.** Connected Codex terminals on the [supported releases](../reference/compatibility.md) support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent, but it can run unscoped mv2 commands as the operator. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. For a text-only answer from an isolated copy, use [`mv2 ask`](#codexs-questions-and-one-shot-runs).
 
 **Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it: a plain launch shows "This conversation is open in another app", and a connected one gets "thread … already has an active writer". mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
 
@@ -229,6 +229,20 @@ Plugins read Codex's models through `harness.models()` and `harness.check()` ([p
 The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
 
 Plugins also read a Codex agent's transcript from its recorded rollout files, for connected and launch-only agents. Inputs, steers, tool results, compactions and native turn endings carry the same public labels as Claude's. Ephemeral threads such as `/btw` have no rollout and read as unavailable. Compressed-only rollouts, conflicting copies and referenced rollout segments (such as native `thread/revert` histories) are reported as unreadable. See the [reading rules](../design/transcript-protocols.md#codex-rollout-rules).
+
+### Codex's questions and one-shot runs
+
+`mv2 ask AGENT --question "question"` answers from a private copy of that agent's current conversation. It uses the latest recorded model and effort, including settings changed between turns. A plugin's `harness.run_once()` answers from the messages it passes.
+
+Both run a disposable Codex process with no declared tools, MCP servers, apps, plugins, hooks or newly discovered instructions. The running agent, its native session and its daemon are never used for the question.
+
+These calls require a ChatGPT file login and a model in the checked catalogue. Other login stores, forced login constraints, custom providers and unchecked Codex releases report unavailable. Unverifiable configuration or current model settings also make the call unavailable.
+
+Codex does not expose retry control for these calls; omit `transport_retries`. The zero-tool configuration is tested at each [version check](../reference/compatibility.md); mv2 does not inspect or proxy production model requests.
+
+Codex reads the selected home's login through links to `auth.json` and `auth.lock`. mv2 creates those links without reading or copying credentials. A run may refresh the login and write the real `auth.json`, like a second normal Codex process. The copied conversation, native caches and private home are removed after the process stops. An uncertain cleanup is retained for `mv2 doctor` to report.
+
+Runs consume your subscription usage. The reply reports the new turn's tokens; Codex does not report a dollar cost. Pass native `session_meta` and `turn_context` rows with plugin history to retain verified encrypted reasoning. Unverified reasoning is omitted and listed in `Reply.lost`; an unverified encrypted compaction makes the run unavailable.
 
 ## The tmux status bar
 

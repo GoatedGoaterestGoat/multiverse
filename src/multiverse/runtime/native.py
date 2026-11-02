@@ -165,6 +165,56 @@ class NativeExecutor:
         self.workspace, self.properties, self.facts = workspace, properties, facts
         self.stopping = False
 
+    def run_once(self, adapter, session, prepare, *, timeout=600):
+        """Snapshot an exact generation before an isolated ask; no pane or daemon access."""
+        from . import runs, run_environment
+        from ..harnesses.types import RunFailure
+        from ..universe import storage
+        if not session.session_file or self.properties is None or self.facts is None:
+            raise RunFailure('unavailable', 'No recorded agent is available for the private question')
+        directory = Path(session.session_file).parent
+        root = directory.parents[2]
+        scope = runs.capture_scope(root, agent_directory=directory)
+        fields = ('id', 'harness', 'workspace', 'native_session_id', 'native_session_home',
+                  'native_storage_environment', 'native_service_identity', 'native_environment')
+        expected = {key: self.properties.get(key) for key in fields}
+
+        def unchanged():
+            runs.check_scope(scope)
+            try:
+                properties = read(directory / 'properties.json')
+                effective, _ = agents.sessions.effective(directory, properties)
+                facts = agents.runtime(directory)
+            except (OSError, ValueError):
+                raise RunFailure('unavailable', 'The selected agent generation cannot be read') from None
+            if ({key: effective.get(key) for key in fields} != expected
+                    or facts.get('launch_id') != session.launch_id
+                    or effective.get('native_session_id') != session.native_id
+                    or effective.get('native_session_home') != session.home):
+                raise RunFailure('unavailable', 'The selected agent generation changed before the private question')
+            try:
+                observed = _observed(adapter, session)
+            except ValueError:
+                raise RunFailure('unavailable', 'The native conversation identity cannot be verified') from None
+            if observed is not None and normalize_session_id(observed.native_id) != session.native_id:
+                raise RunFailure('unavailable', 'The native conversation changed before the private question')
+
+        unchanged()
+        keys = tuple(getattr(adapter, 'storage_env', ()) or ())
+        recorded = storage.recorded_environment(directory, self.properties, adapter.family, keys)
+        selected = (run_environment.replayable(adapter.family, recorded, keys, self.workspace)
+                    if recorded is not None and keys and all(key in recorded for key in keys) else None)
+        if selected is None:
+            raise RunFailure('unavailable', 'The agent has no proven recorded harness storage; resume it once')
+        environment = run_environment.launch(adapter)
+        environment.update(selected)
+        if adapter.session_home(environment) != session.home:
+            raise RunFailure('unavailable', 'The recorded storage no longer names the selected conversation home')
+        request = prepare()
+        unchanged()
+        return runs.run_once(adapter, request, root=root, plugin='core-ask', environment=environment,
+                             agent_directory=directory, scope=scope, timeout=timeout, before_start=unchanged)
+
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
@@ -526,6 +576,14 @@ def operation(root, reference, name, question=''):
     try:
         if name == 'ask' and not question.strip():
             raise ValueError('A side question is required')
+        if name == 'ask':
+            _, adapter, session, executor = context(root, directory.name, reconcile=False)
+            if getattr(adapter, 'ask_snapshot_only', False) is True:
+                if executor.facts.get('binding_conflict'):
+                    return NativeResult('unavailable', executor.facts['binding_conflict']).to_dict()
+                # Private-copy providers validate their captured generation in
+                # run_once. Asking must never repair the source agent's records.
+                return effects.call(adapter, 'ask', session, question, executor).to_dict()
         with lock(directory / '.launch.lock'):
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
             if executor.facts.get('binding_conflict'):

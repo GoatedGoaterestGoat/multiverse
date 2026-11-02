@@ -648,8 +648,7 @@ by call):
   in `properties.json`), as listing and usage do. It never starts or stops a
   process, switches a conversation, adopts the caller's storage, or acts for
   the caller.
-- **spend** uses tokens, money or time and changes nothing: `ask`, and the
-  one-shot run to come.
+- **spend** uses tokens, money or time and changes nothing: `ask` and the [one-shot run](transcript-protocols.md#the-one-shot-run).
 - **act** changes a session, a launch, an inbox or a universe's files: spawn,
   resume, kill, send, a refresh applied, an inbox read that marks messages
   read, a settings edit, launch contributions and harness extensions.
@@ -1201,10 +1200,7 @@ feature gating need proof before `harnesses.codex.dir` is offered.
 
 #### Tree compaction for Codex: analysis only
 
-Where it stands with the transcript protocols ([transcript
-protocols](transcript-protocols.md)): reading a Codex conversation goes
-through the rollout transcript protocol; a one-shot run, not until Codex can run a model with its
-tools off; installing a tree still has no native replacement, as below.
+Codex reads conversations through the rollout transcript protocol and supports [one-shot runs](transcript-protocols.md#codex) through a private tool-free process on checked releases. Installing a tree still has no native replacement, as below.
 
 Codex could implement `CompactionSource` one day, but lifecycle signals are not
 enough. It needs:

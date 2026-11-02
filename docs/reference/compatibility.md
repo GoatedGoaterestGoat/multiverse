@@ -27,6 +27,8 @@ The earlier checked releases, 0.163.0 and 0.164.0, retain startup-screen checks 
 When checking a new Codex release, also regenerate the adapter's bundled model
 catalog from that release's source and review changes to the rollout format.
 
+Codex `ask` and one-shot runs support **0.166.0 only**. They require a separate release check; leave them unavailable on releases that have not passed it. In a private process, home and workspace, capture empty tool inventories with the trimmed same-model catalog and explicit feature settings, and verify that MCP, hooks, plugins and new instruction discovery stay off. Check copied same-model history and encrypted reasoning, validate the `auth.json` and `auth.lock` link targets without reading or logging credential contents, and prove cleanup after success, timeout, cancellation and startup failure. Regenerate the private catalogue with `scripts/gen_codex_run_models.py SOURCE --version VERSION` and run `test_codex_run_native` alongside the replay, ask and cleanup tests. This checks the recipe's tool declarations without adding a per-request gate.
+
 When checking a new Claude Code or Codex release, also add its screens to
 `tests/fixtures/`: real captures, or Codex's renderer snapshots labelled as
 such. Then run `tests/test_pane_display.py`. The dashboard's live pane must

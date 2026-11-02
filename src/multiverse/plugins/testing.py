@@ -528,7 +528,9 @@ class FakeSlash:
 class FakeRuns:
     """One-shot runs answered from a script (1.14), for PluginTestCase.fake_runs(). The real run_once runs: the
     API's checks, access and permission, the harness's run options, model check and plan (its message checks
-    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Each run takes
+    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Claude and Codex
+    (1.16) both run: the test's bin/ gets a stand-in claude and codex that only print a checked version, and its
+    home a Codex file login whose contents are never read. Each run takes
     the next answer: an api.Reply it returns, or an api.RunError it raises. `requests` holds each run's request
     in full, oldest first: a dict of messages (an api.Message, or a row's data as passed), prompt, system, model,
     effort, transport_retries, agent (its directory, or None) and timeout."""
@@ -540,6 +542,13 @@ class FakeRuns:
         self.answers, self.requests, calling = list(answers), [], []
         if not (test.bin / "claude").exists():  # what the run options ask the harness's executable; never a session
             test.executable("claude", f"echo '{version} (Claude Code)'")
+        if not (test.bin / "codex").exists():  # Codex's: a checked release and a file login in the test's home
+            from ..harnesses.codex import run as codex_run
+            test.executable("codex", f"echo 'codex-cli {'.'.join(map(str, max(codex_run.VERSIONS)))}'")
+            login = Path(os.environ.get("CODEX_HOME") or test.home / ".codex") / "auth.json"
+            if not login.exists():  # only its kind is checked before a run; the fake never starts one
+                login.parent.mkdir(parents=True, exist_ok=True)
+                login.write_text("{}")
         original = runs.run_once
 
         def run_once(adapter, request, **keywords):

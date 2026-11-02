@@ -232,7 +232,7 @@ if not check.ok:
 
 ### One-shot runs
 
-One model reply to a context you supply, with no tools and nothing saved (1.14; `spend`, needs `models.FAMILY`). Claude runs it; Codex, Pi and custom harnesses say it isn't supported yet. The design is [transcript-protocols](../design/transcript-protocols.md#the-one-shot-run).
+One model reply to a context you supply, with no tools and nothing saved (1.14; `spend`, needs `models.FAMILY`). Claude and checked Codex releases run it; Pi and custom harnesses report it unavailable. The design is [transcript-protocols](../design/transcript-protocols.md#the-one-shot-run).
 
 ```python
 claude = mv.universe(root).harness("claude")
@@ -248,6 +248,7 @@ reply = claude.run_once(
 reply.text, reply.model, reply.usage, reply.cost_usd, reply.stop, reply.lost
 ```
 
+- **Codex:** requires a checked release, model and ChatGPT file login; see [Codex private runs](../use/harnesses.md#codexs-questions-and-one-shot-runs). Retry control is unavailable, so omit `transport_retries`. Pass `session_meta` and `turn_context` rows with history to preserve verified same-model encrypted reasoning. Unknown login or model provenance drops optional reasoning and reports it in `reply.lost`; opaque compaction without verified provenance is unavailable.
 - **`reply.usage`** counts tokens under `input`, `output`, `cache_read` and `cache_write`, where the harness reports them; `reply.cost_usd` is the harness's own figure.
 - **Messages:** an `api.Row` is passed as stored, the native passthrough: it must be this harness's format (`options.formats`) and carry its body (a row read with `bodies=False` is refused). An `api.Message("user" or "assistant", blocks)` is built by the harness from `api.TextBlock(text)` and, in user messages, `api.ImageBlock(media_type, data)` (PNG, JPEG, GIF or WebP, at most 5 MB). Messages, when there are any, end with the model's, since `prompt` is the next user message; with none, the prompt runs alone. What the harness can't carry is listed in `reply.lost`.
 - **Checked before anything is sent:** the arguments (`prompt`, `system` and `model` are required; messages may be empty), the messages, the model and effort (`check()`'s rules), access and permission. A refusal is `api.Error`, or `api.RunError` with kind `invalid_request` or `unavailable`, and nothing is spent.
@@ -397,7 +398,7 @@ Each test gets:
 - a temporary home, `CLAUDE_CONFIG_DIR`, tmux socket folder (`TMUX_TMPDIR`, so the default tmux server, where your agents run, is out of reach) and run folder (`MV2_RUN_DIR`), and `bin/` first on `PATH`;
 - no inherited agent identity, and no `MV2_TMUX_SOCKET`;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
-- `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
+- `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. Claude and Codex runs both work (Codex from 1.16): the test's `bin/` gets stand-in `claude` and `codex` that only print a checked version, and its home a Codex file login whose contents are never read. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
 - `self.fake_slash(commands, *answers)` (1.16): harness commands answered from a script for the rest of the test. `commands` are the `api.SlashCommand` the harness lists; each run takes the next answer: a dict of what it reports (`output`, `prompted`, ...), `"queued"` (no result until `fake.finish(id, answer)`) or `"lost"` (the agent stops before it runs). The API's and core's checks, refusals, run records and wait are real, and this test's agents count as running with mv2's bridge. `fake.requests` holds each command the harness was sent;
 - a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 

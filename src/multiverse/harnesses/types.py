@@ -324,6 +324,8 @@ class Message:
 class Executor(Protocol):
     """Core owns execution, deadlines and terminal ownership checks."""
     def request(self, session: SessionHandle, payload: dict, timeout: float = 10) -> NativeResult: ...
+    def run_once(self, adapter, session: SessionHandle, prepare: Callable[[], 'RunRequest'],
+                 *, timeout: float = 600) -> 'RunReply': ...
     def check_session(self) -> None: ...
     def command(self, specification: CommandSpec, timeout: float = 10): ...
     def rpc(self, specification: RpcSpec, timeout: float = 10) -> NativeResult: ...
@@ -582,6 +584,19 @@ class RunFile:
 
 
 @dataclass(frozen=True, kw_only=True)
+class RunLink:
+    """A link inside a disposable tree; its absolute target is borrowed, never opened by core."""
+    path: str
+    target: str
+
+
+class RunChannel(Protocol):
+    """Bounded JSON frames to a private stdio child. All dialogue decisions stay in the caller."""
+    def send(self, frame: dict) -> None: ...
+    def receive(self) -> dict: ...
+
+
+@dataclass(frozen=True, kw_only=True)
 class RunOutcome:
     returncode: int
     stdout: str
@@ -613,8 +628,11 @@ class RunFailure(ValueError):
 @dataclass(frozen=True, kw_only=True)
 class RunPlan:
     command: CommandSpec
-    interpret: Callable[[RunOutcome], RunReply]
+    interpret: Callable[[RunOutcome], RunReply] | None = None
     files: tuple[RunFile, ...] = ()
+    dialogue: Callable[[RunChannel], RunReply] | None = None
+    disposable: tuple[str, ...] = ()
+    links: tuple[RunLink, ...] = ()
 
 
 class RunProvider(Protocol):

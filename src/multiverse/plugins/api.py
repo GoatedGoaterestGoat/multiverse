@@ -687,8 +687,7 @@ def _agent_storage(agent, harness, family, keys):
     return None, None
 
 
-_HOME_VARIABLES = {"claude": ("CLAUDE_CONFIG_DIR", ".claude"), "codex": ("CODEX_HOME", ".codex"),
-                   "pi": ("PI_CODING_AGENT_DIR", None)}
+from ..runtime.run_environment import HOME_VARIABLES as _HOME_VARIABLES
 
 
 def _replayable(family, recorded, keys, workspace):
@@ -697,20 +696,8 @@ def _replayable(family, recorded, keys, workspace):
     path.resolve does (no symlink resolution), to the directory it was set from: the agent's recorded workspace,
     where its launches start. An unset (None) or empty home variable stays as recorded and brings the launch's
     proven HOME, under which its default lies. Unset, empty and set stay apart."""
-    variable = _HOME_VARIABLES.get(family, (None, None))[0]
-    result = {}
-    for key in keys:
-        value = recorded[key]
-        if isinstance(value, str) and value and not os.path.isabs(value):
-            if not (isinstance(workspace, str) and os.path.isabs(workspace)):
-                return None
-            value = os.path.normpath(os.path.join(workspace, value))
-        result[key] = value
-    if variable in result and not result[variable]:
-        if not recorded.get("HOME"):
-            return None
-        result["HOME"] = recorded["HOME"]
-    return result
+    from ..runtime.run_environment import replayable
+    return replayable(family, recorded, keys, workspace)
 
 
 def _recorded_home(family, recorded):
@@ -1513,13 +1500,8 @@ def _absolute_storage(adapter, environment, base):
     directory it was set from, as Claude's own path resolution joins it (lexically): the run's process starts in
     a directory of its own, where a relative value would name another store. None when one is relative and there
     is no base to resolve it against."""
-    for key in getattr(adapter, "storage_env", ()) or ():
-        value = environment.get(key)
-        if isinstance(value, str) and value and not os.path.isabs(value):
-            if base is None:
-                return None
-            environment[key] = os.path.normpath(os.path.join(base, value))
-    return environment
+    from ..runtime.run_environment import absolute_storage
+    return absolute_storage(adapter, environment, base)
 
 
 def _inside(agent):
@@ -1534,11 +1516,9 @@ def _inside(agent):
 def _launch_environment(adapter):
     """What a launch of `adapter` from this process gets: this process's environment without mv2's own MV2_*
     variables, with what the harness removes mapped to None and its settings env on top."""
-    spec = getattr(adapter, "spec", {}) or {}
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
-    environment.update(dict.fromkeys(spec.get("unset_env") or (), None))
-    environment.update(spec.get("env") or {})
-    return environment
+    from ..runtime.run_environment import launch
+    return launch(adapter)
+
 
 def _from_core(kind, value):
     """An API result from core's result of the same shape: core imports no API types, so a field core adds later

@@ -1003,7 +1003,7 @@ host requests retain Codex's normal tools and permissions; there is no execution
 isolation, and the side can run mv2 commands as the user. Primary send, receipt and
 queue-continuation RPCs still address only the saved primary ID. A native side
 error is forwarded locally without failing the primary. Unknown native versions,
-side resume and persistent forks remain unavailable. This does not add Codex ask.
+side resume and persistent forks remain unavailable. Codex `ask` uses the [private tool-free copy provider](transcript-protocols.md#codex).
 
 The runner records `native_relay.state=ready` after binding. Loss of the bound
 TUI's relay connection (or an upstream connection failure before binding) records
@@ -1667,7 +1667,7 @@ mv2 leaves this native footer choice to the user.
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; Codex retains a saved bridge reading |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
-| Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
+| Isolated ask | [Private tool-free transcript copy](transcript-protocols.md#codex) | Bridge: `$.model.fork` over the transcript | Unavailable | Plain Codex: the same private-copy provider; others unavailable |
 
 Unsupported usage displays N/A, not zero. The usage representation includes
 cache-inclusive input, output, total, optional cache subsets, source, timestamp

@@ -267,8 +267,7 @@ transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
 `models.FAMILY`) gets one model reply to a context the plugin supplies, with
 no tools and no saved conversation. `run_options()` (`observe`, but it may start
 the harness once per process to read its version) says whether a
-harness runs at all and what it keeps. Claude implements it; Codex, Pi and
-custom harnesses report it unsupported.
+harness runs at all and what it keeps. Claude and checked Codex releases implement it; Pi and custom harnesses report it unsupported.
 
 - **Messages.** A `Row` is the native passthrough: this harness's format, with
   its body, used in the order given as one linear conversation, with the
@@ -395,9 +394,25 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   still reports the model, usage and cost the result gives. `retry_after` is
   None: the JSON result has none.
 
+### Codex
+
+The Codex plan starts an owned `app-server` over stdio in a disposable home. Its same-model catalogue removes tool declarations, with explicit settings disabling the remaining tool and extension paths. New Codex versions are unavailable until the separate zero-tools release check passes. Production has no request proxy or per-request attestation. The native file-login links and refresh behavior are described in [harnesses](../use/harnesses.md#codexs-questions-and-one-shot-runs).
+
+Login preflight checks credential metadata without reading credentials. It opens configuration nonblocking, refuses symlinks, and checks the descriptor is a regular file distinct from both credential targets by device and inode. Only that validated descriptor receives a bounded read. Special or unverifiable files report unavailable during synchronous capability and plan checks, before any producer starts.
+
+The adapter's dialogue runs in the caller. Core relays bounded JSON objects, owns the child process group and removes the declared private tree after proving the producers stopped. It never follows the borrowed login links during cleanup. EOF, cancellation and scope disappearance stop the private process. Journals contain ownership metadata, not prompts, replies or credentials.
+
+Native rows are replayed in the supplied order. The reader's model-membership rule excludes UI echoes and runtime metadata. A compaction replaces the prefix with its `replacement_history`; legacy compactions without a complete replacement history are unavailable. Historical tool calls and results remain conversation. `additional_tools`, tool-search declarations and saved dynamic-tool configuration do not restore capabilities. Removed declarations are reported in `Reply.lost`.
+
+A plugin supplies `session_meta` and `turn_context` rows to establish encrypted-history provenance. The writing model comes from the preceding `turn_context`; a settings update cannot relabel items from that turn. Reasoning is retained only for the same model and a creator account matching native account metadata. Unknown optional reasoning is omitted with a loss report; encrypted compaction is never silently discarded. Built messages preserve text and image order. A successful reply contains text and last-turn token usage, not resumed cumulative totals; dollar cost remains unknown.
+
+Codex `ask` uses this same provider with an exact recorded generation and a pinned in-context transcript snapshot. Core revalidates the captured generation and storage just before starting; the live agent can continue during inference. The copy preserves the agent's base instructions, model, effort and encrypted history as its next native turn would. A gap, unreadable model row or repeated snapshot change makes the question unavailable. Only the copied rollout is resumed, under a fresh private identity; the live daemon and original session are not contacted.
+
+The question's model and effort come from the latest `turn_context` or `thread_settings_applied` in the whole stored history, including before compaction. A settings snapshot must belong to the recorded thread and name the standard provider and model. Its omitted effort means the default. Unreadable or unproven current settings make the question unavailable. Copied turn contexts remain unchanged, preserving the separate writing-model provenance.
+
 ## Later
 
 - **Conversation entries** (API 1.15): each row's content in one form for
   every harness.
-- **Pi reading and models; Codex and Pi one-shot runs; a schema for the reply; provider routing recorded at
+- **Pi reading, models and one-shot runs; a schema for the reply; provider routing recorded at
   launch for per-agent runs** ([future work](future-work.md)).

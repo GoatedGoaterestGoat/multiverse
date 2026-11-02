@@ -27,6 +27,11 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 | `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
 
 `EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+An adapter with `ask_snapshot_only = True` receives a read-only source snapshot,
+without identity reconciliation or a launch lock. Its `ask` must use
+`executor.run_once(adapter, session, prepare)` to revalidate the captured generation
+and storage before preparation and private execution. The flag does not hold the
+live generation fixed during inference.
 Core checks the current plugin access limit before calling the adapter, and
 before a launch or send writes records. Optional identity, storage, readiness,
 receipt and usage evidence methods are `observe`; launching a relay and
@@ -148,7 +153,7 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `stop` | Terminal | Bridge: cancels app-server work, then terminal | Terminal | Terminal |
 | `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: extension socket | No |
 | `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: extension | No |
-| `ask` | Bridge: a model fork over the transcript | No | No | No |
+| `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No |
 | `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | No | No |
 | `compaction` | Live connection, when the compaction plugin is on | No | No | No |
 
@@ -320,8 +325,7 @@ replacement rules, and the [plugin API](plugins.md) for the public read methods.
 
 The optional `RunProvider` exposes `run_options(environment=...)` (observe) and
 `run_plan(request, environment=..., run=...)` (spend). A plan contains an argv-only
-`CommandSpec`, bounded `RunFile` declarations and a pure `interpret(RunOutcome)`
-function. It describes no launch, service, relay or attachment. The adapter makes
+`CommandSpec`, bounded `RunFile` declarations and either a pure `interpret(RunOutcome)` function or a caller-side `dialogue(RunChannel)` for a private stdio process. The channel sends and receives bounded JSON objects; the supervisor never loads adapter dialogue code. A plan may declare disposable child directories and borrowed `RunLink` targets inside them. Core removes those trees without following links, only after proving their producers stopped. It describes no agent launch, shared service or attachment. The adapter makes
 no files and starts no process. Core checks the model and effort before asking
 for a plan; an unverified but accepted model may run. Unsupported harnesses return
 an unavailable result without spending.
