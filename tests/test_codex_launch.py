@@ -90,13 +90,14 @@ class CodexLaunchTest(unittest.TestCase):
                                     self.assertIn(relation + ' than the checked release', notices[0])
 
     def test_resume_permission_flags_become_grants(self):
-        """Resume flags (--sandbox, -s, --ask-for-approval, -a, --dangerously-bypass...) become thread/resume grants
+        """Explicit spawn/resume permission flags become native grants without blocking in-terminal navigation
         and malformed ones fail before any native call; fragile because of the many spellings, and a miss silently
-        resumes a full-access agent read-only; spawn flags and native exclusions must survive too (e6a11a4)."""
+        or silently resuming a full-access agent read-only; native exclusions must survive too (e6a11a4)."""
         session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
         cases = [
             (['--dangerously-bypass-approvals-and-sandbox'],
              {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
+            (['--yolo'], {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
             (['--sandbox', 'read-only', '--ask-for-approval', 'on-request'],
              {'sandbox': 'read-only', 'approvalPolicy': 'on-request'}),
             (['--sandbox=workspace-write', '--ask-for-approval=never'],
@@ -105,26 +106,45 @@ class CodexLaunchTest(unittest.TestCase):
             (['-sread-only', '-a=on-request'], {'sandbox': 'read-only', 'approvalPolicy': 'on-request'}),
             (['-sworkspace-write'], {'sandbox': 'workspace-write'}),
             (['-anever'], {'approvalPolicy': 'never'}),
-            (['--dangerously-bypass-approvals-and-sandbox', '-sread-only', '-aon-request'],
+            (['--dangerously-bypass-approvals-and-sandbox', '-sread-only'],
              {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
             ([], {}),
         ]
-        for preference in ('args', 'resume_args'):
-            for flags, expected in cases:
-                with self.subTest(preference=preference, flags=flags):
-                    settings = {'inbox_bridge': True, preference: flags}
-                    adapter = CodexAdapter.configured('codex', settings)
-                    command = adapter.resume(session, self.context)
-                    self.assertEqual(command.rpc_proxy.settings['resume_permissions'], expected)
-                    self.assertEqual(command.argv[-1], self.native_id)
-                    for flag in flags:
-                        self.assertNotIn(flag, command.argv)
-                    self.assertEqual(settings[preference], flags)
-                    if preference == 'args':
-                        spawned = adapter.spawn(self.context)
+        for mode in ('spawn', 'resume'):
+            for preference in ('args', mode + '_args'):
+                for flags, expected in cases:
+                    with self.subTest(mode=mode, preference=preference, flags=flags):
+                        settings = {'inbox_bridge': True, preference: flags}
+                        adapter = CodexAdapter.configured('codex', settings)
+                        command = (adapter.spawn(self.context) if mode == 'spawn'
+                                   else adapter.resume(session, self.context))
+                        self.assertEqual(command.rpc_proxy.settings['resume_permissions'], expected)
+                        if mode == 'resume':
+                            self.assertEqual(command.argv[-1], self.native_id)
                         for flag in flags:
-                            self.assertIn(flag, spawned.argv, 'Spawn permissions belong to the native TUI')
-                        self.assertEqual(spawned.rpc_proxy.settings['resume_permissions'], {})
+                            self.assertNotIn(flag, command.argv)
+                        self.assertEqual(settings[preference], flags)
+                        protocol = LaunchProtocol(command.rpc_proxy.settings)
+                        request = protocol.outgoing({'id': 1, 'method': 'thread/' + ('start' if mode == 'spawn' else 'resume'),
+                            'params': {'threadId': self.native_id, 'config': {}}})
+                        self.assertEqual({key: request['params'].get(key) for key in expected}, expected)
+                        policy = {'sandbox': {'type': {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
+                            'danger-full-access': 'dangerFullAccess'}.get(expected.get('sandbox'), 'readOnly')},
+                            'approvalPolicy': expected.get('approvalPolicy', 'on-request')}
+                        self.assertEqual(protocol.incoming({'id': 1, 'result': {
+                            'thread': {'id': self.native_id, 'cwd': '/workspace'}, **policy}}), self.native_id)
+        for flags in (['--profile', 'custom'], ['-pcustom'], ['--approve-for-me'], ['--not-so-yolo'],
+                      ['-c', 'approval_policy="never"'], ['-c', 'network.enabled=false'],
+                      ['--config=permissions.custom={{}}']):
+            for mode in ('spawn', 'resume'):
+                with self.subTest(unmappable=flags, mode=mode):
+                    from multiverse.harnesses.types import BridgeUnavailable
+                    adapter = CodexAdapter.configured('codex', {'inbox_bridge': True, mode + '_args': flags})
+                    executor = Mock()
+                    with self.assertRaisesRegex(BridgeUnavailable, 'cannot map'):
+                        context = replace(self.context, executor=executor)
+                        adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                    executor.rpc.assert_not_called()
         with self.subTest('native environment exclusions and writable roots'):
             executor = Mock()
             executor.rpc.return_value = NativeResult('ok', value={
@@ -142,12 +162,16 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertEqual(adapter.resume(session, self.context).rpc_proxy.settings['resume_permissions'], {})
         for flags in (['--sandbox'], ['--sandbox=wrong'], ['-s'], ['-sread-only', '--sandbox=workspace-write'],
                       ['-a'], ['--ask-for-approval=wrong'], ['-anever', '-aon-request'],
-                      ['--dangerously-bypass-approvals-and-sandbox=true']):
-            with self.subTest(malformed=flags):
-                adapter = CodexAdapter.configured('codex', {'inbox_bridge': True, 'resume_args': flags})
-                executor = Mock()
-                with self.assertRaises(ValueError):
-                    adapter.resume(session, replace(self.context, executor=executor))
+                      ['--dangerously-bypass-approvals-and-sandbox=true'], ['--yolo=true'],
+                      ['--yolo', '-aon-request']):
+            for mode in ('spawn', 'resume'):
+                with self.subTest(mode=mode, malformed=flags):
+                    adapter = CodexAdapter.configured('codex', {'inbox_bridge': True, mode + '_args': flags})
+                    executor = Mock()
+                    with self.assertRaises(ValueError):
+                        context = replace(self.context, executor=executor)
+                        adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                    executor.rpc.assert_not_called()
                 executor.rpc.assert_not_called()
 
     def test_wake_waits_for_exact_tui_starting_turn_reply(self):
@@ -403,16 +427,20 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         # Codex 0.163.0 /new and /clear issue thread/start; /resume issues
         # thread/resume on this same transport. Reject before the daemon sees it.
         for request_id, method, params, reason in (
-            (10, 'thread/start', {}, 'already owns'),
-            (11, 'thread/resume', {'threadId': str(uuid4())}, 'does not match'),
+            (10, 'thread/start', {}, 'navigation'),
+            (11, 'thread/resume', {'threadId': str(uuid4())}, 'navigation'),
             (12, 'thread/fork', {'threadId': self.native_id}, 'separate Multiverse launch'),
             (14, 'thread/fork', {'threadId': self.native_id, 'ephemeral': False}, 'separate Multiverse launch'),
         ):
+            errors_before = len(self.errors)
             await self.client.send(json.dumps({'id': request_id, 'method': method, 'params': params}))
             response = json.loads(await asyncio.wait_for(self.client.recv(), 2))
             self.assertEqual(response['id'], request_id)
             self.assertIn(reason, response['error']['message'])
-            self.assertIn(reason, self.errors[-1], 'Rejected primary navigation is recorded')
+            if method == 'thread/fork':
+                self.assertIn(reason, self.errors[-1], 'Persistent forks keep their existing diagnostic')
+            else:
+                self.assertEqual(len(self.errors), errors_before, 'Navigation denial is local to the request')
             self.assertTrue(self.received.empty())
             self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
         # A rejected navigation leaves the original session usable.

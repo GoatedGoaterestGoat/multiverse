@@ -351,6 +351,45 @@ class TranscriptCoreTest(BaseTest):
         self.assertEqual(len(page.rows), 4)
         self.assertEqual(len(sessions.journal(self.directory)), 1)
 
+    def test_navigation_fences_current_reads_but_retains_explicit_earlier_history(self):
+        """A current cursor must not cross a switch, while an explicitly chosen earlier conversation remains readable."""
+        old = t.info(self.root, self.directory)
+        new_id = str(uuid4())
+        self.provider.views[new_id] = self.provider.views[self.native_id]
+        stale = read(self.directory / 'runtime.json')
+        agents.update_runtime(self.directory, 'launch', navigation={'state': 'admitted'})
+        self.provider.observation = ObservedBinding(native_id=new_id, home=self.home, evidence='fixture')
+        from multiverse.runtime import native, navigation
+        with self.assertRaises(navigation.Switching):
+            native.session_snapshot(self.root, self.directory, read(self.directory / 'properties.json'),
+                                    stale, adapter=self.provider)
+        self.assertFalse((self.directory / 'sessions.jsonl').exists())
+        write(self.directory / 'runtime.json', stale)
+        self.provider.observation = None
+        agents.rebind_session(self.root, self.directory.name, self.native_id, new_id, 'new', 'launch', home=self.home)
+        with self.assertRaises(t.Changed) as changed:
+            t.rows(self.root, self.directory, after=old.start)
+        self.assertEqual(changed.exception.reason, 'replaced')
+        facts = read(self.directory / 'runtime.json')
+        agents.update_runtime(self.directory, 'launch', navigation={'state': 'admitted'})
+        with self.assertRaises(t.Retry):
+            t.rows(self.root, self.directory)
+        self.assertEqual(t.info(self.root, self.directory, generation=old.generation).state, 'supported')
+        earlier = t.rows(self.root, self.directory, generation=old.generation)
+        self.assertEqual(earlier.generation, old.generation)
+        self.assertEqual(len(earlier.rows), 4)
+        write(self.directory / 'runtime.json', facts)
+        def fence_during_body():
+            agents.update_runtime(self.directory, 'launch', navigation={'state': 'admitted'})
+        self.provider.during_body = fence_during_body
+        with self.assertRaises(t.Retry):
+            t.rows(self.root, self.directory)
+        # Returning to the same ID still invalidates an in-flight current read.
+        write(self.directory / 'runtime.json', facts)
+        self.provider.during_body = lambda: agents.update_runtime(self.directory, 'launch', session_generation=2)
+        with self.assertRaises(t.Retry):
+            t.rows(self.root, self.directory)
+
     def test_a_rewrite_during_body_read_returns_a_safe_resume_without_native_content(self):
         """A page cannot combine old facts with rewritten bodies or leak a provider exception containing transcript text."""
         page = t.rows(self.root, self.directory, limit=1)

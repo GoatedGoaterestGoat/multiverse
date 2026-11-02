@@ -86,6 +86,26 @@ class CodexAdapter(ConfiguredAdapter):
         from .storage import session_storage_evidence
         return session_storage_evidence(session, home)
 
+    def navigation_target(self, session, target):
+        """Require the same exact recorded-home proof as earlier-generation transcript reads."""
+        from .transcripts import readable
+        from ..types import normalize_session_id
+        import time
+        if not isinstance(session.home, str) or not Path(session.home).is_absolute():
+            return NativeResult('unavailable', 'Conversation navigation requires an explicit recorded Codex home')
+        deadline = time.monotonic() + 30
+        class ReadBudget:
+            def check(self):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Saved conversation metadata could not be checked within 30 seconds')
+        try:
+            proven = readable(replace(session, native_id=normalize_session_id(target)), reader=ReadBudget())
+        except (OSError, ValueError) as error:
+            return NativeResult('unavailable', f'Saved conversation cannot be verified: {error}')
+        if proven is not True:
+            return NativeResult('unavailable', 'The saved conversation rollout is missing, unreadable or unsupported in its recorded Codex home')
+        return NativeResult('ok')
+
     def agent_identity_policy(self):
         from .identity import POLICY
         return POLICY
@@ -168,7 +188,7 @@ class CodexAdapter(ConfiguredAdapter):
         if setting is False:
             return plain
         try:
-            bridge = self._bridge_command(command, context)
+            bridge = self._bridge_command(command, context, cli_version=version)
         except BridgeUnavailable as error:
             if setting is True:
                 raise
@@ -176,13 +196,24 @@ class CodexAdapter(ConfiguredAdapter):
         return replace(bridge, native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
                        fallback=plain if setting is None else None)
 
-    def _bridge_command(self, command, context):
+    def _bridge_command(self, command, context, *, cli_version=None):
         settings = getattr(self, 'settings', {})
         args = [*settings.get('args', []), *settings.get(context.mode + '_args', [])]
         if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon' for arg in args):
             raise BridgeUnavailable('Codex bridge conflicts with a custom --remote or --no-daemon argument')
+        unsupported = {'--approve-for-me', '--not-so-yolo', '--profile', '-p'}
+        if any(arg.split('=', 1)[0] in unsupported or arg.startswith('-p') and not arg.startswith('--') for arg in args):
+            raise BridgeUnavailable('Codex bridge cannot map explicit profile or automatic-review overrides without changing grants; '
+                                    'use plain mode or select an explicit sandbox and approval policy')
+        from .plugins import overrides
+        permission_keys = {'approval_policy', 'approvals_reviewer', 'default_permissions', 'sandbox_mode',
+                           'permissions', 'network', 'sandbox_workspace_write'}
+        for key, _ in overrides(args):
+            if key.split('.')[0] in permission_keys and key != 'sandbox_workspace_write.writable_roots':
+                raise BridgeUnavailable(f'Codex bridge cannot map explicit permission config {key!r} without changing grants; '
+                                        'use plain mode or select an explicit sandbox and approval policy')
         if context.mode == 'resume':
-            unsupported = {'--add-dir', '--approve-for-me', '--profile', '-p'}
+            unsupported = {'--add-dir'}
             if any(arg.split('=', 1)[0] in unsupported or arg.startswith('-p') and not arg.startswith('--') for arg in args):
                 raise BridgeUnavailable('Codex bridge resume does not support writable-directory, profile or automatic-review overrides. '
                                         'Bridge resume uses native saved permissions and TUI settings. '
@@ -274,6 +305,8 @@ class CodexAdapter(ConfiguredAdapter):
                                 'storage_keys': context.storage_keys,
                                 'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
+                                'navigation_cli': cli_version,
+                                'navigation_home': storage['CODEX_HOME'],
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
                                binds_session=True),
                            shared_service=SharedServiceSpec(

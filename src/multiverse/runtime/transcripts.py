@@ -150,7 +150,7 @@ def _binding(properties, facts):
     return ({key: properties.get(key) for key in (
         'id', 'harness', 'workspace', 'native_session_id', 'native_session_home',
         'native_session_transition', 'native_storage_environment', 'native_service_identity')},
-        {key: facts.get(key) for key in ('launch_id', 'pid', 'pid_started', 'binding_conflict')})
+        {key: facts.get(key) for key in ('launch_id', 'pid', 'pid_started', 'binding_conflict', 'session_generation')})
 
 
 def _inode(path):
@@ -225,7 +225,7 @@ def _gone(directory):
     return AgentGone(f'Agent folder {directory} is gone; it was removed or moved')
 
 
-def _snapshot(root, reference):
+def _snapshot(root, reference, *, allow_navigation=False):
     effects.require('transcript_view', getattr(reference, 'name', reference))
     root = Path(root).resolve()
     directory = reference if isinstance(reference, Path) else agents.directory(root, reference)
@@ -241,11 +241,15 @@ def _snapshot(root, reference):
         adapter = harnesses.load(root, properties['harness'])
         # This may reconcile proven /clear evidence. Never claim to hold the
         # launch lock before native's nonblocking snapshot path has acquired it.
-        properties, facts = native.session_snapshot(root, directory, properties, facts, adapter=adapter,
-                                                     launch_locked=False)
+        from . import navigation
+        if not (allow_navigation and navigation.pending(facts)):
+            properties, facts = native.session_snapshot(root, directory, properties, facts, adapter=adapter,
+                                                         launch_locked=False)
         with native._snapshot_lock(directory):
             current = records.properties(directory / 'properties.json')
             live = records.runtime(directory / 'runtime.json')
+            if not allow_navigation:
+                navigation.require_settled(live)
             if _inode(directory) != identity or _binding(current, live) != _binding(properties, facts):
                 raise Retry()
             effective, _ = sessions.effective(directory, current)
@@ -269,9 +273,13 @@ def _snapshot(root, reference):
                     raise _gone(directory)
                 props = records.properties(directory / 'properties.json')
                 runtime = records.runtime(directory / 'runtime.json')
+                if not allow_navigation:
+                    navigation.require_settled(runtime)
                 effective, _ = sessions.effective(directory, props)
                 if _binding(effective, runtime) != expected:
                     raise Retry()
+            except navigation.Switching as error:
+                raise Retry(str(error)) from None
             except FileNotFoundError:
                 raise _gone(directory) from None
             except records.RecordError as error:
@@ -297,6 +305,9 @@ def _snapshot(root, reference):
     except (OSError, KeyError, TypeError):
         raise Unavailable('Native session records cannot be read reliably; repair the agent records') from None
     except ValueError as error:
+        from .navigation import Switching
+        if isinstance(error, Switching):
+            raise Retry(str(error)) from None
         if 'retry' in str(error).lower():
             raise Retry('Native session identity is updating; retry shortly') from None
         raise Unavailable('Native session identity or storage is not recorded reliably; repair the agent records') from None
@@ -402,7 +413,7 @@ def _validate_view(view):
 def _load(root, directory, *, generation=None, tip=None, snapshot=None):
     if tip is not None and not isinstance(tip, str):
         raise ValueError('Transcript tip must be a row ref')
-    snapshot = snapshot or _snapshot(root, directory)
+    snapshot = snapshot or _snapshot(root, directory, allow_navigation=generation is not None)
     session = snapshot.session
     if generation is not None:
         _unpack(generation, GENERATION_PREFIX)
@@ -418,6 +429,10 @@ def _load(root, directory, *, generation=None, tip=None, snapshot=None):
                 session = replace(session, harness=selected['harness'], native_id=selected['native_id'], home=selected['home'])
                 if session.home is None:
                     raise Unavailable('The earlier generation has no recorded storage')
+    if session.native_id == snapshot.session.native_id:
+        from .navigation import pending
+        if pending(records.runtime(snapshot.directory / 'runtime.json')):
+            raise Retry('Conversation switch is unresolved; retry after it completes')
     if session.native_id is None:
         raise Unavailable('No native conversation is bound to this agent yet')
     view = _provider(snapshot, 'transcript_view', session, tip=tip)
@@ -797,7 +812,7 @@ def turn(root, directory, turn_id, *, after=None, limit=200, max_bytes=DEFAULT_B
 
 def info(root, directory, *, generation=None, tip=None):
     try:
-        snapshot = _snapshot(root, directory)
+        snapshot = _snapshot(root, directory, allow_navigation=generation is not None)
         earlier = []
         for row in snapshot.earlier:
             old = replace(snapshot.session, harness=row['harness'], native_id=row['native_id'], home=row['home'])

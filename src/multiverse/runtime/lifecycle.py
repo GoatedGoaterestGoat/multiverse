@@ -373,8 +373,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 if error := missing_runtime.mismatch(agent_dir, previous, previous_observation):
                     raise error
                 observed_key = observation_key(properties, previous)
-                properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
-                                                                adapter=adapter, launch_locked=True)
+                from .navigation import pending, Switching
+                if pending(previous):
+                    if _recovery or resume_message_id is not None or previous_observation['live'] not in ('stopped', 'dormant'):
+                        raise Switching('Conversation switch is unresolved; close this terminal, then run mv2 resume '
+                                        + properties['name'] + ' to restore its recorded conversation')
+                    # Explicit resume after attachment exit restores only the
+                    # journal's durable selection, never a speculative native reply.
+                else:
+                    properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
+                                                                    adapter=adapter, launch_locked=True)
                 if error := missing_runtime.damage(agent_dir, previous):
                     raise error
                 if observation_key(properties, previous) != observed_key:
@@ -600,6 +608,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
+        if resume and not _recovery and resume_message_id is None:
+            # Settle before replacing the old runtime, so an interrupted resume
+            # cannot lose the switch fence while leaving its input unaccounted for.
+            from .navigation import end_waiting
+            reason = ('Conversation switch ended before delivery; run mv2 deliver '
+                      + properties['name'] + ' --retry')
+            waiting = end_waiting(agent_dir, reason)
+            if waiting:
+                notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
         write(agent_dir / "runtime.json",
               {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
                'run_directory': str(run_root)})
@@ -907,6 +924,8 @@ def _initial_runtime(launch_id, command, adapter, session, previous, resume, rec
     queue = previous.get('queue_state')
     if resume and isinstance(queue, dict) and session and queue.get('native_session_id') == session.native_id:
         runtime_record['queue_state'] = dict(queue)
+    if resume and isinstance(previous.get('queue_history'), dict):
+        runtime_record['queue_history'] = dict(previous['queue_history'])
     if recovery:
         event = {'at': now(), 'from_launch_id': previous['launch_id'], 'launch_id': launch_id,
                  'reason': 'Native relay disconnected while the exact thread was idle'}

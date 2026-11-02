@@ -121,16 +121,18 @@ class UsagePublisher:
 
     def __call__(self, usage):
         try:
-            facts = read(self.agent_dir / 'runtime.json')
-            properties = read(self.agent_dir / 'properties.json')
-            if (facts.get('launch_id') != self.launch_id or facts.get('state') != 'running'
-                    or not usage.get('native_session_id')
-                    or properties.get('native_session_id') != usage['native_session_id']):
-                return
-            previous = facts.get('usage')
-            previous = previous if isinstance(previous, dict) else {}
-            if usage != {key: value for key, value in previous.items() if key != 'reported_at'}:
-                update_runtime(self.agent_dir, self.launch_id, usage={**usage, 'reported_at': now()})
+            def changes(facts):
+                from multiverse.runtime.navigation import pending
+                properties = read(self.agent_dir / 'properties.json')
+                if (facts.get('state') != 'running' or pending(facts)
+                        or not usage.get('native_session_id')
+                        or properties.get('native_session_id') != usage['native_session_id']):
+                    return None
+                previous = facts.get('usage')
+                previous = previous if isinstance(previous, dict) else {}
+                if usage != {key: value for key, value in previous.items() if key != 'reported_at'}:
+                    return {'usage': {**usage, 'reported_at': now()}}
+            mutate_runtime(self.agent_dir, self.launch_id, changes)
         except (OSError, ValueError, TypeError):
             pass  # A stale launch or unavailable runtime cannot affect native work.
 
@@ -189,13 +191,20 @@ class StatusWatcher:
             asyncio.run(self._observe())
         except Exception:
             # Optional observations must not take down the interactive terminal.
-            self._publish('unknown')
+            # _observe's finally publishes unknown with its exact binding.
+            # An unscoped fallback here could overwrite a newer conversation.
+            pass
 
-    def _publish(self, status):
+    def _publish(self, status, native_id=None, generation=None):
         if status not in ('working', 'waiting', 'idle', 'unknown'):
             status = 'unknown'
         try:
             def changes_for(facts):
+                from multiverse.runtime.navigation import pending
+                if (pending(facts) or native_id is not None and (
+                        read(self.agent_dir / 'properties.json').get('native_session_id') != native_id
+                        or facts.get('session_generation', 0) != generation)):
+                    return None
                 if facts.get('state') != 'running':
                     return None
                 known = facts.get('native_status_value', facts.get('status'))
@@ -226,6 +235,7 @@ class StatusWatcher:
             return
         task = None
         native_id = None
+        generation = None
         try:
             while not self.stopped.is_set():
                 facts = read(self.agent_dir / 'runtime.json')
@@ -235,24 +245,35 @@ class StatusWatcher:
                 if facts.get('state') == 'starting':
                     await asyncio.sleep(.1)
                     continue
-                if task is not None:
-                    if properties.get('native_session_id') != native_id or task.done():
-                        return
-                elif properties.get('native_session_id'):
+                changed = (properties.get('native_session_id'), facts.get('session_generation', 0)) != (native_id, generation)
+                if task is not None and changed:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    task = None
+                elif task is not None and task.done():
+                    return
+                if task is None and properties.get('native_session_id'):
+                    from multiverse.runtime.navigation import pending
+                    if pending(facts):
+                        await asyncio.sleep(.1)
+                        continue
                     session = SessionHandle.from_records(properties, facts, self.agent_dir)
                     specification = describe(session)
                     if specification is None:
                         return
-                    native_id = session.native_id
+                    native_id, generation = session.native_id, facts.get('session_generation', 0)
                     from multiverse.runtime.attachments import connection_logger
-                    task = asyncio.create_task(rpc.watch(*specification, self._publish,
+                    # Bind each callback to this observation, including a final
+                    # unknown from the old stream after the pointer has moved.
+                    publish = lambda status, identity=native_id, epoch=generation: self._publish(status, identity, epoch)
+                    task = asyncio.create_task(rpc.watch(*specification, publish,
                                               record_connection=connection_logger(self.agent_dir / 'launches' / self.launch_id)))
                 await asyncio.sleep(1)
         finally:
             if task is not None:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            self._publish('unknown')
+            self._publish('unknown', native_id, generation)
 
 
 class StartupDelivery:
@@ -646,13 +667,15 @@ def main():
                 from multiverse.runtime.recovery import reconnected
                 reconnected(agent_dir, launch.name)
             from multiverse.runtime.queue_continuation import record_primary_event
+            from multiverse.runtime.navigation import handler as navigation_handler
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
                 UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name),
                 record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
                 record_connection=attachments.connection_logger(launch, started=runner_started),
-                record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event))
+                record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
+                navigation=navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name))
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()

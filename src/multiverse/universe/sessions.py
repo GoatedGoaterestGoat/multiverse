@@ -178,8 +178,8 @@ def effective(directory, data):
         data = {**data, 'native_session_id': last['to'], 'native_session_home': _next_home(last)}
         if last.get('kind') == 'bind':
             data['native_fresh_pending'] = False
-            if data.get('agent_identity'):
-                data['agent_identity'] = {**data['agent_identity'], 'native_id': last['to']}
+        if data.get('agent_identity'):
+            data['agent_identity'] = {**data['agent_identity'], 'native_id': last['to']}
     return data, rows
 
 
@@ -463,5 +463,7 @@ def transition(root, directory, previous, target, reason, launch_id, home):
                'launch': launch_id, 'from': previous, 'to': target, 'reason': reason}
         _append(directory, row)
         data.update(native_session_id=target, native_session_home=home, updated_at=row['at'])
+        if data.get('agent_identity'):
+            data['agent_identity'] = {**data['agent_identity'], 'native_id': target}
         write(directory / 'properties.json', data)
     return data, row

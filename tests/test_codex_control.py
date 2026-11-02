@@ -34,6 +34,8 @@ class CodexControlTest(unittest.TestCase):
         while True:
             self.requests.append(request)
             response = overrides.get(request.method, {'result': answers[request.method]})
+            if callable(response):
+                response = response(request)
             try:
                 request = generator.send(response)
             except StopIteration as done:
@@ -164,32 +166,34 @@ class CodexControlTest(unittest.TestCase):
         """A receipt is queued or transcript-confirmed only by clientUserMessageId in Codex's queue and turn history,
         and lookup never resends; fragile because it reads Codex's history item shape, and a wrong answer stays
         invisible until someone asks whether a message arrived."""
-        for queue, items, expected, paused in (
-            ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, False),
-            ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, True),
-            ([], [{'type': 'userMessage', 'clientId': self.message.id}], True, False),
-            ([], [{'type': 'userMessage', 'clientId': 'another-message'}], None, False),
-        ):
-            replies = {'initialize': {}, 'thread/read': {'thread': {'id': self.ctx.native_id,
-                'cwd': '/tmp', 'status': {'type': 'active'}}}, 'thread/queue/list': {'data': queue},
-                'thread/turns/list': {'data': [{'id': 'turn', 'items': items}]}}
-            session = replace(self.ctx, queue_state={'native_session_id': self.ctx.native_id, 'state': 'paused'}) if paused else self.ctx
-            generator = get_delivery(session, self.message.id)
-            request = next(generator)
-            while True:
-                self.assertNotIn(request.method, ('turn/steer', 'thread/queue/add'))
-                try:
-                    request = generator.send({'result': replies[request.method]})
-                except StopIteration as done:
-                    result = done.value
-                    break
-            if expected is False:
-                self.assertEqual(bool(result.value.get('paused')), paused)
-            if expected is None:
-                self.assertEqual(result.state, 'unknown')
-            else:
-                self.assertEqual(result.state, 'native_queued')
-                self.assertIs(result.value['transcript_confirmed'], expected)
+        for state, direct in (('active', True), ('notLoaded', False), ('systemError', False)):
+            for queue, items, expected, paused in (
+                ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, False),
+                ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, True),
+                ([], [{'type': 'userMessage', 'clientId': self.message.id}], True, False),
+                ([], [{'type': 'userMessage', 'clientId': 'another-message'}], None, False),
+            ):
+                replies = {'initialize': {}, 'thread/read': {'thread': {'id': self.ctx.native_id,
+                    'cwd': '/tmp', 'status': {'type': state}, 'canAcceptDirectInput': direct}}, 'thread/queue/list': {'data': queue},
+                    'thread/turns/list': {'data': [{'id': 'turn', 'items': items}]}}
+                session = replace(self.ctx, queue_state={'native_session_id': self.ctx.native_id, 'state': 'paused'}) if paused else self.ctx
+                generator = get_delivery(session, self.message.id)
+                request = next(generator)
+                while True:
+                    self.assertNotIn(request.method, ('turn/steer', 'thread/queue/add'))
+                    try:
+                        request = generator.send({'result': replies[request.method]})
+                    except StopIteration as done:
+                        result = done.value
+                        break
+                self.assertIn(result.state, ('native_queued', 'unknown'))
+                if expected is False:
+                    self.assertEqual(bool(result.value.get('paused')), paused)
+                if expected is None:
+                    self.assertEqual(result.state, 'unknown')
+                else:
+                    self.assertEqual(result.state, 'native_queued')
+                    self.assertIs(result.value['transcript_confirmed'], expected)
 
     def test_stop_cancels_only_this_threads_queue_and_turn(self):
         """Stop cancels only this thread's queue and turn on a shared daemon and never reloads an unloaded thread; a
@@ -219,6 +223,48 @@ class CodexControlTest(unittest.TestCase):
                     self.assertEqual(request.params['threadId'], self.ctx.native_id)
                     if request.method == 'turn/interrupt':
                         self.assertEqual(request.params['turnId'], 'exact-turn')
+
+        def fresh(**changes):
+            return {'result': {'thread': {'id': self.ctx.native_id, 'cwd': '/tmp',
+                    'status': {'type': 'idle'}, 'canAcceptDirectInput': True, **changes}}}
+        empty_error = {'error': {'code': -32600, 'message': f'thread {self.ctx.native_id} is not materialized yet; '
+                                'thread/turns/list is unavailable before first user message'}}
+        for name, first, final, error, queue, expected, last in (
+                ('empty fresh thread', fresh(), fresh(), empty_error, False, 'ok', 'thread/backgroundTerminals/clean'),
+                ('fresh queued input', fresh(), fresh(), empty_error, True, 'ok', 'thread/backgroundTerminals/clean'),
+                ('became active', fresh(), fresh(status={'type': 'active'}), empty_error, True,
+                 'unavailable', 'thread/read'),
+                ('changed workspace', fresh(), fresh(cwd='/other'), empty_error, False, 'error', 'thread/read'),
+                ('changed ID', fresh(), fresh(id=str(uuid4())), empty_error, False, 'error', 'thread/read'),
+                ('read-only thread', fresh(), fresh(canAcceptDirectInput=False), empty_error, False,
+                 'unavailable', 'thread/read'),
+                ('unknown initial authority', fresh(canAcceptDirectInput=None), fresh(), empty_error, False,
+                 'error', 'thread/turns/list'),
+                ('unknown final authority', fresh(), fresh(canAcceptDirectInput=None), empty_error, False,
+                 'unavailable', 'thread/read'),
+                ('initial active', fresh(status={'type': 'active'}), fresh(), empty_error, False,
+                 'error', 'thread/turns/list'),
+                ('other error', fresh(), fresh(), {'error': {'code': -32600, 'message': 'history unavailable'}},
+                 False, 'error', 'thread/turns/list'),
+                ('wrong error code', fresh(), fresh(), {'error': {**empty_error['error'], 'code': -32603}},
+                 False, 'error', 'thread/turns/list'),
+                ('foreign diagnostic', fresh(), fresh(), {'error': {**empty_error['error'],
+                    'message': empty_error['error']['message'].replace(self.ctx.native_id, str(uuid4()))}},
+                 False, 'error', 'thread/turns/list')):
+            with self.subTest(fresh_stop=name):
+                self.requests.clear()
+                replies = iter((first, final))
+                overrides = {'thread/read': lambda _: next(replies), 'thread/turns/list': error,
+                             **(queued if queue else {})}
+                result = self.run_plan('stop', overrides=overrides)
+                self.assertEqual(result.state, expected)
+                self.assertEqual(self.requests[-1].method, last)
+                self.assertEqual(result.value['cancelled_message_ids'], [self.message.id] if queue else [])
+                self.assertEqual(result.value['interrupted_turns'], 0)
+                self.assertEqual(result.value['background_terminal_cleanup_requested'], expected == 'ok')
+                self.assertNotIn('turn/interrupt', [request.method for request in self.requests])
+                self.assertNotIn('thread/resume', [request.method for request in self.requests])
+                self.assertTrue(all(request.params['threadId'] == self.ctx.native_id for request in self.requests[1:]))
 
 
 if __name__ == '__main__':

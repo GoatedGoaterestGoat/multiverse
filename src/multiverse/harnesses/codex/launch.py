@@ -9,6 +9,64 @@ from ..types import NativeResult, RpcRequest, RpcNotification, RpcSpec, normaliz
 from .protocol import result, object_field
 
 
+GRANT_FIELDS = ('approvalPolicy', 'approvalsReviewer', 'sandbox', 'activePermissionProfile', 'runtimeWorkspaceRoots')
+WORKSPACE_FLAGS = {'networkAccess': 'network_access', 'excludeTmpdirEnvVar': 'exclude_tmpdir_env_var',
+                   'excludeSlashTmp': 'exclude_slash_tmp'}
+
+
+def grant_policy(observed):
+    """The complete, exactly representable native policy; never a config guess."""
+    if any(key not in observed for key in GRANT_FIELDS):
+        raise ValueError('Native effective permissions are incomplete; reattach before conversation navigation')
+    policy = deepcopy({key: observed[key] for key in GRANT_FIELDS})
+    if (policy['approvalPolicy'] not in ('never', 'on-request') or policy['approvalsReviewer'] != 'user'
+            or policy['activePermissionProfile'] is not None):
+        raise ValueError('Native approval or permission profile cannot be mapped exactly for conversation navigation')
+    def paths(value):
+        if (not isinstance(value, list) or any(not isinstance(path, str) or not path or '\0' in path
+                or not Path(path).is_absolute() for path in value)):
+            raise ValueError('Native permission roots must be proven absolute paths')
+        return sorted(set(value))
+    policy['runtimeWorkspaceRoots'] = paths(policy['runtimeWorkspaceRoots'])
+    sandbox = policy['sandbox']
+    if not isinstance(sandbox, dict):
+        raise ValueError('Native effective sandbox is not an object')
+    kind = sandbox.get('type')
+    if kind == 'workspaceWrite':
+        if (set(sandbox) != {'type', 'writableRoots', *WORKSPACE_FLAGS}
+                or any(type(sandbox[key]) is not bool for key in WORKSPACE_FLAGS)):
+            raise ValueError('Native workspace permissions cannot be mapped exactly')
+        sandbox['writableRoots'] = paths(sandbox['writableRoots'])
+    elif kind == 'readOnly':
+        if set(sandbox) != {'type', 'networkAccess'} or sandbox['networkAccess'] is not False:
+            raise ValueError('Native read-only permissions cannot be mapped exactly')
+    elif kind != 'dangerFullAccess' or set(sandbox) != {'type'}:
+        raise ValueError('Native sandbox or profile cannot be mapped exactly for conversation navigation')
+    return policy
+
+
+def apply_grants(params, policy):
+    """New/clear inherits native grants, replacing rather than merging roots."""
+    from .plugins import config_tree
+    policy = grant_policy(policy)
+    config = config_tree(object_field(params, 'config').items()) if params.get('config') is not None else {}
+    if any(key in config for key in ('permissions', 'permission_profile', 'active_permission_profile', 'profiles', 'profile')):
+        raise ValueError('Permission profile overrides cannot be mapped for conversation navigation')
+    if params.get('environments') not in (None, []):
+        raise ValueError('Environment permission overrides cannot be mapped for conversation navigation')
+    sandbox = policy['sandbox']
+    mode = {'workspaceWrite': 'workspace-write', 'readOnly': 'read-only', 'dangerFullAccess': 'danger-full-access'}[sandbox['type']]
+    params.update(approvalPolicy=policy['approvalPolicy'], approvalsReviewer=policy['approvalsReviewer'],
+                  sandbox=mode, permissions=None, runtimeWorkspaceRoots=policy['runtimeWorkspaceRoots'])
+    config.update(sandbox_mode=mode, approval_policy=policy['approvalPolicy'], approvals_reviewer=policy['approvalsReviewer'])
+    if sandbox['type'] == 'workspaceWrite':
+        config['sandbox_workspace_write'] = {'writable_roots': sandbox['writableRoots'],
+                                             **{native: sandbox[key] for key, native in WORKSPACE_FLAGS.items()}}
+    else:
+        config.pop('sandbox_workspace_write', None)
+    params['config'] = config
+
+
 def tui_arguments(argv):
     """Avoid unattended update dialogs unless launch arguments explicitly opt in."""
     argv = list(argv)
@@ -69,12 +127,12 @@ def startup_retryable(snapshot):
 
 
 def remote_arguments(argv, context):
-    """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
+    """Move roots, bootstrap and explicit grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)
     output, roots, permissions = [], [], {}
     permission_flags = {'--sandbox': 'sandbox', '-s': 'sandbox',
                         '--ask-for-approval': 'approvalPolicy', '-a': 'approvalPolicy',
-                        '--dangerously-bypass-approvals-and-sandbox': 'bypass'}
+                        '--dangerously-bypass-approvals-and-sandbox': 'bypass', '--yolo': 'bypass'}
     bootstrap = json.loads(context.values['bootstrap_json'])
     index = 0
     while index < end:
@@ -82,9 +140,9 @@ def remote_arguments(argv, context):
         flag, equal, value = arg.partition('=')
         if arg.startswith('-c') and not arg.startswith('--') and arg != '-c':
             flag, equal, value = '-c', '=', arg[2:].removeprefix('=')
-        if context.mode == 'resume' and arg[:2] in ('-s', '-a') and len(arg) > 2:
+        if arg[:2] in ('-s', '-a') and len(arg) > 2 and not arg.startswith('--'):
             flag, equal, value = arg[:2], '=', arg[2:].removeprefix('=')
-        if context.mode == 'resume' and flag in permission_flags:
+        if flag in permission_flags:
             key = permission_flags[flag]
             if key in permissions:
                 raise ValueError(f'{flag} cannot be used multiple times')
@@ -136,6 +194,8 @@ def remote_arguments(argv, context):
         index += 1
     # Match native CLI precedence when bypass is combined with explicit policies.
     if permissions.pop('bypass', False):
+        if 'approvalPolicy' in permissions:
+            raise ValueError('Codex bypass and an explicit approval policy conflict; choose one permission shape')
         permissions.update(sandbox='danger-full-access', approvalPolicy='never')
     return [*output, *argv[end:]], bootstrap, list(dict.fromkeys(roots)), permissions
 
@@ -182,6 +242,28 @@ class LaunchProtocol:
         self.prompt_request = None
         self.prompt_submitted = False
         self.prompt_error = None
+        self.candidate_grants = None
+        self.grant_ceiling = None
+        self.current_grants = None
+        self.grants_native_id = None
+        self.grants_error = 'No complete native permission reply has been bound; use mv2 resume'
+        self.grants_epoch = 0
+        self.grants_bound = False
+
+    def bind_grants(self, primary):
+        """Called only after core accepts the owning initial bind."""
+        if self.grants_bound:
+            return
+        self.grants_bound = True
+        self.grant_ceiling = deepcopy(primary.candidate_grants)
+        self.current_grants = deepcopy(primary.candidate_grants)
+        self.grants_native_id = self.native_id
+        self.grants_error = primary.grants_error
+
+    def invalidate_grants(self):
+        self.current_grants = None
+        self.grants_epoch += 1
+        self.grants_error = 'Native permissions changed or cannot be verified; use mv2 resume before navigating'
 
     def for_connection(self, connection_id, owns_primary):
         from .side import LaunchConnection
@@ -218,8 +300,10 @@ class LaunchProtocol:
             params['config'] = config
         elif not self.native_id or params.get('threadId') != self.native_id:
             raise ValueError('Native resume does not match this launch')
-        else:
-            params.update(self.settings.get('resume_permissions') or {})
+        # Explicit CLI permissions are removed from both launch paths so native
+        # in-terminal resume has no invocation override to reject. Preserve the
+        # exact grants in the request and validate them in its response.
+        params.update(self.settings.get('resume_permissions') or {})
         from .plugins import config_tree, merge_config
         defaults = self.settings.get('plugin_config') or {}
         explicit = self.settings.get('plugin_user_config') or {}
@@ -248,6 +332,8 @@ class LaunchProtocol:
                                                    self.settings.get('storage_keys'))
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
+        if method == 'thread/start' and self.settings.get('navigation_grants') is not None:
+            apply_grants(params, self.settings['navigation_grants'])
         self.pending = value['id']
         self.pending_method = method
         return {**value, 'params': params}
@@ -295,6 +381,12 @@ class LaunchProtocol:
                                  'deliberately change them through Codex before a new mv2 resume. '
                                  'This launch cannot accept input until its requested grant is verified; '
                                  'Multiverse will not reconfigure or restart the shared daemon.')
+        try:
+            self.candidate_grants = grant_policy(observed)
+        except ValueError as error:
+            # Older/unsupported metadata must not break ordinary binding or /btw.
+            self.candidate_grants = None
+            self.grants_error = str(error)
         self.native_id = native_id
         self.bound = True
         return native_id

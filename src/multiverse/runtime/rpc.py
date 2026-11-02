@@ -147,7 +147,8 @@ class LaunchProxy:
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
-                 record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None):
+                 record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None,
+                 navigation=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -156,6 +157,7 @@ class LaunchProxy:
         self.record_refusal = record_refusal
         self.record_connection = record_connection
         self.record_primary_event = record_primary_event
+        self.navigation = navigation
         self.owner = None
         self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
@@ -246,6 +248,26 @@ class LaunchProxy:
                         return
                     await (client if destination == 'client' else upstream).send(reply)
 
+                async def navigate(direction, value):
+                    describe = getattr(protocol, 'navigation', None)
+                    event = describe(direction, value) if describe else None
+                    if event is None:
+                        return None
+                    try:
+                        if (not isinstance(event, dict) or event.get('action') not in ('begin', 'commit', 'abort')
+                                or self.navigation is None):
+                            raise ValueError('This launch does not support conversation switching; resume with a current bridge')
+                        # Sends hold launch.lock while awaiting their own RPC.
+                        # Never block this event loop acquiring that same lock.
+                        answer = await asyncio.to_thread(self.navigation, event['action'], event)
+                        protocol.navigation_done(event, answer)
+                        return event if event['action'] in ('commit', 'abort') else None
+                    except (OSError, ValueError, RuntimeError) as error:
+                        failed = getattr(protocol, 'navigation_failed', None)
+                        if failed is not None:
+                            failed(event, str(error))
+                        raise LocalProtocolError(str(error), request_id=value.get('id')) from error
+
                 async def forward(source, target, outgoing):
                     nonlocal ended
                     try:
@@ -260,9 +282,11 @@ class LaunchProxy:
                             if not isinstance(value, dict):
                                 raise ValueError('Native relay received a non-object')
                             original = value
+                            resolved_navigation = None
                             if outgoing:
                                 try:
                                     value = protocol.outgoing(value)
+                                    resolved_navigation = await navigate('outgoing', value)
                                 except LocalProtocolError as error:
                                     await local_error(error, value, True)
                                     continue
@@ -279,6 +303,7 @@ class LaunchProxy:
                             else:
                                 try:
                                     native_id = protocol.incoming(value)
+                                    resolved_navigation = await navigate('incoming', value)
                                 except LocalProtocolError as error:
                                     await local_error(error, value, False)
                                     continue
@@ -322,6 +347,11 @@ class LaunchProxy:
                                     raise ValueError('Native relay message exceeds size limit')
                                 payload = encoded.encode() if isinstance(payload, bytes) else encoded
                             await target.send(payload)
+                            if resolved_navigation is not None:
+                                try:
+                                    await asyncio.to_thread(self.navigation, 'flush', resolved_navigation)
+                                except (OSError, ValueError, RuntimeError) as error:
+                                    self._record_error(f'Saved input after conversation switch: {error}')
                     finally:
                         code = source.close_code
                         if ended is None:

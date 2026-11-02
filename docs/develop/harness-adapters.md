@@ -31,7 +31,9 @@ An adapter with `ask_snapshot_only = True` receives a read-only source snapshot,
 without identity reconciliation or a launch lock. Its `ask` must use
 `executor.run_once(adapter, session, prepare)` to revalidate the captured generation
 and storage before preparation and private execution. The flag does not hold the
-live generation fixed during inference.
+live generation fixed during inference. The pre-start check includes the
+conversation generation counter, so switching away and back still invalidates
+an earlier preparation.
 Core checks the current plugin access limit before calling the adapter, and
 before a launch or send writes records. Optional identity, storage, readiness,
 receipt and usage evidence methods are `observe`; launching a relay and
@@ -103,6 +105,30 @@ A `reported` harness binds its ID in one of two ways:
 ### Session changes
 
 An adapter can report a verified native session change, such as Claude's `/clear`, without replacing the mv2 agent. Core records the change in the agent's session lineage, keeps the earlier conversations owned by that agent, and follows the current one for delivery, usage and resume. An adapter that reports no changes keeps exact-session behavior. See [session lineage](../design/session-lineage.md).
+
+An interactive relay can instead qualify an exact navigation request and reply.
+Its optional `navigation(direction, value)` returns a semantic event: `begin`
+with `previous`, `target` (only for resume), `reason` and request `correlation`;
+`commit` with the admission `token`, returned `target` and recorded `home`; or
+`abort` with the token for a definite native refusal. Core runs these callbacks
+off the relay event loop. Admission holds the launch lock only while checking
+and recording the fence; the native idle/empty-queue observation holds no file
+lock. An optional observe method `navigation_target(session, target)` must prove
+that a resume target is readable in the exact recorded home. Core separately
+requires that it belongs to the agent's unretired lineage.
+
+The relay receives `navigation_done(event, answer)` after each core callback.
+Only a committed reply may publish the new primary and pass success to the
+client. Core journals the selection and callback identity first. A correlated
+refusal is local to that request; an ambiguous outcome retains the fence and
+must never be retried as a fresh creation. Core flushes only input saved during
+that fence after forwarding a definite result. Accepted or uncertain input
+keeps its original conversation. `navigation_failed(event, reason)` must not
+undo a committed journal or silently restore old-thread mutation authority.
+Receipt checks during an unresolved switch report deferred evidence, leave
+acceptance unchanged, and ask the caller to check again after it resolves.
+After closing the attachment, an explicit `mv2 resume` restores the durable
+recorded selection and clears the old launch's fence.
 
 A bridged Codex conversation can have several clients at once. Its tool configuration requests agent-stable values, so `report` and `inbox` work from any client. An adapter can opt into proof from a retained bridge request when an older loaded conversation lacks the mode marker. Runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
 

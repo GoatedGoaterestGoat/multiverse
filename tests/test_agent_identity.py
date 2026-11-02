@@ -139,6 +139,21 @@ class AgentIdentityTest(BaseTest):
                 worker.join()
         self.assertEqual(result['messages'][0]['text'], 'after resume')
 
+    def test_navigation_moves_stable_callback_authority_and_fences_the_old_thread(self):
+        """Updating only the session pointer would reject new callbacks while leaving old-thread tools with stale authority."""
+        from multiverse.universe import agents
+        facts = read(self.directory / 'runtime.json')
+        agents.update_runtime(self.directory, facts['launch_id'], navigation={'state': 'admitted'})
+        with patch.dict(os.environ, self.env, clear=True), self.assertRaisesRegex(ValueError, 'switch is unresolved'):
+            report.run(self.root, agent=self.identity, summary='must not write')
+        new_id = str(uuid4())
+        agents.rebind_session(self.root, self.identity, self.native, new_id, 'new', facts['launch_id'], home=str(self.work))
+        agents.update_runtime(self.directory, facts['launch_id'], navigation={'state': 'committed'})
+        with patch.dict(os.environ, self.env, clear=True), self.assertRaisesRegex(ValueError, 'does not match'):
+            report.run(self.root, agent=self.identity, summary='old thread must not write')
+        with patch.dict(os.environ, {**self.env, 'FIXTURE_THREAD': new_id}, clear=True):
+            self.assertEqual(report.run(self.root, agent=self.identity, summary='new thread')['summary'], 'new thread')
+
     def test_incomplete_or_wrong_proof_never_becomes_authority(self):
         """Each missing or wrong element of an identity proof, in stable and in legacy per-launch mode, is refused,
         and no identity at all means the operator; fragile because the proof has six env elements plus binding and

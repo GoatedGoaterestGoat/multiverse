@@ -887,6 +887,21 @@ class LaunchIsolationTest(unittest.TestCase):
             self.assertIn(unittest.mock.call("/explicit/tmux.sock"), tmux.call_args_list)
             self.assertIn(unittest.mock.call("/inherited/tmux.sock"), tmux.call_args_list)
 
+        with self.subTest(part='explicit resume clears an unresolved navigation only after terminal exit'), \
+                patch.object(lifecycle, 'Tmux', return_value=backend), \
+                patch.object(lifecycle.shutil, 'which', return_value='/fake/executable'), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}) as observed:
+            current = read(directory / 'runtime.json')
+            agents.update_runtime(directory, current['launch_id'], navigation={'state': 'admitted'})
+            expected = read(directory / 'properties.json').get('native_session_id')
+            observed.return_value = {'live': 'alive'}
+            with self.assertRaisesRegex(ValueError, 'close this terminal'):
+                lifecycle.start(self.root, resume=directory.name)
+            observed.return_value = {'live': 'dormant'}
+            restored = lifecycle.start(self.root, resume=directory.name)
+            self.assertEqual(restored.get('native_session_id'), expected)
+            self.assertNotIn('navigation', restored['runtime'])
+
         path = self.root / "harnesses/pi/harness.json"
         definition = read(path)
         definition["settings"]["env"] = {"IS_SANDBOX": "1", "INHERITED": "harness"}

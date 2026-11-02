@@ -24,8 +24,21 @@ class PrivateProcessGroup:
         self.closed = False
         track(pid=pid)  # tests/run.py ends the group if this test is stopped before close() runs
 
-    def _members(self):
-        output = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True, timeout=5)
+    def _members(self, *, deadline=None):
+        command = ['ps', '-axo', 'pid=,pgid=,stat=']
+        # A slow ps is unknown, not an empty group. Retry only that transient
+        # failure, sharing close's deadline across both signal phases.
+        deadline = time.monotonic() + 30 if deadline is None else deadline
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 0)
+            try:
+                output = subprocess.check_output(command, text=True, timeout=min(5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise
         return [int(fields[0]) for line in output.splitlines()
                 if len(fields := line.split()) == 3 and int(fields[1]) == self.pgid
                 and not fields[2].startswith('Z')]
@@ -33,28 +46,31 @@ class PrivateProcessGroup:
     def close(self, *, reap=lambda: None, timeout=2):
         if self.closed:
             return  # Never signal a numeric group again after observing it empty.
+        deadline = time.monotonic() + 30
         for ending in (signal.SIGTERM, signal.SIGKILL):
             reap()
-            if not self._members():
+            if not self._members(deadline=deadline):
                 self.closed = True
                 return
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(['ps', '-axo', 'pid=,pgid=,stat='], 30)
             try:
                 os.killpg(self.pgid, ending)
             except (ProcessLookupError, PermissionError):
                 # macOS can return EPERM for an already empty process group.
                 # Only the process table establishes that the group is gone.
-                if self._members():
+                if self._members(deadline=deadline):
                     raise
-            deadline = time.monotonic() + timeout
+            phase_deadline = min(deadline, time.monotonic() + timeout)
             while True:
                 reap()
-                if not self._members():
+                if not self._members(deadline=deadline):
                     self.closed = True
                     return
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= phase_deadline:
                     break
                 time.sleep(.02)
-        raise AssertionError(f'Private native helpers did not exit: {self._members()}')
+        raise AssertionError(f'Private native helpers did not exit: {self._members(deadline=deadline)}')
 
 
 class PrivateDaemonGroups:

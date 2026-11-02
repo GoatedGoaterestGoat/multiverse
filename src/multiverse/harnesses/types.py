@@ -13,7 +13,7 @@ EFFECTS: Mapping[str, Effect] = {
         'capabilities', 'get_usage', 'get_delivery', 'observed_binding',
         'session_home', 'session_storage_evidence', 'resume_notice',
         'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
-        'attachment_ready', 'attachment_recovery', 'retained_usage',
+        'attachment_ready', 'attachment_recovery', 'retained_usage', 'navigation_target',
         'connection_problem', 'status_watch', 'supports_launch_refusal',
         'launch_started', 'launch_refusal', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',

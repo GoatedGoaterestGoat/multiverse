@@ -259,6 +259,19 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
 
+For a bridged conversation switch, `runtime.json` also holds a `navigation`
+record with its request correlation and admission token. `checking` and
+`admitted` block new submission until a definite result; an unknown result
+stays fenced. `session_generation` distinguishes a switch away and back within
+one launch. `queue_history` retains each earlier conversation's pause state,
+while `queue_state` names the current one. Resume preserves these pause records.
+Input saved during the fence has `navigation_wait` in `inbox-state.json`; a
+resolved switch can submit it once. Before an explicit resume replaces a stopped
+launch, pending input still carrying that deferral becomes a reported failure
+for `deliver --retry`, keeping its message ID and target. This works even if the
+old runtime marker is already gone; resume never infers new delivery authority
+for accepted, submitting or uncertain attempts.
+
 Each launch directory holds:
 
 | File | Meaning |

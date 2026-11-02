@@ -24,5 +24,5 @@ The transcript protocols (reading rows by cursor, labels, turns, model metadata,
 
 ## Harnesses
 
-- **Codex `/new` and `/resume` inside a running agent.** On Codex 0.163.0 the bridge relay refuses both, so the agent keeps its conversation and nothing is lost. If a later Codex lets the terminal switch conversations, record the change in the session lineage as Claude's `/clear` does.
+- **Following a Codex terminal's actual selection.** mv2 follows Codex's explicit navigation requests (`/new`, `/clear`, `/resume`) once Codex accepts them; a terminal that then fails to load the chosen history stays on the old thread unnoticed. Following the view itself needs a Codex event that says which thread a terminal shows.
 - **Plugin worker liveness outside tmux.** Covered in PR #20 by workers checking their parent. Revisit if the host ever runs without tmux by design.

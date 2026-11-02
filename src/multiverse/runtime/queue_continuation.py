@@ -31,6 +31,9 @@ def record_primary_event(directory, launch_id, event):
     if properties.get('native_session_id') != event['native_session_id']:
         raise ValueError('Primary queue event belongs to a different conversation')
     def changes(facts):
+        from .navigation import pending
+        if pending(facts) or read(directory / 'properties.json').get('native_session_id') != event['native_session_id']:
+            return None
         if facts.get('ending_at') or facts.get('state') not in ('starting', 'running'):
             return None
         previous = _saved_state(facts)

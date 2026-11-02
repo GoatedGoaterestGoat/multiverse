@@ -185,10 +185,13 @@ class NativeExecutor:
                 properties = read(directory / 'properties.json')
                 effective, _ = agents.sessions.effective(directory, properties)
                 facts = agents.runtime(directory)
+                from .navigation import require_settled
+                require_settled(facts)
             except (OSError, ValueError):
                 raise RunFailure('unavailable', 'The selected agent generation cannot be read') from None
             if ({key: effective.get(key) for key in fields} != expected
                     or facts.get('launch_id') != session.launch_id
+                    or facts.get('session_generation', 0) != self.facts.get('session_generation', 0)
                     or effective.get('native_session_id') != session.native_id
                     or effective.get('native_session_home') != session.home):
                 raise RunFailure('unavailable', 'The selected agent generation changed before the private question')
@@ -218,6 +221,9 @@ class NativeExecutor:
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
+        if not self.stopping:
+            from .navigation import require_settled
+            require_settled(self.facts)
         if self.facts.get('native_refusal') and not self.stopping:
             raise ValueError(self.facts['native_refusal']['message'])
         if self.facts.get('binding_conflict') and not self.stopping:
@@ -374,6 +380,8 @@ def _observed(adapter, session):
 
 def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
     """Follow session lineage and completed command receipts before exposing the saved settings."""
+    from .navigation import require_settled
+    require_settled(facts)
     properties, facts = _session_snapshot(root, directory, properties, facts, adapter=adapter,
                                           launch_locked=launch_locked)
     if not (directory / 'slash' / 'pending.json').exists():
@@ -409,6 +417,8 @@ def _session_snapshot(root, directory, properties, facts, *, adapter=None, launc
         with _snapshot_lock(directory):
             return session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
     current_facts = agents.runtime(directory)
+    from .navigation import require_settled
+    require_settled(current_facts)
     if current_facts.get('launch_id') != facts.get('launch_id'):
         raise ValueError('Launch changed while reading native session identity; retry')
     current = agents.session_properties(root, directory, launch_locked=True)
@@ -577,6 +587,8 @@ def operation(root, reference, name, question=''):
         if name == 'ask' and not question.strip():
             raise ValueError('A side question is required')
         if name == 'ask':
+            from .navigation import require_settled
+            require_settled(agents.runtime(directory))
             _, adapter, session, executor = context(root, directory.name, reconcile=False)
             if getattr(adapter, 'ask_snapshot_only', False) is True:
                 if executor.facts.get('binding_conflict'):
@@ -847,6 +859,15 @@ def _receipt_id(message, attempt):
 
 
 def _check_delivery_receipt(directory, adapter, session, executor, message, tracking):
+    receipt = _receipt_evidence(directory, adapter, session, executor, message, tracking)
+    target = tracking.get('target_session') or message.get('target_session')
+    value = receipt.get('value') if isinstance(receipt.get('value'), dict) else {}
+    if target and target != session.native_id and not value.get('outside_lineage'):
+        receipt = {**receipt, 'value': {**value, 'native_session_id': target, 'historical_conversation': True}}
+    return receipt
+
+
+def _receipt_evidence(directory, adapter, session, executor, message, tracking):
     """Reconcile receipt evidence under the caller's launch and delivery locks, never submit.
 
     Opted-in adapters get a private UUID for each actual submission. Earlier
@@ -861,7 +882,8 @@ def _check_delivery_receipt(directory, adapter, session, executor, message, trac
                     'reason': "Message targets a conversation outside this agent's recorded lineage; delivery cannot be checked",
                     'value': {'outside_lineage': True,
                               'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
-        receipt_session = replace(session, native_id=target)
+        from .navigation import queue_for
+        receipt_session = replace(session, native_id=target, queue_state=queue_for(executor.facts, target))
     if tracking.get('submission_state') == 'failed' and not receipt_failure(tracking):
         return {**(tracking.get('last_receipt') or tracking['attempts'][-1]), 'ok': False}
     saved = tracking.get('native_receipt')
@@ -942,6 +964,17 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                 and tracking.get('submission_state') in ('submitting', 'unknown', 'accepted')):
             from . import wake
             return wake.check(root, directory, message, tracking)
+        from . import navigation
+        if check and navigation.pending(agents.runtime(directory)):
+            reason = 'Receipt check is deferred until the conversation switch resolves'
+            return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                    'reason': reason + '; try deliver --check again. Prior acceptance is unchanged',
+                    'value': {'evidence_problem': reason, 'check_deferred': True}}
+        if not check:
+            deferred = navigation.defer(directory, message, tracking, agents.runtime(directory),
+                                        retry=retry, new_message=new_message)
+            if deferred is not None:
+                return deferred
         try:
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
         except Denied:
@@ -1083,6 +1116,10 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)
+        from .navigation import defer
+        deferred = defer(directory, message, tracking, facts, retry=retry, new_message=new_message)
+        if deferred is not None:
+            return deferred
         properties = records.properties(directory / 'properties.json')
         observation = None
         damage = missing_runtime.damage(directory, facts)

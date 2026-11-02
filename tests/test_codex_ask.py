@@ -217,13 +217,17 @@ class AskGenerationTests(BaseTest):
                                 home=home, launch_id=launch, session_file=str(directory / 'session.jsonl'))
         executor = native.NativeExecutor(str(self.work), properties, facts)
         for stage in ('prepare', 'plan'):
-            for field in ('launch', 'native_session_id', 'native_session_home', 'native_storage_environment', 'unchanged'):
+            for field in ('launch', 'native_session_id', 'native_session_home', 'native_storage_environment',
+                          'session_generation', 'navigation', 'unchanged'):
                 with self.subTest(stage=stage, field=field):
                     write(directory / 'properties.json', properties)
                     write(directory / 'runtime.json', facts)
                     def change():
                         if field == 'launch':
                             write(directory / 'runtime.json', {'launch_id': str(uuid4())})
+                        elif field in ('session_generation', 'navigation'):
+                            write(directory / 'runtime.json', {**facts, field:
+                                  2 if field == 'session_generation' else {'state': 'admitted'}})
                         elif field != 'unchanged':
                             value = {'STORE': home + '-changed'} if field == 'native_storage_environment' else str(uuid4())
                             write(directory / 'properties.json', {**properties, field: value})
