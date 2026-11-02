@@ -363,7 +363,11 @@ where they happen and delivered where plugins run**:
     journal's counter keep their plain-number format, so a plugin host started
     before an update, still running the old code, keeps its place. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
-    on for that event, and its next events get calls of their own. A give-up
+    on for that event, and its next events get calls of their own. A call that
+    ran out of time but then returns counts as finished with what it returned
+    (the host keeps how it ended for its next look at that event of that
+    journal, never another), so work a slow handler did
+    finish is never done twice; a restart may still repeat one. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
     ("gave up on event N (agent.status) in its handler H"). A worker left with
     two calls that never returned restarts itself (the supervisor starts a

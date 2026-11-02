@@ -52,6 +52,7 @@ _discovering = threading.local()  # the universes this thread is finding plugins
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
+_late = {}  # running key -> (late tag, "ok", value) or (tag, "error", error): a call that timed out, ended since
 _loading = {}  # resolved plugin directory -> (Event set when its load in the background ends, when it started)
 _attempts = {}  # resolved plugin directory -> loads started for it in this process
 _log_lock = threading.Lock()
@@ -996,7 +997,10 @@ class Outcome:
     error: str | None = None
 
 
-def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET, key=None, **kwargs):
+LATE_KEPT = 256  # late ends kept for a later call with the same late tag to answer with, oldest dropped
+
+
+def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET, key=None, late=None, **kwargs):
     """Call plugin code within a time budget; the one way core calls into a plugin where something waits on it.
 
     The call runs in a daemon thread of its own (never an executor, which a hung
@@ -1004,7 +1008,13 @@ def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET
     caller waits at most `timeout` seconds. Python cannot stop the thread: until
     it ends, a call with the same plugin and `key` (default: `what`) is `busy`.
     SystemExit and other errors from plugin code are recorded, never raised.
-    With timeout=None the call runs in the calling thread."""
+    With timeout=None the call runs in the calling thread.
+
+    `late` is for a caller that calls again with the same arguments after a timeout (an event handler): a tag
+    naming what the call is for (the event: its journal and sequence). A call that timed out and has ended
+    since answers the next call with that key and the same tag, which then starts nothing, so work a slow call
+    did finish is never done twice; a next call with another tag drops that end and runs. Calls with one key
+    still never run at once, whatever their tags."""
     if timeout is None:
         try:
             return Outcome(function(*args, **kwargs))
@@ -1014,8 +1024,15 @@ def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET
     with _running_lock:
         if running_key in _running:
             return Outcome(None, "busy")
-        _running.add(running_key)
-    outcome, finished = {}, threading.Event()
+        ended = _late.pop(running_key, None) if late is not None else None
+        if ended is not None and ended[0] != late:
+            ended = None  # the end of a call for something else (another event, another journal): not this one's
+        if ended is None:
+            _running.add(running_key)
+    if ended is not None:  # the call that timed out has ended since: its answer, nothing called again
+        _, kind, value = ended
+        return Outcome(None, "error", record(loaded, what, value, root)) if kind == "error" else Outcome(value)
+    outcome, finished, abandoned = {}, threading.Event(), []
 
     def call():
         try:
@@ -1025,11 +1042,25 @@ def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET
         finally:
             with _running_lock:
                 _running.discard(running_key)
+                if abandoned:  # its caller timed out: keep how it ended for the next call with this key
+                    _late[running_key] = (late, "error", outcome["error"]) if "error" in outcome else \
+                        (late, "ok", outcome.get("value"))
+                    while len(_late) > LATE_KEPT:
+                        _late.pop(next(iter(_late)))
             finished.set()
 
     threading.Thread(target=call, name=f"plugin {loaded.name}: {what}", daemon=True).start()
     if not finished.wait(timeout):
-        return Outcome(None, "timeout", record(loaded, what, TimeoutError(f"took longer than {timeout:g} s"), root))
+        with _running_lock:
+            # Decided under the lock the call ends under, so an end just after the wait is never lost: either it
+            # has ended (answered below), or it is marked abandoned and keeps its end for the next call.
+            still = running_key in _running
+            if still and late is not None:
+                abandoned.append(True)
+        if still:
+            return Outcome(None, "timeout", record(loaded, what, TimeoutError(f"took longer than {timeout:g} s"),
+                                                   root))
+        finished.wait()
     if "error" in outcome:
         return Outcome(None, "error", record(loaded, what, outcome["error"], root))
     return Outcome(outcome.get("value"))

@@ -640,7 +640,7 @@ def _deliver(loaded, mv, scope, name):
         if not found:
             break
         for event in found:
-            if not _dispatch(loaded, universe, event, scope, held):
+            if not _dispatch(loaded, universe, event, scope, held, journal):
                 complete = False
             elif complete:
                 _write_cursor(scope, name, event["seq"], journal)
@@ -707,7 +707,7 @@ _saved = {}  # (plugin, universe) -> (journal, finished) last written to handler
 _abandoned = []  # (Loaded, guard key) of calls given up on while still running, in this process
 
 
-def _dispatch(loaded, universe, event, scope, held=None):
+def _dispatch(loaded, universe, event, scope, held=None, journal=None):
     """Run each matching handler that has not finished `event`; False while one of them has not finished it.
 
     A handler in `held` (still on an earlier event) is not called: each handler sees the events in order."""
@@ -732,7 +732,10 @@ def _dispatch(loaded, universe, event, scope, held=None):
         what = f"event {kind} ({label})"
         started = time.monotonic()
         guard_key = f"handler {index} in {scope} #{_generations.get(key, 0)}"
-        outcome = loader.guarded(loaded, what, handler, value, root=scope, timeout=HANDLER_SECONDS, key=guard_key)
+        # late: a call that ran out of time but has finished since answers for this event of this journal (never
+        # another journal's event of the same number), so it isn't called again.
+        outcome = loader.guarded(loaded, what, handler, value, root=scope, timeout=HANDLER_SECONDS, key=guard_key,
+                                 late=(journal, seq))
         if outcome.state in ("timeout", "busy"):
             on, tries, first = _timeouts.get(key, (seq, 0, started))
             if on != seq:
