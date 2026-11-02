@@ -299,6 +299,15 @@ def _at_exit():
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
            "MV2_TMUX_SOCKET", "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
+# Beyond those, what a plugin test inherits from no shell or agent running it, by the rule mv2's own tests use
+# (tests/isolation.py): every mv2 variable (the agent's identity and identity mode, universe, sockets, read-only
+# cap), the harnesses' session markers (CODEX_*, CLAUDE_CODE_*, Claude's own), and tmux's.
+INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
+INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "TMUX", "TMUX_PANE")
+
+
+def _inherited(key):
+    return key in CLEARED or key in INHERITED or key.startswith(INHERITED_PREFIXES)
 
 
 class ClaudeRows:
@@ -608,7 +617,7 @@ class PluginTestCase(unittest.TestCase):
         self.home.mkdir()
         self.plugins_dir = self.work / "plugins"
         self.plugins_dir.mkdir()
-        environment = {key: value for key, value in os.environ.items() if key not in CLEARED}
+        environment = {key: value for key, value in os.environ.items() if not _inherited(key)}
         self.bin = self.work / "bin"
         self.bin.mkdir()
         self.claude_config = self.work / "claude-config"
@@ -617,6 +626,7 @@ class PluginTestCase(unittest.TestCase):
         # MV2_RUN_DIR: the live agents' run folder; the test's own, short enough for its native sockets' paths.
         (self.work / "run").mkdir(mode=0o700)
         environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config), TMUX_TMPDIR=str(self.work),
+                           MV2_PYTHON=sys.executable,  # what a launch from this mv2 gives a callback
                            MV2_RUN_DIR=str(self.work / "run"),
                            PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
                            MV2_PLUGIN_PATH=os.pathsep.join(

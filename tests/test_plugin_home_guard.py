@@ -84,6 +84,32 @@ class RunFolderTest(unittest.TestCase):
         self.assertEqual(Path(seen).parent, probe.work)
 
 
+class InheritedIdentityTest(unittest.TestCase):
+    def test_a_plugin_test_inherits_no_agent_or_harness_marker(self):
+        """A PluginTestCase test sees none of the agent's or harness's markers the shell running it had (the rule
+        tests/isolation.py uses: MV2_*, CODEX_*, CLAUDE_CODE_* and Claude's and tmux's own), only its own run
+        folder and this mv2's Python; fragile because a test run from a Codex agent's shell kept MV2_IDENTITY_MODE
+        and CODEX_THREAD_ID, so the API refused universe.spawn there (qa-plugins API116-PLUGIN-FIXTURE-1), and any
+        marker kept makes the test act as that agent without anything showing."""
+        class Probe(PluginTestCase):
+            def test_nothing(self):
+                pass
+        planted = {"MV2_IDENTITY_MODE": "codex-agent-v1", "CODEX_THREAD_ID": "parent-thread",
+                   "MV2_AGENT_ID": "parent", "MV2_EFFECTS": "observe", "MV2_SOURCE": "/elsewhere/src",
+                   "CODEX_SANDBOX": "seatbelt", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDECODE": "1",
+                   "CLAUDE_PID": "1", "TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%1"}
+        with mock.patch.dict(os.environ, planted):
+            probe = Probe("test_nothing")
+            probe.setUp()
+            try:
+                seen = {name: os.environ.get(name) for name in planted}
+                python = os.environ.get("MV2_PYTHON")
+            finally:
+                probe.doCleanups()
+        self.assertEqual({name: value for name, value in seen.items() if value is not None}, {})
+        self.assertEqual(python, sys.executable)  # what a launch from this mv2 would give a callback
+
+
 class GuardTest(StandInHome):
     def test_a_write_under_the_protected_home_is_refused_and_recorded(self):
         """The home guard refuses and records writes into the protected ~/.multiverse, the user's real ~/.claude,
