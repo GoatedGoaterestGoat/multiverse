@@ -120,9 +120,20 @@ class LoadBudgetTest(PluginTestCase):
             self.assertEqual(self.names(root, wait=0), ["swift"])
         with self.subTest("one shared deadline however many plugins still load"):
             root = self.case("shared", "slow", "slow2", "swift")
-            start = time.monotonic()
-            self.assertEqual(self.names(root, wait=0.4), ["swift"])
-            self.assertLess(time.monotonic() - start, 0.9)  # not 0.4 s per plugin still loading
+            load, waits = loader.load, {}
+
+            def recording(found, *arguments, wait=None, **options):  # when each wait would end, as passed
+                if wait is not None:  # (wait=0 only starts a load: the ones active() makes first, ending at once)
+                    waits.setdefault(found.name, []).append(time.monotonic() + wait)
+                return load(found, *arguments, wait=wait, **options)
+            with mock.patch.object(loader, "load", recording):
+                self.assertEqual(self.names(root, wait=0.4), ["swift"])
+            # Both still-loading plugins are waited for until one deadline, not 0.4 s each one after the other: the
+            # second's wait ends when the first's does. Measured on the waits themselves, not the clock around the
+            # call, which a loaded machine stretches with discovery and imports.
+            ends = [moments[-1] for name, moments in sorted(waits.items()) if name in ("slow", "slow2")]
+            self.assertEqual(len(ends), 2, waits)
+            self.assertLess(max(ends) - min(ends), 0.2, waits)
         with self.subTest("the dashboard's wrappers skip a plugin still loading"):
             root = self.case("wrappers", "late")
             other = threading.Thread(target=lambda: loader.load(loader.entry(root, "late")), daemon=True)
