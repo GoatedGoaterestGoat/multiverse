@@ -12,7 +12,7 @@ message in the history.
 """
 
 FOOTER_ROWS = 2    # the most footer rows under the composer
-HINTS = (' for shortcuts', ' to queue message', ' to queue')
+HINTS = (' for agents', ' for shortcuts', ' to queue message', ' to queue')
 EFFORTS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')  # the effort after the model's name
 
 
@@ -37,7 +37,7 @@ def display(text):
 def footer(row):
     """The status line, or a row of shortcut, queue and context hints; either may end with the warning count."""
     parts = [part.strip() for part in row.split('  ') if part.strip()]
-    if parts and all(hint(part) or context(part) or warning(part) for part in parts):
+    if parts and all(hints(part) or context(part) or warning(part) for part in parts):
         return True
     items = parts[0].split(' · ') if parts else []
     return (len(items) >= 2 and all(map(warning, parts[1:]))
@@ -60,6 +60,11 @@ def reading(item):
 def folder(item):
     """A folder as the status line names it: from the root or home, or cut at the left; not a key such as "/ search"."""
     return item[:1] in ('/', '~', '…') and item[1:2] != ' '
+
+
+def hints(part):
+    """Key hints, one or joined by " · " as Codex joins them: "← for agents · ? for shortcuts"."""
+    return all(map(hint, part.split(' · ')))
 
 
 def hint(part):
