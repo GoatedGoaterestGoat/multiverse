@@ -191,8 +191,12 @@ def _manual(message):
 
 
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
-          last=None, since=None, present=None):
-    """Read unread manual messages; peek and full history do not consume them."""
+          last=None, since=None, present=None, blocking=True):
+    """Read unread manual messages; peek and full history do not consume them.
+
+    blocking=False raises BlockingIOError on contention so a waiter can check
+    its own deadline and lifetime without keeping another lock while waiting.
+    """
     if peek and (all_messages or after is not None):
         raise ValueError('--peek cannot be combined with --all or --after')
     if (last is not None or since is not None) and not all_messages:
@@ -202,7 +206,7 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
-    with lock(agent_dir / '.inbox.lock'):
+    with lock(agent_dir / '.inbox.lock', blocking=blocking):
         data, read_cursor, records = _messages(agent_dir)
         states = _states(agent_dir)
         if after is not None:

@@ -38,6 +38,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`inspect`](#inspect) | Show an agent's key facts and the end of its live terminal. |
 | [`send`](#send) | Save and deliver a message to the exact native session. |
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
+| [`listen`](#listen) | Wait in a background shell for unread inbox-only messages, without reading them. |
 | [`focus`](#focus) | Focus an agent while it needs the user: only inbox-only messages reach it, others are refused. |
 | [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
@@ -300,6 +301,18 @@ mv2 inbox [--agent AGENT] [--all] [--after AFTER] [--peek] [--json] [--last LAST
 | `--since` | `SINCE` | Filter --all by ISO timestamp or duration such as 30m or 2h |  |
 | `--wait` |  | Wait for an unread message |  |
 | `--timeout` | `TIMEOUT` | Limit --wait (seconds, or a duration such as 30s or 2m) |  |
+
+## listen
+
+Wait in a background shell for unread inbox-only messages, without reading them.
+
+```sh
+mv2 listen [--timeout TIMEOUT]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `--timeout` | `TIMEOUT` | Stop waiting after seconds or a duration such as 30s or 2m |  |
 
 ## focus
 

@@ -258,6 +258,18 @@ bookkeeping is not evidence that the agent never received an older message.
 
 `--wait` without `--timeout` waits indefinitely. When a timeout runs out, `inbox` prints a line and exits 1.
 
+## Listen for quiet messages
+
+When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. After reading and handling the messages, start it again when you are waiting.
+
+Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Steers and follow-ups do not end the wait.
+
+On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. Run `mv2 inbox` to read them. It waits without a time limit unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
+
+The listener belongs to the launch in which it started, before waiting for any lock. It exits nonzero with a reason when that launch ends or is replaced, or its identity or process cannot be verified. It does not attach to a replacement launch, including when a shared conversation keeps its identity. Busy launch or inbox locks do not suspend the timeout or launch checks. Before reporting unread messages, it checks the launch's processes again.
+
+The harness decides how to notify you when the background shell exits. Claude starts a turn for its background-task notification. Codex shows command completion but does not start a new turn after the current turn ends; check the result and inbox at your next turn. mv2 does not send a separate wake message.
+
 ## Report progress
 
 ```sh
@@ -296,7 +308,7 @@ Codex answers from a private copy, with or without a live connection. See [Codex
 
 ## Scripts
 
-Every command on this page takes `--json` and then prints the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
+Except for `listen`, commands on this page take `--json` and then print the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
 
 If inbox-state.json is damaged, send still saves the new message, names the file,
 and makes no native submission. Repair or reset that file before retrying.

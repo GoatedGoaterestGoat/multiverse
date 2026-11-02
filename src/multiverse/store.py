@@ -39,12 +39,13 @@ def write(path, value):
 
 
 @contextmanager
-def lock(path, *, create_parent=True):
+def lock(path, *, create_parent=True, blocking=True):
+    """Exclusive file lock; blocking=False raises BlockingIOError if already held."""
     path = Path(path)
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -52,10 +53,10 @@ def lock(path, *, create_parent=True):
 
 
 @contextmanager
-def existing_lock(path):
-    """A late worker must never recreate an agent that was removed."""
+def existing_lock(path, *, blocking=True):
+    """Lock an existing file, without recreating an agent; optionally refuse contention."""
     with path.open('r+') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
