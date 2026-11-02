@@ -249,13 +249,13 @@ def framed_text(root, message, *, at=None):
     scope = sender.get('universe')
     if sender.get('agent_id') and scope:
         try:
-            name = read(Path(scope) / 'state' / 'agents' / sender['agent_id'] / 'properties.json')['name']
+            name = records.properties(Path(scope) / 'state' / 'agents' / sender['agent_id'] / 'properties.json')['name']
         except (OSError, ValueError, KeyError):
             pass
     origin = ''
     if scope and Path(scope).resolve() != Path(root).resolve():
         try:
-            origin = f' (in universe {read(Path(scope) / "universe.json")["name"]})'
+            origin = f' (in universe {records.properties(Path(scope) / "universe.json")["name"]})'
         except (OSError, ValueError, KeyError):
             origin = f' (in universe {scope})'
     age = _message_age(message.get('at'), at=at)

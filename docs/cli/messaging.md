@@ -22,6 +22,8 @@ mv2 send reviewer,tester --text 'The fix is on branch fix-login.'
 
 Separate several recipients with commas. Each one gets the message and its own result line. A failure for one doesn't stop the others. The recipient sees the message as `Message from SENDER:` followed by your text.
 
+If the sender's record is unreadable or damaged, the sender line keeps the message's saved name, or `user` if none was saved. An unreadable or damaged sender universe uses its saved path in that line. The message stays readable and deliverable.
+
 ## Choose a delivery
 
 ```sh

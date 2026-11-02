@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import contextlib
+import io
 import json
 import threading
 from unittest.mock import patch
@@ -67,7 +68,7 @@ class InboxDeliveryTest(DeliveryFixture):
         """24 concurrent senders get unique ids and keep their own modes, and 16 concurrent deliver --retry calls
         submit once; fragile because correctness rests on file locks, and races show only as rare silent
         duplicates; cross-universe sender labels must also survive framing or identically named agents silently
-        become indistinguishable to the recipient."""
+        become indistinguishable to the recipient; damaged sender metadata must not block another agent's inbox."""
         with ThreadPoolExecutor(max_workers=8) as pool:
             messages = list(pool.map(lambda i: self.send(str(i), delivery='steer' if i % 2 else 'follow-up'), range(24)))
         self.assertEqual(len({m['id'] for m in messages}), 24)
@@ -88,6 +89,28 @@ class InboxDeliveryTest(DeliveryFixture):
             with self.subTest(sender_universe=str(scope)):
                 self.send('sender context', sender={'name': 'auditor', 'universe': str(scope)})
                 self.assertEqual(self.calls[-1][1].framed, f'Message from auditor{suffix}:\nsender context')
+        sender_id = str(uuid4())
+        sender_record = origin / 'state/agents' / sender_id / 'properties.json'
+        universe_record = origin / 'universe.json'
+        for damaged_path in (sender_record, universe_record):
+            for value in ([], None, 'not an object', 7, {}, {'name': []}):
+                with self.subTest(sender_record=damaged_path.name, value=value):
+                    write(sender_record, {'id': sender_id, 'name': 'current-sender'})
+                    write(universe_record, {'name': 'review'})
+                    write(damaged_path, value)
+                    sender = {'agent_id': sender_id, 'universe': str(origin), 'name': 'saved-sender'}
+                    label = 'saved-sender' if damaged_path == sender_record else 'current-sender'
+                    scope = 'review' if damaged_path == sender_record else str(origin)
+                    framed = f'Message from {label} (in universe {scope}):\nsender context'
+                    self.assertEqual(native.framed_text(self.root, {'from': sender, 'text': 'sender context'}), framed)
+                    self.send('sender context', sender=sender)
+                    self.assertEqual(self.calls[-1][1].framed, framed)
+                    append_message(self.directory, 'sender context', sender)
+                    append_message(self.directory, 'still readable', {'name': 'user'})
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        inbox_tool.cli_run(self.root, agent=self.agent)
+                    self.assertEqual(output.getvalue().strip(), framed + '\n\nMessage from user:\nstill readable')
 
     def test_message_age_uses_send_time_at_preparation_without_rewriting_acceptances(self):
         """Delayed inbox, wake and retry frames must expose their age without re-adding an accepted native message."""
