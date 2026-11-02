@@ -17,7 +17,7 @@ def with_usage(agent):
         shown = {"context": display.context_display(reading), "context_level": display.context_level(reading),
                  "cost": display.cost_display(reading), "context_line": display.context_line(reading)}
     return {**agent, **shown,
-            "focus_line": ("Focused " + focus.ends(held) + ": only inbox-only messages reach it") if held else "Not focused"}
+            "focus_line": ("Focused " + focus.ends(held) + ": messages to it wait in its inbox") if held else "Not focused"}
 
 
 def rate_limits(items):

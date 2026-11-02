@@ -81,7 +81,7 @@ Press `g` for a new subverse, type a name and press `Enter`. The subverse uses i
 
 ## Message, focus, kill and resume
 
-- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. On a focused agent, the message goes to its inbox without interrupting it; to answer it, attach with Enter. If the agent focuses while the form is open, the form comes back with your text, to send inbox-only.
+- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. On a focused agent, the message goes to its inbox without interrupting it; to answer it, attach with Enter. If the agent focuses while the form is open, your message goes to its inbox.
 - **`f`** asks how long to [focus](../cli/messaging.md#focus-an-agent) the selected agent: 5 minutes, 20 minutes, 1 hour, until its next turn ends, or until you unfocus it. The turn choice shows only while the harness reports the agent's status. On a focused agent, `f` unfocuses it and says how many inbox messages wait. The inspector and `v` say until when an agent is focused.
 - **`i`** shows the selected agent's unread inbox messages as the agent will read them with `mv2 inbox`. Reading them here doesn't mark them read, so the agent still gets them.
 - **`K`** asks for confirmation, then kills the agent. Its record and conversation are kept.

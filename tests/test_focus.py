@@ -16,9 +16,9 @@ from uuid import uuid4
 from test_multiverse import BaseTest
 from multiverse import cli, harnesses, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
-from multiverse.runtime import agent_identity, native
+from multiverse.runtime import agent_identity, focus_note, native
 from multiverse.terminal import statusline
-from multiverse.tools import focus as focus_tool, unfocus
+from multiverse.tools import focus as focus_tool, listen, send, unfocus
 from multiverse.universe import agents, focus, mailbox, templates
 
 
@@ -211,6 +211,7 @@ class FocusCommandTest(BaseTest):
                 'universe_id': store.read(self.root / 'universe.json')['id'], 'native_session_id': str(uuid4())})
             store.write(directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'idle',
                 'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
+            (directory / '.launch.lock').touch()   # a launched agent's; held and listen never create it
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
@@ -246,30 +247,271 @@ class FocusCommandTest(BaseTest):
     def history(self, name):
         return mailbox.inbox(self.directories[name], all_messages=True, limit=None)['messages']
 
-    def test_steer_and_follow_up_to_a_focused_agent_are_refused_and_not_saved(self):
-        """Steer and follow-up to a focused agent are refused and not saved, inbox-only still arrives, and other
-        recipients are not held up; this is the feature, and a silent save would bury the question it protects."""
+    def test_steer_and_follow_up_to_a_focused_agent_wait_in_its_inbox(self):
+        """Steer and follow-up to a focused agent are saved inbox-only, naming the focus and what they were meant to
+        be, and never reach its harness, while other recipients are not held up; a break loses the message or buries
+        the question the focus protects."""
         self.output('focus', 'asker', '--for', '20m')
+        held = focus.current(self.directories['asker'])
+        line = 'asker is currently focused. Your message has been delivered as an inbox message instead.\n'
         for delivery in ('steer', 'follow-up'):
             with self.subTest(delivery=delivery):
-                self.output('send', 'asker', '--text', 'start the benchmark', '--delivery', delivery,
-                            agent='helper', code=1)
-                self.assertTrue(self.stderr.startswith('Not sent: asker is focused until '), self.stderr)
-                self.assertIn('--delivery inbox-only', self.stderr)
-        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json', code=1))
-        self.assertEqual((record['state'], record['saved'], record['ok']), ('focused', False, False))
-        self.assertIn('asker is focused', record['reason'])
-        self.assertIsNotNone(record['focus']['until'])
-        self.assertEqual(self.history('asker'), [])
+                self.assertEqual(self.output('send', 'asker', '--text', 'start the benchmark', '--delivery', delivery,
+                                             agent='helper'), line)
+        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json'))
+        self.assertEqual((record['state'], record['saved'], record['ok'], record['delivery'], record['intended']),
+                         ('held', True, True, 'inbox-only', 'steer'))
+        self.assertEqual([(m['delivery'], m['intended'], m['focus']) for m in self.history('asker')],
+                         [('inbox-only', 'steer', held['id']), ('inbox-only', 'follow-up', held['id']),
+                          ('inbox-only', 'steer', held['id'])])
+        self.assertEqual(focus.last(self.directories['asker'])['held'], 3)
         self.assertEqual(self.calls, [])
-        # Inbox-only still arrives, and other recipients of a batch are not held up.
-        output = self.output('send', 'asker,other', '--text', 'when you are free', agent='helper', code=1)
-        self.assertEqual(output, 'Sent to other; it reads this at its next pause.\n')
-        self.assertTrue(self.stderr.startswith('Not sent: asker is focused'), self.stderr)
+        output = self.output('send', 'asker,other', '--text', 'when you are free', agent='helper')
+        self.assertEqual(output, line + 'Sent to other; it reads this at its next pause.\n')
         self.assertEqual([agent for agent, _ in self.calls], [self.directories['other'].name])
-        self.output('send', 'asker', '--text', 'when you are free', '--delivery', 'inbox-only', agent='helper')
         self.output('send', 'asker', '--text', 'also this', '--queue-only', agent='helper')
-        self.assertEqual([m['delivery'] for m in self.history('asker')], ['inbox-only', 'inbox-only'])
+        self.assertNotIn('intended', self.history('asker')[-1])
+
+    def test_held_reads_only_what_the_last_focus_held_and_the_note_goes_to_the_agent_that_unfocuses(self):
+        """mv2 held reads and marks read only the unread messages the last focus held, however it ended, leaving
+        other unread messages unread, and only an agent unfocusing itself is told about them; a break shows other
+        messages, repeats read ones, or tells the agent nothing about the messages it held."""
+        directory = self.directories['asker']
+        self.output('focus', agent='asker')
+        self.output('send', 'asker', '--text', 'stop the benchmark', agent='helper')
+        self.output('held', agent='asker', code=1)
+        self.assertIn('You are focused', self.stderr)
+        self.output('send', 'asker', '--text', 'fyi', '--delivery', 'inbox-only', agent='helper')
+        self.assertEqual(self.output('unfocus', agent='asker'), 'Unfocused; messages reach you normally again. You '
+                         'received 1 steer or follow-up message during your focus. Use mv2 held to check only that '
+                         'message. You also have 1 other unread inbox message: read it with mv2 inbox.\n')
+        self.assertEqual(self.output('held', agent='asker'),
+                         'Message from helper (steer, held while you were focused):\nstop the benchmark\n')
+        self.assertEqual(self.output('held', agent='asker'), 'No unread messages held during your last focus.\n')
+        self.assertEqual(statusline.unread(directory), 1)   # the tmux bar's own count skips it too
+        self.assertEqual([m['text'] for m in json.loads(self.output('inbox', '--peek', '--json',
+                                                                    agent='asker'))['messages']], ['fyi'])
+        # A focus the user ends gets no note, and mv2 held reads only the latest focus's messages.
+        self.output('focus', 'asker')
+        self.output('send', 'asker', '--text', 'next task', '--delivery', 'follow-up', agent='helper')
+        self.assertNotIn('held', self.output('unfocus', 'asker'))
+        self.output('focus', 'asker')
+        self.output('unfocus', 'asker')
+        self.assertEqual(self.output('held', agent='asker'), 'No unread messages held during your last focus.\n')
+        self.assertEqual(self.output('inbox', agent='asker'), 'Message from helper:\nfyi\n\nMessage from helper '
+                         '(follow-up, held while you were focused):\nnext task\n')
+        self.assertEqual(self.output('inbox', agent='asker'), 'No unread messages.\n')
+        self.output('focus', agent='asker')
+        self.output('send', 'asker', '--text', 'read early', agent='helper')
+        mailbox.inbox(directory)    # read with mv2 inbox during the focus: nothing left to note or hold
+        self.assertEqual(self.output('unfocus', agent='asker'), 'Unfocused; messages reach you normally again.\n')
+        self.assertEqual(self.output('held', agent='asker'), 'No unread messages held during your last focus.\n')
+        # A focus that begins while mv2 held reads waits for it: held never reads into a new focus.
+        self.output('focus', agent='asker')
+        self.output('send', 'asker', '--text', 'late', agent='helper')
+        self.output('unfocus', agent='asker')
+        original, waited = mailbox.held, []
+        def focus_meanwhile(*arguments, **options):
+            starting = threading.Thread(target=focus.start, args=(directory,))
+            starting.start()
+            starting.join(0.3)
+            waited.append(starting.is_alive())
+            self.addCleanup(starting.join, 5)
+            return original(*arguments, **options)
+        with patch.object(mailbox, 'held', side_effect=focus_meanwhile):
+            self.assertIn('late', self.output('held', agent='asker'))
+        self.assertEqual(waited, [True])
+
+    def test_a_turn_focus_end_sends_one_note_while_no_listener_reports(self):
+        """A turn focus, the agent's or the user's, that ends with held messages unread sends one follow-up note from
+        mv2, and none when they were read or a listener claims the report; without it the agent never learns of them."""
+        directory = self.directories['asker']
+        spawned = []
+        original_note = focus_note.run
+        def spawn(agent_dir, focus_id):
+            spawned.append(focus_id)
+            focus_note.run(agent_dir, focus_id, wait=0)
+        self.enterContext(patch.object(focus, '_spawn', side_effect=spawn))
+        def turns(*statuses):
+            for status in statuses:
+                agents.update_runtime(directory, self.launch, status=status)
+        for who in ('agent', 'user'):
+            with self.subTest(focused_by=who):
+                self.calls.clear()
+                turns('working')
+                if who == 'agent':
+                    self.output('focus', '--turn', agent='asker')
+                else:
+                    self.output('focus', 'asker', '--turn')
+                self.output('send', 'asker', '--text', 'one', agent='helper')
+                self.output('send', 'asker', '--text', 'two', '--delivery', 'follow-up', agent='helper')
+                turns('idle', 'working')
+                self.assertEqual(self.calls, [])
+                turns('idle')
+                self.assertIsNone(focus.current(directory))
+                self.assertEqual(self.calls, [(directory.name, 'follow-up')])
+                note = self.history('asker')[-1]
+                self.assertEqual((note['from']['name'], note['delivery'], note['text']),
+                                 ('mv2', 'follow-up', focus.note(2)))
+                mailbox.inbox(directory)
+        # Read before the focus ended, or claimed by a listener: no note.
+        self.calls.clear()
+        turns('working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'three', agent='helper')
+        mailbox.inbox(directory)
+        turns('idle', 'working', 'idle', 'working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'four', agent='helper')
+        turns('idle', 'working')
+        with focus.listening(directory):
+            store.write(directory / focus.LAST, {**focus.last(directory), 'report': 'listener'})
+            turns('idle')
+        self.assertEqual((len(spawned), self.calls), (4, []))
+        # A focus that begins before the note is sent: the note is dropped, never held.
+        turns('working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'five', agent='helper')
+        sending = send.run
+        def refocus_then_send(*arguments, **options):
+            focus.start(directory)   # the person focuses it again
+            return sending(*arguments, **options)
+        with patch.object(send, 'run', side_effect=refocus_then_send):
+            turns('idle', 'working', 'idle')
+        self.assertEqual(len(spawned), 5)
+        self.assertEqual(self.history('asker')[-1]['text'], 'five')
+        self.assertEqual((focus.last(directory)['held'], self.calls), (0, []))
+        # Held messages read after the note counted them, before it is saved: the note is dropped.
+        focus.end(directory)
+        turns('working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'six', agent='helper')
+        def read_then_send(*arguments, **options):
+            mailbox.held(directory, options['_note_for'])
+            return sending(*arguments, **options)
+        with patch.object(send, 'run', side_effect=read_then_send):
+            turns('idle', 'working', 'idle')
+        self.assertEqual((len(spawned), self.history('asker')[-1]['text'], self.calls), (6, 'six', []))
+        self.assertIsNone(focus.last(directory)['report'])
+        # A note that fails before it is saved claims nothing, so a listener still reports, and a later note may go.
+        focus.end(directory)
+        turns('working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'seven', agent='helper')
+        send_lock = directory / '.send.lock'
+        def damaged_send(*arguments, **options):
+            send_lock.unlink()
+            send_lock.mkdir()   # the real send fails on its lock, before saving anything
+            try:
+                return sending(*arguments, **options)
+            finally:
+                send_lock.rmdir()
+                send_lock.touch()
+        with patch.object(send, 'run', side_effect=damaged_send), \
+                patch.object(focus_note, 'run', side_effect=lambda *a, **k: self.assertRaises(
+                    IsADirectoryError, original_note, *a, **k)):
+            turns('idle', 'working', 'idle')
+        self.assertEqual((self.history('asker')[-1]['text'], focus.last(directory)['report']), ('seven', None))
+        held = mailbox.inbox(directory, limit=None, peek=True)['messages']
+        with focus.locked(directory):
+            self.assertIsNotNone(listen._report(directory, held, datetime.now(timezone.utc) - timedelta(seconds=60)))
+        original_note(directory, focus.last(directory)['id'], wait=0)
+        note = self.history('asker')[-1]
+        self.assertEqual((note['text'], focus.last(directory)['report'], focus.last(directory)['note']),
+                         (focus.note(1), 'note', note['id']))
+        # A listener that reports after the note looked, before it is saved: the note stays unsaid.
+        mailbox.inbox(directory)
+        turns('working')
+        self.output('focus', '--turn', agent='asker')
+        self.output('send', 'asker', '--text', 'eight', agent='helper')
+        self.calls.clear()
+        def listener_reports_then_send(*arguments, **options):
+            with focus.locked(directory):
+                self.assertTrue(focus.claim_locked(directory, options['_note_for'], 'listener'))
+            return sending(*arguments, **options)
+        with patch.object(send, 'run', side_effect=listener_reports_then_send):
+            turns('idle', 'working', 'idle')
+        self.assertEqual((self.history('asker')[-1]['text'], focus.last(directory)['report'], self.calls),
+                         ('eight', 'listener', []))
+
+    def test_a_saved_note_stays_the_report_when_its_claim_was_never_written(self):
+        """A note saved before its claim was written, by a sender that then failed or died, is still the report: a
+        listener that waited through the focus stays quiet, and a rerun sends no second note and replays nothing;
+        a break notifies the agent twice. Another focus's note or an ordinary follow-up is no such note."""
+        directory = self.directories['asker']
+        def ended_focus():
+            record = focus.start(directory)
+            self.output('send', 'asker', '--text', 'held work', agent='helper')
+            focus.end(directory)
+            return record['id']
+        before = datetime.now(timezone.utc) - timedelta(seconds=60)
+        def listener_report():
+            unread = mailbox.inbox(directory, limit=None, peek=True)['messages']
+            with focus.locked(directory):
+                return listen._report(directory, unread, before)
+        # Controls: an ordinary follow-up, and mv2's note about another focus, leave the report to the listener.
+        focus_id = ended_focus()
+        mailbox.append_message(directory, focus.note(1), {'name': 'mv2', 'agent_id': None, 'core': True}, 'follow-up',
+                               focus_note='another focus')
+        mailbox.append_message(directory, focus.note(1), {'name': 'user', 'agent_id': None}, 'follow-up', focus_note=focus_id)
+        report = listener_report()
+        self.assertIsNotNone(report)
+        self.assertEqual(report[1], focus_id)   # the listener reports, and would claim this focus
+        self.assertIsNone(focus.last(directory)['report'])
+        mailbox.inbox(directory)
+        # The claim's write fails after the note was saved; nothing was submitted.
+        focus_id = ended_focus()
+        with patch.object(focus, 'commit_note', side_effect=OSError('injected claim write failure')), \
+                patch.object(native, 'send_or_wake') as submitted, self.assertRaisesRegex(OSError, 'claim write'):
+            focus_note.run(directory, focus_id, wait=0)
+        submitted.assert_not_called()
+        note = self.history('asker')[-1]
+        self.assertEqual((note.get('focus_note'), focus.last(directory)['report']), (focus_id, None))
+        # A listener that waited through the focus finds the saved note and stays quiet; one started later reports.
+        self.assertIsNone(listener_report())
+        self.assertEqual((focus.last(directory)['report'], focus.last(directory)['note']), ('note', note['id']))
+        unread = mailbox.inbox(directory, limit=None, peek=True)['messages']
+        with focus.locked(directory):
+            self.assertIsNotNone(listen._report(directory, unread, datetime.now(timezone.utc)))
+        # A rerun of the note's sender adds nothing and submits nothing.
+        with patch.object(native, 'send_or_wake') as submitted:
+            focus_note.run(directory, focus_id, wait=0)
+        submitted.assert_not_called()
+        self.assertEqual(self.history('asker')[-1]['id'], note['id'])
+        # Without a listener first, the rerun itself adopts the saved note.
+        mailbox.inbox(directory)
+        focus_id = ended_focus()
+        with patch.object(focus, 'commit_note', side_effect=OSError('injected claim write failure')), \
+                self.assertRaises(OSError):
+            focus_note.run(directory, focus_id, wait=0)
+        orphan = self.history('asker')[-1]['id']
+        with patch.object(native, 'send_or_wake') as submitted:
+            focus_note.run(directory, focus_id, wait=0)
+        submitted.assert_not_called()
+        self.assertEqual((self.history('asker')[-1]['id'], focus.last(directory)['note']), (orphan, orphan))
+        # A note whose native submission is uncertain stays single and is never sent again.
+        mailbox.inbox(directory)
+        focus_id = ended_focus()
+        with patch.object(native, 'send_or_wake', return_value={'state': 'unknown', 'ok': False,
+                                                                'reason': 'injected uncertainty'}) as submitted:
+            focus_note.run(directory, focus_id, wait=0)
+            focus_note.run(directory, focus_id, wait=0)
+        self.assertEqual(submitted.call_count, 1)
+        self.assertEqual(sum(m.get('focus_note') == focus_id for m in self.history('asker')), 1)
+        # Its claim lost later, as by a damaged or restored focus-last.json: the same note is recovered, with no
+        # send, no second note and its delivery tracking untouched.
+        noted = focus.last(directory)['note']
+        mailbox.update_message(directory, noted, submission_state='unknown', attempts=[{'state': 'unknown'}])
+        ledger = (directory / 'inbox-state.json').read_bytes()
+        store.write(directory / focus.LAST, {**{key: value for key, value in focus.last(directory).items()
+                                                if key != 'note'}, 'report': None})
+        with patch.object(native, 'send_or_wake') as submitted:
+            focus_note.run(directory, focus_id, wait=0)
+        submitted.assert_not_called()
+        self.assertEqual((focus.last(directory)['report'], focus.last(directory)['note']), ('note', noted))
+        self.assertEqual(sum(m.get('focus_note') == focus_id for m in self.history('asker')), 1)
+        self.assertEqual((directory / 'inbox-state.json').read_bytes(), ledger)
+        self.assertFalse(list((directory / 'inbox-unsubmitted').glob('*.json')))
 
     def test_unfocus_restores_delivery_and_points_at_the_inbox(self):
         """unfocus restores delivery and says how many unread messages wait, and how many came during the focus;
@@ -309,6 +551,10 @@ class FocusCommandTest(BaseTest):
         self.assertIn('Focused asker until unfocused', self.output('focus', 'asker'))
         with self.assertRaisesRegex(ValueError, 'Name the agent'):
             focus_tool.run(self.root)
+        # Only the person focuses for a time.
+        self.output('focus', '--for', '5m', agent='asker', code=1)
+        self.assertIn('Only the user can focus you for a time', self.stderr)
+        self.output('focus', 'asker', '--for', '5m', agent='asker', code=1)
 
     def test_a_mismatched_or_outdated_agent_identity_is_refused(self):
         """focus and unfocus inside an agent need the same verified identity as send: an agent can't claim another's
@@ -379,16 +625,6 @@ class FocusCommandTest(BaseTest):
         report('idle')
         self.assertIsNone(focus.current(directory))
 
-    def test_the_refusal_says_who_focused_the_agent(self):
-        """A refusal says the agent needs the user only when the agent focused itself; otherwise a sender is told the
-        agent waits on the user when the person focused it."""
-        self.output('focus', 'asker')
-        self.output('send', 'asker', '--text', 'ping', code=1)
-        self.assertIn('asker is focused until unfocused by the user, so it takes only inbox-only', self.stderr)
-        self.output('focus', agent='asker')
-        self.output('send', 'asker', '--text', 'ping', code=1)
-        self.assertIn("because it needs the user's attention", self.stderr)
-
     def test_a_verified_agent_identity_focuses_itself_and_an_unverified_one_is_refused(self):
         """A bridge agent identified by its verified conversation acts on itself, and an unverified one is refused; a
         break lets a mismatched process change a focus."""
@@ -412,7 +648,7 @@ class FocusCommandTest(BaseTest):
         self.assertTrue(focus.current(directory))
 
     def test_turn_focus_needs_reported_turns_and_ends_with_the_next_turn(self):
-        """focus --turn is refused while the harness reports no status, and once accepted it refuses sends until the
+        """focus --turn is refused while the harness reports no status, and once accepted it holds sends until the
         turn ends; otherwise a turn focus would never end."""
         directory = self.directories['asker']
         store.write(directory / 'runtime.json', {**store.read(directory / 'runtime.json'), 'status': 'unknown'})
@@ -424,10 +660,10 @@ class FocusCommandTest(BaseTest):
         self.assertIn('It ends by itself', output)
         self.assertEqual(focus.current(directory)['turns'], 2)
         for status in ('idle', 'working', 'idle'):
-            self.output('send', 'asker', '--text', 'ping', code=1)
+            self.assertIn('currently focused', self.output('send', 'asker', '--text', 'ping'))
             agents.update_runtime(directory, self.launch, status=status)
         self.assertIsNone(focus.current(directory))
-        self.output('send', 'asker', '--text', 'ping')
+        self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping'))
 
     def test_retry_waits_for_unfocus_but_check_does_not(self):
         """deliver --retry is refused while focused and works after unfocus, and --check is never held back; a retry
@@ -489,7 +725,7 @@ class FocusCommandTest(BaseTest):
         self.output('focus', 'asker', '--for', '20m')
         listing = self.output('list')
         self.assertIn('  Focused until ', listing)
-        self.assertIn('send it only --delivery inbox-only messages', listing)
+        self.assertIn('messages to it wait in its inbox', listing)
         self.assertEqual(listing.count('Focused'), 1)
         rows = {row['name']: row for row in json.loads(self.output('list', '--json'))}
         self.assertIsNotNone(rows['asker']['focus']['until'])

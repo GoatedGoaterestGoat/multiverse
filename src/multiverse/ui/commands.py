@@ -73,22 +73,18 @@ class AgentCommands:
         if self.ready() and self.selected and not self.damaged_selection():
             self.message_form(dict(self.selected))
 
-    def message_form(self, agent, text="", held=None):
+    def message_form(self, agent):
         """The message form; while the agent is focused, its inbox-only form."""
-        held = held or agent.get("focus")
-        # A focused agent takes only inbox-only messages, from the person too.
+        held = agent.get("focus")
+        # The person's message to a focused agent goes to its inbox too.
         title, delivery, description = (f'Message {agent["name"]}', "steer", "") if not held else (
             f'Message {agent["name"]} (focused)', "inbox-only",
             f'{agent["name"]} is focused {focus.ends(held)}, so this message goes to its inbox without '
             f'interrupting it. To answer it directly, attach with Enter.')
-        def refused(result, typed):
-            # It focused while the form was open: offer the same text again, inbox-only.
-            if (result or {}).get("state") == "focused":
-                self.message_form(agent, typed, result.get("focus"))
-        self.push_screen(Form(title, [("text", "Message", text, True, True)], description=clean(description)),
+        # If it focuses while the form is open, mv2 saves the message to its inbox instead, and sent() says so.
+        self.push_screen(Form(title, [("text", "Message", "", True, True)], description=clean(description)),
                          lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
-                                                              agent["id"], values["text"], delivery, describe=sent,
-                                                              after=lambda result: refused(result, values["text"]))
+                                                              agent["id"], values["text"], delivery, describe=sent)
                          if values is not None else None)
 
     def action_toggle_focus(self):
@@ -198,8 +194,8 @@ class AgentCommands:
 def sent(result):
     """Status for a sent message: saved, then whatever native delivery reported."""
     result = result or {}
-    if result.get('state') == 'focused':
-        return "Not sent: it is focused now, so the message is back in its form to send inbox-only.", True
+    if result.get('state') == 'held':
+        return "It is focused now, so the message was saved to its inbox instead.", False
     if result.get('delivery') == 'inbox-only':
         return "Saved to its inbox; it reads it at its next inbox check.", False
     receipt = result.get('native_delivery', {})
@@ -209,7 +205,7 @@ def sent(result):
 
 
 def focused(result):
-    return f"Focused {result['agent']} {result['ends']}: steer and follow-up messages to it are refused.", False
+    return f"Focused {result['agent']} {result['ends']}: messages to it go to its inbox.", False
 
 
 def unfocused(result):

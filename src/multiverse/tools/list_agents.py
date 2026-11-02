@@ -102,7 +102,7 @@ def problems(row, wide):
     if row.get('recovery_note'):
         lines.append('  Note: Reconnected automatically.')
     if row.get('focus'):
-        lines.append(f"  Focused {focus.ends(row['focus'])}: send it only --delivery inbox-only messages.")
+        lines.append(f"  Focused {focus.ends(row['focus'])}: messages to it wait in its inbox.")
     return lines
 
 

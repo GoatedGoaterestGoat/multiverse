@@ -109,7 +109,7 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     if row.get('recovery_note'):
         out.append('Note: Reconnected automatically.')
     if row.get('focus'):
-        out.append(f"Focused {focus.ends(row['focus'])}: it takes only inbox-only messages.")
+        out.append(f"Focused {focus.ends(row['focus'])}: messages to it wait in its inbox.")
     shown = tail(capture, lines)
     if shown:
         out += ["", f"Terminal (last {len(shown)} lines):", *shown]

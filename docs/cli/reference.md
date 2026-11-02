@@ -38,8 +38,9 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`inspect`](#inspect) | Show an agent's key facts and the end of its live terminal. |
 | [`send`](#send) | Save and deliver a message to the exact native session. |
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
+| [`held`](#held) | Read the steer and follow-up messages held during your last focus, and mark only those read. |
 | [`listen`](#listen) | Wait in a background shell for unread inbox-only messages, without reading them. |
-| [`focus`](#focus) | Focus an agent while it needs the user: only inbox-only messages reach it, others are refused. |
+| [`focus`](#focus) | Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox. |
 | [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
 | [`status`](#status) | Alias for [`report`](#report). |
@@ -302,6 +303,18 @@ mv2 inbox [--agent AGENT] [--all] [--after AFTER] [--peek] [--json] [--last LAST
 | `--wait` |  | Wait for an unread message |  |
 | `--timeout` | `TIMEOUT` | Limit --wait (seconds, or a duration such as 30s or 2m) |  |
 
+## held
+
+Read the steer and follow-up messages held during your last focus, and mark only those read.
+
+```sh
+mv2 held [--json]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `--json` |  | Return machine-readable JSON |  |
+
 ## listen
 
 Wait in a background shell for unread inbox-only messages, without reading them.
@@ -316,7 +329,7 @@ mv2 listen [--timeout TIMEOUT]
 
 ## focus
 
-Focus an agent while it needs the user: only inbox-only messages reach it, others are refused.
+Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox.
 
 ```sh
 mv2 focus [--json] [--for DURATION | --turn] [agent]
@@ -326,7 +339,7 @@ mv2 focus [--json] [--for DURATION | --turn] [agent]
 | --- | --- | --- | --- |
 | `agent` |  | Agent name (default: yourself inside an agent session) |  |
 | `--json` |  | Return the focus record as JSON |  |
-| `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus) |  |
+| `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus); the user only, not an agent focusing itself |  |
 | `--turn` |  | End the focus when the agent's next turn ends; for an agent focusing itself or one that is working, that is the turn after the current one |  |
 
 Use at most one of `--for`, `--turn`.

@@ -145,9 +145,9 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
 
-    async def test_a_message_refused_by_a_new_focus_comes_back_in_its_inbox_only_form(self):
-        """If the agent focuses while the message form is open, the refused message comes back in the focused form
-        with its text, and sends inbox-only; a break loses what the person typed."""
+    async def test_a_message_sent_as_the_agent_focuses_goes_to_its_inbox(self):
+        """If the agent focuses while the message form is open, the message is saved to its inbox and the status says
+        so, without an error; a break reports a saved message as failed, so the person sends it again."""
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             agent = dict(self.app.selected)
@@ -156,15 +156,11 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.backend.focus(Path(agent["universe"]), agent["id"])
             await pilot.press("ctrl+enter")
             await self.settle(pilot)
-            self.assertEqual(self.backend.messages, [])
-            self.assertIsInstance(self.app.screen, Form)
-            self.assertIn("(focused)", str(self.app.screen.query_one("#dialog-title").render()))
-            self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "Here is the answer")
-            self.assertIn("back in its form", self.status())
-            await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual([(m["text"], m["delivery"]) for m in self.backend.messages],
-                             [("Here is the answer", "inbox-only")])
+            self.assertNotIsInstance(self.app.screen, Form)
+            self.assertEqual([(m["text"], m["delivery"], m["intended"]) for m in self.backend.messages],
+                             [("Here is the answer", "inbox-only", "steer")])
+            self.assertIn("saved to its inbox instead", self.status())
+            self.assertNotIn("rror", self.status())
 
     async def test_a_failing_backend_operation_never_ends_the_dashboard(self):
         """Send, inspect, spawn and attach raising, attach inside Textual's suspend, leave the error on show, the rows

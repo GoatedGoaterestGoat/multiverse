@@ -132,13 +132,14 @@ def unread(directory):
             source.seek(cursor)
             data = source.read(READ_LIMIT + 1)
         count = 0
+        read_ahead = read_object(directory / 'inbox-read.json')  # read by mv2 held, past the read position
         for line in data[:READ_LIMIT].splitlines(keepends=True):
             if not line.endswith(b'\n'):
                 break
             message = json.loads(line)
             if not isinstance(message, dict):
                 return None
-            if message.get('schema') != 2 or message['delivery'] == 'inbox-only':
+            if (message.get('schema') != 2 or message['delivery'] == 'inbox-only') and message.get('id') not in read_ahead:
                 count += 1
                 if count >= INBOX_LIMIT:
                     return INBOX_LIMIT

@@ -314,8 +314,11 @@ def framed_text(root, message, *, at=None):
             origin = f' (in universe {records.properties(Path(scope) / "universe.json")["name"]})'
         except (OSError, ValueError, KeyError):
             origin = f' (in universe {scope})'
+    # A steer or follow-up that a focus held as inbox-only says so; it never reaches a harness.
+    held = (f' ({message["intended"]}, held while you were focused)'
+            if message.get('intended') in ('steer', 'follow-up') else '')
     age = _message_age(message.get('at'), at=at)
-    return f'Message from {name}{origin}{" (" + age + ")" if age else ""}:\n{message["text"]}'
+    return f'Message from {name}{origin}{held}{" (" + age + ")" if age else ""}:\n{message["text"]}'
 
 
 def _message_age(sent_at, *, at=None):

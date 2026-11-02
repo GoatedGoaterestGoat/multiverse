@@ -9,6 +9,10 @@ from .. import store, universe
 from ..universe import mailbox
 from ._common import add_agent, callback
 
+# What an unread message shows; `intended` marks a steer or follow-up that a focus held.
+FIELDS = ('at', 'from', 'text', 'delivery', 'intended')
+
+
 def configure(parser):
     add_agent(parser)
     parser.add_argument("--all", dest="all_messages", action="store_true", help="Browse full history, including native delivery")
@@ -48,7 +52,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
     def public_result(result):
         if all_messages:
             return result
-        return {**result, 'messages': [{key: message[key] for key in ('at', 'from', 'text', 'delivery') if key in message}
+        return {**result, 'messages': [{key: message[key] for key in FIELDS if key in message}
                                       for message in result['messages']]}
     cutoff = since_time(since)
     previous = None
@@ -100,7 +104,7 @@ def unread(root, agent):
     it takes only the inbox's own lock, so the dashboard can call it on every refresh."""
     access.require('observe', 'read inbox')
     directory = agents.directory(universe.resolve(root), agent, allow_damaged=True)
-    return [{key: message[key] for key in ('at', 'from', 'text', 'delivery') if key in message}
+    return [{key: message[key] for key in FIELDS if key in message}
             for message in mailbox.inbox(directory, limit=None, peek=True)['messages']]
 
 
@@ -131,7 +135,7 @@ def readable(root, result, empty='No unread messages.'):
     blocks = []
     for message in result['messages']:
         sender = message.get('from') or {}
-        if not sender.get('agent_id'):
+        if not sender.get('agent_id') and sender.get('core') is not True:
             sender = {**sender, 'name': 'user'}
         blocks.append(framed_text(root, {**message, 'from': sender}))
     return '\n\n'.join(blocks) if blocks else empty

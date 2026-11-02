@@ -1,6 +1,6 @@
 """End an agent's focus: messages reach it normally again. Says what waits in its inbox."""
 from ..store import read
-from ..universe import focus
+from ..universe import focus, mailbox
 from .focus import caller, target, unread
 
 
@@ -10,11 +10,21 @@ def configure(parser):
 
 
 def run(root=None, *, agent=None, json=False, as_user=False):
-    directory, _ = target(root, agent, as_user)
+    directory, own = target(root, agent, as_user)
     record = focus.end(directory)
     count, during = unread(directory, record["since"] if record else None)
+    held = len(_held(directory, record)) if record else 0
+    # Only an agent ending its own focus is told about the messages it held.
     return {"agent": read(directory / "properties.json")["name"], "focused": False, "was_focused": record is not None,
-            "unread": count, "unread_while_focused": during}
+            "unread": count, "unread_while_focused": during, "held_unread": held,
+            "note": focus.note(held) if own and held else None}
+
+
+def _held(directory, record):
+    try:
+        return mailbox.held(directory, focus.identity(record), peek=True)["messages"]
+    except (OSError, ValueError):
+        return []
 
 
 def cli_run(root=None, *, json=False, **options):
@@ -25,6 +35,13 @@ def cli_run(root=None, *, json=False, **options):
 def summary(result, own=False):
     """`Unfocused; …` and what waits in the inbox, for the agent itself or for the user."""
     name, count, during = result["agent"], result["unread"], result["unread_while_focused"]
+    if own and result.get("note"):
+        line = "Unfocused; messages reach you normally again. " + result["note"]
+        other = max(0, count - result["held_unread"])
+        if other:
+            line += (f" You also have {other} other unread inbox {'message' if other == 1 else 'messages'}: "
+                     f"read {'it' if other == 1 else 'them'} with mv2 inbox.")
+        return line
     if own:
         line = ("Unfocused; messages reach you normally again." if result["was_focused"]
                 else "You were not focused; messages already reach you normally.")

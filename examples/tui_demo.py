@@ -67,12 +67,13 @@ class DemoBackend:
         with self.lock:
             agent = self.find(root, reference)
             delivery = "inbox-only" if queue_only else delivery
-            if agent.get("focus") and delivery != "inbox-only":
-                return {"delivery": delivery, "state": "focused", "saved": False, "ok": False,
-                        "reason": f'{agent["name"]} is focused {focus.ends(agent["focus"])}.', "focus": agent["focus"]}
+            held = agent.get("focus") and delivery != "inbox-only"
             self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text,
-                                  "delivery": delivery, "at": datetime.now(timezone.utc).isoformat(),
-                                  "from": {"name": "user"}})
+                                  "delivery": "inbox-only" if held else delivery, **({"intended": delivery} if held else {}),
+                                  "at": datetime.now(timezone.utc).isoformat(), "from": {"name": "user"}})
+            if held:
+                return {"delivery": "inbox-only", "intended": delivery, "state": "held", "saved": True, "ok": True,
+                        "focus": agent["focus"]}
             return {"delivery": delivery, "state": "queued", "saved": True}
 
     def focus(self, root, reference, duration=None, turn=False):

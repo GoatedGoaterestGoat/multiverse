@@ -224,7 +224,7 @@ def _check_state(receipt, *, accepted):
 
 def _focused(name, held, results, present):
     """A retry refused, or stopped part way, because the recipient is focused."""
-    reason = f'{name} is focused {focus.ends(held)} and takes only inbox-only messages; retry after it unfocuses.'
+    reason = f'{name} is focused {focus.ends(held)}, so no steer or follow-up reaches it; retry after it unfocuses.'
     if present:
         present(f'{"The rest were not retried" if results else "Not retried"}: {reason}')
     return {'messages': results, 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held}

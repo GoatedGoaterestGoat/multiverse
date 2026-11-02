@@ -149,7 +149,7 @@ A plugin adds; it never alters mv2. It adds commands, columns, status items, cap
 | `agent.id`, `.name`, `.harness`, `.live`, `.status`, `.phase`, `.summary`, `.task`, `.universe`, `.directory`, `.record` | The agent as it was read; `agent.reload()` reads it again | `agents.read` to reload |
 | `agent.terminal(lines=30)`, `agent.usage()`, `agent.capabilities()`, `universe.doctor()` | The terminal's last lines; usage, capability and doctor results | `agents.read` |
 | `agent.resume(model=None, effort=None, wait=False)`, `agent.kill()` | `model` and `effort` (1.16) change the agent's own from that launch on | `agents.control` |
-| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`. A steer or follow-up to a focused agent is refused and not saved: `ok` is false and `state` is `"focused"` | `messages.send` |
+| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`. A steer or follow-up to a focused agent is saved as inbox-only: `ok` is true, `delivery` is `"inbox-only"` and `state` is `"held"` | `messages.send` |
 | `agent.ask(question)` | The answer to a side question that never enters the conversation | `messages.ask` |
 | `agent.slash(command, args="", timeout=600, wait=True)`, `agent.slash_result(id)` | A `CommandResult`: the harness's own command run in the agent (1.16); see [harness commands](#harness-commands) | `agents.control`; `agents.read` for the result |
 | `agent.slash_commands()` | A `CommandList` of what the agent's harness offers, and why mv2 refuses any (1.16) | `agents.read` |
