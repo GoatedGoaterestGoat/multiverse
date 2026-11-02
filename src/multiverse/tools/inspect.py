@@ -3,7 +3,7 @@ import re
 from ..universe import agents, focus
 from ..runtime import effects, lifecycle
 from .. import harnesses, universe
-from ..display import error_text, label, mode, state, notice_lines
+from ..display import clean, error_text, label, mode, state, notice_lines
 
 TAIL_LINES = 30
 
@@ -83,6 +83,7 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     notices = notice_lines(row.get('runtime', {}).get('launch_notices'), problems, modes)
     if json:
         result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
+                "model": row.get("model"), "effort": row.get("effort"),
                 "status": row.get("status"), "phase": row.get("phase"), "summary": row.get("summary", ""),
                 "error": error, "fallback": fallback, "focus": row.get("focus"),
                 "terminal": capture if capture else None, "note": note}
@@ -100,6 +101,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     reported = " — ".join(part for part in (row.get("phase"), " ".join(row.get("summary", "").split())) if part)
     out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error if damage else error_text(error, tail=5)}"] if error else []) \
         + ([f"Note: {fallback}"] if fallback else [])
+    if row.get('model'):
+        out.append(f"Model: {clean(row['model'])}" + (f" (effort: {clean(row['effort'])})" if row.get('effort') else ''))
     out.extend('Note: ' + notice for notice in notices)
     if row.get('delivery_problem'):
         out.append(row['delivery_problem'])

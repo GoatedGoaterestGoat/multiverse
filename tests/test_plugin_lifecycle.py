@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from multiverse.harnesses.types import CommandSpec
+from multiverse.harnesses.types import CommandSpec, ModelCheck
 from multiverse.plugins import config, loader
 from multiverse.runtime import lifecycle, rpc, runner
 from multiverse.store import read, write
@@ -90,10 +90,14 @@ class PluginLaunchTest(NativeBackendTest):
             with self.subTest(start=start):
                 if "resume" in start:
                     write(self.directory / "runtime.json", {**agents.runtime(self.directory), "state": "stopped"})
-                result, contexts = self.contexts(**start)
+                with patch.object(self.adapter, 'supports_launch_effort', True, create=True), \
+                        patch.object(self.adapter, 'check_model', return_value=ModelCheck(ok=True), create=True):
+                    result, contexts = self.contexts(**start, model='fixture-model', effort='high')
                 first, final = contexts[0], contexts[-1]
                 self.assertEqual(len(contexts), 2)  # a service launch is prepared twice, as before
+                self.assertEqual(result['effort'], 'high')
                 for context in (first, final):
+                    self.assertEqual(context.effort, 'high')
                     for key, value in self.expected(result).items():
                         self.assertEqual(context.environment[key], value, key)
                     self.assertTrue(context.environment["PATH"].startswith("/opt/mv2/bin" + os.pathsep))

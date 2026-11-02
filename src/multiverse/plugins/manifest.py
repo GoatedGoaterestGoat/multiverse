@@ -17,7 +17,7 @@ NAME_LENGTH = 40
 # A plugin's per-agent state is state/agents/<id>/NAME/, so it may not take a
 # name an agent directory already uses, or one core keeps for itself.
 RESERVED_NAMES = frozenset({
-    "launches", "claude-asks", "claude-receipts", "status-items", "events", "plugins", "host",
+    "launches", "claude-asks", "claude-receipts", "claude-commands", "slash", "status-items", "events", "plugins", "host",
     "state", "inbox", "properties", "runtime", "session", "mv2", "multiverse", "core",
 })
 # Extension points of this mv2's plugin API; a later minor version adds more.
@@ -35,7 +35,7 @@ EXTENSION_POINTS = frozenset({
 })
 # Event types core records; a plugin's own events are PLUGIN.*.
 CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status", "agent.exited", "agent.killed",
-               "agent.reported", "agent.session", "agent.moved", "agent.removed", "message.saved", "message.delivered",
+               "agent.reported", "agent.session", "agent.command", "agent.moved", "agent.removed", "message.saved", "message.delivered",
                "message.failed", "message.read", "universe.created", "refresh.applied")
 EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
@@ -47,7 +47,7 @@ LATER_CORE_ITEMS = frozenset({"focus"})
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 PERMISSIONS = {
     "agents.read": "read this universe's agents: names, state, reported work, terminal tails and usage",
-    "agents.control": "spawn, resume and kill agents in this universe",
+    "agents.control": "spawn, resume and kill agents in this universe, and run their harness's commands",
     "messages.send": "send messages to any agent in this universe, as this plugin",
     "messages.ask": "ask agents side questions",
     "messages.read": "read agents' messages",

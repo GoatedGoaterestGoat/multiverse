@@ -456,7 +456,8 @@ class GrantedPermissionTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             for level, allowed, held in (
                     ("observe", ["read this universe's agents"],
                      ["ask agents side questions (needs spend)", "send messages to any agent in this universe, as this "
-                      "plugin (needs act)", "spawn, resume and kill agents in this universe (needs act)"]),
+                      "plugin (needs act)", "spawn, resume and kill agents in this universe, and run their harness's "
+                      "commands (needs act)"]),
                     ("spend", ["read this universe's agents", "ask agents side questions"],
                      ["send messages to any agent in this universe, as this plugin (needs act)"]),
                     ("act", ["read this universe's agents", "ask agents side questions", "send messages to any agent"],

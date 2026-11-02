@@ -40,7 +40,7 @@ from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read
-from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply
+from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply, SlashCommand
 from . import models as model_table
 from . import pane
 from . import run as one_shot
@@ -59,10 +59,15 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
-BRIDGE = 'claude-mod-v2'  # the mod that reads a tag's send time
-# A mod that registered before it could, until it reloads: still connected, and sent tags without a send time,
-# since it would miss a tag it can't parse and show the model raw tags with no receipt.
-BRIDGES = ('claude-mod-v1', BRIDGE)
+BRIDGE = 'claude-mod-v3'  # the mod that also runs Claude's commands for mv2 (`mv2 slash`)
+# Mods that read a tag's send time. An older one (v1) is sent tags without one, and a mod older than BRIDGE is never
+# sent a command frame: it would miss a tag it can't parse and show the model the raw frame, with no result.
+SENT_BRIDGES = ('claude-mod-v2', BRIDGE)
+BRIDGES = ('claude-mod-v1', 'claude-mod-v2', BRIDGE)
+LIST_TIMEOUT = 10  # the mod answers a command list at once, from Claude's own
+COMMAND_BYTES = 1 << 20  # a command result holds at most 64 KiB of output, JSON-escaped
+# A name mv2 slash can address: Claude also lists MCP prompts under a display name with a space ('… (MCP)').
+COMMAND_NAME = re.compile(r'[^/\s\x00-\x1f][^\s\x00-\x1f]*')
 FUNCTION_HOOKS = 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'  # loads the mod: set for bridge launches only
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
@@ -534,6 +539,66 @@ def mod_receipt(path, identifier):
     return 'delivered', value['route'], at if type(at) is int and at > 0 else None
 
 
+COMMANDS = Path(__file__).with_name('commands.json')
+FORMS = ('runs', 'prompt', 'screen', 'settings', 'managed', 'person', 'hidden')
+RUNNABLE = ('runs', 'prompt', 'settings')
+
+
+def command_table():
+    """Claude Code's built-ins mv2 slash may run, as claude-support's version check classified them:
+    (the Claude Code version it was checked on, {name: {'bare': form, 'args': form}})."""
+    table = json.loads(COMMANDS.read_text())
+    commands = table['commands']
+    if not isinstance(commands, dict) or any(not isinstance(forms, dict) or not set(forms) <= {'bare', 'args'}
+                                             or not set(forms.values()) <= set(FORMS) for forms in commands.values()):
+        raise ValueError(f'{COMMANDS} does not classify its commands')
+    return table['claude_code'], commands
+
+
+def _agent_name(session):
+    """The agent's name from its record beside the session file, for advice that names it; None when unreadable."""
+    record = _json_record(Path(session.session_file).parent / 'properties.json', 1 << 20) if session.session_file else None
+    name = record.get('name') if record else None
+    return name if isinstance(name, str) and name.strip() and not any(c.isspace() for c in name) else None
+
+
+def _form_refusal(forms, version):
+    """Why these forms of a built-in don't run, each a screen or not in the table at all, with the version once."""
+    why = ['it opens an interactive screen' if form == 'screen' else "it isn't classified" for form in forms]
+    reason = why[0] if len(set(why)) == 1 else f'Bare, {why[0]}; with arguments, {why[1]}'
+    return f"{reason} {'on' if forms[-1] == 'screen' else 'for'} Claude Code {version}"
+
+
+def slash_entry(item, version, table):
+    """One listed command as mv2 slash describes it: whether it needs arguments, or why it never runs."""
+    name = item['name']
+    entry = SlashCommand(name=name, description=item.get('description') or '', source=item.get('source') or 'builtin',
+                         plugin=item.get('plugin'))
+    if entry.source != 'builtin':
+        return entry  # a plugin's, the person's or an MCP server's: it prints or prompts
+    forms = table.get(name)
+    if forms is None:
+        return replace(entry, refused=f'Not classified for Claude Code {version}: mv2 runs a built-in command only once '
+                                      'its version check has classified it')
+    bare, args = forms.get('bare'), forms.get('args')
+    if 'managed' in (bare, args):
+        return replace(entry, refused='mv2 manages this; use the mv2 command instead')
+    if 'person' in (bare, args):
+        return replace(entry, refused='Claude runs it only when the person asks for it in the session')
+    if 'hidden' in (bare, args):
+        return replace(entry, refused='Its output is written into the conversation for the model, not returned to mv2')
+    # A settings form also saves the choice as the person's Claude default for every new session: core runs it only
+    # for a person (decision H1) and says so.
+    entry = replace(entry, changes_settings='settings' in (bare, args))
+    if bare not in RUNNABLE:
+        if args not in RUNNABLE:
+            # What is left is a screen or a form the table leaves out (not classified), and each says which.
+            reason = _form_refusal((bare, args), version)
+            return replace(entry, refused=reason[0].upper() + reason[1:])
+        return replace(entry, needs_args=True)
+    return entry
+
+
 RECEIPT_BYTES = 1 << 16  # a receipt is a few short fields; anything larger isn't one
 ANSWER_BYTES = 1 << 22  # an ask answer holds the model's text
 
@@ -805,11 +870,24 @@ class ClaudeAdapter(ConfiguredAdapter):
         adapter.system_prompt_snapshot = snapshot
         return adapter
 
+    # `--effort LEVEL`: Claude's own flag for the current session only; it saves nothing to the person's settings.
+    supports_launch_effort = True
+
+    @staticmethod
+    def _with_effort(command, context):
+        effort = getattr(context, 'effort', None)
+        if not effort:
+            return command
+        argv = list(command.argv)
+        at = argv.index('--') if '--' in argv else len(argv)
+        argv[at:at] = ['--effort', effort]
+        return replace(command, argv=tuple(argv) if isinstance(command.argv, tuple) else argv)
+
     def spawn(self, context):
-        return self._with_bridge(super().spawn(context), context)
+        return self._with_bridge(self._with_effort(super().spawn(context), context), context)
 
     def resume(self, session, context):
-        command = self._snapshot_flag(super().resume(session, context))
+        command = self._with_effort(self._snapshot_flag(super().resume(session, context)), context)
         note = fresh_start(session, context.environment)
         fresh = self._reserve_session(command, session.native_id) if note else None
         # The note itself is the resume's notice (`resume_notice`), which core shows and keeps with the launch.
@@ -1104,6 +1182,9 @@ class ClaudeAdapter(ConfiguredAdapter):
                          else Capability('unavailable', bridge.reason or 'No agent directory recorded'))
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
+        problem = self._slash_bridge(session)
+        result['slash'] = (Capability('supported', mechanism='claude-mod-command') if problem is None
+                           else Capability('unavailable', problem.reason))
         return result
 
     def _would_support(self, executor):
@@ -1121,7 +1202,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             why = problem and (f'Launches of this harness refuse to start: {problem}' if self.bridge_policy == 'required'
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
-                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt'}
+                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt', 'slash': 'claude-mod-command'}
         result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
                          else Capability('unavailable', why, required=name.startswith('send_')))
                   for name, mechanism in mechanisms.items()}
@@ -1342,7 +1423,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         # Always `next`: the mod decides from the tag when a follow-up runs.
         # When the sender sent it, for the age the mod adds once the model gets it; only a plain timestamp, so the
         # attribute can never end the tag.
-        sent = (f' sent={message.sent_at}' if session.bridge == BRIDGE and isinstance(message.sent_at, str)
+        sent = (f' sent={message.sent_at}' if session.bridge in SENT_BRIDGES and isinstance(message.sent_at, str)
                 and SENT.fullmatch(message.sent_at) else '')
         try:
             opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}{sent}>>'
@@ -1395,6 +1476,116 @@ class ClaudeAdapter(ConfiguredAdapter):
                                     "questions only after one, so ask again after the agent's next response")
             return NativeResult('error', f'Claude did not answer: {record.get("reason", "unknown reason")}')
         return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
+
+    def _slash_bridge(self, session):
+        """(None, None) when this launch's mod runs Claude's commands for mv2, else (None, the NativeResult why not)."""
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return unavailable(bridge)
+        if session.bridge != BRIDGE:
+            name = _agent_name(session)
+            restart = f'mv2 kill {name}, then mv2 resume {name}' if name else 'mv2 kill, then mv2 resume'
+            return NativeResult('unavailable', "This launch's multiverse mod predates mv2 slash; it runs commands from "
+                                f"the agent's next start ({restart})")
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        return None
+
+    def _command_frame(self, session, executor, mode, frame_id, body):
+        target, token = self._inbox(session)
+        if target is None:
+            return NativeResult('unavailable', token)
+        frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': frame_id,
+                 'message': {'role': 'user', 'content': f'<<MV2 {mode} id={frame_id}>>{json.dumps(body, ensure_ascii=False)}{CLOSE}'}}
+        return executor.write_lines(target, [json.dumps({'type': 'auth', 'token': token}),
+                                             json.dumps(frame, ensure_ascii=False)])
+
+    def slash_commands(self, session, executor):
+        """The commands the person can run in this session now, from Claude's own list through the mod, each with
+        whether mv2 slash needs its arguments or why it never runs it (commands.json, for built-ins)."""
+        problem = self._slash_bridge(session)
+        if problem is not None:
+            return problem
+        list_id = str(uuid4())
+        written = self._command_frame(session, executor, 'commands', list_id, {})
+        if written.state != 'ok':
+            return written
+        path = Path(session.session_file).parent / 'claude-commands' / f'{list_id}.json'
+        deadline = time.monotonic() + LIST_TIMEOUT
+        while time.monotonic() < deadline:
+            record = _json_record(path, COMMAND_BYTES)
+            if record and record.get('id') == list_id and record.get('state') == 'listed':
+                path.unlink(missing_ok=True)
+                items = record.get('commands')
+                if not isinstance(items, list) or not all(isinstance(item, dict) and isinstance(item.get('name'), str)
+                                                          for item in items):
+                    return NativeResult('error', "The mod's command list is damaged")
+                version, table = command_table()
+                return NativeResult('ok', "Claude's own command list", [asdict(slash_entry(item, version, table))
+                                                                        for item in items
+                                                                        if COMMAND_NAME.fullmatch(item['name'])])
+            time.sleep(0.1)
+        return NativeResult('unavailable', f'The multiverse mod did not list the commands within {LIST_TIMEOUT} s')
+
+    def run_slash(self, session, request, executor):
+        """Hand one command to the mod, which runs it as if the person typed it once the session is idle and writes
+        claude-commands/<id>.json. Submits once and returns at once: the result is slash_result's to read."""
+        problem = self._slash_bridge(session)
+        if problem is not None:
+            return problem
+        try:
+            frame_id = normalize_session_id(request.id)
+        except ValueError:
+            return NativeResult('error', 'A command run needs a UUID')
+        version, table = command_table()
+        forms = table.get(request.command)
+        form = forms and forms.get('args' if request.args.strip() else 'bare')
+        if forms is not None and form not in RUNNABLE:
+            how = 'with arguments' if request.args.strip() else 'without arguments'
+            reason = (f'/{request.command} {how}: {_form_refusal((form,), version)}' if form in (None, 'screen')
+                      else slash_entry({'name': request.command, 'source': 'builtin'}, version, table).refused)
+            return NativeResult('ok', 'Refused', {'state': 'refused', 'reason': reason})
+        written = self._command_frame(session, executor, 'command', frame_id,
+                                      {'command': request.command, 'args': request.args})
+        if written.state != 'ok':
+            return written
+        return NativeResult('unknown', 'Queued in the Claude session; it runs once the session is idle',
+                            {'state': 'queued'})
+
+    def slash_result(self, session, request, executor=None):
+        """The mod's result for one command run, read only: works after the launch ended. A missing file is
+        unknown and says so (absent); one that can't be read or doesn't describe this run is plain unknown."""
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        try:
+            run_id = normalize_session_id(request.id)
+        except ValueError:
+            return NativeResult('error', 'A command run needs a UUID')
+        record = _json_record(Path(session.session_file).parent / 'claude-commands' / f'{run_id}.json', COMMAND_BYTES)
+        if record is None:
+            return NativeResult('unknown', 'No result yet', {'absent': True})
+        state = record.get('state') if record else None
+        if not record or record.get('id') != run_id or state not in ('ran', 'failed', 'refused'):
+            return NativeResult('unknown', 'The command result could not be read')
+        if state != 'ran':
+            reason = record.get('reason')
+            return NativeResult('ok', 'Not run', {'state': state, 'reason': reason if isinstance(reason, str) else None})
+        output, model, native_id = record.get('text'), record.get('model'), record.get('session_id')
+        if (output is not None and not isinstance(output, str) or type(record.get('prompted')) is not bool
+                or model is not None and not isinstance(model, str) or native_id is not None and not isinstance(native_id, str)):
+            return NativeResult('unknown', 'The command result could not be read')
+        effort = record.get('effort')
+        if effort is not None and not isinstance(effort, str):
+            return NativeResult('unknown', 'The command result could not be read')
+        _, table = command_table()
+        form = (table.get(request.command) or {}).get('args' if request.args.strip() else 'bare')
+        value = {'state': 'ran', 'output': output, 'prompted': record['prompted'], 'model': model,
+                 'session_id': native_id, 'saved_default': form == 'settings'}
+        # Claude has no call that reads the session's effort: only /effort confirms one, from what it saved, and
+        # only when the session's model takes that level (Claude saves a level a model ignores, too).
+        if effort is not None and model_table.takes_effort(model, effort):
+            value['effort'] = effort
+        return NativeResult('ok', 'Ran', value)
 
     def get_delivery(self, session, message_id, executor=None):
         """The mod's receipt for this delivery attempt (core gives each attempt its own message ID): delivered once

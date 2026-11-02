@@ -15,6 +15,7 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 | `--harness` | A harness configured in this universe. The default is `codex` |
 | `--task` / `--prompt`, `--task-file` | The first prompt. Leave it out to start the agent idle |
 | `--model` | Override the harness's default model for this agent |
+| `--effort` | Set effort for this agent only; currently supported by Claude, with a refusal for unsupported harnesses or levels. Give `--model` too when the launch has no recorded or configured model. `default` uses the harness default |
 | `--wait`, `--wait-timeout SECONDS` | Return only once the agent can receive messages or has failed. The timeout defaults to 60 s |
 
 Without `--wait`, `spawn` returns as soon as the launch is registered. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
@@ -61,11 +62,15 @@ Press `Ctrl-b d` to detach from an attached terminal; the agent keeps running. [
 mv2 kill worker
 mv2 resume worker
 mv2 resume worker --model opus --wait
+mv2 resume worker --model sonnet --effort high
+mv2 resume worker --effort default
 ```
 
 `kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane, then prints `Stopped NAME.` If mv2 couldn't confirm the work was cancelled, the line says so and why; `--json` prints the record. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`. If a caller storage override is ignored to preserve the saved conversation, the resume summary explains it on a separate line (also with `--wait`); `--json` includes it in `notices`. A message that wakes the agent returns the same notice.
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
+
+`--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other Claude sessions. `--effort default` clears the saved effort and uses the harness default. Changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer Claude's effective default from the person's settings, account and provider.
 
 If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
 agent's folder, name and inbox and starts a new conversation in the calling

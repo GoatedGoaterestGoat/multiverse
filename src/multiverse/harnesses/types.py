@@ -19,11 +19,11 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
-        'models', 'check_model', 'run_options', 'display_pane',
+        'models', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
-    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy'), 'act'),
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash'), 'act'),
 }
 
 
@@ -230,6 +230,7 @@ class LaunchContext:
     # None preserves the complete selection used by existing callers; an empty
     # tuple proves no storage keys. Omitted legacy keys retain native inheritance.
     storage_keys: tuple[str, ...] | None = None
+    effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,7 +245,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash')
 
 
 @dataclass(frozen=True)
@@ -343,6 +344,45 @@ class HarnessAdapter(Protocol):
     def get_delivery(self, session: SessionHandle, message_id: str, executor: Executor) -> NativeResult: ...
     def ask(self, session: SessionHandle, question: str, executor: Executor) -> NativeResult: ...
     def get_usage(self, session: SessionHandle, executor: Executor | None = None) -> NativeResult: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlashCommand:
+    name: str
+    description: str = ''
+    source: str = 'builtin'
+    plugin: str | None = None
+    needs_args: bool = False
+    refused: str | None = None
+    changes_settings: bool = False  # also saves the person's defaults; only an operator may run it
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlashRequest:
+    id: str
+    command: str
+    args: str = ''
+    wait_until: float = 0.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandResult:
+    id: str
+    command: str
+    args: str
+    state: str
+    output: str | None = None
+    prompted: bool = False
+    changed: tuple[str, ...] = ()
+    reason: str | None = None
+    saved_default: bool = False
+
+
+class SlashProvider(Protocol):
+    """Live command discovery, one submission, and read-only correlated receipts."""
+    def slash_commands(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
+    def run_slash(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
+    def slash_result(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
 
 
 class AttachmentProvider(Protocol):

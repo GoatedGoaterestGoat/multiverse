@@ -25,6 +25,7 @@ import copy
 import functools
 import inspect
 from dataclasses import dataclass, field, fields
+import math
 import os
 from pathlib import Path
 import time
@@ -1039,12 +1040,13 @@ class Universe:
                 return Agent(row, self._plugin)
         raise Error(f"No agent named {reference} here")
 
-    def spawn(self, name, *, harness="codex", task=None, model=None, wait=False):
-        """Start a new agent (needs agents.control); returns it."""
+    def spawn(self, name, *, harness="codex", task=None, model=None, effort=None, wait=False):
+        """Start a new agent (needs agents.control); returns it. `model` and `effort` (1.16) are that agent's own,
+        used at each launch, never saved as the person's defaults."""
         self._plugin._need("agents.control")
         from ..tools import spawn
         with _acting(self._plugin._loaded, "act", self, "spawn"):
-            _call(spawn.run, self.path, name=name, task=task, harness=harness, model=model, wait=wait)
+            _call(spawn.run, self.path, name=name, task=task, harness=harness, model=model, effort=effort, wait=wait)
         return self.agent(name)
 
     def catalog(self):
@@ -1542,7 +1544,8 @@ def _from_core(kind, value):
     """An API result from core's result of the same shape: core imports no API types, so a field core adds later
     is one line here."""
     known = {item.name for item in fields(kind)}
-    values = {name: getattr(value, name) for name in known if hasattr(value, name)}
+    values = ({name: value[name] for name in known if name in value} if isinstance(value, dict)
+              else {name: getattr(value, name) for name in known if hasattr(value, name)})
     if kind is TranscriptInfo:
         values["earlier"] = tuple(_from_core(Generation, item) for item in values.get("earlier") or ())
     elif kind is RowPage:
@@ -1553,6 +1556,10 @@ def _from_core(kind, value):
         values["models"] = tuple(_from_core(Model, item) for item in values.get("models") or ())
     elif kind is Reply:
         values["usage"], values["lost"] = dict(values.get("usage") or {}), tuple(values.get("lost") or ())
+    elif kind is CommandList:
+        values["commands"] = tuple(_from_core(SlashCommand, item) for item in values.get("commands") or ())
+    elif kind is CommandResult:
+        values["changed"] = tuple(values.get("changed") or ())
     elif kind is RunOptions:
         values["reason"] = values.get("reason") or None
         values["formats"] = tuple(values.get("formats") or ())
@@ -1565,6 +1572,43 @@ def _choices(value, what):
     if isinstance(value, str) or not all(isinstance(item, str) for item in value):
         raise Error(f"{what} takes a set of names")
     return frozenset(value)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlashCommand:
+    """A command an agent's harness offers (1.16), named without its slash ("compact" for /compact)."""
+    name: str
+    description: str = ""
+    source: str = ""            # builtin, plugin, user or mcp; treat one you don't know like plugin
+    plugin: str | None = None   # the plugin that added it, where the harness says
+    needs_args: bool = False    # bare, it only opens a screen, so it is refused without arguments
+    refused: str | None = None  # why mv2 never runs it (and what to use instead), else None
+    changes_settings: bool = False  # it also saves the person's harness defaults: it runs only for the person
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandList:
+    """What an agent's harness offers now (1.16). `state` is ok, or unavailable with `reason`: a stopped agent, a
+    launch without mv2's bridge, or a harness that doesn't run its commands for mv2."""
+    state: str
+    reason: str | None = None
+    commands: tuple = ()        # SlashCommand
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandResult:
+    """One run of a harness command (1.16). `state`: ran; queued (the wait ended first: it stays queued and may still
+    run, so read it later with agent.slash_result(id), never run it again); refused, failed or lost (the agent stopped
+    before it ran), each with `reason`. Treat a state a later minor adds like failed."""
+    id: str
+    command: str
+    args: str = ""
+    state: str
+    output: str | None = None   # what it printed, at most 64 KiB; None when it printed nothing
+    prompted: bool = False      # it expanded into a prompt: the agent's reply is a turn, not this output
+    changed: tuple = ()         # what mv2 recorded because of it: "session", "model", "effort"
+    reason: str | None = None
+    saved_default: bool = False  # it was also saved as the person's own default (a person's /model, say)
 
 
 @dataclass(frozen=True)
@@ -1632,17 +1676,60 @@ class Agent:
         with _acting(self._plugin._loaded, "observe", self.universe, "reading capabilities"):
             return _call(capabilities.run, self.universe.path, agent=self.id)
 
-    def resume(self, *, wait=False):
+    def resume(self, *, model=None, effort=None, wait=False):
+        """Resume the agent (needs agents.control). `model` and `effort` (1.16) change its own, from this launch
+        on, as `mv2 resume --model --effort` does: the way to change them that a plugin has, since /model and
+        /effort run only for the person."""
         self._plugin._need("agents.control")
         from ..tools import resume
         with _acting(self._plugin._loaded, "act", self.universe, "resume"):
-            return _call(resume.run, self.universe.path, agent=self.id, wait=wait, json=True)
+            return _call(resume.run, self.universe.path, agent=self.id, model=model, effort=effort, wait=wait,
+                         json=True)
 
     def kill(self):
         self._plugin._need("agents.control")
         from ..tools import kill
         with _acting(self._plugin._loaded, "act", self.universe, "kill"):
             return _call(kill.run, self.universe.path, agent=self.id)
+
+    def slash_commands(self):
+        """The commands this agent's harness offers now, each with why mv2 refuses it if it does (1.16; observe,
+        needs agents.read). Unavailable, with the reason, for a stopped agent or a harness that can't run them."""
+        self._plugin._need("agents.read")
+        from ..runtime import slash
+        with _acting(self._plugin._loaded, "observe", self.universe, "listing an agent's commands"):
+            return _from_core(CommandList, _call(slash.commands, self.universe.path, self.id))
+
+    def slash(self, command, args="", *, timeout=600, wait=True):
+        """Run the harness's own command, as if the person typed it (1.16; act, needs agents.control): `command`
+        named without its slash ("compact", "model"), `args` as the person would type them ("sonnet"). It joins
+        the harness's queue and runs once the agent is idle, never mid-turn. Waits up to `timeout` seconds; with
+        `wait=False`, or when the wait ends first, the result is queued: read it with slash_result(id), never run
+        it again. A command mv2 manages (exit, resume, ...), a bare command that only opens a screen, one that
+        changes the person's settings (changes_settings: /model, /effort, ...; use resume(model=, effort=)), or any
+        on a focused agent comes back refused, with the reason and what to use instead. Not for column, panel or
+        settings-check code, which runs as observe."""
+        self._plugin._need("agents.control")
+        if not isinstance(command, str) or not command.strip() or not isinstance(args, str):
+            raise Error("slash(command, args) takes a command name and its arguments as text")
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0
+                or not isinstance(wait, bool)):
+            raise Error("slash() takes a number of seconds (0 or more) as timeout and True or False as wait")
+        from ..runtime import slash
+        caller = {"kind": "plugin", "name": self._plugin.name}  # not a person: refused on a focused agent
+        with _acting(self._plugin._loaded, "act", self.universe, f"running {command.strip()}"):
+            return _from_core(CommandResult, _call(slash.run, self.universe.path, self.id, command, args,
+                                                   timeout=timeout, wait=wait, caller=caller))
+
+    def slash_result(self, id):
+        """The result of an earlier slash() run on this agent, by its id, as it stands now (1.16; observe, needs
+        agents.read)."""
+        self._plugin._need("agents.read")
+        if not isinstance(id, str) or not id:
+            raise Error("slash_result() takes a run's id")
+        from ..runtime import slash
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading a command's result"):
+            return _from_core(CommandResult, _call(slash.result, self.universe.path, self.id, id))
 
     def send(self, text, delivery="steer"):
         """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).

@@ -262,7 +262,7 @@ where to look, and core can check, edit and refresh them the same way:
   `state/agents/<id>/NAME/`, set through the plugin's own command or screen.
 - **Reserved names.** A plugin may not be named after something an agent
   directory already holds (`launches`, `claude-asks`, `claude-receipts`,
-  `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
+  `claude-commands`, `slash`, `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
   Compaction's existing `state/agents/<id>/compaction/` already fits this rule,
   so it needs no move.
 
@@ -412,6 +412,7 @@ caller can forget one:
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
 | `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`), a session pointer is recovered, or `--start-fresh` retires a conversation that is gone (`sessions.retire`, reason `missing-conversation`), for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
+| `agent.command` | `runtime/slash.py`, when a harness command's run record is written: submitted, ran, refused by the harness, failed or lost (1.16) | command (its name), state, caller (`kind` person, plugin with its `name`, or agent with its `agent_id`, `universe` and `name`); never its arguments or output |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
@@ -594,7 +595,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 15)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 16)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,

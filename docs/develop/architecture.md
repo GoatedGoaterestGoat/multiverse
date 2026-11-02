@@ -29,7 +29,7 @@ Dependencies point one way:
 5. `runtime` imports everything above.
 6. The entry points sit on top: `tools`, `ui`, `cli`, and `plugins/__main__.py` (the helper actions that harness hooks run).
 
-`runtime.native` imports `runtime.lifecycle` inside one function, to wake a stopped agent. That import is the only cycle.
+`runtime.native` imports `runtime.lifecycle` inside one function, to wake a stopped agent, and `runtime.slash` inside snapshot reconciliation to settle pending command receipts. These runtime edges are local imports; adapters never import runtime.
 
 The top-level `runner.py`, `statusline.py` and `recovery.py` are stubs that forward to `runtime.runner`, `terminal.statusline` and `runtime.recovery`. Processes started from an older layout run them by path or module name. Don't add code to them.
 

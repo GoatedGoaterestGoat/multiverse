@@ -14,22 +14,23 @@ def configure(parser):
     task.add_argument("--task", "--prompt", help="Initial prompt sent to the new agent")
     task.add_argument("--task-file", type=Path)
     parser.add_argument("--model")
+    parser.add_argument("--effort", help="Effort for this agent only; requires harness support and a known --model; default uses the harness default")
     add_wait(parser)
     parser.add_argument("--json", action="store_true", help="Print the full launch record as JSON")
 
 
-def run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, wait=False, wait_timeout=60,
+def run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, effort=None, wait=False, wait_timeout=60,
         json=False):  # `json` is the command line's presentation flag: the record is always returned here
     root = universe.resolve(root)
     prompt = Path(task_file).read_text() if task_file is not None else task
-    return lifecycle.start(root, name, prompt, harness, model, wait=wait, wait_timeout=wait_timeout)
+    return lifecycle.start(root, name, prompt, harness, model, effort=effort, wait=wait, wait_timeout=wait_timeout)
 
 
-def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, wait=False,
+def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, effort=None, wait=False,
             wait_timeout=60, json=False):
     try:
         record = run(root, name=name, task=task, task_file=task_file, harness=harness, model=model,
-                     wait=wait, wait_timeout=wait_timeout)
+                     effort=effort, wait=wait, wait_timeout=wait_timeout)
     except (RuntimeError, ValueError) as error:
         if json:
             from ._launch import failure_record

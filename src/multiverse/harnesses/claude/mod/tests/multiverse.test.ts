@@ -210,7 +210,7 @@ describe('status', () => {
     expect(w.reports).toEqual([])
     await $.turn.start({ text: 'go', turnId: 't1' })
     await w.clock.settle()
-    expect(w.reports.at(-1)).toEqual(['/python', '-m', 'multiverse.tools.runtime_update', '--status', 'working', '--bridge', 'claude-mod-v2'])
+    expect(w.reports.at(-1)).toEqual(['/python', '-m', 'multiverse.tools.runtime_update', '--status', 'working', '--bridge', 'claude-mod-v3'])
   })
 
   test('idle when the session starts, working in a turn, waiting on a question, idle after', async ($, on) => {

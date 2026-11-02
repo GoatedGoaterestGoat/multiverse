@@ -63,7 +63,7 @@ Codex checks the native thread UUID in a rollout's metadata header under the can
 
 | Type | Fields you use |
 | --- | --- |
-| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
+| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `effort`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
 | `SessionHandle` | `agent_id`, `harness`, `workspace`, `launch_id`, `native_id`, `session_file`, `state`, `endpoint`, `bridge`, `native_mode` |
 | `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment` |
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
@@ -72,6 +72,8 @@ Codex checks the native thread UUID in a rollout's metadata header under the can
 For legacy storage adoption, `LaunchContext.storage_keys` lists proven harness storage variables, never `HOME`. A default-storage adoption can retain `HOME` in the launch environment without adding it to this mask. `None` keeps the complete selection used by existing callers; an empty tuple proves none. A listed key absent from `environment` is known unset; an omitted key is unknown and retains native inheritance. Adapters still enforce their own conversation's identity requirements.
 
 ### Rules
+
+An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude supports it; Codex and Pi currently refuse it.
 
 - **Only describe.** Return specs and results. Core starts processes, owns tmux, writes `runtime.json` and holds the locks. Reach the native side only through the executor: `executor.request`, `executor.rpc` or `executor.write_lines`.
 - **No shell.** `argv` runs as given, so prompts and IDs stay literal.

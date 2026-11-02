@@ -323,6 +323,19 @@ def _observed(adapter, session):
 
 
 def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+    """Follow session lineage and completed command receipts before exposing the saved settings."""
+    properties, facts = _session_snapshot(root, directory, properties, facts, adapter=adapter,
+                                          launch_locked=launch_locked)
+    if not (directory / 'slash' / 'pending.json').exists():
+        return properties, facts
+    if not launch_locked:
+        with _snapshot_lock(directory):
+            return session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
+    from . import slash
+    return slash.reconcile(root, directory, properties, facts, adapter=adapter), facts
+
+
+def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
     """Reconcile adapter evidence before using a native ID. No native probes.
 
     A provider owns the evidence checks. Core owns launch fencing, the CAS,

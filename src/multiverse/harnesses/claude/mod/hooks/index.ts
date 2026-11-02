@@ -33,15 +33,15 @@ import { registerUsage } from './usage'
 // `<<MV2>>` alone is the first version's tag, still found in older history.
 // `id=` names one delivery attempt (core gives a retry an ID of its own), so a receipt is about that attempt.
 // `sent=` is when the sender sent it (core's record time); older tags have none.
-const TAG = /<<MV2(?: (steer|follow-up|ask))?(?: id=([0-9a-fA-F-]{36}))?(?: sent=([0-9][0-9T:.+\-Z]*))?>>([\s\S]*)<<\/MV2>>/
+const TAG = /<<MV2(?: (steer|follow-up|ask|command|commands))?(?: id=([0-9a-fA-F-]{36}))?(?: sent=([0-9][0-9T:.+\-Z]*))?>>([\s\S]*)<<\/MV2>>/
 
-type Message = { text: string; mode: "steer" | "follow-up" | "ask"; id?: string; sent?: string }
+type Message = { text: string; mode: "steer" | "follow-up" | "ask" | "command" | "commands"; id?: string; sent?: string }
 
 // The tagged message in a text; undefined when the text carries none.
 function tagged(text: string): Message | undefined {
   const match = TAG.exec(text)
   if (match === null) return undefined
-  const mode = match[1] === "follow-up" || match[1] === "ask" ? match[1] : "steer"
+  const mode = match[1] === "follow-up" || match[1] === "ask" || match[1] === "command" || match[1] === "commands" ? match[1] : "steer"
   return { text: match[4] ?? "", mode, id: match[2], sent: match[3] }
 }
 
@@ -233,8 +233,9 @@ async function report($: EngineInterface) {
     while (!registered || reported !== status()) {
       const value = status()
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
-      // v2 reads a tag's send time; mv2 sends one only to a mod that registered it.
-      if (!registered) argv.push("--bridge", "claude-mod-v2")
+      // v2 reads a tag's send time and v3 also runs Claude's commands for mv2; mv2 sends either only to a mod that
+      // registered it.
+      if (!registered) argv.push("--bridge", "claude-mod-v3")
       let result
       try {
         result = await $.process.run(argv, { timeoutMs: 10000, env: await pythonEnv($) })
@@ -377,7 +378,9 @@ function waitingFor(id: string | undefined): Waiting | undefined {
 // Not delivered, as far as the mod can tell: Claude refused it or never stored it. A receipt names one attempt.
 // It has a file of its own beside the delivery receipt, and a delivery wins wherever both exist, so a refusal
 // whose write finishes after the row was stored, even across a reload, never hides the delivery.
-// Only Claude's own refusal is definite, and so retryable. A row still missing after a timeout may yet come:
+// Definite, and so retryable, are Claude's own refusal and the mod's before it queued anything (a message kept out
+// of Claude's queue so it can't overtake an earlier command; it never called next()). Once a message is queued it
+// may yet run, so nothing later is definite. A row still missing after a timeout may yet come:
 // Claude holds a taken message while a local command such as /compact, or a dialog, holds its turn, and stores
 // it afterwards, so a retry then would run it twice. Core reports that one as not confirmed. Claude refusing the
 // held submit afterwards is the proof, so its refusal replaces an unsure one; an unsure one never replaces it.
@@ -418,12 +421,24 @@ async function aged($: EngineInterface, text: string, sent: string | undefined):
   return sent === undefined ? text : withAge(text, agePhrase(sent, await $.clock.now()))
 }
 
+// mv2's own entries into Claude's queue go in the order they reached the mod: a command is checked against Claude's
+// list before it runs, so a prompt that arrives just after it must wait for that check, or a follow-up would overtake
+// the command in Claude's first-in, first-out queue.
+let lane: Promise<void> = Promise.resolve()
+function inLane(step: () => Promise<void>) {
+  // A step that fails must not stop the ones after it.
+  lane = lane.then(step).catch(() => undefined)
+}
+// How long a message entering Claude's queue as a peer prompt waits for the entries before it in the lane (a command's
+// check against Claude's list, which Claude answers at once): bounded, so the hook it waits in never runs out of time.
+const ADMIT_WAIT_MS = 2000
+
 // Submit as the person's own words: a turn of its own once the session is idle.
 function submit($: EngineInterface, message: Message) {
   const entry = hold(message, "submitted")
   if (idle()) expireLater($, [entry])
   // A hook must not wait for its own submit, so leave the hook first.
-  $.clock.after(0, () => {
+  $.clock.after(0, () => inLane(async () => {
     $.prompt.submit({ text: message.text, asUser: true }).then((result) => {
       if (result === undefined || result === null || typeof result !== "object" || !("drop" in result)) return
       // Refused, so it never enters the conversation: forget it, and send later messages the peer way.
@@ -432,7 +447,7 @@ function submit($: EngineInterface, message: Message) {
       interrupted = true
       $.ui.log(`multiverse: message not submitted: ${String(result.drop)}`)
     }, (error) => $.ui.log(`multiverse: message not submitted: ${String(error)}`))
-  })
+  }))
 }
 
 async function receipt($: EngineInterface, entry: { id?: string }, route: string) {
@@ -453,6 +468,163 @@ async function answer($: EngineInterface, message: Message) {
     ? { id: message.id, answered: true, text: result.text, usage: result.usage, at }
     : { id: message.id, answered: false, reason: result.reason, usage: "usage" in result ? result.usage : undefined, at }
   await $.fs.write(`${directory}/claude-asks/${message.id}.json`, JSON.stringify(record) + "\n")
+}
+
+// Commands mv2 manages itself, refused here too (core refuses them first): a second guard, matched against the name
+// exactly as Claude's own list gives it.
+const MANAGED = new Set(["exit", "quit", "resume", "login", "logout", "restart", "multiverse"])
+const OUTPUT_LIMIT = 64 * 1024
+
+// A command that expands into a prompt (a skill, a plugin's or an MCP prompt) starts a main-loop turn whose text names
+// it (`<command-name>/NAME</command-name>`), as the run resolves: just before it or, more often, just after. The
+// command a run is waiting on, or has just finished with no output, and whether its turn started.
+// Several runs can wait at once (queued behind a busy turn), so each has its own watch, oldest first.
+// `before` is the conversation as the run was handed to Claude: a run that resolves without changing it stored no
+// line of its own, so a same-name line already at the end belongs to an earlier run.
+// `overtaken`: a later run of the same command was handed over while this one waited; it may run as soon as this
+// one resolves, so the end of the conversation could be its line, and none is read back for this run.
+// `started`: this run's own row reached session.append under the multiverse plugin's name (/compact's `/compact`
+// prompt row, another command's `<command-name>` row), so the run is the one Claude runs. `contested`: a row of the
+// same command came from anyone else (the person's own, which Claude files as the engine's, or another plugin's) while
+// this run waited, so a line at the end may be theirs. A line is read back only for a started, uncontested run.
+type Watch = { name: string; prompted: boolean; seen?: () => void; before?: string; overtaken?: boolean;
+  started?: boolean; contested?: boolean }
+const watching: Watch[] = []
+const PROMPT_WINDOW_MS = 2000
+// What Claude shows for a command that prints only on screen (/compact's "Compacted (ctrl+o to see full summary)",
+// /effort's "Set effort level to ..."): $.command.run answers those with no text (2.1.316), and the session stores
+// the line as a user row right after the command's own `<command-name>` row, /compact's past session.append. So it is
+// read back from the end of the conversation, where it is the last row (one that isn't last belongs to an earlier
+// run, or to the person's). A line Claude stores as a notice, such as /compact's "Error: No messages to compact" on
+// a session with no messages, never reaches the mod.
+const COMMAND_ROW = /^\s*<command-name>\/([^<\s]+)<\/command-name>/
+const OUTPUT_ROW = /^\s*<local-command-(stdout|stderr)>([\s\S]*)<\/local-command-\1>\s*$/
+const ANSI = /\x1b\[[0-9;]*[A-Za-z]/g
+
+function conversation(rows: readonly { role: string; text: string }[]) {
+  // FNV-1a over every row, so a rewrite (compaction) counts as a change as well as a new row.
+  let hash = 0x811c9dc5
+  for (const row of rows) {
+    for (const part of [row.role, row.text]) {
+      for (let i = 0; i < part.length; i++) hash = Math.imul(hash ^ part.charCodeAt(i), 0x01000193)
+      hash = Math.imul(hash ^ 0x1f, 0x01000193)
+    }
+  }
+  return `${rows.length}:${hash >>> 0}`
+}
+
+// Which command a stored row starts: `/compact args` (a /compact's prompt row) or `<command-name>/name</command-name>`.
+const PROMPT_ROW = /^\/([^\s/]+)(?:\s|$)/
+function noteCommand(stored: string, origin: { kind: string; name?: string }) {
+  const name = COMMAND_ROW.exec(stored)?.[1] ?? PROMPT_ROW.exec(stored.trim())?.[1]
+  if (name === undefined) return
+  if (origin.kind === "plugin" && origin.name === "multiverse") {
+    const watch = watching.find((w) => w.name === name && !w.started)
+    if (watch !== undefined) watch.started = true
+    return
+  }
+  for (const watch of watching) if (watch.name === name) watch.contested = true
+}
+
+async function storedLine($: EngineInterface, name: string, watch: Watch): Promise<{ output?: string; error?: string } | undefined> {
+  const rows = await $.session.messages()
+  // Checked after the read: a later run handed over while it was pending may already have stored its line.
+  if (!watch.started || watch.contested || watch.overtaken || watch.before === undefined ||
+      conversation(rows) === watch.before) return undefined
+  const [named, printed] = [rows.at(-2), rows.at(-1)]
+  if (named?.role !== "user" || printed?.role !== "user" || COMMAND_ROW.exec(named.text)?.[1] !== name) return undefined
+  const line = OUTPUT_ROW.exec(printed.text)
+  if (!line) return undefined
+  const shown = (line[2] ?? "").replace(ANSI, "").trim()
+  if (line[1] === "stderr") return { error: shown || "Claude reported an error" }
+  return shown ? { output: shown } : undefined
+}
+const startsWith = (text: string, name: string) => text.includes(`<command-name>/${name}</command-name>`)
+
+async function commandRecord($: EngineInterface, id: string, record: Record<string, unknown>) {
+  const directory = await $.env.get("MV2_AGENT_DIR")
+  if (!directory) return
+  const at = await $.clock.now()
+  await $.fs.write(`${directory}/claude-commands/${id}.json`, JSON.stringify({ id, ...record, at }) + "\n")
+}
+
+// Claude's own list of the commands the person can run now, for `mv2 slash AGENT --list`. Answered at once.
+async function listCommands($: EngineInterface, message: Message) {
+  if (message.id === undefined) return
+  const commands = (await $.command.list()).map((c) => ({ name: c.name, description: c.description, source: c.source,
+    plugin: c.plugin ?? null }))
+  await commandRecord($, message.id, { state: "listed", commands })
+}
+
+// Run one command for mv2, as if the person typed it: Claude queues it until the session is idle, in the same queue as
+// follow-ups. Only a name exactly as Claude lists it runs, so an alias the list doesn't show (`quit` runs /exit) never
+// does; a plugin's own command.run hook doesn't see its own runs, so this check is the mod's only one. The check runs in
+// the lane, so the command enters Claude's queue before anything mv2 sent after it.
+function runCommand($: EngineInterface, message: Message) {
+  const id = message.id
+  if (id === undefined) return
+  inLane(async () => {
+    let request: { command?: unknown; args?: unknown }
+    try {
+      request = JSON.parse(message.text) as { command?: unknown; args?: unknown }
+    } catch {
+      return commandRecord($, id, { state: "refused", reason: "The command request could not be read" })
+    }
+    const name = typeof request.command === "string" ? request.command : ""
+    const args = typeof request.args === "string" ? request.args : ""
+    if (MANAGED.has(name)) return commandRecord($, id, { state: "refused", reason: `mv2 manages /${name}` })
+    if (!(await $.command.list()).some((c) => c.name === name)) {
+      return commandRecord($, id, { state: "refused", reason: `/${name} is not a command in this session` })
+    }
+    const watch: Watch = { name, prompted: false }
+    for (const earlier of watching) if (earlier.name === name) earlier.overtaken = true
+    watching.push(watch)
+    try { watch.before = conversation(await $.session.messages()) } catch { /* no snapshot: no line is read back */ }
+    // Called here, in the lane; not awaited, so a run waiting for the session to be idle doesn't hold the lane.
+    const run = $.command.run({ command: name, args })
+    void finish($, id, name, watch, run)
+  })
+}
+
+async function finish($: EngineInterface, id: string, name: string, watch: Watch, run: Promise<{ text?: string }>) {
+  try {
+    const result = await run
+    // A command that printed nothing answers with "" (Claude 2.1.316) or no text at all.
+    const answered = typeof result.text === "string" && result.text !== "" ? result.text : undefined
+    let stored = answered === undefined ? await storedLine($, name, watch) : undefined
+    if (answered === undefined && stored === undefined && !watch.prompted) {
+      // No output yet and no turn: wait briefly for one, which a prompt starts as its run resolves, and for an
+      // on-screen command's line, which /compact stores just after its run resolves.
+      await new Promise<void>((resolve) => {
+        watch.seen = resolve
+        $.clock.after(PROMPT_WINDOW_MS, resolve)
+      })
+      if (!watch.prompted) stored = await storedLine($, name, watch)
+    }
+    // A stored error line means the command failed, though its run resolved.
+    if (stored?.error !== undefined) {
+      await commandRecord($, id, { state: "failed", reason: stored.error.slice(0, 500) })
+      return
+    }
+    const shown = answered ?? stored?.output
+    const output = shown !== undefined ? shown.slice(0, OUTPUT_LIMIT) : null
+    const model = await $.session.model()
+    // Claude has no call that reads the session's effort; /effort saves it under the model in the person's settings,
+    // so that is read back for /effort alone. Nothing else reports one.
+    let effort: string | undefined
+    if (name === "effort") {
+      const saved = await $.settings.read({ key: "modelSettings" }) as Record<string, { effortLevel?: unknown } | undefined> | undefined
+      const level = saved?.[model]?.effortLevel
+      if (typeof level === "string") effort = level
+    }
+    await commandRecord($, id, { state: "ran", text: output, prompted: watch.prompted && output === null, model,
+      ...(effort !== undefined ? { effort } : {}), session_id: await $.session.id() })
+  } catch (error) {
+    // The private record keeps a bounded reason; the screen's log never shows it (it may echo the command's text).
+    await commandRecord($, id, { state: "failed", reason: String(error instanceof Error ? error.message : error).slice(0, 500) })
+  } finally {
+    watching.splice(watching.indexOf(watch), 1)
+  }
 }
 
 function text(content: readonly { type: string; text?: unknown }[]): string {
@@ -494,6 +666,12 @@ export const register: Register = (on) => {
 
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) {
+      // A command mv2 ran that expanded into a prompt starts its turn under its own name.
+      const watch = watching.find((w) => !w.prompted && startsWith(e.text, w.name))
+      if (watch !== undefined) {
+        watch.prompted = true
+        watch.seen?.()
+      }
       turnRunning = true
       turnKnown = true
       takenBeforeTurn = pending()
@@ -581,6 +759,15 @@ export const register: Register = (on) => {
   on("session.receive", { origin: { kind: "peer" } }, async ($, e, next) => {
     const message = tagged(e.text)
     if (message === undefined) return next(e)
+    if (message.mode === "command" || message.mode === "commands") {
+      // A hook must not wait on its own run: leave it first. Never shown to the model. The log names the run only:
+      // an error may echo the command's arguments.
+      $.clock.after(0, () => {
+        if (message.mode === "command") return runCommand($, message)
+        listCommands($, message).catch(() => $.ui.log(`multiverse: command list for mv2 not written (${message.id ?? "no id"})`))
+      })
+      return { consumed: "Multiverse command taken by the multiverse plugin" }
+    }
     if (message.mode === "ask") {
       // The fork may take a while; leave the hook first.
       $.clock.after(0, () => {
@@ -596,11 +783,34 @@ export const register: Register = (on) => {
     // peer prompt of its own.
     const entry = hold(message, "queued")
     if (idle()) expireLater($, [entry])
-    return next({ ...e, text: message.text })
+    if (!interrupted) return next({ ...e, text: message.text })
+    // After an interruption it joins Claude's queue as a peer prompt beside mv2's commands, and only this hook can put
+    // it there: it goes in after the lane's earlier entries (a command still being checked against Claude's list,
+    // never a command's run, which waits for the session), and later entries wait until it has gone in.
+    const earlier = lane
+    let admitted: () => void = () => {}
+    const admission = new Promise<void>((resolve) => { admitted = resolve })
+    inLane(() => admission)
+    try {
+      const inOrder = await Promise.race([earlier.then(() => true),
+        new Promise<boolean>((resolve) => { $.clock.after(ADMIT_WAIT_MS, () => resolve(false)) })])
+      if (!inOrder) {
+        // Queued now, it would run before the earlier command: never overtake. Kept out of Claude's queue and reported
+        // not delivered, so mv2 deliver --retry sends it again.
+        forget(entry)
+        void refuse($, entry, `an earlier mv2 command was still being checked after ${ADMIT_WAIT_MS / 1000} s, and this message would have run before it`)
+        return { consumed: "Multiverse message held back to keep mv2's order" }
+      }
+      return await next({ ...e, text: message.text })
+    } finally {
+      // Claude queues it once this hook has returned.
+      $.clock.after(0, admitted)
+    }
   })
 
   on("session.append", async ($, e, next) => {
     const stored = text(e.message.content)
+    if (e.agentId === undefined && watching.length > 0) noteCommand(stored, e.origin)
     // Claude's recorded rendering: its peer wrapper around our text, mid-turn or (after an interruption) as a turn
     // of its own.
     // A row is ours by holding the text of a message the mod sent that way, or by an older mod's tag around it

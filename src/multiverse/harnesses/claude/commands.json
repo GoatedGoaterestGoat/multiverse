@@ -1,0 +1,192 @@
+{
+  "claude_code": "2.1.316",
+  "note": "Claude Code's built-in commands that mv2 slash may run, checked by claude-support's version check. For each form, bare and with arguments: runs (acts on this session and prints), prompt (expands into a prompt: the agent answers in a turn), screen (opens an interactive screen, refused), settings (also saves to the person's Claude settings: runs only when a person runs it, and its result says so; an agent or a plugin is refused and pointed at mv2 resume --model or --effort), managed (mv2's own command instead), person (Claude runs it only when the person asks), hidden (its output goes only to the model, as a hidden row). A built-in not listed here, or a form left out, is refused as not classified; plugin, user and MCP commands are not listed and run.",
+  "commands": {
+    "clear": {
+      "bare": "runs"
+    },
+    "compact": {
+      "bare": "runs",
+      "args": "runs"
+    },
+    "context": {
+      "bare": "hidden"
+    },
+    "recap": {
+      "bare": "person"
+    },
+    "reload-plugins": {
+      "bare": "runs"
+    },
+    "reload-skills": {
+      "bare": "runs"
+    },
+    "rename": {
+      "bare": "managed",
+      "args": "managed"
+    },
+    "code-review": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "simplify": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "security-review": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "verify": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "init": {
+      "bare": "prompt"
+    },
+    "claude-api": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "workflow-authoring": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "plugin-authoring": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "dataviz": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "artifact-design": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "artifact-diagramming": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "artifact-capabilities": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "deep-research": {
+      "bare": "prompt",
+      "args": "prompt"
+    },
+    "model": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "effort": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "theme": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "output-style": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "autocompact": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "tui": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "config": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "permissions": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "statusline": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "privacy-settings": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "fast": {
+      "bare": "settings",
+      "args": "settings"
+    },
+    "voice": {
+      "bare": "settings",
+      "args": "settings"
+    },
+    "scroll-speed": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "sandbox": {
+      "bare": "screen",
+      "args": "settings"
+    },
+    "agents": {
+      "bare": "screen"
+    },
+    "mcp": {
+      "bare": "screen"
+    },
+    "hooks": {
+      "bare": "screen"
+    },
+    "plugin": {
+      "bare": "screen"
+    },
+    "memory": {
+      "bare": "screen"
+    },
+    "ide": {
+      "bare": "screen"
+    },
+    "status": {
+      "bare": "screen"
+    },
+    "tasks": {
+      "bare": "screen"
+    },
+    "workflows": {
+      "bare": "screen"
+    },
+    "artifacts": {
+      "bare": "screen"
+    },
+    "rewind": {
+      "bare": "screen"
+    },
+    "keybindings": {
+      "bare": "screen"
+    },
+    "exit": {
+      "bare": "managed",
+      "args": "managed"
+    },
+    "resume": {
+      "bare": "managed",
+      "args": "managed"
+    },
+    "login": {
+      "bare": "managed",
+      "args": "managed"
+    },
+    "logout": {
+      "bare": "managed",
+      "args": "managed"
+    },
+    "restart": {
+      "bare": "managed",
+      "args": "managed"
+    }
+  }
+}

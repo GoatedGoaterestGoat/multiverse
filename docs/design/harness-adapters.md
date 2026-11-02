@@ -1350,9 +1350,17 @@ only on tagged text and shows the model the text alone:
   input since") until the person types, but not a peer prompt. Until the person's
   own input at the terminal, the mod leaves each message in Claude's queue
   without its tags: it runs as Claude's own peer prompt, and `session.append`
-  stores that row without the wrapper. A submit Claude refuses (after a reload
-  forgot the interruption) sends later messages this way too. Other input may
-  not lift Claude's refusal, so only the terminal's ends this.
+  stores that row without the wrapper. Only its own `session.receive` hook can
+  queue a peer prompt, so the hook waits there (two seconds at most) for mv2's
+  entries that reached the mod before it, such as a command still being checked
+  against Claude's list, and later entries wait for it: commands and messages
+  keep their order. If the earlier entries take longer, the message would run
+  before them, so it stays out of Claude's queue and is reported not
+  delivered, for `mv2 deliver --retry`. A submit Claude refuses (after a reload forgot the
+  interruption) sends later messages this way too. Other input may not lift
+  Claude's refusal, so only the terminal's ends this. Claude refuses a plugin's
+  command runs the same way (Claude Code 2.1.316), so until then `mv2 slash`
+  reports each command failed, with Claude's reason.
 
 The tag also carries the message's send time (`sent=`, the inbox record's). If
 the message reaches the model more than ten minutes after it was sent, the mod

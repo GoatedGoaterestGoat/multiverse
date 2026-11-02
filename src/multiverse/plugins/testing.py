@@ -435,6 +435,96 @@ class FakeTranscript:
         self._case.addCleanup(folder.chmod, 0o755)
 
 
+class FakeSlash:
+    """A harness's command answers from a script (1.16), for PluginTestCase.fake_slash(). The real API and core
+    run: access and permission, the caller and focus rules, mv2's own refusals (managed, bare and settings-changing
+    commands, names the list lacks), the run record, the wait and what a run records. Only the harness's side is
+    replaced, and this test's agents count as running with mv2's bridge; nothing reaches a terminal or a session.
+
+    `commands` are the api.SlashCommand the harness lists. Each run takes the next answer: a dict of what the
+    harness reports (state, default "ran"; output, prompted, model, effort, session_id), "queued" (sent, with no
+    result until finish(id, answer)) or "lost" (the agent's launch ends before it runs). `requests` holds each run
+    the harness was sent, oldest first: {id, command, args}."""
+
+    def __init__(self, test, commands, answers):
+        from dataclasses import fields
+        from .. import harnesses
+        from ..harnesses import types
+        from ..runtime import native, slash
+        self.requests, self.answers, self._finished, self._ended = [], list(answers), {}, set()
+        names = {item.name for item in fields(types.SlashCommand)}
+        listed = [types.SlashCommand(**{name: getattr(item, name) for name in names if hasattr(item, name)})
+                  for item in commands]
+        work, fake = str(test.work), self
+
+        def mine(path):
+            return str(Path(path).resolve()).startswith(work + os.sep)
+
+        def fixture(facts):  # an agent this test made: its record names a tmux socket inside the test's folder
+            socket_path = ((facts or {}).get("tmux") or {}).get("socket")
+            return isinstance(socket_path, str) and socket_path.startswith(work + os.sep)
+
+        class Scripted:
+            def slash_commands(self, session, executor):
+                return types.NativeResult("ok", value=list(listed))
+
+            def run_slash(self, session, request, executor):
+                fake.requests.append({"id": request.id, "command": request.command, "args": request.args})
+                if not fake.answers:
+                    return types.NativeResult("error", "the test's script has no answer left for this command")
+                answer = fake.answers.pop(0)
+                if answer == "lost":
+                    fake._ended.add(session.agent_id)
+                    return types.NativeResult("unknown")
+                if answer == "queued":
+                    return types.NativeResult("unknown")
+                if not isinstance(answer, dict):
+                    raise TypeError('fake_slash answers are dicts, "queued" and "lost"')
+                fake._finished[request.id] = {"state": "ran", **answer}
+                return types.NativeResult("ok", value=dict(fake._finished[request.id]))
+
+            def slash_result(self, session, request, executor):
+                if request.id in fake._finished:
+                    return types.NativeResult("ok", value=dict(fake._finished[request.id]))
+                return types.NativeResult("unknown", value={"absent": True})
+
+        load, observe, owned = harnesses.load, native.observe, native.owned
+        launch_ended = slash.delivery_evidence.launch_ended
+
+        def scripted_load(root, name, *arguments, **keywords):
+            adapter = load(root, name, *arguments, **keywords)
+            if not mine(root) or getattr(adapter, "family", None) != "claude":
+                return adapter  # another harness keeps its own answer: Codex and Pi say unavailable
+            wrapped = object.__new__(type(f"Scripted{type(adapter).__name__}", (Scripted, type(adapter)), {}))
+            wrapped.__dict__.update(adapter.__dict__)  # every other attribute and hook as the real adapter has it
+            return wrapped
+
+        def scripted_observe(properties, facts):
+            seen = observe(properties, facts)
+            return {**seen, "live": "alive"} if fixture(facts) and (facts or {}).get("state") == "running" else seen
+
+        def scripted_owned(properties, facts, *arguments, **keywords):
+            if fixture(facts):
+                return None
+            return owned(properties, facts, *arguments, **keywords)
+
+        def scripted_ended(directory, launch_id):
+            if mine(directory):
+                return Path(directory).name in fake._ended
+            return launch_ended(directory, launch_id)
+
+        for target, name, replacement in ((harnesses, "load", scripted_load), (native, "observe", scripted_observe),
+                                          (native, "owned", scripted_owned),
+                                          (slash.delivery_evidence, "launch_ended", scripted_ended)):
+            patcher = mock.patch.object(target, name, replacement)
+            patcher.start()
+            test.addCleanup(patcher.stop)
+
+    def finish(self, id, answer=None):
+        """The harness ran a queued command: slash_result(id) reads `answer` (a dict, as for the script) from now."""
+        self._finished[id] = {"state": "ran", **(answer or {})}
+
+
 class FakeRuns:
     """One-shot runs answered from a script (1.14), for PluginTestCase.fake_runs(). The real run_once runs: the
     API's checks, access and permission, the harness's run options, model check and plan (its message checks
@@ -601,6 +691,11 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def fake_slash(self, commands=(), *answers):
+        """Harness commands answered from this script for the rest of the test (1.16): a FakeSlash, whose
+        `requests` records each command the harness was sent. Everything but the harness's side is real."""
+        return FakeSlash(self, commands, answers)
 
     def fake_runs(self, *answers):
         """One-shot runs answered from this script for the rest of the test (1.14): a FakeRuns, whose `requests`
