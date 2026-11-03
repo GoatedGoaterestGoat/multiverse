@@ -7,7 +7,7 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, lookup
 from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
@@ -27,7 +27,7 @@ class FleetView:
             if self.draft and row["key"] == self.draft.key:
                 row["kind"] = "draft"
         available = self.query_one("#fleet").content_size.width - 1
-        fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
+        fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe") and key not in MARKS)]
         if available < COMPACT_WIDTH:
             fields = [key for key in fields if lookup(key).compact]
         if self.draft:

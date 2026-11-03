@@ -24,6 +24,10 @@ from . import theme
 
 # Below this table width, columns that are not `compact` are hidden.
 COMPACT_WIDTH = 110
+# A view key that is not a column of its own: listed in a view's `columns`, it adds the agent's unread inbox count
+# to the name cell (the backend reads it only then).
+UNREAD = "unread"
+MARKS = frozenset({UNREAD})
 # Columns no plugin column stands in for: they say whether an agent needs the person or is held.
 ATTENTION = frozenset(ATTENTION_COLUMNS)
 
@@ -56,8 +60,8 @@ class Column:
 
 
 class NameColumn(Column):
-    """Tree guides in each ancestor's accent, a fold arrow on groups, a dot on agents waiting for input
-    and a ring on focused agents."""
+    """Tree guides in each ancestor's accent, a fold arrow on groups, a dot on agents waiting for input,
+    a ring on focused agents, and the unread inbox count where the view turns it on."""
     def render(self, row):
         color = row["accent"]
         group = row["kind"] == "group"
@@ -72,6 +76,9 @@ class NameColumn(Column):
             label.append(" ⚠", style=f"bold {theme.RED}")
         if not group and row.get("focus"):
             label.append(" ◉", style=f"bold {theme.MAUVE}")
+        unread = row.get(UNREAD)
+        if not group and isinstance(unread, int) and not isinstance(unread, bool) and unread > 0:
+            label.append(f" ✉{unread}", style=theme.PEACH)  # last: the marks that need the person stay in view
         return label
 
 
@@ -314,7 +321,7 @@ def resolve_plugin_columns(scopes, keys, replace=True):
     Live, Status and Focus are never stood in for.
     """
     from .. import plugins
-    wanted = [key for key in keys if key not in COLUMNS and not core_key(key)]
+    wanted = [key for key in keys if key not in COLUMNS and key not in MARKS and not core_key(key)]
     found = {}
     if not wanted and not (replace and replaceable(keys)):
         return found

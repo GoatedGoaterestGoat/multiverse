@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -16,6 +17,41 @@ from multiverse import cli, store
 from multiverse.universe import mailbox
 from multiverse.tools import doctor, report
 from multiverse.tools import inbox as inbox_tool
+from isolation import track
+
+
+SPECIAL_PEEK = '''import errno,io,os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from multiverse.tools import inbox
+target=Path(sys.argv[4]); condition=sys.argv[5]; replaced=False; descriptors=[]
+def replace():
+    global replaced
+    target.unlink()
+    os.mkfifo(target)
+    replaced=True
+def wrap(original):
+    def opened(path,*args,**kwargs):
+        selected=isinstance(path,(str,os.PathLike)) and Path(path)==target and not replaced
+        if selected and condition=='swap': replace()
+        handle=original(path,*args,**kwargs)
+        if selected: descriptors.append(handle if isinstance(handle,int) else handle.fileno())
+        if selected and condition=='opened': replace()
+        return handle
+    return opened
+io.open=wrap(io.open); os.open=wrap(os.open)
+try:
+    found=inbox.unread(Path(sys.argv[2]),sys.argv[3],blocking=False)
+except (OSError,ValueError):
+    print('refused',flush=True)
+else:
+    print(len(found),flush=True)
+if condition in ('swap','opened'): assert replaced
+for descriptor in descriptors:
+    try: os.fstat(descriptor)
+    except OSError as error: assert error.errno==errno.EBADF
+    else: raise AssertionError('peek leaked its descriptor')
+'''
 
 
 class InboxCliTest(BaseTest):
@@ -36,6 +72,52 @@ class InboxCliTest(BaseTest):
                 ['mv2', '-u', str(self.root), 'inbox', '--agent', self.agent, *flags]):
             cli.main()
         return output.getvalue()
+
+    def test_peek_rejects_special_files_at_the_open_without_consuming_messages(self):
+        """Every peek input, including its lock, must reject a FIFO swapped after stat or one damaged inbox stalls refresh."""
+        message = self.message('still unread')
+        files = {'inbox.jsonl': (self.directory / 'inbox.jsonl').read_bytes(),
+                 'inbox.cursor': b'0', 'inbox-read.json': b'{}', 'inbox-state.json': b'{}',
+                 'native-delivery.json': b'{}', '.inbox.lock': b'',
+                 f'inbox-unsubmitted/{message["id"]}.json': json.dumps(
+                     {'schema': 1, 'message_id': message['id'], 'reason': 'fixture'}).encode()}
+        for name, data in files.items():
+            path = self.directory / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(data)
+        for condition in ('fifo', 'swap', 'opened', 'paired fifo'):
+            for name, data in (files.items() if condition != 'paired fifo' else [('.inbox.lock', b'')]):
+                with self.subTest(condition=condition, file=name):
+                    path = self.directory / name
+                    peer = None
+                    if condition in ('fifo', 'paired fifo'):
+                        path.unlink()
+                        os.mkfifo(path)
+                        if condition == 'paired fifo':
+                            peer = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+                    child = subprocess.Popen([sys.executable, '-I', '-c', SPECIAL_PEEK, str(ROOT / 'src'),
+                        str(self.root), self.agent, str(path), condition], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    track(pid=child.pid)
+                    try:
+                        try:
+                            output, error = child.communicate(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.communicate(timeout=5)
+                            self.fail(f'peek blocked on {condition} at {name}')
+                        self.assertEqual(child.returncode, 0, error)
+                        self.assertEqual(output.strip(), b'1' if condition == 'opened' else b'refused', error)
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                            child.communicate(timeout=5)
+                        if peer is not None:
+                            os.close(peer)
+                        path.unlink()
+                        path.write_bytes(data)
+                    self.assertEqual({key: (self.directory / key).read_bytes() for key in files}, files)
+        self.assertEqual([item['text'] for item in inbox_tool.unread(self.root, self.agent, blocking=False)],
+                         ['still unread'])
 
     def test_reads_that_must_not_consume_never_move_the_cursor(self):
         """--peek, --all, --last, --since, invalid combinations, wait timeouts, report's unread count, the dashboard's

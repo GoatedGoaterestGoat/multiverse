@@ -14,12 +14,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.plugins.testing import PluginTestCase
+from multiverse.store import lock, write
+from multiverse.ui import backend as backend_module
+from multiverse.universe import mailbox
 from multiverse.runtime import native
 from multiverse.ui import app as appmod
 from multiverse.ui.backend import usage_identity, usage_key
 from multiverse.ui.views import view
 from multiverse.universe import templates
-from isolation import isolate
+from isolation import isolate, track
 
 
 class OldViewTests(unittest.TestCase):
@@ -188,6 +191,114 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                               env={**os.environ, "PYTHONPATH": str(root / "src")})
         self.assertEqual((done.returncode, done.stdout.split()), (0, ["reading", "returned"]), done.stderr[-2000:])
         self.assertLess(time.time() - started, 30)
+
+
+COUNTS = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from multiverse.ui.backend import LocalBackend
+print(LocalBackend().unread_count({"universe": sys.argv[2], "id": sys.argv[3]}), flush=True)
+"""
+
+
+class UnreadInNameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_a_view_that_lists_unread_counts_each_agents_unread_inbox_in_its_name_without_reading_it(self):
+        """With "unread" in a view's columns, each agent's name cell shows its unread inbox count, which follows new
+        messages and reads, never marks a message read, never breaks the list on a damaged inbox, never waits for an
+        inbox's lock, tries a failed read again, and shows nowhere when the view doesn't list it; fragile because the
+        count is read on every refresh, so a consuming read would quietly mark every agent's messages read, a waiting
+        one would hold the list (and quitting) behind a blocked reader, and a stale or failing one goes unnoticed in a
+        busy list."""
+        ada, bob = self.agent("ada"), self.agent("bob")
+        view = self.root / "views" / "default.json"
+        write(view, {"columns": ["name", "unread", "live", "phase"]})
+        for text in ("first", "second"):
+            mailbox.append_message(ada, text, {"name": "lead"})
+
+        def names(d):
+            """The name cell's words after each agent's name, and the headers."""
+            headers, rows = d.table()
+            marks = {}
+            for row in rows:
+                words = row[0].split()
+                for name in ("ada", "bob"):
+                    if name in words:
+                        marks[name] = words[words.index(name) + 1:]
+            return headers, marks
+
+        async with self.dashboard() as d:
+            with self.subTest("the count is in the name cell, not a column of its own"):
+                headers, marks = names(d)
+                self.assertEqual(marks, {"ada": ["✉2"], "bob": []})
+                self.assertEqual(len(headers), 3, headers)  # name, live, phase
+            with self.subTest("reading the count never marks a message read"):
+                await d.refresh()
+                self.assertFalse((ada / "inbox.cursor").exists())
+                self.assertEqual(len(mailbox.inbox(ada, limit=None, peek=True)["messages"]), 2)
+            with self.subTest("a new message and a read change it"):
+                mailbox.append_message(ada, "third", {"name": "lead"})
+                await d.refresh()
+                self.assertEqual(names(d)[1]["ada"], ["✉3"])
+                mailbox.inbox(ada, limit=None)  # ada reads its inbox
+                await d.refresh()
+                self.assertEqual(names(d)[1]["ada"], [])
+            with self.subTest("a damaged inbox shows no count and leaves the list whole"):
+                mailbox.append_message(bob, "hello", {"name": "lead"})
+                (ada / "inbox.cursor").write_text("not a number")
+                await d.refresh()
+                self.assertEqual(names(d)[1], {"ada": [], "bob": ["✉1"]})
+                self.assertNotIn("Could not refresh", d.status)
+            with self.subTest("an inbox whose lock is held shows its last count, and nothing waits for it"):
+                mailbox.append_message(bob, "again", {"name": "lead"})
+                with lock(bob / ".inbox.lock"):  # a reader holding it while its output is blocked
+                    await d.refresh()
+                    self.assertEqual(names(d)[1]["bob"], ["✉1"])
+                await d.refresh()
+                self.assertEqual(names(d)[1]["bob"], ["✉2"])
+            with self.subTest("a read that failed is tried again on the next refresh"):
+                real, failed = backend_module.inbox.unread, []
+
+                def unread(root, agent, **kwargs):
+                    if agent == bob.name and not failed:  # bob's first read fails; ada's damaged one is read each time
+                        failed.append(agent)
+                        raise OSError("a passing I/O error")
+                    return real(root, agent, **kwargs)
+
+                mailbox.append_message(bob, "third", {"name": "lead"})
+                with mock.patch.object(backend_module.inbox, "unread", unread):
+                    await d.refresh()
+                    self.assertEqual((names(d)[1]["bob"], len(failed)), ([], 1))
+                    await d.refresh()  # no file changed since
+                    self.assertEqual(names(d)[1]["bob"], ["✉3"])
+            with self.subTest("a view that doesn't list it shows no count"):
+                write(view, {"columns": ["name", "live", "phase"]})
+                await d.refresh()
+                self.assertEqual(names(d)[1], {"ada": [], "bob": []})
+
+
+    def test_a_fifo_in_an_agents_inbox_never_holds_the_count(self):
+        """A FIFO (or anything but a regular file) where the read opens an inbox file gives no count instead of
+        blocking: the count runs in every refresh for every agent, so one blocked open would stop the whole list,
+        and quitting waits for it (the reviewer's repro at 0c007ac)."""
+        source = str(Path(__file__).resolve().parents[1] / "src")
+        for name in ("inbox.jsonl", "inbox.cursor", ".inbox.lock", "inbox-unsubmitted/fixture.json"):
+            with self.subTest(file=name):
+                directory = self.agent(f"fifo-{name.strip('.').split('.')[0].split('/')[0]}")
+                if name != "inbox.jsonl":
+                    mailbox.append_message(directory, "hello", {"name": "lead"})
+                (directory / name).parent.mkdir(exist_ok=True)
+                (directory / name).unlink(missing_ok=True)  # the message's own lock file, for one
+                os.mkfifo(directory / name)
+                child = subprocess.Popen([sys.executable, "-I", "-c", COUNTS, source, str(self.root), directory.name],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                track(pid=child.pid)
+                try:
+                    output, error = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.communicate()
+                    self.fail(f"the count blocked on a FIFO at {name}")
+                self.assertEqual((child.returncode, output.strip()), (0, b"None"), error)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from ..store import lock, now, read, uid, write
+from ..store import lock, now, open_regular, read, uid, write
 from . import records
 
 
@@ -49,9 +49,15 @@ def _event(agent_dir, kind, data):
         pass
 
 
+def _bytes(path):
+    with open_regular(path) as stream:
+        # A growing file cannot extend this read indefinitely; writers normally hold the inbox lock.
+        return stream.read(os.fstat(stream.fileno()).st_size)
+
+
 def _cursor(agent_dir):
     path = agent_dir / "inbox.cursor"
-    return int(path.read_text()) if path.exists() else 0
+    return int(_bytes(path).decode()) if path.exists() else 0
 
 
 def _validate_cursor(data, cursor):
@@ -61,7 +67,7 @@ def _validate_cursor(data, cursor):
 
 def _messages(agent_dir):
     path = agent_dir / 'inbox.jsonl'
-    data = path.read_bytes() if path.exists() else b''
+    data = _bytes(path) if path.exists() else b''
     cursor = _cursor(agent_dir)
     _validate_cursor(data, cursor)
     offset = 0

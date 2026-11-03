@@ -99,13 +99,15 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         time.sleep(min(.2, remaining) if remaining is not None else .2)
 
 
-def unread(root, agent):
+def unread(root, agent, *, blocking=True):
     """An agent's unread inbox messages for a person to read, oldest first. Like --peek it never marks them read, and
-    it takes only the inbox's own lock, so the dashboard can call it on every refresh."""
+    it takes only the inbox's own lock, so the dashboard can call it on every refresh. blocking=False raises
+    BlockingIOError instead of waiting while another reader or sender holds that lock. Inbox data and lock
+    files are opened nonblocking and checked on their descriptors; special files are damage, never read."""
     access.require('observe', 'read inbox')
     directory = agents.directory(universe.resolve(root), agent, allow_damaged=True)
     return [{key: message[key] for key in FIELDS if key in message}
-            for message in mailbox.inbox(directory, limit=None, peek=True)['messages']]
+            for message in mailbox.inbox(directory, limit=None, peek=True, blocking=blocking)['messages']]
 
 
 def timeout_seconds(value):

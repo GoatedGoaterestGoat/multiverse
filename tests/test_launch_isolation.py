@@ -17,7 +17,7 @@ from native_safety import install as install_native_safety
 install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse.universe import agents, storage as storage_records
+from multiverse.universe import agents, records, storage as storage_records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import runner
 from multiverse import harnesses
@@ -657,10 +657,11 @@ class LaunchIsolationTest(unittest.TestCase):
                         return incomplete
                     original_lstat = Path.lstat
                     original_read = Path.read_bytes
-                    def read_bytes(path):
+                    original_open = records.open_regular
+                    def open_regular(path):
                         if evidence == 'older-unreadable-request' and path == old_request:
                             raise PermissionError('unreadable older request')
-                        return original_read(path)
+                        return original_open(path)
                     def lstat(path, *args, **kwargs):
                         if family == 'pi' and evidence == 'unreadable' and path == directory / 'session.jsonl':
                             raise PermissionError('unreadable conversation file')
@@ -669,7 +670,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch('multiverse.runtime.missing_runtime.Tmux', side_effect=terminal), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
-                            patch.object(Path, 'read_bytes', read_bytes), \
+                            patch.object(records, 'open_regular', open_regular), \
                             patch.object(storage_adoption, 'adapter_hook', side_effect=evidence_hook), \
                             patch.dict(os.environ, {key: str(caller), **({'HOME': str(caller)} if unknown_server else {})}):
                         if unknown_server:
