@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "adapter": "claude",
+  "description": "Claude Code; prompt-led coordination and an assigned native session UUID.",
+  "settings": {
+    "args": [
+      "--dangerously-skip-permissions"
+    ]
+  }
+}
