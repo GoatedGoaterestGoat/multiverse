@@ -149,6 +149,7 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         that read for the interpreter and quitting waits for it, which shows only as a slow quit on a busy machine."""
         self.agent("ada")
         gate, calls, listings, ticks = threading.Event(), [], [], []
+        leaving, in_flight = threading.Event(), [0]
         self.addCleanup(gate.set)
         clock = [100.0]  # the app's monotonic clock, moved by hand: the bound never depends on how busy the machine is
 
@@ -165,11 +166,16 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
             def snapshot(root):
                 listings.append(clock[0])
-                return listing(root)
+                in_flight[0] += 1
+                try:
+                    return listing(root)
+                finally:
+                    in_flight[0] -= 1
 
             def timed_refresh():
                 ticks.append(clock[0])
-                tick()
+                if not leaving.is_set():  # leaving: the timer starts no listing that could outlive the dashboard
+                    tick()
 
             d.app.backend.snapshot, d.app.timed_refresh = snapshot, timed_refresh  # before the timer is set up
             async with d:
@@ -191,6 +197,11 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     clock[0] += 1.0
                     await d.until(lambda: len(listings) > before, "a timer listing after the bound")
                 await self.release(d, gate)
+                # The driver runs no timer, so leaving it waits only for what runs now; a tick after that starts a
+                # listing whose thread outlives the test and reads the real HOME once it is given back.
+                leaving.set()
+                await d.until(lambda: not d.app.scanning, "the last listing")
+            self.assertEqual(in_flight[0], 0, "a listing outlived the dashboard")
             self.assertNoUsageRead()
 
     def test_quitting_never_waits_for_a_usage_read(self):
