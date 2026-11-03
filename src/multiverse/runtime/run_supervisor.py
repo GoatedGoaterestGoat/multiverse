@@ -19,6 +19,7 @@ WIRE_BYTES = 64 << 20
 OUTPUT_BYTES = 16 << 20
 ERROR_BYTES = 64 << 10
 CLEANUP_SECONDS = 5
+IDENTITY_SECONDS = 5
 POLL = .05
 
 
@@ -73,6 +74,24 @@ def _check(connection, payload):
     if time.monotonic() >= payload['deadline']:
         raise Stopped('timeout', 'The run deadline passed')
     scopes(payload['scopes'])
+
+
+def _child_started(connection, payload, child):
+    # The unreaped child still waits at its gate. Retry observation, never native execution.
+    deadline = min(payload['deadline'], time.monotonic() + IDENTITY_SECONDS)
+    while True:
+        _check(connection, payload)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Stopped('unavailable', 'Cannot record the private child identity')
+        token = process_started(child.pid, timeout=min(2, remaining))
+        _check(connection, payload)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Stopped('unavailable', 'Cannot record the private child identity')
+        if token:
+            return token
+        time.sleep(min(POLL, remaining))
 
 
 def _exited(child):
@@ -172,9 +191,7 @@ def supervise(connection, payload):
                                      pass_fds=(read_gate,))
         finally:
             os.close(read_gate)
-        token = process_started(child.pid)
-        if not token:
-            raise Stopped('unavailable', 'Cannot record the private child identity')
+        token = _child_started(connection, payload, child)
         record.update(phase='running', child={'pid': child.pid, 'started': token, 'pgid': child.pid})
         run_files.save(directory, record)
         _check(connection, payload)

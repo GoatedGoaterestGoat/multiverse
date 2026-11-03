@@ -70,7 +70,7 @@ def start_matches(recorded, pid, *, observed=None):
     return False
 
 
-def process_started(pid):
+def process_started(pid, *, timeout=2):
     """Boot-scoped Linux start ticks, or macOS UTC ctime; unknown is never guessed.
 
     The runner samples its unreaped child immediately after Popen. Adapters
@@ -82,7 +82,7 @@ def process_started(pid):
     if sys.platform.startswith('linux'):
         snapshot = _linux_snapshot(pid)
         return snapshot[0] if snapshot else None
-    value = _query(pid, 'lstart=')
+    value = _query(pid, 'lstart=', timeout=timeout)
     return value if value is not None and START.fullmatch(value) else None
 
 
@@ -110,12 +110,12 @@ def process_parent(pid):
     return int(value) if value and value.isdecimal() and int(value) > 0 else None
 
 
-def _query(pid, fields):
+def _query(pid, fields, *, timeout=2):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
         result = subprocess.run(['ps', '-p', str(pid), '-o', fields], capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'}, timeout=2)
+                                stdin=subprocess.DEVNULL, env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'}, timeout=timeout)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return None
     if not isinstance(result.stdout, str):

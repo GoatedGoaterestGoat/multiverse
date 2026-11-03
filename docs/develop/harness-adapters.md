@@ -390,7 +390,11 @@ parents alone.
 A disposable supervisor owns the child's new process group. One deadline covers
 preparation, execution and interpretation; cancellation, timeout and the calling
 worker's death stop that group with TERM then KILL and bounded cleanup. The leader
-is not reaped until group cleanup, so a reused PID grants no control. Agent and
+is not reaped until group cleanup, so a reused PID grants no control. The native
+child waits behind a gate until its process identity is saved. An unavailable
+identity lookup is retried for at most 5 seconds
+within the run's remaining deadline, still checking cancellation and scope. This
+retries only observation; the native command has not started. Agent and
 universe folder identities are captured before the API reads the agent's storage
 and checked after that read and the preliminary options probe. The same immutable
 snapshot is carried into core and checked before preparation and spawning, while
@@ -402,7 +406,7 @@ Input and prepared file content are bounded to 32 MiB, stdout to 16 MiB and stde
 to 64 KiB. Overflow is a failure, not a truncated success. Replies stay in memory;
 errors carry only a bounded native diagnostic or a content-free core reason.
 `RunReply` and `RunFailure` carry elapsed time and any known usage and cost for the
-plugin's metadata-only run record. Core never retries. The next run performs a
+plugin's metadata-only run record. Core never retries the native command. The next run performs a
 bounded, silent sweep of leftovers only when all recorded producers are proven
 gone and all file ownership still matches. After the supervisor records that a run
 ended, the calling dashboard or plugin worker need not exit before cleanup. A
