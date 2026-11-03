@@ -132,6 +132,17 @@ Codex reads the exact recorded thread's rollout under its recorded `CODEX_HOME`,
 - `thread_rolled_back.num_turns` removes the newest non-contextual native input boundaries and their following rows, including steers within one public prompt turn. These boundaries are tracked separately from public turn grouping. The cut moves backward over immediately preceding contextual developer/user model messages, as native `trim_pre_turn_context_updates` does; rollout bookkeeping and response records filtered by native `is_api_message` (system messages, unowned configuration updates, compaction triggers and `Other`) do not block it. Harness-authored configuration updates and other actual model items still act as barriers. Context before the first ordinary input and context separated by a non-context model item stay. An unknown fragment or malformed context shape makes trimming unreadable rather than preserving guessed instructions. Supported native input/context predicates, ordinary-user provenance and unambiguous plain-text legacy echoes establish the boundaries; native inter-agent items also count. Context-looking legacy text cannot gain a rollback boundary from its echo alone. Uncertain input boundaries make a rollback history unreadable rather than deleting an earlier proven prompt. A compaction checkpoint whose tail cannot be proved a non-context barrier is also unreadable when trimming would reach it, because its replacement history is one stored row. Raw reads retain these abandoned rows. A native item ref can select the stored history before that rollback. An unknown tip falls back to the current history with its actual tip and no gap. An in-place rewrite changes positions instead.
 - Copies must agree byte for byte through the older copy's complete rows. The newest copy is read only when each older copy is its prefix. Every identity-bearing session header must name the recorded thread under the same strict duplicate-key parsing as the first header; an ambiguous later header remains an invalid identity record. Other ambiguous records remain unreadable metadata and cannot supply rollback or model-membership proof. A completed metadata scan is validated before publication or caching; a changed file needs a stable open-file prefix proof, so mixed scans never release previews. Conflicting copies, unreadable storage, links, unsupported matching filenames, compressed rollouts without a plain sibling, and non-null `session_meta.history_base` report an error rather than guessed history. Body reads permit concurrent appends, re-proving the indexed prefix on the opened file when its signature changes; a rewrite hidden by growth still fails. Native `thread/revert` can create a referenced child rollout under the same thread ID; even a lone child is refused because its ancestor ranges are not implemented. Earlier-generation readability uses these same consistency and history checks, returning unknown for unsupported or inconsistent storage.
 
+A Codex conversation switch (`/new`, `/clear`, `/resume` in a running bridge
+terminal; see [session lineage](session-lineage.md#codex-conversation-switches))
+starts a new generation, as Claude's `/clear` does. A current read or cursor
+that crosses it reports `TranscriptChanged("replaced")` with the new start; an
+explicitly selected earlier generation stays pinned to its token, and each
+earlier thread is listed once, at its latest departure. A fresh thread with no
+rollout yet reads as not stored yet, never as the previous thread. While a
+switch is unresolved, current reads and Codex ask are unavailable (try again)
+rather than choosing a conversation; a read of an explicitly selected earlier
+generation still works.
+
 ## History and context
 
 The **history** is the conversation as it now stands, across every
@@ -267,8 +278,7 @@ transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
 `models.FAMILY`) gets one model reply to a context the plugin supplies, with
 no tools and no saved conversation. `run_options()` (`observe`, but it may start
 the harness once per process to read its version) says whether a
-harness runs at all and what it keeps. Claude implements it; Codex, Pi and
-custom harnesses report it unsupported.
+harness runs at all and what it keeps. Claude and checked Codex releases implement it; Pi and custom harnesses report it unsupported.
 
 - **Messages.** A `Row` is the native passthrough: this harness's format, with
   its body, used in the order given as one linear conversation, with the
@@ -395,9 +405,25 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   still reports the model, usage and cost the result gives. `retry_after` is
   None: the JSON result has none.
 
+### Codex
+
+The Codex plan starts an owned `app-server` over stdio in a disposable home. Its same-model catalogue removes tool declarations, with explicit settings disabling the remaining tool and extension paths. New Codex versions are unavailable until the separate zero-tools release check passes. Production has no request proxy or per-request attestation. The native file-login links and refresh behavior are described in [harnesses](../use/harnesses.md#codexs-questions-and-one-shot-runs).
+
+Login preflight checks credential metadata without reading credentials. It opens configuration nonblocking, refuses symlinks, and checks the descriptor is a regular file distinct from both credential targets by device and inode. Only that validated descriptor receives a bounded read. Special or unverifiable files report unavailable during synchronous capability and plan checks, before any producer starts.
+
+The adapter's dialogue runs in the caller. Core relays bounded JSON objects, owns the child process group and removes the declared private tree after proving the producers stopped. It never follows the borrowed login links during cleanup. EOF, cancellation and scope disappearance stop the private process. Journals contain ownership metadata, not prompts, replies or credentials.
+
+Native rows are replayed in the supplied order. The reader's model-membership rule excludes UI echoes and runtime metadata. A compaction replaces the prefix with its `replacement_history`; legacy compactions without a complete replacement history are unavailable. Historical tool calls and results remain conversation. `additional_tools`, tool-search declarations and saved dynamic-tool configuration do not restore capabilities. Removed declarations are reported in `Reply.lost`.
+
+A plugin supplies `session_meta` and `turn_context` rows to establish encrypted-history provenance. The writing model comes from the preceding `turn_context`; a settings update cannot relabel items from that turn. Reasoning is retained only for the same model and a creator account matching native account metadata. Unknown optional reasoning is omitted with a loss report; encrypted compaction is never silently discarded. Built messages preserve text and image order. A successful reply contains text and last-turn token usage, not resumed cumulative totals; dollar cost remains unknown.
+
+Codex `ask` uses this same provider with an exact recorded generation and a pinned in-context transcript snapshot. Core revalidates the captured generation and storage just before starting; the live agent can continue during inference. The copy preserves the agent's base instructions, model, effort and encrypted history as its next native turn would. A gap, unreadable model row or repeated snapshot change makes the question unavailable. Only the copied rollout is resumed, under a fresh private identity; the live daemon and original session are not contacted.
+
+The question's model and effort come from the latest `turn_context` or `thread_settings_applied` in the whole stored history, including before compaction. A settings snapshot must belong to the recorded thread and name the standard provider and model. Its omitted effort means the default. Unreadable or unproven current settings make the question unavailable. Copied turn contexts remain unchanged, preserving the separate writing-model provenance.
+
 ## Later
 
 - **Conversation entries** (API 1.15): each row's content in one form for
   every harness.
-- **Pi reading and models; Codex and Pi one-shot runs; a schema for the reply; provider routing recorded at
+- **Pi reading, models and one-shot runs; a schema for the reply; provider routing recorded at
   launch for per-agent runs** ([future work](future-work.md)).

@@ -10,7 +10,7 @@ Everything lives in `src/multiverse/`.
 | --- | --- |
 | `cli.py` | The `mv2` command line. `COMMANDS` lists every command, and each maps to a module in `tools/`. |
 | `tools/` | One module per command, each with `configure(parser)` and `run(...)`. The dashboard calls the same `run` functions. `runtime_update.py` is for harness integrations, not a command. |
-| `universe/` | Everything on disk. The package resolves universes and walks subverses. Its modules are `agents` (agent records), `mailbox` (inbox, read position, delivery tracking), `focus` (whether an agent takes only inbox-only messages, and until when), `templates` (install and refresh), `catalog` (skills, commands, workflows, bootstrap), `relocate` and `trash`. |
+| `universe/` | Everything on disk. The package resolves universes and walks subverses. Its modules are `agents` (agent records), `mailbox` (inbox, read position, delivery tracking), `focus` (whether an agent's steer and follow-up messages wait in its inbox, and until when), `templates` (install and refresh), `catalog` (skills, commands, workflows, bootstrap), `relocate` and `trash`. |
 | `runtime/` | Everything that runs. Its modules are `lifecycle` (spawn, resume, wake, readiness, listing, kill), `native` (runs adapter specs, delivers messages, keeps receipts), `rpc` (JSON-RPC transport and launch relay), `recovery` (reconnecting idle Codex terminals) and `runner` (the process in each agent's pane). |
 | `terminal/` | tmux: commands, pane tags, liveness from panes, and the status line script tmux runs. |
 | `harnesses/` | Adapters. `types.py` is the contract and `base.py` holds the shared argv rendering. There is one package each for `claude`, `codex` and `pi`, plus `legacy` for schema-1 definitions. See [harness adapters](harness-adapters.md). |
@@ -29,7 +29,7 @@ Dependencies point one way:
 5. `runtime` imports everything above.
 6. The entry points sit on top: `tools`, `ui`, `cli`, and `plugins/__main__.py` (the helper actions that harness hooks run).
 
-`runtime.native` imports `runtime.lifecycle` inside one function, to wake a stopped agent. That import is the only cycle.
+`runtime.native` imports `runtime.lifecycle` inside one function, to wake a stopped agent, and `runtime.slash` inside snapshot reconciliation to settle pending command receipts. These runtime edges are local imports; adapters never import runtime.
 
 The top-level `runner.py`, `statusline.py` and `recovery.py` are stubs that forward to `runtime.runner`, `terminal.statusline` and `runtime.recovery`. Processes started from an older layout run them by path or module name. Don't add code to them.
 
@@ -81,6 +81,8 @@ runner.py LAUNCH_DIR                                tmux pane
 ```
 
 Shared-service adapters are prepared again after the endpoint is available. Both preparations receive the same proven storage-key selection, so unknown legacy keys keep their inherited behavior in the final connected tool environment.
+
+The runner waits for its child in bounded intervals so it can handle a terminal hangup even when a helper thread receives the signal. A hangup or termination signal records a stop request; registration, startup and child-wait checkpoints act on it outside subprocess's locks. Repeated signals cannot interrupt cleanup. The shutdown path closes the runner's helpers and terminates its own child; shared native services stay running.
 
 Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core validates socket lengths before asking the adapter, but creates the run directory and performs terminal recovery only after the adapter accepts the launch. Core owns processes, tmux, records and locks. The tmux creation reply binds pane operations to its server PID and start time, separately from the OS proof needed to signal that server. Each bound command checks that identity in the same tmux command group before acting; a replacement server cannot inherit the pane merely by reusing its number. A new spawn refused before native preparation releases its name. Once native preparation begins, a failed launch keeps its record with the error, so `mv2 resume` can retry.
 

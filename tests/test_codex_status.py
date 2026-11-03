@@ -169,6 +169,24 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
     def runtime_status(self):
         return read(self.agent_dir / 'runtime.json')['status']
 
+    async def test_status_watcher_retargets_with_no_late_old_publication(self):
+        """A conversation switch must start a new observer instead of leaving status permanently unknown or accepting an old stream."""
+        self.setup_runtime('navigation')
+        await self.eventually(lambda: self.runtime_status() == 'idle')
+        old_id = self.thread_id
+        self.thread_id = str(uuid4())
+        self.properties['native_session_id'] = self.thread_id
+        write(self.agent_dir / 'properties.json', self.properties)
+        facts = read(self.agent_dir / 'runtime.json')
+        write(self.agent_dir / 'runtime.json', {**facts, 'status': 'unknown', 'session_generation': 1})
+        await self.eventually(lambda: any(r.get('params', {}).get('threadId') == self.thread_id for r in self.requests))
+        await self.eventually(lambda: self.runtime_status() == 'idle')
+        before = (self.agent_dir / 'runtime.json').read_bytes()
+        self.watcher._publish('working', old_id, 0)
+        self.assertEqual((self.agent_dir / 'runtime.json').read_bytes(), before)
+        await self.connection.send(json.dumps(self.event({'type': 'active', 'activeFlags': []}, self.thread_id)))
+        await self.eventually(lambda: self.runtime_status() == 'working')
+
     async def test_status_watcher_follows_only_the_validated_thread(self):
         """The status watcher subscribes only after the thread is bound and the launch validated, never reconnects
         after daemon loss, and keeps working without a launch directory; a break shows a plausible but wrong

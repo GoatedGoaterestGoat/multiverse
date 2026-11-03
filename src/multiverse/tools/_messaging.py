@@ -43,7 +43,7 @@ def failure_reason(reason, text='', *, preserve_details=False):
     return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
 
 
-def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, retry=False, accepted=False, text='', running=False):
+def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, retry=False, accepted=False, text='', running=False):
     state = receipt.get('state')
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
@@ -136,3 +136,16 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, r
     if delivery == 'follow-up':
         return f'{name} has your message for its next turn.'
     return f'Sent to {name}; it reads this at its next pause.'
+
+
+def delivery_line(name, receipt, **kwargs):
+    line = _delivery_line(name, receipt, **kwargs)
+    value = receipt.get('value') or {}
+    if value.get('historical_conversation') is True and value.get('native_session_id'):
+        if value.get('paused') is True:
+            return (f'{name}: message queued and paused in original conversation {value["native_session_id"]}. '
+                    'Return to that conversation before submitting new input. Do not resend.')
+        line += f" Original conversation: {clean(value['native_session_id'])}."
+    if value.get('navigation_wait'):
+        return f"{name}: saved until the conversation switch resolves; it has not been submitted."
+    return line

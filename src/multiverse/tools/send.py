@@ -6,7 +6,7 @@ from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime
 from ..terminal.recovery import Unreachable
-from ..store import lock, now, read
+from ..store import lock, read
 from ..universe import agents, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
@@ -25,7 +25,9 @@ def configure(parser):
 
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
-        json=False, _present=None, _present_error=None):
+        json=False, _present=None, _present_error=None, _note_for=None):
+    """`_note_for` is a focus id: mv2's own note about that focus's held messages, sent only while no newer
+    focus has begun."""
     access.require('act', f'send to {agent}')
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
@@ -66,11 +68,12 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 continue  # An alias of the same recipient must not duplicate a prompt.
             seen.add(directory)
             name = read(directory / 'properties.json')['name']
-            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only)
+            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
             running = bool(_present and receipt.get('state') in ('error', 'unavailable') and _running(directory))
-            if result['state'] == 'focused':
-                result['reason'] = refusal(name, result['focus'])
-                line = 'Not sent: ' + result['reason']
+            if result['state'] == 'held':
+                line = f"{name} is currently focused. Your message has been delivered as an inbox message instead."
+            elif result['state'] == 'skipped':
+                line = f"Not sent to {name}: {result['reason']}."
             elif result['delivery'] == 'inbox-only':
                 line = f"Saved to {name}'s inbox; it sees it at its next check."
             else:
@@ -92,22 +95,26 @@ def _running(directory):
         return False
 
 
-def refusal(name, record):
-    """Why a focused agent refused a message, and what the sender can do instead."""
-    why = "because it needs the user's attention" if record.get("by") == "agent" else "by the user"
-    return (f"{name} is focused {focus.ends(record)} {why}, so it takes only inbox-only messages. "
-            f"Send again with --delivery inbox-only; {name} reads it from its inbox.")
+def _skipped(sender, text, delivery, reason):
+    return ({'from': sender, 'text': text, 'delivery': delivery, 'state': 'skipped', 'saved': False, 'ok': True,
+             'reason': reason}, {})
 
 
-def _send_one(root, directory, text, sender, delivery, queue_only):
+def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
-        held = focus.current(directory) if delivery != 'inbox-only' else None
+        # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
+        if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
+            return _skipped(sender, text, delivery, 'a newer focus began')
+        held = focus.hold(directory, lambda focus_id: append_message(directory, text, sender, 'inbox-only', intended=delivery,
+                                                                     focus=focus_id)) if delivery != 'inbox-only' and note_for is None else None
         if held:
-            # Refused, not saved: the sender decides whether it is worth an inbox-only message.
-            return ({'at': now(), 'from': sender, 'text': text, 'delivery': delivery, 'state': 'focused',
-                     'saved': False, 'ok': False, 'focus': held}, {})
+            # Saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
+            record, message = held
+            return ({**{key: message[key] for key in ('at', 'from', 'text', 'delivery', 'intended')}, 'state': 'held',
+                     'saved': True, 'ok': True, 'focus': record,
+                     'reason': 'Focused, so saved as an inbox-only message'}, {})
         binding_error = None
         preflight_error = None
         if delivery != 'inbox-only':
@@ -120,9 +127,10 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             if delivery != 'inbox-only':
                 try:
                     facts = agents.runtime(directory)
+                    from ..runtime.navigation import pending
                     # Preserve the saved target while send_or_wake independently
                     # discovers terminal ownership; damaged facts cannot reconcile.
-                    if (missing_runtime.damage(directory, facts) is None
+                    if (not pending(facts) and missing_runtime.damage(directory, facts) is None
                             and missing_runtime.mismatch(directory, facts, native.observe(properties, facts)) is None):
                         properties, _ = native.session_snapshot(root, directory, properties, facts,
                                                                 launch_locked=True)
@@ -131,7 +139,25 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                 except Exception as error:
                     binding_error = error
             target = properties.get('native_session_id')
-            message = append_message(directory, text, sender, delivery, target_session=target)
+            if note_for is not None:
+                # Under the focus lock, the note is saved and then the report committed to it: a note that is never
+                # saved claims nothing, and a listener that reported first keeps it unsaid. The two are ordered
+                # writes, not one. After a crash between them, the saved note, which names its focus, becomes the
+                # report (focus.reconcile_locked) before another note is saved or a listener reports; it is never
+                # sent again.
+                # Counted under the launch lock too, which mv2 inbox and mv2 held take to read, so the note names
+                # only what is still unread when it is saved.
+                with focus.locked(directory):
+                    if (focus.reconcile_locked(directory, note_for) or {}).get('report'):
+                        return _skipped(sender, text, delivery, 'the agent was told already')
+                    count = len(mailbox.held(directory, note_for, peek=True)['messages'])
+                    if not count:
+                        return _skipped(sender, text, delivery, 'its held messages were read')
+                    message = append_message(directory, focus.note(count), sender, delivery, target_session=target,
+                                             focus_note=note_for)
+                    focus.commit_note(directory, note_for, message['id'])
+            else:
+                message = append_message(directory, text, sender, delivery, target_session=target)
         result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
         if delivery == 'inbox-only':
             return ({**result, "state": "queued", "saved": True,

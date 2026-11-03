@@ -115,6 +115,10 @@ class ProcessEvidenceTest(BaseTest):
             self.assertEqual(run.call_args.kwargs['env']['TZ'], 'UTC')
             self.assertEqual(run.call_args.kwargs['env']['LC_ALL'], 'C')
             self.assertLessEqual(run.call_args.kwargs['timeout'], 2)
+            with patch.object(sys, 'platform', 'darwin'), \
+                    patch('multiverse.runtime.process.subprocess.run', return_value=result) as run:
+                self.assertEqual(process_started(123, timeout=.125), 'Fri Oct 16 22:47:45 2026')
+            self.assertEqual(run.call_args.kwargs['timeout'], .125)
         for pid in (None, True, -1, 0, '123'):
             with self.subTest('no probe for an invalid pid', pid=pid), \
                     patch('multiverse.runtime.process.subprocess.run') as run:

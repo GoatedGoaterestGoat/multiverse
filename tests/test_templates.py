@@ -66,16 +66,18 @@ class BaseTemplateTest(unittest.TestCase):
     def test_bootstrap_is_short_and_workflows_load_only_on_request(self):
         """The bootstrap stays within its word budget and skill and workflow bodies load only on request; a break goes
         unnoticed because a longer bootstrap still works and only costs every agent context on every launch."""
-        root = templates.create(self.work / "base", "base", "base", self.work)
-        (root / "workflows" / "review" / "prompt.md").write_text("REVIEW_BODY_SENTINEL\n" * 1000)
-        (root / "skills" / "coordination" / "SKILL.md").write_text("SENTINEL_LONG_CAPABILITY\n" * 1000)
-        prompt = catalog.bootstrap(root, {"id": "test", "name": "test", "universe_id": "test"})
-        self.assertLess(len(prompt.split()), 260)
-        self.assertNotIn("REVIEW_BODY_SENTINEL", prompt)
-        self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
-        self.assertIn("REVIEW_BODY_SENTINEL", catalog.command(root, "review"))
-        self.assertIn("SENTINEL_LONG_CAPABILITY", catalog.command(root, "coordination"))
-        self.assertIn("review", [entry["name"] for entry in catalog.catalog(root)])
+        for template in ("base", "Silicon23"):
+            with self.subTest(template):
+                root = templates.create(self.work / template, template, template, self.work)
+                (root / "workflows" / "review" / "prompt.md").write_text("REVIEW_BODY_SENTINEL\n" * 1000)
+                (root / "skills" / "coordination" / "SKILL.md").write_text("SENTINEL_LONG_CAPABILITY\n" * 1000)
+                prompt = catalog.bootstrap(root, {"id": "test", "name": "test", "universe_id": "test"})
+                self.assertLess(len(prompt.split()), 260)
+                self.assertNotIn("REVIEW_BODY_SENTINEL", prompt)
+                self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
+                self.assertIn("REVIEW_BODY_SENTINEL", catalog.command(root, "review"))
+                self.assertIn("SENTINEL_LONG_CAPABILITY", catalog.command(root, "coordination"))
+                self.assertIn("review", [entry["name"] for entry in catalog.catalog(root)])
 
 
 if __name__ == "__main__":

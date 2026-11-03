@@ -19,6 +19,7 @@ WIRE_BYTES = 64 << 20
 OUTPUT_BYTES = 16 << 20
 ERROR_BYTES = 64 << 10
 CLEANUP_SECONDS = 5
+IDENTITY_SECONDS = 5
 POLL = .05
 
 
@@ -73,6 +74,24 @@ def _check(connection, payload):
     if time.monotonic() >= payload['deadline']:
         raise Stopped('timeout', 'The run deadline passed')
     scopes(payload['scopes'])
+
+
+def _child_started(connection, payload, child):
+    # The unreaped child still waits at its gate. Retry observation, never native execution.
+    deadline = min(payload['deadline'], time.monotonic() + IDENTITY_SECONDS)
+    while True:
+        _check(connection, payload)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Stopped('unavailable', 'Cannot record the private child identity')
+        token = process_started(child.pid, timeout=min(2, remaining))
+        _check(connection, payload)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Stopped('unavailable', 'Cannot record the private child identity')
+        if token:
+            return token
+        time.sleep(min(POLL, remaining))
 
 
 def _exited(child):
@@ -139,6 +158,7 @@ def supervise(connection, payload):
     directory = Path(payload['directory'])
     record = {'run_id': directory.name, 'directory': str(directory), 'universe': payload['universe'],
               'store': payload.get('store'), 'declared': [{k: item[k] for k in ('root', 'path')} for item in payload['files']],
+              'disposable': payload.get('disposable', []),
               'owner': payload['owner'], 'supervisor': {'pid': os.getpid(), 'started': process_started(os.getpid())},
               'child': None}
     created, child, gate = False, None, None
@@ -150,62 +170,71 @@ def supervise(connection, payload):
             raise Stopped('unavailable', 'Cannot record the run supervisor identity')
         run_files.create(directory, record)
         created = True
+        for name in payload.get('disposable', []):
+            _check(connection, payload)
+            run_files.create_tree(directory, record, name)
         for item in payload['files']:
             _check(connection, payload)
             root = directory if item['root'] == 'run' else Path(payload['store'])
             path = root / run_files.relative(item['path'])
             run_files.write_file(directory, record, path, base64.b64decode(item['content'], validate=True))
+        for item in payload.get('links', []):
+            _check(connection, payload)
+            run_files.write_link(directory, record, item['path'], item['target'])
         _check(connection, payload)
         read_gate, gate = os.pipe()
         try:
             child = subprocess.Popen([sys.executable, '-I', '-S', '-c', CHILD, str(read_gate), *payload['argv']],
-                                     cwd=directory, env=payload['environment'], stdin=subprocess.DEVNULL,
+                                     cwd=directory, env=payload['environment'],
+                                     stdin=subprocess.PIPE if payload.get('rpc') else subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                                      pass_fds=(read_gate,))
         finally:
             os.close(read_gate)
-        token = process_started(child.pid)
-        if not token:
-            raise Stopped('unavailable', 'Cannot record the private child identity')
+        token = _child_started(connection, payload, child)
         record.update(phase='running', child={'pid': child.pid, 'started': token, 'pgid': child.pid})
         run_files.save(directory, record)
         _check(connection, payload)
         os.write(gate, b'g')
         os.close(gate)
         gate = None
-        with selectors.DefaultSelector() as selector:
-            selector.register(connection, selectors.EVENT_READ, ('parent', 0))
-            for name, stream, limit in (('stdout', child.stdout, OUTPUT_BYTES), ('stderr', child.stderr, ERROR_BYTES)):
-                os.set_blocking(stream.fileno(), False)
-                selector.register(stream, selectors.EVENT_READ, (name, limit))
-            while True:
-                _check(connection, payload)
-                for key, _ in selector.select(min(POLL, max(0, payload['deadline'] - time.monotonic()))):
-                    name, limit = key.data
-                    if name == 'parent':
-                        _parent(connection)
-                        continue
-                    chunk = os.read(key.fd, min(65536, limit - len(outputs[name]) + 1))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                    else:
-                        outputs[name].extend(chunk)
-                        if len(outputs[name]) > limit:
-                            raise Stopped('failed', f'Native {name} exceeded the run size bound')
-                if _exited(child):
-                    # Drain buffered output, but do not wait forever for a descendant keeping a pipe open.
-                    for name, stream, limit in (('stdout', child.stdout, OUTPUT_BYTES), ('stderr', child.stderr, ERROR_BYTES)):
-                        while True:
-                            try:
-                                chunk = os.read(stream.fileno(), min(65536, limit - len(outputs[name]) + 1))
-                            except BlockingIOError:
-                                break
-                            if not chunk:
-                                break
+        if payload.get('rpc'):
+            from .run_rpc import relay
+            relay(connection, child, payload)
+        else:
+            with selectors.DefaultSelector() as selector:
+                selector.register(connection, selectors.EVENT_READ, ('parent', 0))
+                for name, stream, limit in (('stdout', child.stdout, OUTPUT_BYTES), ('stderr', child.stderr, ERROR_BYTES)):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ, (name, limit))
+                while True:
+                    _check(connection, payload)
+                    for key, _ in selector.select(min(POLL, max(0, payload['deadline'] - time.monotonic()))):
+                        name, limit = key.data
+                        if name == 'parent':
+                            _parent(connection)
+                            continue
+                        chunk = os.read(key.fd, min(65536, limit - len(outputs[name]) + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                        else:
                             outputs[name].extend(chunk)
                             if len(outputs[name]) > limit:
                                 raise Stopped('failed', f'Native {name} exceeded the run size bound')
-                    break
+                    if _exited(child):
+                        # Drain buffered output, but do not wait forever for a descendant keeping a pipe open.
+                        for name, stream, limit in (('stdout', child.stdout, OUTPUT_BYTES), ('stderr', child.stderr, ERROR_BYTES)):
+                            while True:
+                                try:
+                                    chunk = os.read(stream.fileno(), min(65536, limit - len(outputs[name]) + 1))
+                                except BlockingIOError:
+                                    break
+                                if not chunk:
+                                    break
+                                outputs[name].extend(chunk)
+                                if len(outputs[name]) > limit:
+                                    raise Stopped('failed', f'Native {name} exceeded the run size bound')
+                        break
     except Stopped as error:
         response = {'failure': {'kind': error.kind, 'reason': error.reason, 'gone': error.gone}}
     except Exception:
@@ -219,7 +248,7 @@ def supervise(connection, payload):
                 stopped = _stop(child)
             except (OSError, subprocess.SubprocessError):
                 stopped = False
-            for stream in (child.stdout, child.stderr):
+            for stream in (child.stdin, child.stdout, child.stderr):
                 if stream:
                     stream.close()
         if not stopped:
@@ -242,6 +271,7 @@ def supervise(connection, payload):
 
 def main():
     connection = socket.socket(fileno=int(sys.argv[1]))
+    payload = {}
     try:
         try:
             payload = _read_request(connection)
@@ -250,6 +280,8 @@ def main():
             result = {'failure': {'kind': 'failed', 'reason': 'The private run supervisor could not read its request'}}
         data = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()
         connection.settimeout(CLEANUP_SECONDS)
+        if pending := payload.get('_rpc_pending'):
+            connection.sendall(pending)
         connection.sendall(struct.pack('!Q', len(data)) + data)
     except (OSError, ValueError):
         pass  # Caller death cannot prevent cleanup, and content is never written to a log.

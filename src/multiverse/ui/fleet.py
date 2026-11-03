@@ -7,7 +7,7 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, lookup
 from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
@@ -27,7 +27,7 @@ class FleetView:
             if self.draft and row["key"] == self.draft.key:
                 row["kind"] = "draft"
         available = self.query_one("#fleet").content_size.width - 1
-        fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
+        fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe") and key not in MARKS)]
         if available < COMPACT_WIDTH:
             fields = [key for key in fields if lookup(key).compact]
         if self.draft:
@@ -62,12 +62,17 @@ class FleetView:
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else lookup(field).render(row)
-                                  for field in fields]) for row in projected]
-        if self.moving:
-            for key, cells in rendered:
-                if key == self.moving["key"]:
-                    cells[0].append("  ⇢ moving", style=f"italic {theme.YELLOW}")
+        moving = (("  ⇢ moving", f"italic {theme.YELLOW}"),)
+
+        def cell(row, field):
+            if row["kind"] == "draft":
+                return self.draft_cell(row, field)
+            if field == "name":  # its marks stay in view: a long name is shortened to the column's width instead
+                return COLUMNS["name"].render(row, widths["name"],
+                                              moving if self.moving and row["key"] == self.moving["key"] else ())
+            return lookup(field).render(row)
+
+        rendered = [(row["key"], [cell(row, field) for field in fields]) for row in projected]
         signature = (list(widths.items()), rendered)
         if signature != self._table_signature:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):

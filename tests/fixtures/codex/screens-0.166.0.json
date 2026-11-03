@@ -1,0 +1,10 @@
+[
+ {
+  "name": "agents hint",
+  "note": "working, with \"← for agents · ? for shortcuts\" under the status line; the last 8 rows of a real tmux capture of an agent on this machine",
+  "cli_version": "0.166.0",
+  "width": null,
+  "text": "• Working (12m 44s • esc to interrupt)\n  └ Tip: You can run any shell command from Codex using ! (e.g. !ls)\n\n\n› Ask Codex to do anything\n\n  GPT-6-Astra xhigh · harness-features · never · Context 33% left · weekly 52% left · 171K used · codex-ask\n  ← for agents · ? for shortcuts\n",
+  "shown": "• Working (12m 44s • esc to interrupt)\n  └ Tip: You can run any shell command from Codex using ! (e.g. !ls)\n\n"
+ }
+]

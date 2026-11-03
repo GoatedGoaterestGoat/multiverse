@@ -19,7 +19,8 @@ from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import write
 
-HUNG_LOAD = 20.0  # LOAD_SECONDS while the test shows nothing waits for a load: a full wait takes this long
+HUNG_LOAD = 90.0  # LOAD_SECONDS here: past every wait of the test (about 50 s in all), so a load held at its
+                  # gate is still loading at the end, however slow the machine; a full wait takes this long
 QUICK = 4.0       # what the first screen may take on a busy machine; it waits loader.REFRESH_WAIT for plugins at most
 
 GATED = '''
@@ -27,7 +28,7 @@ import os, time
 from pathlib import Path
 
 def wait_for_gate(name):
-    gate, deadline = Path(os.environ[name]), time.monotonic() + 30
+    gate, deadline = Path(os.environ[name]), time.monotonic() + 120  # past HUNG_LOAD: the gate never ends it first
     while not gate.exists() and time.monotonic() < deadline:   # hangs until the test opens the gate
         time.sleep(0.05)
 '''
@@ -166,7 +167,12 @@ class FirstScreenTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.2)
                 self.assertIn("unknown widget type", shown())
             with self.subTest("q while a plugin still loads"):
-                self.assertTrue(self.loading("stuck"))
+                stuck = next(item for item in plugins.listing(self.root) if item["name"] == "stuck")
+                threads = [thread.name for thread in threading.enumerate() if thread.name.startswith("plugin stuck")]
+                # Its gate never opens, so its load can't have ended: if it reads otherwise, say what the listing
+                # and the load threads show, which tells a load that ended from a listing that misreads one.
+                self.assertEqual(stuck["state"], "loading", f"stuck reads {stuck['state']!r}, problem "
+                                 f"{stuck.get('problem')!r}, errors {stuck.get('errors')!r}, load threads {threads}")
                 await d.pilot.press("q")
                 for _ in range(100):  # not d.until: that waits for every worker
                     if not d.app.is_running:

@@ -6,7 +6,7 @@ from .. import universe
 from ..plugins.loader import CORE_COLUMN_ALIASES
 from ..store import read
 from . import theme
-from .columns import COLUMNS
+from .columns import COLUMNS, MARKS
 from .panels import error_widget, normalize_widgets
 from .plugin_panels import option_of
 
@@ -45,9 +45,10 @@ def _read_view(root):
         requested = DEFAULT_COLUMNS
     requested = [_unaliased(key) if isinstance(key, str) else key for key in requested]
     # A plugin column stays named while its plugin is off: `plugin:key` always, a short key while a plugin uses it.
-    offered = _plugin_column_keys(root) if any(isinstance(key, str) and key not in COLUMNS for key in requested) else set()
+    offered = (_plugin_column_keys(root) if any(isinstance(key, str) and key not in COLUMNS and key not in MARKS
+                                                for key in requested) else set())
     selected = list(dict.fromkeys(key for key in requested if isinstance(key, str)
-                                  and (key in COLUMNS or key in offered or _core(key) or _qualified(key))))
+                                  and (key in COLUMNS or key in MARKS or key in offered or _core(key) or _qualified(key))))
     widgets = normalize_widgets(config.get("widgets", []), root)
     replace = config.get("replace", True)  # false: no plugin column stands in for a core one in this view
     if not isinstance(replace, bool):
@@ -58,7 +59,9 @@ def _read_view(root):
     except ValueError as error:
         plugin_panels = "auto"
         widgets = [*widgets, error_widget("View configuration error", error)]
-    return {"columns": selected or DEFAULT_COLUMNS, "accent": accent, "replace": replace,
+    if not any(key not in MARKS for key in selected):  # nothing to show but a mark: the default columns, with it
+        selected = [*DEFAULT_COLUMNS, *selected]
+    return {"columns": selected, "accent": accent, "replace": replace,
             "title": str(config.get("title", "")), "widgets": widgets, "plugin_panels": plugin_panels}
 
 

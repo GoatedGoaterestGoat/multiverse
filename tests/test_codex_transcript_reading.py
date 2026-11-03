@@ -400,6 +400,8 @@ class CodexTranscriptReadingTest(BaseTest):
                 ('another thread', replace(self.session, native_id=str(uuid4())), {}, 'unavailable')]:
             with self.subTest(name), patch.dict(os.environ, environment):
                 self.assertEqual(self.adapter.transcript_view(session).source.state, state)
+                navigation = self.adapter.navigation_target(session, session.native_id)
+                self.assertEqual(navigation.state, 'ok' if state == 'supported' and session.home else 'unavailable')
         self.assertIs(self.adapter.transcript_readable(self.session), True)
         self.assertIs(self.adapter.transcript_readable(replace(self.session, native_id=str(uuid4()))), False)
         # Reviewer probes use actual line bytes and schedule writes between reads.
@@ -414,6 +416,7 @@ class CodexTranscriptReadingTest(BaseTest):
                 'content_item_metadata': [{'provenance': {'type': 'user'}}]})) + '\n')
         self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
         self.assertIsNone(self.adapter.transcript_readable(self.session))
+        self.assertEqual(self.adapter.navigation_target(self.session, self.native).state, 'unavailable')
         with self.assertRaises(TranscriptRowsChanged):
             self.adapter.transcript_bodies(self.session, own_view, [1], max_bytes=1 << 20)
         for malformed in ('duplicate identity', 'duplicate record type'):
@@ -432,6 +435,7 @@ class CodexTranscriptReadingTest(BaseTest):
                     handle.write(json.dumps(proven) + '\n')
                 self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
                 self.assertIsNone(self.adapter.transcript_readable(self.session))
+                self.assertEqual(self.adapter.navigation_target(self.session, self.native).state, 'unavailable')
                 with self.assertRaises(TranscriptRowsChanged):
                     self.adapter.transcript_bodies(self.session, own_view, [1], max_bytes=1 << 20)
         real_open = t.open_regular

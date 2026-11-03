@@ -4,16 +4,25 @@ import json
 import os
 from pathlib import Path
 
-from ..store import lock, now, read, uid, write
+from ..store import lock, now, open_regular, read, uid, write
 from . import records
 
 
-def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None):
+def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None, intended=None, focus=None,
+                   focus_note=None):
+    """Append a message. `intended` and `focus` mark a steer or follow-up that a focus held as inbox-only;
+    `focus_note` marks mv2's follow-up about that focus's held messages."""
     if not text.strip():
         raise ValueError("Message cannot be empty")
     if delivery not in ("steer", "follow-up", "inbox-only"):
         raise ValueError("Unknown native delivery mode")
-    message = {"schema": 2, "target_session": target_session, "delivery": delivery, "id": uid(), "at": now(), "from": sender, "text": text}
+    if intended is not None and (delivery != "inbox-only" or intended not in ("steer", "follow-up") or not focus):
+        raise ValueError("A held message is inbox-only and names its intended delivery and focus")
+    if focus_note is not None and (delivery != "follow-up" or not isinstance(focus_note, str) or not focus_note):
+        raise ValueError("A focus note is a follow-up and names its focus")
+    message = {"schema": 2, "target_session": target_session, "delivery": delivery, "id": uid(), "at": now(), "from": sender, "text": text,
+               **({"intended": intended, "focus": focus} if intended else {}),
+               **({"focus_note": focus_note} if focus_note else {})}
     agent_dir = Path(agent_dir)
     with lock(agent_dir / ".inbox.lock"):
         path = agent_dir / "inbox.jsonl"
@@ -26,7 +35,8 @@ def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_ses
             out.flush()
             os.fsync(out.fileno())
     sender = {key: sender.get(key) for key in ("name", "agent_id", "plugin") if isinstance(sender, dict) and key in sender}
-    _event(agent_dir, "message.saved", {"id": message["id"], "delivery": delivery, "length": len(text), "from": sender})
+    _event(agent_dir, "message.saved", {"id": message["id"], "delivery": delivery, "length": len(text), "from": sender,
+                                        **({"intended": intended} if intended else {})})
     return message
 
 
@@ -39,9 +49,15 @@ def _event(agent_dir, kind, data):
         pass
 
 
+def _bytes(path):
+    with open_regular(path) as stream:
+        # A growing file cannot extend this read indefinitely; writers normally hold the inbox lock.
+        return stream.read(os.fstat(stream.fileno()).st_size)
+
+
 def _cursor(agent_dir):
     path = agent_dir / "inbox.cursor"
-    return int(path.read_text()) if path.exists() else 0
+    return int(_bytes(path).decode()) if path.exists() else 0
 
 
 def _validate_cursor(data, cursor):
@@ -51,7 +67,7 @@ def _validate_cursor(data, cursor):
 
 def _messages(agent_dir):
     path = agent_dir / 'inbox.jsonl'
-    data = path.read_bytes() if path.exists() else b''
+    data = _bytes(path) if path.exists() else b''
     cursor = _cursor(agent_dir)
     _validate_cursor(data, cursor)
     offset = 0
@@ -177,6 +193,7 @@ def inbox_problem(agent_dir):
         with lock(agent_dir / '.inbox.lock'):
             data, _, _ = _messages(agent_dir)
             _states(agent_dir)
+            _read_marks(agent_dir)
             if data and not data.endswith(b'\n'):
                 return (f"{agent_dir / 'inbox.jsonl'}: incomplete final line; sends cannot append. "
                         "Back up the file, then repair or remove only the incomplete tail; keep complete messages")
@@ -185,14 +202,27 @@ def inbox_problem(agent_dir):
     return None
 
 
+def _read_marks(agent_dir):
+    """Messages read ahead of the read position, by `mv2 held`: {message id: when}."""
+    path = agent_dir / 'inbox-read.json'
+    marks = _ledger(path)
+    if any(not isinstance(identifier, str) or not isinstance(stamp, str) for identifier, stamp in marks.items()):
+        raise _ledger_damage(path, 'invalid read marks')
+    return marks
+
+
 def _manual(message):
     # Existing logs retain their old mailbox semantics; no live migration.
     return message.get('schema') != 2 or message['delivery'] == 'inbox-only'
 
 
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
-          last=None, since=None, present=None):
-    """Read unread manual messages; peek and full history do not consume them."""
+          last=None, since=None, present=None, blocking=True):
+    """Read unread manual messages; peek and full history do not consume them.
+
+    blocking=False raises BlockingIOError on contention so a waiter can check
+    its own deadline and lifetime without keeping another lock while waiting.
+    """
     if peek and (all_messages or after is not None):
         raise ValueError('--peek cannot be combined with --all or --after')
     if (last is not None or since is not None) and not all_messages:
@@ -202,9 +232,10 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
-    with lock(agent_dir / '.inbox.lock'):
+    with lock(agent_dir / '.inbox.lock', blocking=blocking):
         data, read_cursor, records = _messages(agent_dir)
         states = _states(agent_dir)
+        marks = _read_marks(agent_dir)
         if after is not None:
             _validate_cursor(data, after)
             if not all_messages and after > read_cursor:
@@ -234,8 +265,9 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
                 continue
             state = states.get(message['id'], {})
             if all_messages:
-                messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state}})
-            elif _manual(message):
+                messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
+                                                         **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
+            elif _manual(message) and message['id'] not in marks:
                 messages.append(message)
             else:
                 continue
@@ -251,10 +283,52 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
         consumed = not all_messages and not peek and cursor > read_cursor
         if consumed:
             write(agent_dir / 'inbox.cursor', cursor)
+            if marks:
+                ahead = {message['id'] for offset, message in records if offset > cursor}
+                if any(identifier not in ahead for identifier in marks):
+                    write(agent_dir / 'inbox-read.json',
+                          {identifier: stamp for identifier, stamp in marks.items() if identifier in ahead})
     if consumed and messages:
         # Inbox-only messages read and marked read, after a successful present.
         _event(agent_dir, "message.read", {"count": len(messages)})
     return result
+
+
+def held(agent_dir, focus_id, *, peek=False, present=None):
+    """The unread messages focus `focus_id` held; unless peeking, marks only those read, after `present`."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        _, cursor, records = _messages(agent_dir)
+        marks = _read_marks(agent_dir)
+        messages = [message for offset, message in records
+                    if offset > cursor and focus_id and message.get('focus') == focus_id and message.get('intended')
+                    and _manual(message) and message['id'] not in marks]
+        result = {'messages': messages}
+        if present is not None:
+            present(result)
+        consumed = not peek and bool(messages)
+        if consumed:
+            stamp = now()
+            write(agent_dir / 'inbox-read.json', {**marks, **{message['id']: stamp for message in messages}})
+            # Rewritten unchanged, so whatever watches the read position (the Claude mod's status line, listen)
+            # counts again.
+            write(agent_dir / 'inbox.cursor', cursor)
+    if consumed:
+        _event(agent_dir, "message.read", {"count": len(messages)})
+    return result
+
+
+def focus_note(agent_dir, focus_id, *, blocking=True):
+    """The ID of mv2's saved note about focus `focus_id`'s held messages, from the whole history, or None."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock', blocking=blocking):
+        _, _, records = _messages(agent_dir)
+    for _, message in records:
+        sender = message.get('from')
+        if (message.get('schema') == 2 and message.get('delivery') == 'follow-up' and focus_id
+                and message.get('focus_note') == focus_id and isinstance(sender, dict) and sender.get('core') is True):
+            return message['id']
+    return None
 
 
 def message_record(agent_dir, message_id):

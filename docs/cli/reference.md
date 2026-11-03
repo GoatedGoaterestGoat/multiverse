@@ -38,7 +38,9 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`inspect`](#inspect) | Show an agent's key facts and the end of its live terminal. |
 | [`send`](#send) | Save and deliver a message to the exact native session. |
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
-| [`focus`](#focus) | Focus an agent while it needs the user: only inbox-only messages reach it, others are refused. |
+| [`held`](#held) | Read the steer and follow-up messages held during your last focus, and mark only those read. |
+| [`listen`](#listen) | Wait in a background shell for unread inbox-only messages, without reading them. |
+| [`focus`](#focus) | Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox. |
 | [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
 | [`status`](#status) | Alias for [`report`](#report). |
@@ -47,6 +49,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`deliver`](#deliver) | Check deliveries, retry failures, or dismiss failures and uncertainty without resending. |
 | [`native-status`](#native-status) | Read optional native observations; unavailable and failed observations are explicit. |
 | [`ask`](#ask) | Ask an isolated side question without changing the main conversation. |
+| [`slash`](#slash) | Run a harness command when the agent is idle, or read its command list and results. |
 | [`get-usage`](#get-usage) | Read measured usage for the exact native session. |
 | [`tui`](#tui) | Browse universes and operate agents. |
 | [`doctor`](#doctor) | Check local definitions and report uncertain agent state. |
@@ -129,7 +132,7 @@ mv2 command name ...
 Launch an agent in a tagged tmux pane.
 
 ```sh
-mv2 spawn --name NAME [--harness HARNESS] [--task TASK | --task-file TASK_FILE] [--model MODEL] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json]
+mv2 spawn --name NAME [--harness HARNESS] [--task TASK | --task-file TASK_FILE] [--model MODEL] [--effort EFFORT] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json]
 ```
 
 | Argument | Value | Description | Default |
@@ -139,6 +142,7 @@ mv2 spawn --name NAME [--harness HARNESS] [--task TASK | --task-file TASK_FILE] 
 | `--task`, `--prompt` | `TASK` | Initial prompt sent to the new agent |  |
 | `--task-file` | `TASK_FILE` |  |  |
 | `--model` | `MODEL` |  |  |
+| `--effort` | `EFFORT` | Effort for this agent only; requires harness support and a known --model; default uses the harness default |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
 | `--json` |  | Print the full launch record as JSON |  |
@@ -150,13 +154,14 @@ Use at most one of `--task`, `--task-file`.
 Resume an agent, or explicitly recover its missing native conversation.
 
 ```sh
-mv2 resume [--model MODEL] [--start-fresh] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json] agent
+mv2 resume [--model MODEL] [--effort EFFORT] [--start-fresh] [--wait] [--wait-timeout WAIT_TIMEOUT] [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--model` | `MODEL` |  |  |
+| `--effort` | `EFFORT` | Effort for this agent only; retained on later resumes; default clears it and uses the harness default |  |
 | `--start-fresh` |  | Recover a missing conversation with a new one, only after every candidate storage proves it absent |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
@@ -298,9 +303,33 @@ mv2 inbox [--agent AGENT] [--all] [--after AFTER] [--peek] [--json] [--last LAST
 | `--wait` |  | Wait for an unread message |  |
 | `--timeout` | `TIMEOUT` | Limit --wait (seconds, or a duration such as 30s or 2m) |  |
 
+## held
+
+Read the steer and follow-up messages held during your last focus, and mark only those read.
+
+```sh
+mv2 held [--json]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `--json` |  | Return machine-readable JSON |  |
+
+## listen
+
+Wait in a background shell for unread inbox-only messages, without reading them.
+
+```sh
+mv2 listen [--timeout TIMEOUT]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `--timeout` | `TIMEOUT` | Stop waiting after seconds or a duration such as 30s or 2m |  |
+
 ## focus
 
-Focus an agent while it needs the user: only inbox-only messages reach it, others are refused.
+Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox.
 
 ```sh
 mv2 focus [--json] [--for DURATION | --turn] [agent]
@@ -310,7 +339,7 @@ mv2 focus [--json] [--for DURATION | --turn] [agent]
 | --- | --- | --- | --- |
 | `agent` |  | Agent name (default: yourself inside an agent session) |  |
 | `--json` |  | Return the focus record as JSON |  |
-| `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus) |  |
+| `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus); the user only, not an agent focusing itself |  |
 | `--turn` |  | End the focus when the agent's next turn ends; for an agent focusing itself or one that is working, that is the turn after the current one |  |
 
 Use at most one of `--for`, `--turn`.
@@ -423,6 +452,27 @@ mv2 ask --question QUESTION [--json] agent
 | `agent` |  |  |  |
 | `--question` | `QUESTION` | Required. |  |
 | `--json` |  | Print the full result as JSON |  |
+
+## slash
+
+Run a harness command when the agent is idle, or read its command list and results.
+
+```sh
+mv2 slash [--list | --result ID] [--timeout TIMEOUT] [--no-wait] [--json] agent [command] [args ...]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  |  |  |
+| `command` |  | The live command name without a slash |  |
+| `args` |  | Arguments as you would type them after the command |  |
+| `--list` |  | List commands and their refusals |  |
+| `--result` | `ID` | Read a previously submitted command result; never resend |  |
+| `--timeout` | `TIMEOUT` | Seconds to wait (default: 600); a timeout leaves the command queued | `600` |
+| `--no-wait` |  | Print the command run ID without waiting |  |
+| `--json` |  | Print the complete result as JSON |  |
+
+Use at most one of `--list`, `--result`.
 
 ## get-usage
 

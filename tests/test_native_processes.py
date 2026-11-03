@@ -2,10 +2,12 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -35,6 +37,58 @@ class PrivateProcessGroupTest(unittest.TestCase):
             finally:
                 group.close(reap=process.poll)
                 process.wait(timeout=5)
+        for observation in ('one timeout', 'persistent timeout', 'timeout after signal', 'late inventory'):
+            with self.subTest(observation=observation):
+                process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                           stdin=subprocess.DEVNULL, start_new_session=True)
+                group = PrivateProcessGroup(process.pid)
+                query = subprocess.check_output
+                clock, queries = [0.0], []
+                def observe(*args, **kwargs):
+                    queries.append(kwargs['timeout'])
+                    if observation == 'persistent timeout':
+                        self.assertLessEqual(len(queries), 6, 'Observation retry deadline was reset')
+                    if (observation == 'persistent timeout'
+                            or observation == 'timeout after signal' and len(queries) > 1
+                            or observation == 'one timeout' and len(queries) == 1):
+                        clock[0] += kwargs['timeout']
+                        raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+                    output = query(*args, **kwargs)
+                    clock[0] += 31 if observation == 'late inventory' else 4 if observation == 'timeout after signal' else .01
+                    return output
+                try:
+                    with patch('native_processes.subprocess.check_output', side_effect=observe), \
+                            patch('native_processes.time', SimpleNamespace(monotonic=lambda: clock[0], sleep=time.sleep)), \
+                            patch('native_processes.os.killpg',
+                                  wraps=None if observation == 'timeout after signal' else os.killpg) as signal_group:
+                        if observation != 'one timeout':
+                            with self.assertRaises(subprocess.TimeoutExpired):
+                                group.close(reap=process.poll)
+                            if observation in ('persistent timeout', 'late inventory'):
+                                signal_group.assert_not_called()
+                            else:
+                                signal_group.assert_called_once_with(group.pgid, signal.SIGTERM)
+                            self.assertFalse(group.closed, 'Unknown is not an empty group')
+                            if observation == 'late inventory':
+                                self.assertEqual(queries, [5])
+                            else:
+                                self.assertLessEqual(clock[0], 30)
+                        else:
+                            group.close(reap=process.poll)
+                            self.assertTrue(group.closed)
+                            self.assertTrue(signal_group.called)
+                            self.assertTrue(all(call.args[0] == group.pgid
+                                                for call in signal_group.call_args_list))
+                        if observation != 'late inventory':
+                            self.assertGreater(len(queries), 1)
+                        if observation in ('persistent timeout', 'timeout after signal'):
+                            self.assertLessEqual(len(queries), 8)
+                        self.assertTrue(all(0 < value <= 5 for value in queries))
+                finally:
+                    group.close(reap=process.poll)
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
         with self.subTest('a group of zombies only'):
             if not hasattr(os, 'fork'):
                 self.skipTest('POSIX process states required')

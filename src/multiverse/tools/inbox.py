@@ -5,9 +5,13 @@ import re
 import time
 from ..plugins import access
 from ..universe import agents
-from .. import store
+from .. import store, universe
 from ..universe import mailbox
 from ._common import add_agent, callback
+
+# What an unread message shows; `intended` marks a steer or follow-up that a focus held.
+FIELDS = ('at', 'from', 'text', 'delivery', 'intended')
+
 
 def configure(parser):
     add_agent(parser)
@@ -48,7 +52,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
     def public_result(result):
         if all_messages:
             return result
-        return {**result, 'messages': [{key: message[key] for key in ('at', 'from', 'text', 'delivery') if key in message}
+        return {**result, 'messages': [{key: message[key] for key in FIELDS if key in message}
                                       for message in result['messages']]}
     cutoff = since_time(since)
     previous = None
@@ -95,6 +99,17 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         time.sleep(min(.2, remaining) if remaining is not None else .2)
 
 
+def unread(root, agent, *, blocking=True):
+    """An agent's unread inbox messages for a person to read, oldest first. Like --peek it never marks them read, and
+    it takes only the inbox's own lock, so the dashboard can call it on every refresh. blocking=False raises
+    BlockingIOError instead of waiting while another reader or sender holds that lock. Inbox data and lock
+    files are opened nonblocking and checked on their descriptors; special files are damage, never read."""
+    access.require('observe', 'read inbox')
+    directory = agents.directory(universe.resolve(root), agent, allow_damaged=True)
+    return [{key: message[key] for key in FIELDS if key in message}
+            for message in mailbox.inbox(directory, limit=None, peek=True, blocking=blocking)['messages']]
+
+
 def timeout_seconds(value):
     if value is None:
         return None
@@ -122,7 +137,7 @@ def readable(root, result, empty='No unread messages.'):
     blocks = []
     for message in result['messages']:
         sender = message.get('from') or {}
-        if not sender.get('agent_id'):
+        if not sender.get('agent_id') and sender.get('core') is not True:
             sender = {**sender, 'name': 'user'}
         blocks.append(framed_text(root, {**message, 'from': sender}))
     return '\n\n'.join(blocks) if blocks else empty

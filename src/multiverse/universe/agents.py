@@ -231,6 +231,7 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
     Reducers are core bookkeeping only: no native calls or plugin callbacks.
     Keep launch guards, refusal precedence and status events shared with writes.
     """
+    ended = None
     with lock(agent_dir / ".runtime.lock", create_parent=create_parent):
         data = runtime(agent_dir)
         if data.get("launch_id") != launch_id:
@@ -251,7 +252,10 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
         # A turn ends when the harness goes idle from working or waiting on the person. Under the lock,
         # so a focus --turn, which reads the status under it too, is ordered with this turn end.
         if data.get('status') == 'idle' and before in ('working', 'waiting'):
-            focus.turn_ended(agent_dir)
+            ended = focus.turn_ended(agent_dir)
+    if ended:
+        # The turn ended a focus: tell the agent about messages it held, after the lock.
+        focus.after_turn(agent_dir, ended)
     if data.get('status') != before:
         # After the lock: recording an event never holds up the runtime record.
         _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})

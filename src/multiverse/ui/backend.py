@@ -3,14 +3,15 @@ from pathlib import Path
 import threading
 
 from .. import universe
+from ..universe import agents
 from ..harnesses import load as load_harness
 from ..store import read
-from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inspect, kill, list_agents, move,
+from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse, unfocus)
 from .. import display, plugins
 from ..runtime import lifecycle
 from . import columns, plugin_panels, theme
-from .columns import COLUMNS
+from .columns import COLUMNS, MARKS, UNREAD
 from .panels import error_widget
 from .tree import counts, within
 from .views import view
@@ -44,12 +45,70 @@ def usage_identity(row):
             row.get("native_session_id"), row.get("native_session_home"))
 
 
+# What an agent's unread inbox count depends on: its messages, its read cursor, what it has marked read, and the
+# delivery records the read checks (a damaged one makes it fail, and a repair makes it succeed again).
+INBOX_FILES = ("inbox.jsonl", "inbox.cursor", "inbox-read.json", "inbox-state.json", "native-delivery.json")
+UNSUBMITTED = "inbox-unsubmitted"  # one record per message that was never submitted, each checked by the read
+
+
+def _file_stamp(path):
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return info.st_mtime_ns, info.st_ctime_ns, info.st_size, info.st_ino, info.st_mode
+
+
+def inbox_stamp(directory):
+    """The stat of each file the count depends on, None for one that is missing, and each unsubmitted record by
+    name: a change by any writer, a repair in place or a permission change changes it."""
+    try:
+        records = sorted((directory / UNSUBMITTED).glob("*.json"))
+    except FileNotFoundError:
+        records = []
+    return (tuple(_file_stamp(directory / name) for name in INBOX_FILES),
+            tuple((path.name, _file_stamp(path)) for path in records))
+
+
 class LocalBackend:
     demo = False
 
     def __init__(self):
         # The last usage read per agent, kept with what it was read for: a refresh shows it until the next read lands.
         self._usage, self._usage_lock = {}, threading.Lock()
+        self._unread = {}  # agent key -> (inbox_stamp, unread count): read again only once a stamp changes
+
+    def unread_count(self, row):
+        """The agent's unread inbox count, as the inspector and mv2 inbox count them, or None when its inbox can't be
+        read now. Read through inbox.unread, which never marks anything read and never blocks on what is in an
+        inbox's place (a FIFO is a failed read), and only when one of the files it depends on changed since the last
+        read, so a refresh costs a few stat calls per agent. It never waits for the inbox's lock either (a reader may
+        hold it while its output is blocked): then the last count shows, and the next refresh reads again. A failed
+        read is never kept, so a repair or a permission fix shows on the next one."""
+        key = (str(row["universe"]), str(row["id"]))
+        cached = self._unread.get(key)
+        try:
+            directory = Path(row["universe"]) / "state" / "agents" / str(row["id"])
+            if not directory.is_dir():  # a folder named other than its id: found the way the read finds it
+                directory = agents.directory(Path(row["universe"]), row["id"], allow_damaged=True)
+            stamp = inbox_stamp(directory)
+        except Exception:
+            self._unread.pop(key, None)
+            return None
+        if stamp[0][0] is None:
+            self._unread[key] = (stamp, 0)
+            return 0  # no message ever sent to it: nothing to read, and no lock taken
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            count = len(inbox.unread(Path(row["universe"]), row["id"], blocking=False))
+        except BlockingIOError:
+            return cached[1] if cached is not None else None
+        except Exception:  # a damaged inbox shows no count; mv2 doctor says what is wrong with it
+            self._unread.pop(key, None)
+            return None
+        self._unread[key] = (stamp, count)  # the stamp from before the read: a change during it is read next time
+        return count
 
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
@@ -73,8 +132,13 @@ class LocalBackend:
         for member in members:  # a leftover folder is not a damaged agent: say what to do with it, not what failed to read
             if isinstance(member.get("damaged"), dict) and member["damaged"].get("recover") == "remove":
                 member["summary"] = "damaged: a leftover folder with no agent records · d moves it to the trash"
+        if UNREAD in config["columns"]:  # only where the view shows it: it reads each changed inbox
+            for member in members:
+                if not isinstance(member.get("damaged"), dict):
+                    member[UNREAD] = self.unread_count(member)
         replace = config.get("replace", True)
-        plugin_columns = (any(key not in COLUMNS and not columns.core_key(key) for key in config["columns"])
+        plugin_columns = (any(key not in COLUMNS and key not in MARKS and not columns.core_key(key)
+                              for key in config["columns"])
                           or (replace and columns.replaceable(config["columns"])))
         trouble, on = [], {}
         if plugin_columns:
@@ -184,6 +248,10 @@ class LocalBackend:
 
     def inspect(self, root, reference):
         return inspect.run(root, agent=reference)
+
+    def unread(self, root, reference):
+        """The agent's unread inbox messages, oldest first; reading them here leaves them unread for the agent."""
+        return inbox.unread(root, reference)
 
     def live_pane(self, root, reference, harness):
         """The terminal as the inspector shows it: without the harness's own chrome, where it can say what that is."""

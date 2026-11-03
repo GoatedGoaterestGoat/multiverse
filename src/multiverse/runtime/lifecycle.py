@@ -14,7 +14,7 @@ import time
 import tempfile
 
 from .. import display, harnesses, source, universe
-from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
+from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
@@ -106,7 +106,7 @@ def _listing_runtime(directory, facts, *, prepare=False):
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
-    'id', 'universe_id', 'name', 'harness', 'model', 'task', 'phase', 'summary',
+    'id', 'universe_id', 'name', 'harness', 'model', 'effort', 'slash_settings', 'task', 'phase', 'summary',
     'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
@@ -278,14 +278,24 @@ def _wake_fallback(root):
                                    'Resume this agent as an operator with MV2_TMUX_SOCKET set to choose a server') from None
 
 
+def _effort_problem(reason, properties, requested):
+    if requested is None and properties.get('effort') is not None:
+        reason += (f"; effort {properties['effort']!r} came from the agent's record. "
+                   f"Use mv2 resume {properties['name']} --effort default to clear it")
+    return ValueError(reason)
+
+
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
-          _queue_wake=False, _restart_queue=False, start_fresh=False):
+          _queue_wake=False, _restart_queue=False, start_fresh=False, effort=None):
     effects.require('resume' if resume else 'spawn', resume or name or harness)
+    requested_model = model
     if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
         raise ValueError('--start-fresh requires an explicit resume without a wake prompt')
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
+    if effort is not None and (not isinstance(effort, str) or not effort or any(c.isspace() or ord(c) < 32 for c in effort)):
+        raise ValueError('Effort must be one nonempty level name')
     if (resume_prompt is not None or resume_message_id is not None) and not resume:
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
@@ -310,6 +320,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
     adapter = harnesses.load(root, harness)
+    if (effort not in (None, 'default') or effort is None and properties.get('effort') is not None) \
+            and getattr(adapter, 'supports_launch_effort', False) is not True:
+        raise _effort_problem(f'Harness {harness} does not support --effort for an individual launch', properties, effort)
     model = model or adapter.default_model
     mode = "resume" if resume else "spawn"
     session_mode = adapter.session_mode
@@ -360,8 +373,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 if error := missing_runtime.mismatch(agent_dir, previous, previous_observation):
                     raise error
                 observed_key = observation_key(properties, previous)
-                properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
-                                                                adapter=adapter, launch_locked=True)
+                from .navigation import pending, Switching
+                if pending(previous):
+                    if _recovery or resume_message_id is not None or previous_observation['live'] not in ('stopped', 'dormant'):
+                        raise Switching('Conversation switch is unresolved; close this terminal, then run mv2 resume '
+                                        + properties['name'] + ' to restore its recorded conversation')
+                    # Explicit resume after attachment exit restores only the
+                    # journal's durable selection, never a speculative native reply.
+                else:
+                    properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
+                                                                    adapter=adapter, launch_locked=True)
                 if error := missing_runtime.damage(agent_dir, previous):
                     raise error
                 if observation_key(properties, previous) != observed_key:
@@ -371,6 +392,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             workdir = Path(properties['workspace']).resolve()
             if not workdir.is_dir():
                 raise ValueError(f'Workspace does not exist: {workdir}')
+            # A timed-out or no-wait settings command may have completed since
+            # the first record read. Explicit resume options still win.
+            from . import slash
+            properties = slash.reconcile(root, agent_dir, properties, previous, adapter=adapter)
+            slash.require_settled(agent_dir, properties, previous, model=requested_model, effort=effort)
+            model = requested_model or properties.get('model') or adapter.default_model
         else:
             previous = runtime(agent_dir)
         if not resume and agents.preparing(previous) and previous['launch_id'] == proposed_launch:
@@ -398,6 +425,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
             if _queue_wake:
                 resume_prompt = None
+        effort_notices = []
+        model_changed = resume and requested_model is not None and requested_model != properties.get('model')
+        if effort == 'default':
+            if properties.get('effort') is not None:
+                effort_notices.append(f"Cleared recorded effort {properties['effort']!r}; using the harness default.")
+            properties['effort'] = None
+        elif effort is not None:
+            properties['effort'] = effort
+        if properties.get('effort') is not None and not model:
+            raise _effort_problem('Give --model with --effort when this launch has no recorded model', properties, effort)
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = planned_launch
         launch = agent_dir / "launches" / launch_id
@@ -442,7 +479,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         environment = {key: value for key, value in environment.items() if key not in storage}
         environment.update({key: value for key, value in storage.items() if value is not None})
         context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
-                                agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
+                                agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'),
+                                effort=properties.get('effort'))
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
@@ -465,27 +503,49 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                             f'ignored its harness setting {key}={json.dumps(value)}.'
                             for key, value in from_settings.items()
                             if resume and not start_fresh and key in storage and not _same_directory(storage[key], value)]
-        notices = display.notice_lines(missing_notices, ignored_settings, [item.notice for item in storage_notices],
+        notices = display.notice_lines(missing_notices, ignored_settings, effort_notices, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
-        command = effects.call(adapter, 'resume', session, context) if resume and not fresh else effects.call(adapter, 'spawn', context)
-        # An adapter may resolve a saved path through a changed symlink. Compare
-        # its effective selection with recorded strings, never re-resolve history.
-        selected_storage = dict(storage)
-        for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
-            selected_storage.update({key: selected[key] for key in storage
-                                     if key in selected and not (resume and not start_fresh and key in from_settings)})
-        if resume and not start_fresh:
-            recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
-                                **(properties.get('native_storage_environment') or {})}
-            for key, value in selected_storage.items():
-                if key not in getattr(adapter, 'storage_env', ()):
-                    continue  # Other harnesses' settings are inherited by future children, not this conversation.
-                recorded = recorded_storage.get(key)
-                if recorded not in (None, '') and recorded != value:
-                    raise _storage_difference(recorded, value, variable=key)
-        storage = selected_storage
-        command = _storage_command(command, storage)
+        while True:
+            command = (effects.call(adapter, 'resume', session, context) if resume and not fresh
+                       else effects.call(adapter, 'spawn', context))
+            # An adapter may resolve a saved path through a changed symlink. Compare
+            # its effective selection with recorded strings, never re-resolve history.
+            selected_storage = dict(storage)
+            for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
+                selected_storage.update({key: selected[key] for key in storage
+                                         if key in selected and not (resume and not start_fresh and key in from_settings)})
+            if resume and not start_fresh:
+                recorded_storage = {**storage, **saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
+                                    **(properties.get('native_storage_environment') or {})}
+                for key, value in selected_storage.items():
+                    if key not in getattr(adapter, 'storage_env', ()):
+                        continue  # Other harnesses' settings are inherited by future children, not this conversation.
+                    recorded = recorded_storage.get(key)
+                    if recorded not in (None, '') and recorded != value:
+                        raise _storage_difference(recorded, value, variable=key)
+            command = _storage_command(command, selected_storage)
+            if properties.get('effort') is not None:
+                if getattr(adapter, 'supports_launch_effort', False) is not True:
+                    raise _effort_problem(f'Harness {harness} does not support --effort for an individual launch', properties, effort)
+                if native.adapter_hook(adapter, 'check_model') is None:
+                    raise _effort_problem(f'Harness {harness} cannot validate the model and effort for this launch', properties, effort)
+                check_environment = {**environment, **dict.fromkeys(command.unset_env, None), **command.environment}
+                checked = effects.call(adapter, 'check_model', model, effort=properties['effort'],
+                                       environment=check_environment)
+                if not isinstance(checked, ModelCheck) or checked.ok is not True:
+                    if model_changed and effort is None and isinstance(checked, ModelCheck) and checked.ok is False:
+                        default = effects.call(adapter, 'check_model', model, environment=check_environment)
+                        if isinstance(default, ModelCheck) and default.ok is True:
+                            notices.append(f"Dropped recorded effort {properties['effort']!r}: model {model!r} does not take it. "
+                                           'Using the harness default.')
+                            properties['effort'] = None
+                            context = replace(context, effort=None)
+                            continue  # Reprepare once without the inherited flag; nothing has launched or been saved.
+                    raise _effort_problem((checked.reason if isinstance(checked, ModelCheck) else None)
+                                          or 'The harness refused this model and effort', properties, effort)
+            storage = selected_storage
+            break
         properties['native_storage_environment'] = storage
         if _queue_wake:
             command = replace(command, fallback=None)
@@ -532,7 +592,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         elif resume:
             with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
                 current = read(agent_dir / 'properties.json')
-                current.update({key: properties[key] for key in ('model', 'workspace', 'native_environment',
+                current.update({key: properties[key] for key in ('model', 'effort', 'workspace', 'native_environment',
                                'native_storage_environment', 'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
                                 if key in properties})
                 properties = current
@@ -548,6 +608,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
+        if resume and not _recovery and resume_message_id is None:
+            # Settle before replacing the old runtime, so an interrupted resume
+            # cannot lose the switch fence while leaving its input unaccounted for.
+            from .navigation import end_waiting
+            reason = ('Conversation switch ended before delivery; run mv2 deliver '
+                      + properties['name'] + ' --retry')
+            waiting = end_waiting(agent_dir, reason)
+            if waiting:
+                notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
         write(agent_dir / "runtime.json",
               {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
                'run_directory': str(run_root)})
@@ -609,7 +678,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 progress.mark('preparing native attachment')
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
-                                    agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'))
+                                    agent_environment=agent_environment, storage_keys=tuple(key for key in storage if key != 'HOME'),
+                                    effort=properties.get('effort'))
             if command.shared_service:
                 try:
                     command = _storage_command(effects.call(adapter, 'resume', session, context) if resume and not fresh else effects.call(adapter, 'spawn', context), storage)
@@ -854,6 +924,8 @@ def _initial_runtime(launch_id, command, adapter, session, previous, resume, rec
     queue = previous.get('queue_state')
     if resume and isinstance(queue, dict) and session and queue.get('native_session_id') == session.native_id:
         runtime_record['queue_state'] = dict(queue)
+    if resume and isinstance(previous.get('queue_history'), dict):
+        runtime_record['queue_history'] = dict(previous['queue_history'])
     if recovery:
         event = {'at': now(), 'from_launch_id': previous['launch_id'], 'launch_id': launch_id,
                  'reason': 'Native relay disconnected while the exact thread was idle'}

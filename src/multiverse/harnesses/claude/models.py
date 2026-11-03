@@ -59,6 +59,15 @@ def catalog(environment):
         free_form=True, source='table', version=data['claude_code'], provider=key.replace('_', '-'))
 
 
+def takes_effort(model, effort):
+    """Whether `model`, by any provider's ID and with or without the long-context suffix, takes `effort` by the
+    table: Claude saves an /effort level even for a model that doesn't use it, so that alone proves nothing."""
+    name = (model or '').strip()
+    name = name[:-len(SUFFIX)] if name.endswith(SUFFIX) else name
+    item = next((item for item in table()['models'] if name == item['id'] or name in item['provider_ids'].values()), None)
+    return item is not None and effort in item['efforts']
+
+
 def check(model, effort, environment):
     """Whether a launch with `environment` can use `model` at `effort`: Claude Code never refuses an effort itself
     (it falls back to the model's default), so this has to."""

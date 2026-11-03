@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 import subprocess
 import time
+import signal
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -33,6 +35,34 @@ class RegistrationTest(BaseTest):
                       'parent_started': process_started(os.getpid()), 'sequence': 0,
                       'stage': 'creating terminal', 'state': 'preparing', 'at': now()}
         write(self.launch / 'registration.json', self.owner)
+
+    def test_stop_during_registration_never_starts_the_child(self):
+        """A cooperative stop must leave pending registration promptly, including a ready marker arriving with the signal, without starting a child."""
+        for signum in (signal.SIGHUP, signal.SIGTERM):
+            for release in (False, True):
+                with self.subTest(signal=signum, released=release):
+                    self.fresh()
+                    previous = signal.getsignal(signum)
+                    slept = []
+                    def stop(_seconds):
+                        slept.append(True)
+                        self.assertEqual(slept, [True], 'Stop was ignored on the next registration poll')
+                        if release:
+                            (self.launch / 'ready').touch()
+                        signal.getsignal(signum)(signum, None)
+                    clock = SimpleNamespace(monotonic=time.monotonic, sleep=stop)
+                    with patch.object(registration, 'time', clock), \
+                         patch.object(registration, 'process_snapshot', return_value=(self.owner['parent_started'], 'S')), \
+                         patch.object(runner, 'process_started', return_value=None), \
+                         patch.object(runner.sys, 'argv', ['runner', str(self.launch)]), \
+                         patch.object(runner.subprocess, 'Popen') as child, \
+                         self.assertRaises(SystemExit) as ended:
+                        runner.main()
+                    self.assertEqual(ended.exception.code, 128 + signum)
+                    child.assert_not_called()
+                    self.assertEqual(slept, [True])
+                    self.assertIs(signal.getsignal(signum), previous)
+                    self.assertEqual(read(self.launch / 'cleanup.json')['state'], 'complete')
 
     def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
         """A parent may release and exit after the runner read an earlier stage, with a real subprocess; fragile

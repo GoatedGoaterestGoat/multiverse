@@ -6,9 +6,9 @@ transition to the agent's `sessions.jsonl`; the first assigned or bound session
 has no transition and is generation zero.
 
 This is an optional adapter contract. Existing adapters keep their exact
-conversation behavior unless they implement `observed_binding`. In particular,
-this does not enable Codex `/new` or switching to another thread through mv2's
-relay.
+conversation behavior unless they implement `observed_binding`. Codex's
+`/new`, `/clear` and `/resume`, typed in a running bridge terminal, are followed
+through the relay (see [Codex conversation switches](#codex-conversation-switches)).
 
 ## Provider observations
 
@@ -119,6 +119,114 @@ earlier generations' tokens, cost or context to the new session's measurement.
 The journal preserves history for explicit transcript or accounting features.
 
 
+## Codex conversation switches
+
+On Codex 0.166.0 with mv2's bridge, the person can switch the agent's
+conversation from its terminal: `/new` and `/clear` start a fresh thread, and
+`/resume` returns to an earlier one. The agent, launch, workspace, Codex
+storage, grants and inbox stay; only its current conversation changes, and mv2
+follows it as it follows Claude's `/clear`. Earlier threads stay claimed by the
+agent and readable.
+
+**What counts as a switch.** Codex has no event that says which thread its
+terminal shows. mv2 follows only the explicit navigation requests the checked
+Codex terminal sends on the agent's own bound connection: a persistent start of
+a fresh thread in the same workspace (`/new`, or `/clear` with its own source),
+or a full resume of a different thread (`/resume`), and only after Codex's
+matching success reply. Background attachments, reconnects, queue loading,
+`/btw` side threads, review threads and subagents are never a switch. Another
+Codex version, a plain or fallback launch, or a request shape the checked
+version doesn't send is refused in the terminal with the reason, and the
+conversation stays as it was.
+
+**Which threads.** `/resume` returns only to a thread in this agent's own
+lineage that isn't retired and has the same storage home, and only after the
+adapter's `navigation_target` finds that exact thread's rollout under that
+recorded home, with the same proof `TranscriptInfo.earlier` uses for an earlier
+thread's readability (anything but a clear yes refuses). A
+thread outside the lineage, one another agent claims, a side or subagent
+thread, or one whose rollout can't be proven is refused. `/new` or `/clear`
+choosing another folder or worktree is refused.
+
+**Permissions.** The validated primary reply establishes this launch's complete
+native grant set, including approval policy and reviewer, sandbox roots and
+network/tmp restrictions, profile provenance and runtime workspace roots.
+`/new` and `/clear` use that policy exactly, including after ordinary reattach;
+they never infer an agent root or merge wider request/configuration roots.
+An earlier-thread resume keeps its native request permissions. Every selection
+reply must match the validated grant set before core commits it. Only that
+commit publishes the selected thread's permission metadata.
+
+Incomplete or unmappable grants disable navigation without rejecting ordinary
+startup or `/btw`. An observed current-thread permission change or malformed
+settings update also disables navigation until an ordinary `mv2 resume` verifies
+the current grants. Native settings notifications omit runtime workspace roots.
+A complete, unchanged permission projection in the same workspace only preserves
+an already-valid snapshot; it cannot create or revive one. Other threads'
+notifications cannot replace that policy.
+
+The bound is this launch's validated grants and changes mv2 observes. Another
+client can narrow runtime roots without a notification. A later `/new` or
+`/clear` can restore those unobserved roots up to the launch ceiling, never beyond
+it. Run `mv2 resume` to re-read the current grants before navigating if another
+client changed them. mv2 does not issue an extra admission RPC to discover such
+changes.
+
+**When.** Only while the agent is idle. A switch is refused while a turn or
+input is running or its state is unknown; while another switch, a `/btw` side
+thread or an unsettled mv2 command is in flight; and while the current thread's
+Codex queue holds anything (paused entries and other clients' items included)
+or an mv2 message Codex accepted, is submitting, or whose outcome is uncertain
+may still run there. Input that already ran and is confirmed in the transcript
+doesn't block. Codex runs an idle thread's queue whether or not a terminal is
+attached, so input left behind would run unseen in a conversation the agent has
+left. The refusal says why and what to do; nothing is interrupted, cancelled,
+started or replayed to make a switch possible.
+
+**The transaction.** Core begins a switch under the agent's launch lock: it
+checks the exact current launch, conversation and storage home, and writes a
+durable switching marker. Every mutating path (sends, ask, recovery, command
+runs) sees the marker and waits or is refused for the moment. After Codex's
+validated success reply, core appends the transition to `sessions.jsonl`
+(reason `new`, `clear` or `resume`) before it changes `properties.json` and the
+agent's stable identity, keeps every earlier claim, and only then lets the
+success reach the terminal. A definite refusal clears the marker and changes
+nothing. A lost reply, a disconnect, a malformed success, a claim conflict or a
+failed commit leaves the conversation uncertain: current input, reads and
+operations stay fenced, and mv2 names the recovery: close the agent's
+terminal, then `mv2 resume` it, which restores the conversation the journal
+records. It never guesses which thread is current, and never creates or
+archives a thread to fix it.
+
+An explicit resume marks still-pending input saved during the old switch as
+not delivered, with `mv2 deliver AGENT --retry` advice. This also covers a
+resolved switch whose delivery flush never finished. The messages keep their
+original IDs and targets; retry follows the resumed conversation through the
+usual lineage checks, once, and does not restart a paused native queue. Resume
+does not change accepted, submitting or uncertain attempts. These failures
+remain retryable even if preparing the replacement terminal fails.
+
+**The limit of this evidence.** Once Codex has accepted a navigation request,
+the requested conversation is authoritative. The terminal can still fail to
+load that thread's history after the reply and stay on the old one; mv2 can't
+see that. Input the old thread would then take is refused before it reaches
+Codex; Codex 0.166.0 may then exit rather than show the refusal. Closing the
+terminal (if it is still open) and running `mv2 resume` restores the recorded
+conversation. The reverse can show too: Codex's `/clear` resets the
+terminal's view before it sends its request, so a refused or uncertain
+`/clear` can leave an empty view while the recorded conversation is still the
+old one. mv2 refuses the request, which the terminal may not show, and
+follows the record, not the view; closing the terminal and running `mv2
+resume` restores the recorded conversation's view. Following the terminal's
+actual view would need a Codex event that says which thread it shows.
+
+**After a switch.** Context use reads as unknown until the new thread reports
+it. Focus belongs to the agent and stays; the switch itself isn't a turn end.
+The next `mv2 resume` uses the current thread. Grants pass as they were: a
+spawn's explicit sandbox and approval flags are carried as the equivalent
+native settings, so Codex's in-session resume accepts them; a shape that can't
+be mapped exactly is refused with a diagnosis, never widened.
+
 ## Transcript generations
 
 `universe.sessions.generations(directory, properties)` reads the journal against
@@ -143,7 +251,12 @@ applies to messages held during startup and to an explicit retry of a definite
 failure, including a wake prompt. Core preserves the original inbox record and
 adds `session_changes` to its delivery state: the old and new targets, when it
 was moved, and the journal transition IDs and reasons (such as `clear`). A
-conversation outside that lineage is never substituted.
+conversation outside that lineage is never substituted. On a Codex switch only
+input mv2 knows was never submitted, or definitely failed, follows the new
+thread; input Codex accepted, queued or is submitting, or whose outcome is
+uncertain, stays on its original thread and is never moved or run twice.
+`deliver --check` names the original conversation and reads its receipts
+through a read-only path that never loads or resumes that thread.
 
 Accepted messages and submissions whose outcome is uncertain are never moved
 or resent. `deliver --check` can look up their receipts against the original

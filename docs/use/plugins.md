@@ -149,6 +149,8 @@ There is one host per top-level universe, in a tmux session on mv2's server. It 
 - Quitting the dashboard doesn't stop the host. The host stops by itself once no plugin needs it.
 - A worker that exits is restarted at most 3 times in 5 minutes. After that it stays stopped, and `mv2 plugins host` and `P` show the reason. Turn the plugin off and on again to give it a fresh start.
 - A plugin whose event handlers keep hanging is also left stopped, after 3 such restarts within a day, however long each run takes. `mv2 plugins` and `mv2 doctor` say so too.
+- `mv2 update` restarts the host when it still runs the code from before the update, which its plugins would otherwise fail on. It first lets everything in flight finish, however long that takes (the remote control answers new requests 503 meanwhile), so the update may say the host restarts once that is done. A handler that never returns keeps it waiting; `mv2 plugins host stop` then stops it. A host started by an mv2 from before this restart check is stopped and started instead, which can end a call in flight.
+- `mv2 plugins host stop` gives each plugin 10 seconds, so it can end work in flight.
 - The host's log is `state/plugins/host/host.log` in the top-level universe.
 - If the host's `state/plugins/host/status.json` is damaged, `mv2 plugins host` says its status is unknown and why. The host rewrites the file when it starts.
 

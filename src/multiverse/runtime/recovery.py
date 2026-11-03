@@ -64,6 +64,9 @@ def in_flight(directory, facts, native_id, since=None):
 
 
 def eligibility(properties, facts):
+    from .navigation import pending
+    if pending(facts):
+        return 'Conversation switch is unresolved; restore the recorded conversation explicitly'
     if facts.get('native_refusal'):
         return 'Native launch was refused; a new explicit resume is required'
     proof = facts.get('recovery_snapshot') or {}
@@ -146,6 +149,9 @@ class RecoveryMonitor:
                         return
                     if (facts.get('native_relay') or {}).get('state') == 'lost':
                         return
+                    from .navigation import pending
+                    if pending(facts):
+                        continue
                     if facts.get('state') != 'running' or facts.get('status') != 'idle':
                         continue
                     properties = read(self.directory / 'properties.json')

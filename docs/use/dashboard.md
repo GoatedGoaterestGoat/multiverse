@@ -10,6 +10,10 @@ mv2
 
 Quitting with `q` leaves every agent running, and the dashboard shows the same state when you open it again.
 
+An unread inbox count never consumes messages. If its inbox lock is busy, the dashboard keeps the previous
+count and tries again on the next refresh. A damaged inbox, including a FIFO in place of a data or lock file,
+shows no count and does not hold up the refresh.
+
 ## Keys you will use most
 
 | Key | Does |

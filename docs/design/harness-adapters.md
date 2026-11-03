@@ -1003,7 +1003,7 @@ host requests retain Codex's normal tools and permissions; there is no execution
 isolation, and the side can run mv2 commands as the user. Primary send, receipt and
 queue-continuation RPCs still address only the saved primary ID. A native side
 error is forwarded locally without failing the primary. Unknown native versions,
-side resume and persistent forks remain unavailable. This does not add Codex ask.
+side resume and persistent forks remain unavailable. Codex `ask` uses the [private tool-free copy provider](transcript-protocols.md#codex).
 
 The runner records `native_relay.state=ready` after binding. Loss of the bound
 TUI's relay connection (or an upstream connection failure before binding) records
@@ -1350,9 +1350,17 @@ only on tagged text and shows the model the text alone:
   input since") until the person types, but not a peer prompt. Until the person's
   own input at the terminal, the mod leaves each message in Claude's queue
   without its tags: it runs as Claude's own peer prompt, and `session.append`
-  stores that row without the wrapper. A submit Claude refuses (after a reload
-  forgot the interruption) sends later messages this way too. Other input may
-  not lift Claude's refusal, so only the terminal's ends this.
+  stores that row without the wrapper. Only its own `session.receive` hook can
+  queue a peer prompt, so the hook waits there (two seconds at most) for mv2's
+  entries that reached the mod before it, such as a command still being checked
+  against Claude's list, and later entries wait for it: commands and messages
+  keep their order. If the earlier entries take longer, the message would run
+  before them, so it stays out of Claude's queue and is reported not
+  delivered, for `mv2 deliver --retry`. A submit Claude refuses (after a reload forgot the
+  interruption) sends later messages this way too. Other input may not lift
+  Claude's refusal, so only the terminal's ends this. Claude refuses a plugin's
+  command runs the same way (Claude Code 2.1.316), so until then `mv2 slash`
+  reports each command failed, with Claude's reason.
 
 The tag also carries the message's send time (`sent=`, the inbox record's). If
 the message reaches the model more than ten minutes after it was sent, the mod
@@ -1540,7 +1548,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.316; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.317; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude
@@ -1659,7 +1667,7 @@ mv2 leaves this native footer choice to the user.
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; Codex retains a saved bridge reading |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
-| Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
+| Isolated ask | [Private tool-free transcript copy](transcript-protocols.md#codex) | Bridge: `$.model.fork` over the transcript | Unavailable | Plain Codex: the same private-copy provider; others unavailable |
 
 Unsupported usage displays N/A, not zero. The usage representation includes
 cache-inclusive input, output, total, optional cache subsets, source, timestamp

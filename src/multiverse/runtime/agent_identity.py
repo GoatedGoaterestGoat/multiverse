@@ -205,6 +205,8 @@ def actor(environment=None, *, data=False):
         universe = read(root / 'universe.json')
         if properties['id'] != identity or properties.get('universe_id') != universe['id']:
             raise ValueError('Agent or universe identity changed')
+        from .navigation import require_settled
+        require_settled(records.runtime(directory / 'runtime.json'))
         native_id = normalize_session_id(env.get(spec.native_id_env))
         if native_id != policy.get('native_id') or native_id != properties.get('native_session_id'):
             raise ValueError('This conversation does not match the saved agent identity')

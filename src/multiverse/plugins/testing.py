@@ -299,6 +299,15 @@ def _at_exit():
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
            "MV2_TMUX_SOCKET", "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
+# Beyond those, what a plugin test inherits from no shell or agent running it, by the rule mv2's own tests use
+# (tests/isolation.py): every mv2 variable (the agent's identity and identity mode, universe, sockets, read-only
+# cap), the harnesses' session markers (CODEX_*, CLAUDE_CODE_*, Claude's own), and tmux's.
+INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
+INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "TMUX", "TMUX_PANE")
+
+
+def _inherited(key):
+    return key in CLEARED or key in INHERITED or key.startswith(INHERITED_PREFIXES)
 
 
 class ClaudeRows:
@@ -435,10 +444,102 @@ class FakeTranscript:
         self._case.addCleanup(folder.chmod, 0o755)
 
 
+class FakeSlash:
+    """A harness's command answers from a script (1.16), for PluginTestCase.fake_slash(). The real API and core
+    run: access and permission, the caller and focus rules, mv2's own refusals (managed, bare and settings-changing
+    commands, names the list lacks), the run record, the wait and what a run records. Only the harness's side is
+    replaced, and this test's agents count as running with mv2's bridge; nothing reaches a terminal or a session.
+
+    `commands` are the api.SlashCommand the harness lists. Each run takes the next answer: a dict of what the
+    harness reports (state, default "ran"; output, prompted, model, effort, session_id), "queued" (sent, with no
+    result until finish(id, answer)) or "lost" (the agent's launch ends before it runs). `requests` holds each run
+    the harness was sent, oldest first: {id, command, args}."""
+
+    def __init__(self, test, commands, answers):
+        from dataclasses import fields
+        from .. import harnesses
+        from ..harnesses import types
+        from ..runtime import native, slash
+        self.requests, self.answers, self._finished, self._ended = [], list(answers), {}, set()
+        names = {item.name for item in fields(types.SlashCommand)}
+        listed = [types.SlashCommand(**{name: getattr(item, name) for name in names if hasattr(item, name)})
+                  for item in commands]
+        work, fake = str(test.work), self
+
+        def mine(path):
+            return str(Path(path).resolve()).startswith(work + os.sep)
+
+        def fixture(facts):  # an agent this test made: its record names a tmux socket inside the test's folder
+            socket_path = ((facts or {}).get("tmux") or {}).get("socket")
+            return isinstance(socket_path, str) and socket_path.startswith(work + os.sep)
+
+        class Scripted:
+            def slash_commands(self, session, executor):
+                return types.NativeResult("ok", value=list(listed))
+
+            def run_slash(self, session, request, executor):
+                fake.requests.append({"id": request.id, "command": request.command, "args": request.args})
+                if not fake.answers:
+                    return types.NativeResult("error", "the test's script has no answer left for this command")
+                answer = fake.answers.pop(0)
+                if answer == "lost":
+                    fake._ended.add(session.agent_id)
+                    return types.NativeResult("unknown")
+                if answer == "queued":
+                    return types.NativeResult("unknown")
+                if not isinstance(answer, dict):
+                    raise TypeError('fake_slash answers are dicts, "queued" and "lost"')
+                fake._finished[request.id] = {"state": "ran", **answer}
+                return types.NativeResult("ok", value=dict(fake._finished[request.id]))
+
+            def slash_result(self, session, request, executor):
+                if request.id in fake._finished:
+                    return types.NativeResult("ok", value=dict(fake._finished[request.id]))
+                return types.NativeResult("unknown", value={"absent": True})
+
+        load, observe, owned = harnesses.load, native.observe, native.owned
+        launch_ended = slash.delivery_evidence.launch_ended
+
+        def scripted_load(root, name, *arguments, **keywords):
+            adapter = load(root, name, *arguments, **keywords)
+            if not mine(root) or getattr(adapter, "family", None) != "claude":
+                return adapter  # another harness keeps its own answer: Codex and Pi say unavailable
+            wrapped = object.__new__(type(f"Scripted{type(adapter).__name__}", (Scripted, type(adapter)), {}))
+            wrapped.__dict__.update(adapter.__dict__)  # every other attribute and hook as the real adapter has it
+            return wrapped
+
+        def scripted_observe(properties, facts):
+            seen = observe(properties, facts)
+            return {**seen, "live": "alive"} if fixture(facts) and (facts or {}).get("state") == "running" else seen
+
+        def scripted_owned(properties, facts, *arguments, **keywords):
+            if fixture(facts):
+                return None
+            return owned(properties, facts, *arguments, **keywords)
+
+        def scripted_ended(directory, launch_id):
+            if mine(directory):
+                return Path(directory).name in fake._ended
+            return launch_ended(directory, launch_id)
+
+        for target, name, replacement in ((harnesses, "load", scripted_load), (native, "observe", scripted_observe),
+                                          (native, "owned", scripted_owned),
+                                          (slash.delivery_evidence, "launch_ended", scripted_ended)):
+            patcher = mock.patch.object(target, name, replacement)
+            patcher.start()
+            test.addCleanup(patcher.stop)
+
+    def finish(self, id, answer=None):
+        """The harness ran a queued command: slash_result(id) reads `answer` (a dict, as for the script) from now."""
+        self._finished[id] = {"state": "ran", **(answer or {})}
+
+
 class FakeRuns:
     """One-shot runs answered from a script (1.14), for PluginTestCase.fake_runs(). The real run_once runs: the
     API's checks, access and permission, the harness's run options, model check and plan (its message checks
-    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Each run takes
+    included) and core's own checks. Only the run is replaced, so nothing is written or spawned. Claude and Codex
+    (1.16) both run: the test's bin/ gets a stand-in claude and codex that only print a checked version, and its
+    home a Codex file login whose contents are never read. Each run takes
     the next answer: an api.Reply it returns, or an api.RunError it raises. `requests` holds each run's request
     in full, oldest first: a dict of messages (an api.Message, or a row's data as passed), prompt, system, model,
     effort, transport_retries, agent (its directory, or None) and timeout."""
@@ -450,6 +551,13 @@ class FakeRuns:
         self.answers, self.requests, calling = list(answers), [], []
         if not (test.bin / "claude").exists():  # what the run options ask the harness's executable; never a session
             test.executable("claude", f"echo '{version} (Claude Code)'")
+        if not (test.bin / "codex").exists():  # Codex's: a checked release and a file login in the test's home
+            from ..harnesses.codex import run as codex_run
+            test.executable("codex", f"echo 'codex-cli {'.'.join(map(str, max(codex_run.VERSIONS)))}'")
+            login = Path(os.environ.get("CODEX_HOME") or test.home / ".codex") / "auth.json"
+            if not login.exists():  # only its kind is checked before a run; the fake never starts one
+                login.parent.mkdir(parents=True, exist_ok=True)
+                login.write_text("{}")
         original = runs.run_once
 
         def run_once(adapter, request, **keywords):
@@ -509,7 +617,7 @@ class PluginTestCase(unittest.TestCase):
         self.home.mkdir()
         self.plugins_dir = self.work / "plugins"
         self.plugins_dir.mkdir()
-        environment = {key: value for key, value in os.environ.items() if key not in CLEARED}
+        environment = {key: value for key, value in os.environ.items() if not _inherited(key)}
         self.bin = self.work / "bin"
         self.bin.mkdir()
         self.claude_config = self.work / "claude-config"
@@ -518,6 +626,7 @@ class PluginTestCase(unittest.TestCase):
         # MV2_RUN_DIR: the live agents' run folder; the test's own, short enough for its native sockets' paths.
         (self.work / "run").mkdir(mode=0o700)
         environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config), TMUX_TMPDIR=str(self.work),
+                           MV2_PYTHON=sys.executable,  # what a launch from this mv2 gives a callback
                            MV2_RUN_DIR=str(self.work / "run"),
                            PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
                            MV2_PLUGIN_PATH=os.pathsep.join(
@@ -601,6 +710,11 @@ class PluginTestCase(unittest.TestCase):
             "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
             **(runtime or {})})
         return directory
+
+    def fake_slash(self, commands=(), *answers):
+        """Harness commands answered from this script for the rest of the test (1.16): a FakeSlash, whose
+        `requests` records each command the harness was sent. Everything but the harness's side is real."""
+        return FakeSlash(self, commands, answers)
 
     def fake_runs(self, *answers):
         """One-shot runs answered from this script for the rest of the test (1.14): a FakeRuns, whose `requests`

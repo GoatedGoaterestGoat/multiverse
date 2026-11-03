@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Input, OptionList, Static, TextArea
 from textual import events
 from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
-from multiverse.ui.screens import ChoiceScreen, Form
+from multiverse.ui.screens import ChoiceScreen, Details, Form
 from multiverse.ui.app import MultiverseApp
 from isolation import isolate
 
@@ -54,6 +54,17 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
         await self.app.workers.wait_for_complete()
         await pilot.pause()
+
+    async def until(self, pilot, check, what, timeout=10.0):
+        """Wait for `check` on the dashboard's own loop, bounded: a busy machine slows its timers, not their order."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not check():
+            if asyncio.get_running_loop().time() > deadline:
+                self.fail(f"timed out waiting for {what}")
+            await pilot.pause(0.02)
+
+    def inspecting(self, agent):
+        return bool(self.app.inspector.row) and self.app.inspector.row["id"] == agent["id"]
 
     def buffered(self, text):
         # Unlike Pilot.press, send a whole terminal read without yielding between keys.
@@ -134,9 +145,9 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
 
-    async def test_a_message_refused_by_a_new_focus_comes_back_in_its_inbox_only_form(self):
-        """If the agent focuses while the message form is open, the refused message comes back in the focused form
-        with its text, and sends inbox-only; a break loses what the person typed."""
+    async def test_a_message_sent_as_the_agent_focuses_goes_to_its_inbox(self):
+        """If the agent focuses while the message form is open, the message is saved to its inbox and the status says
+        so, without an error; a break reports a saved message as failed, so the person sends it again."""
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             agent = dict(self.app.selected)
@@ -145,15 +156,11 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.backend.focus(Path(agent["universe"]), agent["id"])
             await pilot.press("ctrl+enter")
             await self.settle(pilot)
-            self.assertEqual(self.backend.messages, [])
-            self.assertIsInstance(self.app.screen, Form)
-            self.assertIn("(focused)", str(self.app.screen.query_one("#dialog-title").render()))
-            self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "Here is the answer")
-            self.assertIn("back in its form", self.status())
-            await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual([(m["text"], m["delivery"]) for m in self.backend.messages],
-                             [("Here is the answer", "inbox-only")])
+            self.assertNotIsInstance(self.app.screen, Form)
+            self.assertEqual([(m["text"], m["delivery"], m["intended"]) for m in self.backend.messages],
+                             [("Here is the answer", "inbox-only", "steer")])
+            self.assertIn("saved to its inbox instead", self.status())
+            self.assertNotIn("rror", self.status())
 
     async def test_a_failing_backend_operation_never_ends_the_dashboard(self):
         """Send, inspect, spawn and attach raising, attach inside Textual's suspend, leave the error on show, the rows
@@ -307,7 +314,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             def capture(root, reference):
                 if reference == original["id"]:
                     entered.set()
-                    release.wait(3)
+                    release.wait(15)  # held until the inspector has moved on; longer than until's bound
                     return "OLD PANE"
                 return "NEW PANE"
 
@@ -317,8 +324,8 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(entered.wait, 1)
                 try:
                     self.app.select_key(agent_key(reviewer))
-                    await pilot.pause(0.3)
-                    self.assertEqual(self.app.inspector.row["id"], reviewer["id"])
+                    # The inspector moves on while the old capture is still held, so it lands late.
+                    await self.until(pilot, lambda: self.inspecting(reviewer), "the inspector on the new agent")
                 finally:
                     release.set()
                 await self.settle(pilot)
@@ -408,6 +415,38 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press(key, "ctrl+enter")  # the same confirmation does act when it is accepted
                     await self.settle(pilot)
                     self.assertTrue(done(), f"Ctrl+Enter on the {title} confirmation did nothing")
+
+    async def test_the_inspector_counts_unread_inbox_messages_and_i_shows_them(self):
+        """The inspector counts the agent's unread inbox messages and keeps the count current while it stays open, shows
+        none for an agent without any, and i shows them; a break hides what waits for an agent, and nothing else would
+        show it."""
+        agent, other = self.backend.agents[0], self.backend.agents[1]
+        self.backend.send(Path(agent["universe"]), agent["id"], "Please re-check the second hunk", queue_only=True)
+        line = lambda: self.app.query_one("#inspect-inbox", Static)
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.select_key(agent_key(agent))
+            await pilot.press("p")
+            await self.settle(pilot)
+            self.assertTrue(line().display)
+            self.assertIn("1 unread inbox message", str(line().render()))
+            await pilot.press("i")
+            await self.settle(pilot)
+            self.assertIsInstance(self.app.screen, Details)
+            self.assertIn("Please re-check the second hunk", self.app.screen.content)
+            await pilot.press("escape")
+            self.backend.send(Path(agent["universe"]), agent["id"], "And the third", queue_only=True)
+            await pilot.press("f5")
+            await self.settle(pilot)
+            self.assertIn("2 unread inbox messages", str(line().render()))
+            self.backend.messages.clear()  # the agent reads them
+            await pilot.press("f5")
+            await self.settle(pilot)
+            self.assertFalse(line().display)
+            self.app.select_key(agent_key(other))
+            await self.until(pilot, lambda: self.inspecting(other), "the inspector on the other agent")
+            await self.settle(pilot)
+            self.assertFalse(line().display)
 
     async def test_a_dormant_agent_has_no_terminal_box(self):
         """The inspector shows no terminal box for a dormant agent and offers r instead, and the box is back once r

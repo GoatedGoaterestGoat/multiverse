@@ -165,9 +165,65 @@ class NativeExecutor:
         self.workspace, self.properties, self.facts = workspace, properties, facts
         self.stopping = False
 
+    def run_once(self, adapter, session, prepare, *, timeout=600):
+        """Snapshot an exact generation before an isolated ask; no pane or daemon access."""
+        from . import runs, run_environment
+        from ..harnesses.types import RunFailure
+        from ..universe import storage
+        if not session.session_file or self.properties is None or self.facts is None:
+            raise RunFailure('unavailable', 'No recorded agent is available for the private question')
+        directory = Path(session.session_file).parent
+        root = directory.parents[2]
+        scope = runs.capture_scope(root, agent_directory=directory)
+        fields = ('id', 'harness', 'workspace', 'native_session_id', 'native_session_home',
+                  'native_storage_environment', 'native_service_identity', 'native_environment')
+        expected = {key: self.properties.get(key) for key in fields}
+
+        def unchanged():
+            runs.check_scope(scope)
+            try:
+                properties = read(directory / 'properties.json')
+                effective, _ = agents.sessions.effective(directory, properties)
+                facts = agents.runtime(directory)
+                from .navigation import require_settled
+                require_settled(facts)
+            except (OSError, ValueError):
+                raise RunFailure('unavailable', 'The selected agent generation cannot be read') from None
+            if ({key: effective.get(key) for key in fields} != expected
+                    or facts.get('launch_id') != session.launch_id
+                    or facts.get('session_generation', 0) != self.facts.get('session_generation', 0)
+                    or effective.get('native_session_id') != session.native_id
+                    or effective.get('native_session_home') != session.home):
+                raise RunFailure('unavailable', 'The selected agent generation changed before the private question')
+            try:
+                observed = _observed(adapter, session)
+            except ValueError:
+                raise RunFailure('unavailable', 'The native conversation identity cannot be verified') from None
+            if observed is not None and normalize_session_id(observed.native_id) != session.native_id:
+                raise RunFailure('unavailable', 'The native conversation changed before the private question')
+
+        unchanged()
+        keys = tuple(getattr(adapter, 'storage_env', ()) or ())
+        recorded = storage.recorded_environment(directory, self.properties, adapter.family, keys)
+        selected = (run_environment.replayable(adapter.family, recorded, keys, self.workspace)
+                    if recorded is not None and keys and all(key in recorded for key in keys) else None)
+        if selected is None:
+            raise RunFailure('unavailable', 'The agent has no proven recorded harness storage; resume it once')
+        environment = run_environment.launch(adapter)
+        environment.update(selected)
+        if adapter.session_home(environment) != session.home:
+            raise RunFailure('unavailable', 'The recorded storage no longer names the selected conversation home')
+        request = prepare()
+        unchanged()
+        return runs.run_once(adapter, request, root=root, plugin='core-ask', environment=environment,
+                             agent_directory=directory, scope=scope, timeout=timeout, before_start=unchanged)
+
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
+        if not self.stopping:
+            from .navigation import require_settled
+            require_settled(self.facts)
         if self.facts.get('native_refusal') and not self.stopping:
             raise ValueError(self.facts['native_refusal']['message'])
         if self.facts.get('binding_conflict') and not self.stopping:
@@ -249,17 +305,20 @@ def framed_text(root, message, *, at=None):
     scope = sender.get('universe')
     if sender.get('agent_id') and scope:
         try:
-            name = read(Path(scope) / 'state' / 'agents' / sender['agent_id'] / 'properties.json')['name']
+            name = records.properties(Path(scope) / 'state' / 'agents' / sender['agent_id'] / 'properties.json')['name']
         except (OSError, ValueError, KeyError):
             pass
     origin = ''
     if scope and Path(scope).resolve() != Path(root).resolve():
         try:
-            origin = f' (in universe {read(Path(scope) / "universe.json")["name"]})'
+            origin = f' (in universe {records.properties(Path(scope) / "universe.json")["name"]})'
         except (OSError, ValueError, KeyError):
             origin = f' (in universe {scope})'
+    # A steer or follow-up that a focus held as inbox-only says so; it never reaches a harness.
+    held = (f' ({message["intended"]}, held while you were focused)'
+            if message.get('intended') in ('steer', 'follow-up') else '')
     age = _message_age(message.get('at'), at=at)
-    return f'Message from {name}{origin}{" (" + age + ")" if age else ""}:\n{message["text"]}'
+    return f'Message from {name}{origin}{held}{" (" + age + ")" if age else ""}:\n{message["text"]}'
 
 
 def _message_age(sent_at, *, at=None):
@@ -323,6 +382,21 @@ def _observed(adapter, session):
 
 
 def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+    """Follow session lineage and completed command receipts before exposing the saved settings."""
+    from .navigation import require_settled
+    require_settled(facts)
+    properties, facts = _session_snapshot(root, directory, properties, facts, adapter=adapter,
+                                          launch_locked=launch_locked)
+    if not (directory / 'slash' / 'pending.json').exists():
+        return properties, facts
+    if not launch_locked:
+        with _snapshot_lock(directory):
+            return session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
+    from . import slash
+    return slash.reconcile(root, directory, properties, facts, adapter=adapter), facts
+
+
+def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
     """Reconcile adapter evidence before using a native ID. No native probes.
 
     A provider owns the evidence checks. Core owns launch fencing, the CAS,
@@ -346,6 +420,8 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
         with _snapshot_lock(directory):
             return session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
     current_facts = agents.runtime(directory)
+    from .navigation import require_settled
+    require_settled(current_facts)
     if current_facts.get('launch_id') != facts.get('launch_id'):
         raise ValueError('Launch changed while reading native session identity; retry')
     current = agents.session_properties(root, directory, launch_locked=True)
@@ -513,6 +589,16 @@ def operation(root, reference, name, question=''):
     try:
         if name == 'ask' and not question.strip():
             raise ValueError('A side question is required')
+        if name == 'ask':
+            from .navigation import require_settled
+            require_settled(agents.runtime(directory))
+            _, adapter, session, executor = context(root, directory.name, reconcile=False)
+            if getattr(adapter, 'ask_snapshot_only', False) is True:
+                if executor.facts.get('binding_conflict'):
+                    return NativeResult('unavailable', executor.facts['binding_conflict']).to_dict()
+                # Private-copy providers validate their captured generation in
+                # run_once. Asking must never repair the source agent's records.
+                return effects.call(adapter, 'ask', session, question, executor).to_dict()
         with lock(directory / '.launch.lock'):
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
             if executor.facts.get('binding_conflict'):
@@ -776,6 +862,15 @@ def _receipt_id(message, attempt):
 
 
 def _check_delivery_receipt(directory, adapter, session, executor, message, tracking):
+    receipt = _receipt_evidence(directory, adapter, session, executor, message, tracking)
+    target = tracking.get('target_session') or message.get('target_session')
+    value = receipt.get('value') if isinstance(receipt.get('value'), dict) else {}
+    if target and target != session.native_id and not value.get('outside_lineage'):
+        receipt = {**receipt, 'value': {**value, 'native_session_id': target, 'historical_conversation': True}}
+    return receipt
+
+
+def _receipt_evidence(directory, adapter, session, executor, message, tracking):
     """Reconcile receipt evidence under the caller's launch and delivery locks, never submit.
 
     Opted-in adapters get a private UUID for each actual submission. Earlier
@@ -790,7 +885,8 @@ def _check_delivery_receipt(directory, adapter, session, executor, message, trac
                     'reason': "Message targets a conversation outside this agent's recorded lineage; delivery cannot be checked",
                     'value': {'outside_lineage': True,
                               'retired_by_fresh_start': _retired_session(directory, executor.properties, target)}}
-        receipt_session = replace(session, native_id=target)
+        from .navigation import queue_for
+        receipt_session = replace(session, native_id=target, queue_state=queue_for(executor.facts, target))
     if tracking.get('submission_state') == 'failed' and not receipt_failure(tracking):
         return {**(tracking.get('last_receipt') or tracking['attempts'][-1]), 'ok': False}
     saved = tracking.get('native_receipt')
@@ -871,6 +967,17 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                 and tracking.get('submission_state') in ('submitting', 'unknown', 'accepted')):
             from . import wake
             return wake.check(root, directory, message, tracking)
+        from . import navigation
+        if check and navigation.pending(agents.runtime(directory)):
+            reason = 'Receipt check is deferred until the conversation switch resolves'
+            return {'state': 'unknown', 'ok': False, 'message_id': message_id,
+                    'reason': reason + '; try deliver --check again. Prior acceptance is unchanged',
+                    'value': {'evidence_problem': reason, 'check_deferred': True}}
+        if not check:
+            deferred = navigation.defer(directory, message, tracking, agents.runtime(directory),
+                                        retry=retry, new_message=new_message)
+            if deferred is not None:
+                return deferred
         try:
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
         except Denied:
@@ -1012,6 +1119,10 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
         facts = agents.runtime(directory)
+        from .navigation import defer
+        deferred = defer(directory, message, tracking, facts, retry=retry, new_message=new_message)
+        if deferred is not None:
+            return deferred
         properties = records.properties(directory / 'properties.json')
         observation = None
         damage = missing_runtime.damage(directory, facts)

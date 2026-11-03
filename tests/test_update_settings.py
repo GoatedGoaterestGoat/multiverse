@@ -103,6 +103,24 @@ class ConversionTest(PluginTestCase):
             self.assertIn("environment synced", text)
             self.assertIn(first, text)
             self.assertNotIn("run mv2 plugins migrate --apply", text)  # installation advice comes first
+        with self.subTest("the plugin host the converter restarted, or could not"):
+            for host, shown in (({"state": "restarted", "universe": str(self.root)}, "Restarted the plugin host of"),
+                                ({"state": "restarting", "universe": str(self.root), "reason": "restarts once idle"},
+                                 "restarts once idle"),
+                                ({"state": "failed", "universe": str(self.root), "reason": "it did not stop"},
+                                 "Could not restart the plugin host of " + str(self.root) + ": it did not stop"),
+                                (3, None), ({"universe": str(self.root)}, None)):
+                done = subprocess.CompletedProcess([], 0, record(host=host), "")
+                with patch.object(update.subprocess, "run", return_value=done):
+                    settings = update._convert_settings(CHECKOUT, self.root)
+                self.assertEqual(settings["state"], "none")  # the conversion's own answer is unchanged
+                text = update.format_output({"json": False, "ok": True, "check": False, "commits": 0, "after": "a" * 40,
+                                             "environment": {"state": "synced"}, "notes": [],
+                                             **({"host": settings["host"]} if "host" in settings else {})})
+                if shown:
+                    self.assertIn(shown, text)
+                else:
+                    self.assertNotIn("plugin host", text)
 
 
 if __name__ == "__main__":

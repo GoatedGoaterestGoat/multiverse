@@ -15,7 +15,7 @@ def configure(parser):
 
 
 WORDS = {'session_name': 'session name', 'send_steer': 'steer', 'send_follow_up': 'follow-up', 'get_usage': 'usage',
-         'get_delivery': 'delivery receipts', 'wake': 'wake with a message'}
+         'get_delivery': 'delivery receipts', 'wake': 'wake with a message', 'slash': 'harness commands'}
 
 
 def cli_run(root=None, *, agent=None, harness=None, probe=False, json=False):

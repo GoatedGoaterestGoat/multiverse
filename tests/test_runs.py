@@ -9,10 +9,12 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -307,6 +309,97 @@ class RunsTest(BaseTest):
                             self.root.rmdir(); restore.rename(self.root)
             spawn.assert_not_called()
         self.assertFalse(runs.base().exists())
+
+    def test_child_identity_retries_stay_before_native_execution_and_within_the_run(self):
+        """A transient process query must not lose a run; waiting for proof must never release an unrecorded child."""
+        for condition in ('transient', 'repeated', 'unavailable', 'cancelled', 'timeout', 'scope removed',
+                          'late proof', 'late preparation proof'):
+            with self.subTest(condition):
+                directory = runs.base() / 'fixture/fake' / str(uuid4())
+                marker = self.work / ('executed-' + condition.replace(' ', '-'))
+                code = ('import json,os,pathlib\n'
+                        'r=json.loads(pathlib.Path("run.json").read_text())\n'
+                        'assert r["phase"]=="running" and r["child"]["pid"]==os.getpid()\n'
+                        f'with pathlib.Path({str(marker)!r}).open("a") as out: out.write("paid\\n")\n'
+                        'print("paid answer")\n')
+                parent, connection = socket.socketpair()
+                offset, queries, child_pid, moved = [0.0], [], [], None
+                clock = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0], sleep=time.sleep)
+                payload = {'directory': str(directory), 'universe': str(self.root), 'owner': None,
+                           'files': [], 'argv': [sys.executable, '-I', '-S', '-c', code],
+                           'environment': {k: v for k, v in self.environment.items() if v is not None},
+                           'scopes': runs.capture_scope(self.root).records(),
+                           'deadline': clock.monotonic() + 30}
+                started = run_supervisor.process_started
+
+                def observation(pid, **kwargs):
+                    nonlocal moved
+                    if pid == os.getpid():
+                        return started(pid)
+                    self.assertFalse(marker.exists())
+                    self.assertIsNone(json.loads((directory / 'run.json').read_text())['child'])
+                    child_pid[:] = [pid]
+                    queries.append(kwargs.get('timeout'))
+                    if condition in ('transient', 'repeated'):
+                        return None if len(queries) <= (1 if condition == 'transient' else 3) else started(pid)
+                    if condition == 'unavailable':
+                        offset[0] += 2
+                        self.assertLessEqual(len(queries), 3, 'Identity preparation needs a finite bound')
+                        return None
+                    if condition == 'cancelled':
+                        parent.shutdown(socket.SHUT_WR)
+                    elif condition == 'scope removed':
+                        moved = self.root.with_name('removed-identity-scope')
+                        self.root.rename(moved)
+                    elif condition == 'late preparation proof':
+                        offset[0] += 6
+                    else:
+                        offset[0] += 31
+                    return started(pid) if condition.startswith('late ') else None
+
+                try:
+                    with patch.object(run_supervisor, 'time', clock), \
+                            patch.object(run_supervisor, 'process_started', side_effect=observation):
+                        result = run_supervisor.supervise(connection, payload)
+                    if condition in ('transient', 'repeated'):
+                        self.assertEqual(result.get('outcome', {}).get('stdout'), 'paid answer\n', result)
+                        self.assertEqual(marker.read_text(), 'paid\n')
+                        self.assertEqual(len(queries), 2 if condition == 'transient' else 4)
+                    else:
+                        expected = ('timeout' if condition in ('timeout', 'late proof') else
+                                    'cancelled' if condition in ('cancelled', 'scope removed') else 'unavailable')
+                        self.assertEqual(result.get('failure', {}).get('kind'), expected, result)
+                        self.assertTrue(result['failure']['confirmed'], result)
+                        self.assertFalse(marker.exists())
+                    self.assertTrue(child_pid)
+                    self.assertTrue(stopped(child_pid[0]))
+                    self.assertFalse(directory.exists())
+                finally:
+                    parent.close()
+                    connection.close()
+                    if moved is not None:
+                        moved.rename(self.root)
+
+        with self.subTest('the process query shares a short remaining run deadline'):
+            now = [10.0]
+            clock = SimpleNamespace(monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+            parent, connection = socket.socketpair()
+            connection.setblocking(False)
+            def unavailable(pid, *, timeout):
+                self.assertEqual(pid, 42)
+                self.assertGreater(timeout, 0)
+                self.assertLessEqual(timeout, .25)
+                now[0] += timeout
+                return None
+            try:
+                with patch.object(run_supervisor, 'time', clock), \
+                        patch.object(run_supervisor, 'process_started', side_effect=unavailable), \
+                        self.assertRaises(run_supervisor.Stopped) as caught:
+                    run_supervisor._child_started(connection, {'deadline': 10.25, 'scopes': []}, SimpleNamespace(pid=42))
+                self.assertEqual(caught.exception.kind, 'timeout')
+            finally:
+                parent.close()
+                connection.close()
 
     def test_collisions_and_linked_store_paths_are_never_overwritten(self):
         """An exclusive session file cannot follow a link or overwrite an existing conversation, even if that

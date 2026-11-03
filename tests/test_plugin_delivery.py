@@ -20,6 +20,7 @@ import time
 
 HOLD = {}  # universe path -> threading.Event: slow waits on it there; elsewhere it sleeps SLEEP
 SLEEP = {"seconds": 0.0}
+LATE = {"seq": None, "seconds": 0.0}  # fast finishes this event, but only after this long
 SEEN = {"slow": [], "fast": []}
 
 def register(mv):
@@ -34,6 +35,8 @@ def register(mv):
     @mv.events.on("agent.status")
     def fast(event):
         SEEN["fast"].append((event.universe.name, event.seq))
+        if event.seq == LATE["seq"]:
+            time.sleep(LATE["seconds"])
 """
 
 
@@ -75,9 +78,10 @@ class Fixture(PluginTestCase):
 class StuckHandlerTest(Fixture):
     def test_no_handler_gets_an_event_twice_however_many_polls_while_a_sibling_is_stuck(self):
         """While one handler is stuck its sibling gets every event exactly once past one read, one poll, more polls
-        and a worker restart, and the shared cursor waits on the stuck event until it ends; fragile because of
-        per-handler bookkeeping and read windows, and a sibling 1,200 events ahead once got them all again (PR #20
-        review 4)."""
+        and a worker restart, even an event it finished only after its limit, and the shared cursor waits on the
+        stuck event until it ends; fragile because of per-handler bookkeeping and read windows: a sibling 1,200
+        events ahead once got them all again (PR #20 review 4), and one that finished an event late was called
+        with it again (a load-dependent full-suite failure at 6df7376)."""
         with self.subTest("stuck, then released"):
             small = self.subverse("small")
             self.enable("pair", root=small)
@@ -96,6 +100,8 @@ class StuckHandlerTest(Fixture):
             self.assertEqual([error for error in self.loaded.errors if "took longer" in error],
                              ["event agent.status (slow): TimeoutError: took longer than 0.2 s"])
         self.module.HOLD["test"] = threading.Event()  # slow never returns on event 1 here
+        # And fast runs past its limit once, on event 1243, but finishes it: done, never called with it again.
+        self.module.LATE.update(seq=1243, seconds=0.15)
         self.emit(self.root, 2600)  # more than the 4 reads of 500 one poll makes from the cursor
         everything = list(range(1, 2601))
         with mock.patch.object(host, "HANDLER_SECONDS", 0.1), mock.patch.object(host, "TIMEOUTS_PER_EVENT", 1000):
@@ -136,14 +142,14 @@ class StuckHandlerTest(Fixture):
                                 self.module.SEEN)
                 self.module.SLEEP["seconds"] = 0.0
                 self.assertEqual(self.seen("fast", "slow"), [1, 2, 3, 4])  # never replayed to the handler that finished
-                # Each call ran past its limit and kept running for 3 limits' time: given up after that one call each.
+                # Each call ran past its limit for 4 limits' time, then returned: one call each, never repeated.
                 self.assertEqual(self.seen("slow", "slow"), [1, 2, 3, 4])
                 given_up = [error for error in self.loaded.errors if "gave up" in error]
-                self.assertEqual(len(given_up), 4, self.loaded.errors)
-                # Never before TIMEOUTS_PER_EVENT limits; a later look (a loaded machine) may read more.
+                # Given up when the host looked while it still ran past 3 limits; finished if it looked only after it
+                # had returned (a loaded machine): either way never before TIMEOUTS_PER_EVENT limits.
                 counts = [re.search(r"gave up on seq (\d+) after (\d+) timeouts", error) for error in given_up]
                 self.assertTrue(all(counts), given_up)
-                self.assertEqual([int(found[1]) for found in counts], [1, 2, 3, 4])
+                self.assertTrue(set(int(found[1]) for found in counts) <= {1, 2, 3, 4}, given_up)
                 self.assertTrue(all(int(found[2]) >= host.TIMEOUTS_PER_EVENT for found in counts), given_up)
             with self.subTest("a call that never returns, beside another universe"):
                 self.module.HOLD["stuck"] = threading.Event()  # slow never returns there (until the test ends)
@@ -172,6 +178,32 @@ class StuckHandlerTest(Fixture):
             self.assertEqual(host._read_cursor(raising, "pair"), 3)  # an error is recorded, not retried forever
             self.assertEqual(self.seen("fast", "raising"), [1, 2, 3])
             self.assertIn("event agent.status (broken): ValueError: bad event", self.loaded.errors)
+
+
+class LateEndTest(Fixture):
+    def test_a_late_end_answers_only_its_own_journal_and_event(self):
+        """A handler call that finished after its limit answers only the event it was for, in the journal it was
+        read from; fragile because the kept end was keyed by the handler alone, so once the journal was replaced
+        an old journal's late end marked the new journal's event 1 finished without running it (reviewer's
+        recheck at 5d76fe9), and that event is silently skipped."""
+        held = threading.Event()
+        self.module.HOLD["test"] = held  # slow is stuck on event 1 until set
+        self.emit(self.root, 1)
+        key = f"handler 0 in {self.root} #0"
+        with mock.patch.object(host, "HANDLER_SECONDS", 0.02), mock.patch.object(host, "TIMEOUTS_PER_EVENT", 1000):
+            host._deliver(self.loaded, self.mv, self.root, "pair")  # runs past its limit: kept as a late end
+            self.assertEqual(self.seen("slow"), [1])
+            held.set()
+            deadline = time.monotonic() + 10
+            while loader.still_running(self.loaded, key) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            previous = events.journal_id(self.root)
+            shutil.rmtree(events.directory(self.root))  # the journal replaced: its event 1 is another event
+            self.emit(self.root, 1)
+            self.assertNotEqual(events.journal_id(self.root), previous)
+            host._deliver(self.loaded, self.mv, self.root, "pair")
+        self.assertEqual(self.seen("slow"), [1, 1])  # the new event 1 ran; the old end didn't stand in for it
+        self.assertEqual(host._read_cursor(self.root, "pair"), 1)
 
 
 class AbandonedCallsTest(Fixture):

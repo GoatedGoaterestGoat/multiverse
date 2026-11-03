@@ -104,7 +104,15 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         action = name or "status"
         if action not in HOST_ACTIONS:
             raise ValueError(f"mv2 plugins host takes {', '.join(HOST_ACTIONS)}")
-        return {"action": action, "universe": str(top), **getattr(host, action)(top)}
+        answer = {"action": action, "universe": str(top), **getattr(host, action)(top)}
+        if action == "status" and answer.get("running"):
+            # What refresh would restart: a host that records no code (an mv2 from before) or this mv2's older code.
+            # Another mv2's host is left alone by refresh: said apart, with no advice to restart it.
+            running, current = answer.get("code"), host.code()
+            answer["stale"] = running is None or (running["source"] == current["source"] and running != current)
+            if running is not None and running["source"] != current["source"]:
+                answer["other_source"] = running["source"]
+        return answer
     if plugin_action == "migrate":
         scopes = list(universe.tree(root)) if recursive else [root]
         planned, done = [], []
@@ -138,6 +146,13 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply,
                   "not_installed": [{"plugin": name, "file": legacy, "universe": str(scope)}
                                     for scope in scopes for name, legacy in plugins.not_installed(scope)]}
+        if apply:
+            # The step every mv2 update runs with the code it just installed, older updaters too: a plugin host
+            # still running the code from before is restarted. It never changes the result's ok or exit status.
+            from ..plugins import host
+            restarted = host.refresh(root)
+            if restarted["state"] in ("restarted", "restarting", "failed", "other"):
+                result["host"] = restarted
         if apply and any(item.get("problem") for item in planned):
             result["ok"] = False  # something was not converted: exit 1
         return result
@@ -513,6 +528,13 @@ def text(action, result):
         waiting = [f'! {plugins.not_installed_message(item["plugin"], item["file"])}'
                    + ("" if item["universe"] == result["universe"] else f' (in {item["universe"]})')
                    for item in result.get("not_installed", [])]
+        restarted = result.get("host") or {}
+        if restarted:
+            waiting.append({"restarted": "Restarted the plugin host: it ran the code from before.",
+                            "restarting": f'The plugin host {restarted.get("reason")}.',
+                            "other": f'Left the plugin host alone: {restarted.get("reason")}.',
+                            "failed": f'! Could not restart the plugin host: {restarted.get("reason")}'}
+                           [restarted["state"]])
         if not result["planned"]:
             return "\n".join(waiting) if waiting else "Nothing to migrate."
         lines = list(waiting)
@@ -534,6 +556,12 @@ def text(action, result):
         lines = [f'The plugin host for {result["universe"]} is {state}' + (f' (pid {result["pid"]}).' if result["running"] and result.get("pid") else ".")]
         if result.get("problem"):
             lines.append(f'! {result["problem"]}; the host rewrites it when it starts.')
+        if result.get("refused"):
+            lines.append(f'! Not stopped: {result["refused"]}.')
+        if result.get("stale"):
+            lines.append("! It runs the code from before an update: run mv2 plugins migrate --apply to restart it.")
+        if result.get("other_source"):
+            lines.append(f'It runs the mv2 in {result["other_source"]}, not this one.')
         if result.get("needed"):
             lines.append(f'Plugins that need it: {", ".join(result["needed"])}.')
         elif result["action"] in ("start", "status"):

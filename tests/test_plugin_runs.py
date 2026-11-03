@@ -259,6 +259,23 @@ class RunApiTest(PluginTestCase):
                     self.assertEqual(entered, [])  # refused by the API itself, before core's run is entered
         self.assertEqual(fake.requests, [])  # none reached the run
 
+    def test_fake_runs_answer_a_codex_run_behind_its_real_checks(self):
+        """PluginTestCase.fake_runs answers a Codex run too, with Codex's own release, login and model checks
+        still run; fragile because the fake only stood in for Claude, so a plugin's Codex tests hit the person's
+        real codex or failed for want of one, and a Codex check the fake skipped would pass there and fail live."""
+        self.write_plugin("coder", {**RUNNER, "api": "1.16", "permissions": ["models.codex"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("coder")
+        codex = api.Plugin(loader.load(self.entry("coder"))).universe(self.root).harness("codex")
+        fake = self.fake_runs(api.Reply(text="A plan", model="gpt-6-sol", usage={"input": 7}))
+        self.assertTrue(codex.run_options().supported)
+        reply = codex.run_once(prompt="Plan it", system="You plan.", model="gpt-6-sol", timeout=60)
+        self.assertEqual((reply.text, fake.requests[0]["model"]), ("A plan", "gpt-6-sol"))
+        with self.assertRaises(api.RunError) as caught:  # Codex's own model check still refuses
+            codex.run_once(prompt="Plan it", system="You plan.", model="no-such-model", timeout=60)
+        self.assertEqual(len(fake.requests), 1)
+        self.assertIn("no checked zero-tools Codex catalogue entry", str(caught.exception))
+
     def test_fake_runs_answer_a_plugins_runs_behind_the_real_checks(self):
         """PluginTestCase.fake_runs answers runs from a script and records each request, while the API's, the
         harness's and core's checks still run; fragile because a fake that skipped them would let a plugin's

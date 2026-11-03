@@ -195,6 +195,69 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
         await client.send(json.dumps({'id': identifier, 'method': method, 'params': params}))
         return json.loads(await asyncio.wait_for(client.recv(), 2))
 
+    async def test_navigation_core_waits_never_block_relay_forwarding_or_publish_before_commit(self):
+        """A core switch waits for delivery locks, so blocking the relay loop would deadlock the response that releases them."""
+        from unittest.mock import patch
+        began, permit_begin, committing, permit_commit = (threading.Event() for _ in range(4))
+        calls, failures = [], []
+        deny_commit = False
+        def describe(view, direction, value):
+            if direction == 'outgoing' and value.get('method') == 'navigate':
+                view.navigation_id = value['id']
+                return {'action': 'begin', 'correlation': view.token + ':' + str(value['id'])}
+            if direction == 'incoming' and value.get('id') == getattr(view, 'navigation_id', None):
+                return {'action': 'commit', 'token': 'ticket'}
+        def done(view, event, answer):
+            calls.append(('published', event['action']))
+        def failed(view, event, reason):
+            failures.append(reason)
+        def core(action, event):
+            calls.append(('core', action))
+            if action == 'begin':
+                began.set()
+                if not permit_begin.wait(3):
+                    raise ValueError('begin test deadline')
+                return {'token': 'ticket'}
+            if action == 'commit':
+                committing.set()
+                if not permit_commit.wait(3):
+                    raise ValueError('commit test deadline')
+                if deny_commit:
+                    raise ValueError('claim changed')
+                return {'native_id': 'new-primary'}
+        self.proxy.navigation = core
+        with patch.object(View, 'navigation', describe, create=True), \
+                patch.object(View, 'navigation_done', done, create=True), \
+                patch.object(View, 'navigation_failed', failed, create=True):
+            primary, side = await self.connect(), await self.connect()
+            try:
+                await primary.send(json.dumps({'id': 10, 'method': 'navigate'}))
+                self.assertTrue(await asyncio.to_thread(began.wait, 2))
+                # Another connection can finish the delivery holding the lock.
+                await side.send(json.dumps({'id': 11, 'method': 'ordinary'}))
+                self.assertEqual(json.loads(await asyncio.wait_for(side.recv(), 2))['id'], 11)
+                permit_begin.set()
+                self.assertTrue(await asyncio.to_thread(committing.wait, 2))
+                receiving = asyncio.create_task(primary.recv())
+                await asyncio.sleep(.03)
+                self.assertFalse(receiving.done())
+                await side.send(json.dumps({'id': 12, 'method': 'ordinary'}))
+                self.assertEqual(json.loads(await asyncio.wait_for(side.recv(), 2))['id'], 12)
+                permit_commit.set()
+                self.assertEqual(json.loads(await asyncio.wait_for(receiving, 2))['id'], 10)
+                self.assertLess(calls.index(('core', 'commit')), calls.index(('published', 'commit')))
+                deny_commit = True
+                await primary.send(json.dumps({'id': 13, 'method': 'navigate'}))
+                refusal = json.loads(await asyncio.wait_for(primary.recv(), 2))
+                self.assertEqual(refusal['id'], 13)
+                self.assertIn('claim changed', refusal['error']['message'])
+                self.assertEqual(failures, ['claim changed'])
+                self.assertEqual(self.losses, [])
+                self.assertEqual(self.refusals, [])
+            finally:
+                permit_begin.set()
+                permit_commit.set()
+
     async def test_request_ids_are_scoped_per_connection(self):
         """Clients reusing small JSON-RPC ids on one relay, through the relay and Codex's connection views, each get
         their own replies, and ownership follows the binding client; a break goes unnoticed because a crossed reply

@@ -470,6 +470,8 @@ def run(root=None, *, check=False, json=False, plugin_fetch_timeout=PLUGIN_FETCH
             settings = _convert_settings(checkout, root)
             if settings["state"] in SETTINGS_NOTICES:  # nothing to say keeps the output as it was
                 result["settings"] = settings
+            if settings.get("host"):  # the plugin host the same step restarted, or could not
+                result["host"] = settings["host"]
         if plugin_failures:
             raise ValueError(" ".join(plugin_failures))
         result["ok"] = True
@@ -550,7 +552,9 @@ def _conversion(target, converted):
         failures = [None]
     state = ("partial" if applied and (failures or missing) else "converted" if applied
              else "failed" if failures else "not_installed" if missing else "none")
-    return {"state": state, "universe": str(target), "lines": lines}
+    host = record.get("host")
+    return {"state": state, "universe": str(target), "lines": lines,
+            **({"host": host} if isinstance(host, dict) and isinstance(host.get("state"), str) else {})}
 
 
 def _scope_label(target, scope):
@@ -609,6 +613,15 @@ def format_output(result):
         lines.extend("  " + line for line in settings.get("lines") or [settings.get("reason", "")])
         if settings["state"] in ("partial", "failed"):
             lines.append("  Fix what it names, then run mv2 plugins migrate --apply --recursive there.")
+    host = result.get("host") or {}
+    if host.get("state") == "restarted":
+        lines.append(f"Restarted the plugin host of {host.get('universe')}: it ran the code from before the update.")
+    elif host.get("state") == "restarting":
+        lines.append(f"The plugin host of {host.get('universe')} {host.get('reason')}.")
+    elif host.get("state") == "other":
+        lines.append(f"Left the plugin host of {host.get('universe')} alone: {host.get('reason')}.")
+    elif host.get("state") == "failed":
+        lines.append(f"Could not restart the plugin host of {host.get('universe')}: {host.get('reason')}")
     if result["check"]:
         lines.append("Check only: code and environment unchanged.")
     lines.extend(result["notes"])

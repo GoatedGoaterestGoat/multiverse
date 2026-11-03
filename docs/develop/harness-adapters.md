@@ -27,6 +27,13 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 | `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
 
 `EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+An adapter with `ask_snapshot_only = True` receives a read-only source snapshot,
+without identity reconciliation or a launch lock. Its `ask` must use
+`executor.run_once(adapter, session, prepare)` to revalidate the captured generation
+and storage before preparation and private execution. The flag does not hold the
+live generation fixed during inference. The pre-start check includes the
+conversation generation counter, so switching away and back still invalidates
+an earlier preparation.
 Core checks the current plugin access limit before calling the adapter, and
 before a launch or send writes records. Optional identity, storage, readiness,
 receipt and usage evidence methods are `observe`; launching a relay and
@@ -63,7 +70,7 @@ Codex checks the native thread UUID in a rollout's metadata header under the can
 
 | Type | Fields you use |
 | --- | --- |
-| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
+| `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `effort`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
 | `SessionHandle` | `agent_id`, `harness`, `workspace`, `launch_id`, `native_id`, `session_file`, `state`, `endpoint`, `bridge`, `native_mode` |
 | `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment` |
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
@@ -72,6 +79,8 @@ Codex checks the native thread UUID in a rollout's metadata header under the can
 For legacy storage adoption, `LaunchContext.storage_keys` lists proven harness storage variables, never `HOME`. A default-storage adoption can retain `HOME` in the launch environment without adding it to this mask. `None` keeps the complete selection used by existing callers; an empty tuple proves none. A listed key absent from `environment` is known unset; an omitted key is unknown and retains native inheritance. Adapters still enforce their own conversation's identity requirements.
 
 ### Rules
+
+An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude supports it; Codex and Pi currently refuse it.
 
 - **Only describe.** Return specs and results. Core starts processes, owns tmux, writes `runtime.json` and holds the locks. Reach the native side only through the executor: `executor.request`, `executor.rpc` or `executor.write_lines`.
 - **No shell.** `argv` runs as given, so prompts and IDs stay literal.
@@ -96,6 +105,30 @@ A `reported` harness binds its ID in one of two ways:
 ### Session changes
 
 An adapter can report a verified native session change, such as Claude's `/clear`, without replacing the mv2 agent. Core records the change in the agent's session lineage, keeps the earlier conversations owned by that agent, and follows the current one for delivery, usage and resume. An adapter that reports no changes keeps exact-session behavior. See [session lineage](../design/session-lineage.md).
+
+An interactive relay can instead qualify an exact navigation request and reply.
+Its optional `navigation(direction, value)` returns a semantic event: `begin`
+with `previous`, `target` (only for resume), `reason` and request `correlation`;
+`commit` with the admission `token`, returned `target` and recorded `home`; or
+`abort` with the token for a definite native refusal. Core runs these callbacks
+off the relay event loop. Admission holds the launch lock only while checking
+and recording the fence; the native idle/empty-queue observation holds no file
+lock. An optional observe method `navigation_target(session, target)` must prove
+that a resume target is readable in the exact recorded home. Core separately
+requires that it belongs to the agent's unretired lineage.
+
+The relay receives `navigation_done(event, answer)` after each core callback.
+Only a committed reply may publish the new primary and pass success to the
+client. Core journals the selection and callback identity first. A correlated
+refusal is local to that request; an ambiguous outcome retains the fence and
+must never be retried as a fresh creation. Core flushes only input saved during
+that fence after forwarding a definite result. Accepted or uncertain input
+keeps its original conversation. `navigation_failed(event, reason)` must not
+undo a committed journal or silently restore old-thread mutation authority.
+Receipt checks during an unresolved switch report deferred evidence, leave
+acceptance unchanged, and ask the caller to check again after it resolves.
+After closing the attachment, an explicit `mv2 resume` restores the durable
+recorded selection and clears the old launch's fence.
 
 A bridged Codex conversation can have several clients at once. Its tool configuration requests agent-stable values, so `report` and `inbox` work from any client. An adapter can opt into proof from a retained bridge request when an older loaded conversation lacks the mode marker. Runner calls stay bound to their launch. See [shared conversations](../design/shared-conversations.md).
 
@@ -146,7 +179,7 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `stop` | Terminal | Bridge: cancels app-server work, then terminal | Terminal | Terminal |
 | `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: extension socket | No |
 | `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: extension | No |
-| `ask` | Bridge: a model fork over the transcript | No | No | No |
+| `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No |
 | `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | No | No |
 | `compaction` | Live connection, when the compaction plugin is on | No | No | No |
 
@@ -318,8 +351,7 @@ replacement rules, and the [plugin API](plugins.md) for the public read methods.
 
 The optional `RunProvider` exposes `run_options(environment=...)` (observe) and
 `run_plan(request, environment=..., run=...)` (spend). A plan contains an argv-only
-`CommandSpec`, bounded `RunFile` declarations and a pure `interpret(RunOutcome)`
-function. It describes no launch, service, relay or attachment. The adapter makes
+`CommandSpec`, bounded `RunFile` declarations and either a pure `interpret(RunOutcome)` function or a caller-side `dialogue(RunChannel)` for a private stdio process. The channel sends and receives bounded JSON objects; the supervisor never loads adapter dialogue code. A plan may declare disposable child directories and borrowed `RunLink` targets inside them. Core removes those trees without following links, only after proving their producers stopped. It describes no agent launch, shared service or attachment. The adapter makes
 no files and starts no process. Core checks the model and effort before asking
 for a plan; an unverified but accepted model may run. Unsupported harnesses return
 an unavailable result without spending.
@@ -358,7 +390,11 @@ parents alone.
 A disposable supervisor owns the child's new process group. One deadline covers
 preparation, execution and interpretation; cancellation, timeout and the calling
 worker's death stop that group with TERM then KILL and bounded cleanup. The leader
-is not reaped until group cleanup, so a reused PID grants no control. Agent and
+is not reaped until group cleanup, so a reused PID grants no control. The native
+child waits behind a gate until its process identity is saved. An unavailable
+identity lookup is retried for at most 5 seconds
+within the run's remaining deadline, still checking cancellation and scope. This
+retries only observation; the native command has not started. Agent and
 universe folder identities are captured before the API reads the agent's storage
 and checked after that read and the preliminary options probe. The same immutable
 snapshot is carried into core and checked before preparation and spawning, while
@@ -370,7 +406,7 @@ Input and prepared file content are bounded to 32 MiB, stdout to 16 MiB and stde
 to 64 KiB. Overflow is a failure, not a truncated success. Replies stay in memory;
 errors carry only a bounded native diagnostic or a content-free core reason.
 `RunReply` and `RunFailure` carry elapsed time and any known usage and cost for the
-plugin's metadata-only run record. Core never retries. The next run performs a
+plugin's metadata-only run record. Core never retries the native command. The next run performs a
 bounded, silent sweep of leftovers only when all recorded producers are proven
 gone and all file ownership still matches. After the supervisor records that a run
 ended, the calling dashboard or plugin worker need not exit before cleanup. A

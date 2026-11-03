@@ -1,4 +1,4 @@
-"""Exact, already-loaded thread control using the native app-server protocol.
+"""Exact thread control and stored receipt reads using the native app-server protocol.
 
 Never starts/resumes a thread. A rejected steer stays rejected: racing turn
 completion is not permission to submit the message to a different turn.
@@ -40,17 +40,17 @@ def result(response):
     return value
 
 
-def _thread(session, *, allow_unloaded=False):
+def _thread(session, *, allow_unloaded=False, read_only=False):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
         'capabilities': {'experimentalApi': True},
     }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
-    return (yield from _read_thread(session, allow_unloaded=allow_unloaded))
+    return (yield from _read_thread(session, allow_unloaded=allow_unloaded, read_only=read_only))
 
 
-def _read_thread(session, *, allow_unloaded=False):
+def _read_thread(session, *, allow_unloaded=False, read_only=False):
     native_id = session.native_id
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
     if isinstance(observed, NativeResult):
@@ -60,6 +60,8 @@ def _read_thread(session, *, allow_unloaded=False):
         return NativeResult('error', 'Native server returned a different thread ID')
     if not isinstance(thread.get('cwd'), str) or not thread['cwd'] or Path(thread['cwd']).resolve() != Path(session.workspace).resolve():
         return NativeResult('error', 'Native thread workspace differs from the saved agent workspace')
+    if read_only:
+        return thread  # Stored receipts need identity and scope, never input authority or a load.
     state = object_field(thread, 'status').get('type')
     if not isinstance(state, str):
         raise ValueError('Native RPC thread status type must be text')
@@ -261,7 +263,7 @@ def send_message(session, message, mode):
 
 def get_delivery(session, message_id):
     """Bounded receipt lookup; absence never establishes non-delivery."""
-    thread = yield from _thread(session)
+    thread = yield from _thread(session, read_only=True)
     if isinstance(thread, NativeResult):
         return thread
     queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 100})))
@@ -341,10 +343,24 @@ def stop_session(session):
             counts['cancelled_submissions'] += 1
             if isinstance(item.get('clientUserMessageId'), str):
                 cancelled.append(item['clientUserMessageId'])
-    turns = result((yield RpcRequest('thread/turns/list', {
-        'threadId': session.native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})))
+    turn_reply = yield RpcRequest('thread/turns/list', {
+        'threadId': session.native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})
+    turns = result(turn_reply)
     if isinstance(turns, NativeResult):
-        return failure(turns)
+        # A checked empty conversation is loaded before its first user message
+        # materializes history. This exact native refusal is not a turn failure.
+        error = turn_reply.get('error', {})
+        if (thread['status']['type'] != 'idle' or thread.get('canAcceptDirectInput') is not True
+                or error.get('code') != -32600
+                or error.get('message') != f'thread {session.native_id} is not materialized yet; '
+                                           'thread/turns/list is unavailable before first user message'):
+            return failure(turns)
+        current = yield from _read_thread(session)
+        if isinstance(current, NativeResult):
+            return failure(current)
+        if current['status']['type'] != 'idle' or current.get('canAcceptDirectInput') is not True:
+            return failure(NativeResult('unavailable', 'Native thread changed while confirming its empty history'))
+        turns = {'data': []}
     for turn in records(turns):
         if turn.get('status') == 'inProgress':
             if not isinstance(turn.get('id'), str) or not turn['id']:

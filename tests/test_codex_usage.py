@@ -232,7 +232,7 @@ class CodexUsageRelayTest(unittest.IsolatedAsyncioTestCase):
         for value in (event('other'), event(self.native_id, tokens=-1)):
             await self.observe(value)
         self.assertNotIn('usage', read(self.directory / 'runtime.json'))
-        with patch('multiverse.runtime.runner.update_runtime', side_effect=OSError('read-only runtime')):
+        with patch('multiverse.runtime.runner.mutate_runtime', side_effect=OSError('read-only runtime')):
             await self.observe(event(self.native_id))
         await self.observe({'method': 'future/event', 'params': {}})
         self.assertNotIn('usage', read(self.directory / 'runtime.json'))

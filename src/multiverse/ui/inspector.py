@@ -28,11 +28,14 @@ class Inspector(Vertical):
         self.follow_next = False
         self.reading_plugins = False
         self.plugin_revision = None
+        self.reading_inbox = False
+        self.inbox_revision = None
 
     def compose(self):
         yield Static("", id="inspect-name", markup=False)
         yield Static("", id="inspect-meta", markup=False)
         yield Static("", id="inspect-state", markup=False)
+        yield Static("", id="inspect-inbox", markup=False)
         yield Static("", id="inspect-plugins", markup=False)
         yield Static("CURRENT WORK", id="inspect-label")
         yield Static("", id="inspect-work", markup=False)
@@ -93,9 +96,11 @@ class Inspector(Vertical):
                     clean(line) for line in (row.get('reason') or message).splitlines())))
         self.query_one("#inspect-state", Static).update(state)
         if changed:
-            self.plugin_revision = None
+            self.plugin_revision = self.inbox_revision = None
             self.show_plugin_lines([])
+            self.show_unread(0)
         self.plugin_facts_if_needed()
+        self.inbox_if_needed()
         self.capture_if_needed()
 
     def show_plugin_lines(self, lines):
@@ -125,6 +130,35 @@ class Inspector(Vertical):
             self.show_plugin_lines(lines)
         elif self.row:
             self.plugin_facts_if_needed()
+
+    def show_unread(self, count):
+        widget = self.query_one("#inspect-inbox", Static)
+        widget.display = count > 0
+        plural = "" if count == 1 else "s"
+        widget.update(Text(f"✉ {count} unread inbox message{plural} · i shows them", style=theme.PEACH))
+
+    def inbox_if_needed(self):
+        """The agent's unread inbox count, read off the event loop once per scan, whatever its terminal's state."""
+        row = self.row
+        revision = (self.generation, self.app.scan_count)
+        if (row and row["kind"] == "agent" and not self.reading_inbox and revision != self.inbox_revision
+                and callable(getattr(self.app.backend, "unread", None))):
+            self.inbox_revision = revision
+            self.reading_inbox = True
+            self.read_inbox(dict(row), self.generation)
+
+    @work(group="inbox", exit_on_error=False)
+    async def read_inbox(self, row, generation):
+        try:
+            count = len(await asyncio.to_thread(self.app.backend.unread, Path(row["universe"]), row["id"]))
+        except Exception:  # an unreadable inbox shows no count; mv2 doctor says what is wrong with it
+            count = 0
+        finally:
+            self.reading_inbox = False
+        if self.row and generation == self.generation:
+            self.show_unread(count)
+        elif self.row:
+            self.inbox_if_needed()
 
     def capture_if_needed(self):
         row = self.row

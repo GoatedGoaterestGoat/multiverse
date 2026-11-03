@@ -46,6 +46,147 @@ class SessionLineageTest(BaseTest):
         """Make a new agent the one self.change moves, so each case of a table starts from its own binding."""
         self.agent, self.old = self.make_agent(name)
 
+    def test_navigation_fence_commit_and_append_first_identity_repair(self):
+        """A reply-boundary switch must not lose callback authority or replay input across a crash or return to an old paused thread."""
+        from multiverse.harnesses.types import NativeResult
+        from multiverse.runtime import navigation, recovery, native, runner
+        from multiverse.universe import mailbox, focus
+        from unittest.mock import Mock
+        (self.agent / '.launch.lock').touch()
+        (self.agent / '.send.lock').touch()
+        props = read(self.agent / 'properties.json')
+        props['agent_identity'] = {'native_id': self.old, 'unchanged': 'policy'}
+        write(self.agent / 'properties.json', props)
+        paused = {'native_session_id': self.old, 'state': 'paused', 'turn_id': 'old-turn'}
+        agents.update_runtime(self.agent, 'launch', status='idle', startup_checked=True,
+                              native_relay={'state': 'ready'}, queue_state=paused)
+        event = {'previous': self.old, 'target': None, 'reason': 'clear', 'correlation': 'owner:1'}
+        with patch.object(recovery, 'check', return_value=NativeResult('ok')):
+            ticket = navigation.begin(self.root, self.agent, 'launch', event)
+        with self.assertRaises(navigation.Switching):
+            navigation.require_settled(agents.runtime(self.agent))
+        message = mailbox.append_message(self.agent, 'during switch', {}, delivery='follow-up', target_session=self.old)
+        reply = navigation.defer(self.agent, message, {}, agents.runtime(self.agent))
+        self.assertEqual(reply['state'], 'pending')
+        self.assertEqual(mailbox.message_record(self.agent, message['id'])[1].get('submission_state', 'pending'), 'pending')
+        target = str(uuid4())
+        completion = {**ticket, 'target': target, 'home': self.home}
+        original_write = sessions.write
+        def crash_after_append(path, value):
+            if path == self.agent / 'properties.json':
+                raise OSError('pointer crash')
+            return original_write(path, value)
+        with patch.object(sessions, 'write', side_effect=crash_after_append), self.assertRaises(OSError):
+            navigation.commit(self.root, self.agent, 'launch', completion)
+        self.assertEqual(read(self.agent / 'properties.json')['native_session_id'], self.old)
+        effective, _ = sessions.effective(self.agent, read(self.agent / 'properties.json'))
+        self.assertEqual(effective['agent_identity']['native_id'], target)
+        with self.assertRaisesRegex(ValueError, 'already advanced'):
+            navigation.abort(self.root, self.agent, 'launch', ticket)
+        accepted = navigation.commit(self.root, self.agent, 'launch', completion)
+        self.assertEqual(accepted['native_id'], target)
+        self.assertEqual(read(self.agent / 'properties.json')['agent_identity'], {'native_id': target, 'unchanged': 'policy'})
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(navigation.commit(self.root, self.agent, 'launch', completion), accepted)
+        facts = agents.runtime(self.agent)
+        self.assertEqual(facts['queue_history'][self.old], paused)
+        self.assertEqual(facts['status'], 'unknown')
+        self.assertEqual(navigation.queue_for(facts, self.old), paused)
+        with patch.object(native, 'deliver', return_value={}) as send:
+            navigation.flush(self.root, self.agent, 'launch', ticket)
+            send.assert_called_once_with(self.root, self.agent.name, message['id'], retry=False, new_message=False)
+        mailbox.update_message(self.agent, message['id'], submission_state='accepted',
+                               native_receipt={'transcript_confirmed': True})
+        # An old observer cannot consume focus or publish into the new binding.
+        before = (self.agent / 'runtime.json').read_bytes()
+        with patch.object(focus, 'turn_ended') as turn:
+            runner.StatusWatcher(self.agent, 'launch', self.root)._publish('idle', self.old, 0)
+            turn.assert_not_called()
+        self.assertEqual(before, (self.agent / 'runtime.json').read_bytes())
+        agents.update_runtime(self.agent, 'launch', status='idle')
+        adapter = Mock(navigation_target=Mock(return_value=NativeResult('ok')))
+        with patch.object(recovery, 'check', return_value=NativeResult('ok')), \
+                patch.object(navigation.harnesses, 'load', return_value=adapter):
+            back = navigation.begin(self.root, self.agent, 'launch',
+                {'previous': target, 'target': self.old, 'reason': 'resume', 'correlation': 'owner:2'})
+        restored = navigation.commit(self.root, self.agent, 'launch', {**back, 'target': self.old, 'home': self.home})
+        self.assertEqual(restored['queue_state'], paused)
+        self.assertEqual([row['reason'] for row in self.rows()], ['clear', 'resume'])
+
+    def test_navigation_admission_refuses_busy_ambiguous_input_and_unowned_targets(self):
+        """A navigation refusal must happen before native selection, even when the picker races work or a damaged inbox."""
+        from multiverse.harnesses.types import NativeResult
+        from multiverse.runtime import navigation, recovery
+        from multiverse.universe import mailbox
+        for case in ('working', 'unknown', 'accepted', 'submitting', 'unknown-input', 'queued', 'managed',
+                     'foreign', 'damaged', 'startup', 'startup-input', 'previous-flush'):
+            with self.subTest(case=case):
+                self.fresh('navigation-' + case)
+                (self.agent / '.launch.lock').touch()
+                agents.update_runtime(self.agent, 'launch', status=case if case in ('working', 'unknown') else 'idle',
+                                      startup_checked=case != 'startup',
+                                      startup_delivery='waiting' if case == 'startup-input' else 'ready',
+                                      native_relay={'state': 'ready'})
+                event = {'previous': self.old, 'target': None, 'reason': 'new', 'correlation': 'owner:1'}
+                if case in ('accepted', 'submitting', 'unknown-input'):
+                    message = mailbox.append_message(self.agent, 'unsettled', {}, delivery='steer', target_session=self.old)
+                    mailbox.update_message(self.agent, message['id'], submission_state='unknown' if case == 'unknown-input' else case)
+                if case == 'managed':
+                    write(self.agent / 'slash/pending.json', {'ids': [str(uuid4())]})
+                if case == 'previous-flush':
+                    message = mailbox.append_message(self.agent, 'previous pending', {}, delivery='steer', target_session=self.old)
+                    mailbox.update_message(self.agent, message['id'], navigation_wait='previous-switch')
+                if case == 'foreign':
+                    event.update(target=str(uuid4()), reason='resume')
+                if case == 'damaged':
+                    (self.agent / 'inbox-state.json').write_text('[]')
+                probe = NativeResult('unavailable', 'Native queue is not empty') if case == 'queued' else NativeResult('ok')
+                with patch.object(recovery, 'check', return_value=probe), self.assertRaises(ValueError):
+                    navigation.begin(self.root, self.agent, 'launch', event)
+                self.assertEqual(read(self.agent / 'properties.json')['native_session_id'], self.old)
+                self.assertFalse((self.agent / 'sessions.jsonl').exists())
+                self.assertIsNone(navigation.pending(agents.runtime(self.agent)))
+                if case == 'previous-flush':
+                    for settled in ({'submission_state': 'failed'}, {'submission_state': 'pending', 'dismissed_at': 'dismissed'}):
+                        mailbox.update_message(self.agent, message['id'], **settled)
+                        with patch.object(recovery, 'check', return_value=NativeResult('ok')):
+                            admitted = navigation.begin(self.root, self.agent, 'launch', event)
+                        navigation.abort(self.root, self.agent, 'launch', admitted)
+
+    def test_navigation_commit_never_publishes_an_unrelated_or_damaged_selection(self):
+        """Native success must not escape when its launch, admission, storage or claim no longer authorizes the returned conversation."""
+        from multiverse.harnesses.types import NativeResult
+        from multiverse.runtime import navigation, recovery
+        for case in ('launch', 'token', 'home', 'foreign', 'binding', 'generation'):
+            with self.subTest(case=case):
+                self.fresh('commit-' + case)
+                (self.agent / '.launch.lock').touch()
+                agents.update_runtime(self.agent, 'launch', status='idle', startup_checked=True,
+                                      native_relay={'state': 'ready'})
+                with patch.object(recovery, 'check', return_value=NativeResult('ok')):
+                    ticket = navigation.begin(self.root, self.agent, 'launch',
+                        {'previous': self.old, 'target': None, 'reason': 'new', 'correlation': 'owner:1'})
+                target = str(uuid4())
+                reply = {**ticket, 'target': target, 'home': self.home}
+                launch = 'wrong' if case == 'launch' else 'launch'
+                if case == 'token':
+                    reply['token'] = 'other request'
+                if case == 'home':
+                    reply['home'] = self.home + '-other'
+                if case == 'foreign':
+                    self.make_agent('foreign-owner', native_id=target)
+                if case == 'binding':
+                    properties = read(self.agent / 'properties.json')
+                    write(self.agent / 'properties.json', {**properties, 'native_session_id': str(uuid4())})
+                if case == 'generation':
+                    agents.update_runtime(self.agent, 'launch', session_generation=[])
+                before = (self.agent / 'properties.json').read_bytes()
+                with self.assertRaises(ValueError):
+                    navigation.commit(self.root, self.agent, launch, reply)
+                self.assertEqual((self.agent / 'properties.json').read_bytes(), before)
+                self.assertFalse((self.agent / 'sessions.jsonl').exists())
+                self.assertEqual(navigation.pending(agents.runtime(self.agent))['id'], ticket['token'])
+
     def test_a_session_change_is_journaled_once(self):
         """Each real session change writes one journal row and one plugin event, and a repeated /clear report writes
         nothing; fragile because hooks fire the same report repeatedly, and duplicates silently grow the journal and

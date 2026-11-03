@@ -245,17 +245,34 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | --- | --- |
 | `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains proven storage variable values; `null` means explicitly unset on future launches. A missing legacy key remains unknown, not unset. A legacy adoption also keeps its proven `HOME` when a default storage path depends on it. Explicit missing-conversation recovery keeps every old and replacement scope in `native_session_homes` before retiring the old binding. A plain recovery records `native_service_identity: null` (no shared service); this is valid for later recoveries, while malformed non-null service identities refuse. |
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane, and `server` with its socket, PID, process start token and tmux start epoch), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
-| `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
+| `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). A message a focus held is `inbox-only` and adds `intended` (`steer` or `follow-up`) and `focus` (the focus's `id`). mv2's note about a focus's held messages is a `follow-up` with `focus_note` (that focus's `id`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
+| `inbox-read.json` | Messages past `inbox.cursor` that `mv2 held` has read, by message ID. |
 | `inbox-state.json` | Delivery attempts and receipts per message. For an adapter using attempt IDs, each submission stores its `native_message_id` and checked `delivery_receipt`; the logical inbox message ID stays unchanged. |
 | `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
-| `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
+| `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `id`, `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
+| `focus-last.json` | The latest focus, kept after it ends: `id`, `since`, `held` (messages it held), `report` (`listener` once a listener's line printed, `note` once the turn-end note was saved, or `null`) and `note` (the note's message ID). |
+| `slash/UUID.json` | A [harness command](../cli/harness-commands.md): its request, original caller and launch, and correlated outcome. Model and effort readbacks update `properties.json` before a successful outcome is returned. Events contain the command name, state and caller, never arguments or output. |
+| `slash/pending.json` | A bounded index of unfinished command IDs. Listing and resume settle available receipts without scanning command history; the index is removed when empty. |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: verified native session changes, such as Claude's `/clear`, and explicit missing-conversation retirements. A retirement keeps the old ID owned and records the replacement storage before properties change; reported IDs remain unbound until the new conversation binds. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
+
+For a bridged conversation switch, `runtime.json` also holds a `navigation`
+record with its request correlation and admission token. `checking` and
+`admitted` block new submission until a definite result; an unknown result
+stays fenced. `session_generation` distinguishes a switch away and back within
+one launch. `queue_history` retains each earlier conversation's pause state,
+while `queue_state` names the current one. Resume preserves these pause records.
+Input saved during the fence has `navigation_wait` in `inbox-state.json`; a
+resolved switch can submit it once. Before an explicit resume replaces a stopped
+launch, pending input still carrying that deferral becomes a reported failure
+for `deliver --retry`, keeping its message ID and target. This works even if the
+old runtime marker is already gone; resume never infers new delivery authority
+for accepted, submitting or uncertain attempts.
 
 Each launch directory holds:
 

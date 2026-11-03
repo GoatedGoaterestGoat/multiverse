@@ -84,7 +84,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                             and isinstance(tracking.get('wake_prompt_context'), dict))
             if accepted:
                 same_session = bool(native_id and target == native_id)
-                queued = same_session and isinstance(evidence, dict) and evidence.get('queued_submission_id') and attempts[-1].get('native_session_id') == native_id
+                owned_earlier = bool(target and target != native_id and not outside_lineage)
+                queued = (same_session or owned_earlier) and isinstance(evidence, dict) and evidence.get('queued_submission_id') and attempts[-1].get('native_session_id') == target
                 old_evidence = False
                 if same_session and attempts[-1].get('launch_id') != launch_id and not queued:
                     adapter = harnesses.load(root, properties['harness'])
@@ -156,7 +157,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         category = _check_state(receipt, accepted=accepted) if check else None
         if check:
             counts[category] = counts.get(category, 0) + 1
-        if _present and category != 'confirmed' and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
+        historical = isinstance(receipt.get('value'), dict) and receipt['value'].get('historical_conversation') is True
+        if _present and (category != 'confirmed' or historical) and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
             _, current = mailbox.message_record(directory, message['id'])
             present = _present_error if summary.get('ok') is False and _present_error else _present
             line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
@@ -222,7 +224,7 @@ def _check_state(receipt, *, accepted):
 
 def _focused(name, held, results, present):
     """A retry refused, or stopped part way, because the recipient is focused."""
-    reason = f'{name} is focused {focus.ends(held)} and takes only inbox-only messages; retry after it unfocuses.'
+    reason = f'{name} is focused {focus.ends(held)}, so no steer or follow-up reaches it; retry after it unfocuses.'
     if present:
         present(f'{"The rest were not retried" if results else "Not retried"}: {reason}')
     return {'messages': results, 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held}

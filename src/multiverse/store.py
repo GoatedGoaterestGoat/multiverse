@@ -1,10 +1,12 @@
 """Local file protocol. Unix only, like tmux. No background service."""
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import uuid
 
@@ -19,6 +21,19 @@ def uid():
 
 def read(path):
     return json.loads(Path(path).read_text())
+
+
+def open_regular(path, mode='rb'):
+    """Open a data or lock file without waiting on a special file; verify the descriptor, not its pathname."""
+    flags = {'rb': os.O_RDONLY, 'a': os.O_WRONLY | os.O_CREAT | os.O_APPEND}[mode]
+    descriptor = os.open(path, flags | os.O_NONBLOCK, 0o666)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, 'not a regular file', str(path))
+        return os.fdopen(descriptor, mode)
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def write(path, value):
@@ -39,12 +54,13 @@ def write(path, value):
 
 
 @contextmanager
-def lock(path, *, create_parent=True):
+def lock(path, *, create_parent=True, blocking=True):
+    """Exclusive file lock; blocking=False raises BlockingIOError if already held."""
     path = Path(path)
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with open_regular(path, 'a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -52,10 +68,10 @@ def lock(path, *, create_parent=True):
 
 
 @contextmanager
-def existing_lock(path):
-    """A late worker must never recreate an agent that was removed."""
+def existing_lock(path, *, blocking=True):
+    """Lock an existing file, without recreating an agent; optionally refuse contention."""
     with path.open('r+') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

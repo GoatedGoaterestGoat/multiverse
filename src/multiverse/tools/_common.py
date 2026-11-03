@@ -67,6 +67,8 @@ def delivery_summary(receipt):
         result['transcript_confirmed'] = value['transcript_confirmed']
     if isinstance(value, dict) and value.get('paused') is True:
         result['paused'] = True
+    if isinstance(value, dict) and value.get('historical_conversation') is True:
+        result['conversation'] = value.get('native_session_id')
     return result
 
 

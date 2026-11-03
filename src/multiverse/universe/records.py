@@ -8,7 +8,10 @@ only what a reader depends on, not a schema: a record that merely lacks a field 
 """
 from pathlib import Path
 import json
+import os
 import re
+
+from ..store import open_regular
 
 MAX_BYTES = 8 * 1024 * 1024  # a record is a few kilobytes; a file this large is not one
 
@@ -35,9 +38,12 @@ def _object(path):
     """The JSON object in `path`; RecordError (never another exception) for anything else."""
     path = Path(path)
     try:
-        if path.stat().st_size > MAX_BYTES:
+        with open_regular(path) as stream:
+            if os.fstat(stream.fileno()).st_size > MAX_BYTES:
+                raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
+            raw = stream.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
             raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
-        raw = path.read_bytes()
     except RecordError:
         raise
     except OSError as error:

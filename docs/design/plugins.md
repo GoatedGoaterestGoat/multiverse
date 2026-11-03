@@ -262,7 +262,7 @@ where to look, and core can check, edit and refresh them the same way:
   `state/agents/<id>/NAME/`, set through the plugin's own command or screen.
 - **Reserved names.** A plugin may not be named after something an agent
   directory already holds (`launches`, `claude-asks`, `claude-receipts`,
-  `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
+  `claude-commands`, `slash`, `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
   Compaction's existing `state/agents/<id>/compaction/` already fits this rule,
   so it needs no move.
 
@@ -363,7 +363,11 @@ where they happen and delivered where plugins run**:
     journal's counter keep their plain-number format, so a plugin host started
     before an update, still running the old code, keeps its place. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
-    on for that event, and its next events get calls of their own. A give-up
+    on for that event, and its next events get calls of their own. A call that
+    ran out of time but then returns counts as finished with what it returned
+    (the host keeps how it ended for its next look at that event of that
+    journal, never another), so work a slow handler did
+    finish is never done twice; a restart may still repeat one. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
     ("gave up on event N (agent.status) in its handler H"). A worker left with
     two calls that never returned restarts itself (the supervisor starts a
@@ -412,6 +416,7 @@ caller can forget one:
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
 | `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`), a session pointer is recovered, or `--start-fresh` retires a conversation that is gone (`sessions.retire`, reason `missing-conversation`), for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
+| `agent.command` | `runtime/slash.py`, when a harness command's run record is written: submitted, ran, refused by the harness, failed or lost (1.16) | command (its name), state, caller (`kind` person, plugin with its `name`, or agent with its `agent_id`, `universe` and `name`); never its arguments or output |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
@@ -524,7 +529,9 @@ So the host is a general **supervisor** for plugins' long-running work:
   supervisor busy stopping workers or pruning never looks stopped. A second
   start (another dashboard) finds it, and never overwrites its status.
 - **Stopping.** It exits once no plugin needs it, or on `mv2 plugins host
-  stop`, and stops its workers first. If the supervisor dies without doing so
+  stop`, and stops its workers first, all at once, its heartbeat going on
+  meanwhile. A stopped worker starts no new handler call and has 10 seconds
+  (its services 5), so a stop can end work in flight. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
   second that its parent process changed, stops its services and exits, so
   nothing keeps holding a socket or running a handler. The supervisor gives each
@@ -532,6 +539,31 @@ So the host is a general **supervisor** for plugins' long-running work:
   still starting. It tells a worker has exited without reaping it (`waitid`,
   or a kqueue on macOS before Python 3.13), so it can still end what the worker
   left in its process group.
+- **Updates.** A host keeps the code it started with, while its workers
+  import modules as they go, so after `mv2 update` they mix old and new code
+  and fail. Its status records the code it runs (its source and a fingerprint
+  of mv2's files), and `mv2 plugins migrate --apply`, the step every updater
+  runs with the code it just installed, asks it to restart when that differs
+  (`restart.json`, naming the supervisor it is for, so a request left from an
+  earlier one never restarts a later host). The supervisor then drains its
+  workers: each starts no new handler call, not even another handler's of the
+  same event, and the host waits, with no deadline, for every handler call
+  still running, those past their limit too (a timeout never stops a call's
+  thread), and then for its services, which finish their requests and admit
+  no new ones. Then it runs the new code in the same pane and pid, and the new
+  workers go on from the cursors: nothing is cut, and no handler gets again an
+  event it finished. A call that ran past its limit counted as a try, so its
+  event can come again, as delivery is at least once. A worker
+  starts with the drain signal blocked until it can take it, so a restart
+  never ends one still starting. A call that never returns keeps the host
+  restarting, and `mv2 update` says so, until a person stops it, with a
+  stop's bounds. A host of another mv2 is left alone. A host from before this check records no code and
+  knows no such request; by the user's decision it is stopped and started
+  again, with its own old stop, which can end a call in flight (its plugins
+  already fail until it restarts). Nothing is signalled unless its pid is
+  proven to be the host: by its recorded process start, or, for a host from
+  before, by its tmux pane on its recorded server running that pid. A pid
+  alone may be another process's by now.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own
@@ -594,7 +626,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 15)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 16)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -647,8 +679,7 @@ by call):
   in `properties.json`), as listing and usage do. It never starts or stops a
   process, switches a conversation, adopts the caller's storage, or acts for
   the caller.
-- **spend** uses tokens, money or time and changes nothing: `ask`, and the
-  one-shot run to come.
+- **spend** uses tokens, money or time and changes nothing: `ask` and the [one-shot run](transcript-protocols.md#the-one-shot-run).
 - **act** changes a session, a launch, an inbox or a universe's files: spawn,
   resume, kill, send, a refresh applied, an inbox read that marks messages
   read, a settings edit, launch contributions and harness extensions.
@@ -1200,10 +1231,7 @@ feature gating need proof before `harnesses.codex.dir` is offered.
 
 #### Tree compaction for Codex: analysis only
 
-Where it stands with the transcript protocols ([transcript
-protocols](transcript-protocols.md)): reading a Codex conversation goes
-through the rollout transcript protocol; a one-shot run, not until Codex can run a model with its
-tools off; installing a tree still has no native replacement, as below.
+Codex reads conversations through the rollout transcript protocol and supports [one-shot runs](transcript-protocols.md#codex) through a private tool-free process on checked releases. Installing a tree still has no native replacement, as below.
 
 Codex could implement `CompactionSource` one day, but lifecycle signals are not
 enough. It needs:

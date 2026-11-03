@@ -1,32 +1,50 @@
-"""An agent's focus: while it lasts, only inbox-only messages reach the agent.
+"""An agent's focus: while it lasts, steer and follow-up messages wait in the agent's inbox.
 
 An agent focuses when its answer needs the person's attention, so that steer and
 follow-up messages cannot start other work and bury the question. `focus.json` in
 the agent directory holds the focus while it lasts:
 
-    {"since": ISO time, "until": ISO time or null, "turns": 1, 2 or null, "by": "agent" or "user"}
+    {"id": ..., "since": ISO time, "until": ISO time or null, "turns": 1, 2 or null, "by": "agent" or "user"}
 
 `until` ends it at a time. `turns` counts the turn ends still to come: when the
 harness status goes from working or waiting to idle, `turn_ended` counts one, and
 the last removes the file. With neither, it lasts until `end`. Readers never
 remove an expired record; the next `start` or `end` replaces it.
 
+A steer or follow-up sent during the focus is saved as an inbox-only message that
+names the focus (`hold`). `focus-last.json` outlives the focus, however it ends:
+
+    {"id": ..., "since": ISO time, "held": messages held, "report": null, "listener" or "note", "note": ID}
+
+so `mv2 held` finds that focus's messages, and the report lets one of a listener
+or the turn-end note tell the agent about them, never both: a listener claims it
+once its line printed, the note once it is saved (`note` is its message ID).
+
 Starting a focus and counting a turn end both happen under the agent's runtime
 lock, so a turn end saved before a `focus --turn` never counts against it.
 `start` also holds the send lock, so a send that found no focus finishes first.
-Lock order: send, runtime, focus.
+Lock order: send, launch, runtime, focus, inbox. listen and mv2 held hold the focus lock while they
+decide, so no focus begins between their check and their read.
 
 The tmux status line reads this file with its own copy of `active`.
 """
 from datetime import datetime, timedelta, timezone
+import fcntl
 import json
 import os
 import re
 import stat
+import subprocess
+import sys
 
-from ..store import lock, write
+from ..store import lock, uid, write
 
 FILE = "focus.json"
+LAST = "focus-last.json"
+# Each running `mv2 listen` holds this shared; the turn-end note waits for a live one to claim the report.
+LISTENING = ".listen.lock"
+# How long the turn-end note waits for a live listener to claim the report before it sends the note itself.
+LISTENER_WAIT = 10
 # A day is the longest timed focus: one that outlives its question is forgotten.
 LONGEST = 86400
 DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
@@ -72,12 +90,12 @@ def active(record, at=None):
         return False
 
 
-def _read(agent_dir):
+def _read(agent_dir, name=FILE):
     """The focus record, or None for anything but a small JSON object in a regular file."""
     try:
         # Non-blocking, so a FIFO in its place never hangs a reader. The descriptor is closed here: wrapping
         # a directory's would fail and leak it.
-        descriptor = os.open(agent_dir / FILE, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return None
@@ -95,6 +113,22 @@ def current(agent_dir):
     """The focus in effect, or None."""
     record = _read(agent_dir)
     return record if active(record) else None
+
+
+def identity(record):
+    """The focus's id; a focus saved before ids existed is known by its `since`."""
+    value = record.get("id")
+    return value if isinstance(value, str) and value else record.get("since")
+
+
+def last(agent_dir):
+    """The latest focus, in effect or ended: `{"id", "since", "held", "report"}`, or None."""
+    record = _read(agent_dir, LAST)
+    if record and isinstance(record.get("id"), str) and record["id"]:
+        return record
+    record = _read(agent_dir)  # a timed focus from before focus-last.json existed
+    return {"id": identity(record), "since": record["since"], "held": 0} if record and isinstance(
+        record.get("since"), str) else None
 
 
 class NoTurns(ValueError):
@@ -124,11 +158,133 @@ def start(agent_dir, *, duration=None, turn=False, by="user"):
             raise NoTurns(status)
         stamp = datetime.now(timezone.utc)
         previous = current(agent_dir)
-        record = {"since": previous["since"] if previous else stamp.isoformat(),
+        record = {"id": identity(previous) if previous else uid(),
+                  "since": previous["since"] if previous else stamp.isoformat(),
                   "until": (stamp + timedelta(seconds=duration)).isoformat() if duration is not None else None,
                   "turns": (2 if by == "agent" or status == "working" else 1) if turn else None, "by": by}
+        if not previous or (last(agent_dir) or {}).get("id") != record["id"]:
+            write(agent_dir / LAST, {"id": record["id"], "since": record["since"], "held": 0, "report": None})
         write(agent_dir / FILE, record)
     return record
+
+
+def hold(agent_dir, save):
+    """Save a message for the focus in effect with `save(focus_id)`, under the focus lock, and count it.
+
+    Returns (the focus, what `save` returned), or None when no focus is in effect, so the caller delivers
+    it as usual. Under the lock, a turn end that ends the focus comes wholly before or after the save.
+    """
+    with lock(agent_dir / ".focus.lock", create_parent=False):
+        record = current(agent_dir)
+        if record is None:
+            return None
+        focus_id = identity(record)
+        saved = save(focus_id)
+        latest = _read(agent_dir, LAST) or {}
+        if latest.get("id") != focus_id:
+            latest = {"id": focus_id, "since": record["since"], "held": 0, "report": None}
+        held = latest.get("held")
+        write(agent_dir / LAST, {**latest, "held": (held if type(held) is int and held > 0 else 0) + 1})
+    return record, saved
+
+
+def locked(agent_dir, *, blocking=True):
+    """The focus lock: no focus starts, ends or counts a turn while it is held."""
+    return lock(agent_dir / ".focus.lock", create_parent=False, blocking=blocking)
+
+
+def claim_locked(agent_dir, focus_id, by):
+    """Claim telling the agent about `focus_id`'s held messages, once: True for the first claim of the
+    latest focus, False after another claim or once a newer focus began. The caller holds the focus lock."""
+    latest = _read(agent_dir, LAST)
+    if not latest or latest.get("id") != focus_id or latest.get("report") or current(agent_dir):
+        return False
+    write(agent_dir / LAST, {**latest, "report": by})
+    return True
+
+
+def reconcile_locked(agent_dir, focus_id, *, blocking=True):
+    """The latest focus record, with an unclaimed report taken by `focus_id`'s note if one was saved.
+
+    The note is saved and then the report committed to it; a writer that died or failed between the two left a
+    saved note, which stays the report: nothing tells the agent again, and nothing sends it again. The caller
+    holds the focus lock. `blocking` is the inbox lock's.
+    """
+    latest = _read(agent_dir, LAST)
+    if not latest or latest.get("id") != focus_id or latest.get("report"):
+        return latest
+    from . import mailbox
+    saved = mailbox.focus_note(agent_dir, focus_id, blocking=blocking)
+    if saved:
+        commit_note(agent_dir, focus_id, saved)
+        return _read(agent_dir, LAST)
+    return latest
+
+
+def commit_note(agent_dir, focus_id, message_id):
+    """Record that the turn-end note about `focus_id` was saved as message `message_id`. The caller holds the
+    focus lock and has checked that nothing claimed the report."""
+    write(agent_dir / LAST, {**_read(agent_dir, LAST), "report": "note", "note": message_id})
+
+
+def began(record):
+    """When a focus record began, or None."""
+    try:
+        return _time(record["since"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def note(count):
+    """What the agent is told when its focus ends with held messages it has not read."""
+    noun = "message" if count == 1 else "messages"
+    return (f"You received {count} steer or follow-up {noun} during your focus. "
+            f"Use mv2 held to check only {'that message' if count == 1 else 'those messages'}.")
+
+
+class Listening:
+    """A listener's registration, so the turn-end note waits for its claim; it never stands in for one.
+
+    A shared lock on `.listen.lock`, released by the kernel even when the listener is killed. It never
+    waits: `register` takes it when it is free, and the listener tries again on its next poll.
+    """
+    def __init__(self, agent_dir):
+        self.handle = (agent_dir / LISTENING).open("a")
+        self.registered = False
+
+    def register(self):
+        if not self.registered:
+            try:
+                fcntl.flock(self.handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                self.registered = True
+            except BlockingIOError:
+                pass  # `listener`'s probe holds it for an instant
+        return self.registered
+
+    def __enter__(self):
+        self.register()
+        return self
+
+    def __exit__(self, *_):
+        self.handle.close()
+
+
+def listening(agent_dir):
+    return Listening(agent_dir)
+
+
+def listener(agent_dir):
+    """Whether a listener runs for this agent now."""
+    try:
+        with (agent_dir / LISTENING).open("r") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    return False
 
 
 def end(agent_dir):
@@ -142,24 +298,48 @@ def end(agent_dir):
 
 
 def turn_ended(agent_dir):
-    """Count one turn end for a focus that lasts turns; the last one ends it.
+    """Count one turn end for a focus that lasts turns; the last one ends it. Returns the focus it ended, or None.
 
     Runs under the runtime lock with the status change that ended the turn, which
     has been saved already: failing here must never fail it.
     """
     try:
         if not (agent_dir / FILE).exists():
-            return  # Never create a lock file in an agent directory that was removed.
+            return None  # Never create a lock file in an agent directory that was removed.
         with lock(agent_dir / ".focus.lock", create_parent=False):
             record = current(agent_dir)
             turns = record.get("turns") if record else None
             if turns is not None:
                 if turns <= 1:
                     (agent_dir / FILE).unlink(missing_ok=True)
-                else:
-                    write(agent_dir / FILE, {**record, "turns": turns - 1})
+                    return record
+                write(agent_dir / FILE, {**record, "turns": turns - 1})
     except Exception:
         pass  # The focus stays on; unfocus still ends it.
+    return None
+
+
+def after_turn(agent_dir, record):
+    """After a turn end ended `record`, outside the runtime lock: start the note's sender if the focus held
+    messages. A separate process, because the status report that ended the turn may come from the
+    agent's own harness integration, which must not wait on a message to itself. Never raises."""
+    try:
+        latest = last(agent_dir)
+        if not latest or latest.get("id") != identity(record) or not latest.get("held"):
+            return
+        _spawn(agent_dir, latest["id"])
+    except Exception:
+        pass
+
+
+def _spawn(agent_dir, focus_id):
+    from .. import source_environment
+    # The note comes from mv2, not from the agent whose status report got here.
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("MV2_AGENT_ID", "MV2_LAUNCH_ID", "MV2_AGENT_DIR", "MV2_IDENTITY_MODE")}
+    subprocess.Popen([sys.executable, "-m", "multiverse.runtime.focus_note", str(agent_dir), focus_id],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, env=source_environment(environment))
 
 
 def ends(record, own=False):

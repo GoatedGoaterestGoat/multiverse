@@ -7,7 +7,7 @@ from pathlib import Path
 from copy import deepcopy
 
 from ..types import NativeResult, normalize_session_id
-from .launch import LaunchProtocol
+from .launch import LaunchProtocol, grant_policy
 from .plugins import server_version
 from .protocol import object_field, result
 from .refusal import SCREEN_VERSIONS
@@ -40,6 +40,8 @@ class LaunchConnection:
         self.reselections = set()
         self.primary_frame = False
         self.ended = False
+        from .navigation import Selection
+        self.selection = Selection(self)
 
     @property
     def bound(self):
@@ -59,6 +61,59 @@ class LaunchConnection:
                 (identifier in self.side_requests or identifier in self.reselections
                  or identifier == self.fork_request or identifier == self.initializing
                  or identifier == self.primary.pending or identifier == self.primary.prompt_request))
+
+    def _grant_update(self, value, *, outgoing=False):
+        root, params = self.root, value.get('params')
+        if not root.grants_bound or root.current_grants is None or not isinstance(params, dict):
+            return
+        selection = getattr(root, '_selection', None) or {}
+        targets = (root.native_id, selection.get('policy_native_id'))
+        if params.get('threadId') not in targets or params.get('threadId') is None:
+            return
+        method = value.get('method')
+        if outgoing:
+            if method not in ('thread/settings/update', 'turn/settings/update', 'turn/start', 'thread/resume'):
+                return
+            policy = root.current_grants
+            mode = {'workspaceWrite': 'workspace-write', 'readOnly': 'read-only',
+                    'dangerFullAccess': 'danger-full-access'}[policy['sandbox']['type']]
+            expected = {**policy, 'sandbox': mode, 'sandboxPolicy': policy['sandbox'], 'permissions': None,
+                        'environments': []}
+            config = params.get('config')
+            configured = (isinstance(config, dict) and any(key.partition('.')[0] in (
+                'sandbox_mode', 'sandbox_workspace_write', 'approval_policy', 'approvals_reviewer',
+                'permissions', 'permission_profile', 'active_permission_profile', 'profiles', 'profile')
+                for key in config))
+            supplied = {key: params[key] for key in expected if key in params and params[key] is not None}
+            try:
+                normalized = grant_policy({**policy,
+                    **({'runtimeWorkspaceRoots': supplied['runtimeWorkspaceRoots']}
+                       if 'runtimeWorkspaceRoots' in supplied else {}),
+                    **({'sandbox': supplied['sandboxPolicy']} if 'sandboxPolicy' in supplied else {})})
+            except ValueError:
+                root.invalidate_grants()
+                return
+            if 'runtimeWorkspaceRoots' in supplied:
+                supplied['runtimeWorkspaceRoots'] = normalized['runtimeWorkspaceRoots']
+            if 'sandboxPolicy' in supplied:
+                supplied['sandboxPolicy'] = normalized['sandbox']
+            if configured or any(value != expected[key] for key, value in supplied.items()):
+                root.invalidate_grants()
+        elif method == 'thread/settings/updated' and 'id' not in value:
+            settings = params.get('threadSettings')
+            try:
+                cwd = settings.get('cwd') if isinstance(settings, dict) else None
+                if (not isinstance(cwd, str) or not Path(cwd).is_absolute()
+                        or Path(cwd).resolve() != Path(root.settings['workspace']).resolve()):
+                    raise ValueError('Unverified native settings workspace')
+                # ThreadSettings omits runtime roots. Equal observed permissions
+                # only preserve this snapshot; they never establish or revive it.
+                policy = grant_policy({'runtimeWorkspaceRoots': root.current_grants['runtimeWorkspaceRoots'],
+                                       **settings, 'sandbox': settings.get('sandboxPolicy')})
+                if policy != root.current_grants:
+                    raise ValueError('Native grants changed')
+            except (OSError, RuntimeError, ValueError):
+                root.invalidate_grants()
 
     def _fork(self, value):
         identifier = value.get('id')
@@ -91,6 +146,9 @@ class LaunchConnection:
         if self.ended:
             raise local_error('This native connection is closed', value.get('id'))
         self._sync()
+        selected = self.selection.outgoing(value)
+        if selected is not None:
+            return selected
         method, identifier = value.get('method'), value.get('id')
         if method is None:
             return value  # Replies to native host requests have a separate ID namespace.
@@ -135,11 +193,13 @@ class LaunchConnection:
                 if not request_id(identifier) or self._pending(identifier) or len(self.reselections) >= MAX_PENDING:
                     raise local_error('Native primary selection ID is full or already in use', identifier)
                 self.reselections.add(identifier)
+                self._grant_update(value, outgoing=True)
                 return value  # A UI return is not a new launch/grant/bootstrap handshake.
             claimed = getattr(self.root, '_binding_connection', None)
             if claimed is not None and claimed != self.connection_id:
                 raise ValueError('Another native connection is preparing this launch binding')
             self.root._binding_connection = self.connection_id
+        self._grant_update(value, outgoing=True)
         return self.primary.outgoing(value)
 
     def _forked(self, value):
@@ -164,6 +224,9 @@ class LaunchConnection:
         if self.ended:
             return None
         self._sync()
+        self._grant_update(value)
+        if self.selection.incoming(value):
+            return None
         response = 'method' not in value
         identifier = value.get('id')
         if response and 'id' in value and not request_id(identifier):
@@ -195,6 +258,12 @@ class LaunchConnection:
                 if (thread.get('id') != self.root.native_id or not isinstance(thread.get('cwd'), str)
                         or Path(thread['cwd']).resolve() != Path(self.root.settings['workspace']).resolve()):
                     raise ValueError('Native primary selection differs from this launch binding')
+                if self.root.current_grants is not None:
+                    try:
+                        if grant_policy(observed) != self.root.grant_ceiling:
+                            raise ValueError('Native primary permissions changed')
+                    except ValueError:
+                        self.root.invalidate_grants()
             return None
         correlated = response and identifier is not None and identifier in (self.primary.pending, self.primary.prompt_request)
         self.primary_frame = correlated or (native_id is not None and native_id == self.root.native_id)
@@ -219,7 +288,19 @@ class LaunchConnection:
             self.root._queue_events = PrimaryEvents()
         return self.root._queue_events.observe(direction, value, self.root.native_id)
 
+    def navigation(self, direction, value):
+        return self.selection.event
+
+    def navigation_done(self, event, result):
+        self.selection.done(event, result)
+
+    def navigation_failed(self, event, reason=''):
+        self.selection.failed(event)
+
     def after_bind(self, upstream_path):
+        if (self.owns_primary() is True and self.root.bound
+                and getattr(self.root, '_binding_connection', None) == self.connection_id):
+            self.root.bind_grants(self.primary)
         return self.primary.after_bind(upstream_path)
 
     def usage(self, value):

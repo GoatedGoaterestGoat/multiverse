@@ -22,6 +22,8 @@ mv2 send reviewer,tester --text 'The fix is on branch fix-login.'
 
 Separate several recipients with commas. Each one gets the message and its own result line. A failure for one doesn't stop the others. The recipient sees the message as `Message from SENDER:` followed by your text.
 
+If the sender's record is unreadable or damaged, the sender line keeps the message's saved name, or `user` if none was saved. An unreadable or damaged sender universe uses its saved path in that line. The message stays readable and deliverable.
+
 ## Choose a delivery
 
 ```sh
@@ -37,7 +39,7 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 
 Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` for a new task, when they want a quick reply, or to return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. A follow-up reply arrives as a prompt, not in the inbox, so an agent waits for one by ending its turn rather than with `mv2 inbox --wait`. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. The one exception is a `steer` or `follow-up` message to a [focused](#focus-an-agent) agent, which is refused and not saved. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a [focused](#focus-an-agent) agent is saved as an `inbox-only` message instead. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 If a wake is refused, `send` and `deliver --check` show the complete reason, including the exact record paths and recovery instructions. Reflected message text remains hidden.
 
@@ -64,7 +66,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
 | `Not delivered to NAME: REASON. Saved; …` | Submission was rejected or delivery was reported failed | Fix the reason, then run `mv2 deliver NAME --retry`. A tmux socket outage or server conflict keeps its full diagnostic: resolve that terminal problem, then retry, without restarting the agent. For a running agent whose native connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
-| `Not sent: NAME is focused until …` | The agent is [focused](#focus-an-agent), so nothing was saved | Send it again with `--delivery inbox-only`, or wait until it unfocuses |
+| `NAME is currently focused. Your message has been delivered as an inbox message instead.` | The agent is [focused](#focus-an-agent), so the message was saved to its inbox | Nothing. Don't resend it |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
@@ -206,34 +208,54 @@ for running the same pass after a manual checkout update.
 
 ## Focus an agent
 
-An agent whose reply needs the user's answer focuses itself before it ends its turn. While it is focused, other agents' messages can't start new work and bury the question.
+An agent whose reply needs the user's answer focuses itself before it ends its turn. While it is focused, new messages from other agents can't start new work and bury the question.
 
 ```sh
-mv2 focus --turn       # until its next turn ends
-mv2 focus --for 20m    # for a time such as 5m, 20m, 1h or 1h30m, at most 1d
-mv2 focus              # until mv2 unfocus
-mv2 unfocus            # end it, and say how many unread inbox messages wait
+mv2 focus --turn              # until its next turn ends
+mv2 focus                     # until mv2 unfocus
+mv2 focus worker --for 20m    # the user only: for a time such as 5m, 20m, 1h or 1h30m, at most 1d
+mv2 unfocus                   # end it, and say what waits in the inbox
 ```
 
 While an agent is focused:
 
-- `steer` and `follow-up` messages to it are refused. Nothing is saved, `send` exits 1, and its result says to send `--delivery inbox-only` instead.
+- `steer` and `follow-up` messages to it are saved as `inbox-only` messages, and the sender is told so. Nothing reaches its harness.
 - `inbox-only` messages are saved as usual.
+- `listen` is refused, and a `listen` already running [reports nothing until the focus ends](#listen-for-quiet-messages).
 - `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
 - What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
-- One exception for now: a `steer` or `follow-up` that was sent before the focus began, to an agent that was still starting, is delivered once the agent is up.
+- A `steer` or `follow-up` sent before the focus began is still delivered if the harness had already accepted it, or if it waited for the agent to finish starting. The turn it starts counts toward a `--turn` focus.
 
-`unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
+Only the user can focus an agent for a time: inside an agent, `focus --for` is refused. `unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
 
 A turn focus ends when the agent's status next goes from working or waiting to idle:
 
 - **An agent that focuses itself, or one you focus while it is working,** finishes its current turn first. The focus ends with the turn after it, which takes your answer.
 - **One you focus while it is waiting on you or idle** has its focus end with the turn that takes your answer: for a permission prompt, that is the current turn.
-- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, and one that delivers a message accepted before the focus. While background work runs, focus with `--for` instead.
+- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, and one that delivers a message accepted before the focus. While background work runs, focus until `mv2 unfocus` instead.
 
-A turn focus needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`. Use `--for` then.
+A turn focus needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`. Focus until `mv2 unfocus` then.
 
 Inside an agent, `focus` and `unfocus` act on the agent itself, and an agent can't change another agent's focus. You can name any agent, as in `mv2 focus worker --for 1h`, or press `f` in the [dashboard](../reference/dashboard.md#message-focus-kill-and-resume). `mv2 list`, `mv2 inspect` and the agent's tmux bar show who is focused and until when.
+
+## Read held messages
+
+```sh
+mv2 held
+```
+
+Inside an agent session, `held` shows the unread `steer` and `follow-up` messages that the agent's last focus held, however that focus ended, and marks only those read. Other unread messages stay unread for `mv2 inbox`. `held` is refused while the agent is focused.
+
+A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
+
+When a focus ends with held messages unread, the agent is told in these cases:
+
+| The focus ends | The agent is told |
+| --- | --- |
+| The agent runs `mv2 unfocus` | In its output: `You received 2 steer or follow-up messages during your focus. Use mv2 held to check only those messages.` |
+| A `--turn` focus ends with a turn, whoever set it | The same text, in a `follow-up` from mv2 that starts a turn. A `listen` that is running reports instead |
+
+A timed focus that runs out, and a focus the user ends, tell the agent nothing. The held messages still wait for `held` and `inbox`.
 
 ## Read an inbox
 
@@ -247,7 +269,7 @@ mv2 inbox --agent worker --all --since 2h
 mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
 ```
 
-Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
+Plain `inbox` shows unread `inbox-only` messages, including [held](#read-held-messages) ones, and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
 
 An unreadable or damaged delivery ledger is reported with its full file path and
 a repair/reset hint, including for `inbox --all` and `--peek`. Back it up before
@@ -255,6 +277,20 @@ repairing or resetting it. Check uncertain deliveries before retrying; resetting
 bookkeeping is not evidence that the agent never received an older message.
 
 `--wait` without `--timeout` waits indefinitely. When a timeout runs out, `inbox` prints a line and exits 1.
+
+## Listen for quiet messages
+
+When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. After reading and handling the messages, start it again when you are waiting.
+
+Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Steers and follow-ups do not end the wait.
+
+On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. Run `mv2 inbox` to read them. It waits without a time limit unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
+
+While you are [focused](#focus-an-agent), `listen` is refused. To listen while you wait for the user, start it before `mv2 focus`. It then reports nothing until the focus ends, and a `--timeout` that runs out meanwhile waits for the end too. If anything is unread then, it prints a line such as `3 unread inbox messages (including 2 steer/follow-up messages held during focus mode)` and exits. Otherwise it keeps waiting. A listener that reports this way replaces the follow-up note a `--turn` focus would send.
+
+The listener belongs to the launch in which it started, before waiting for any lock. It exits nonzero with a reason when that launch ends or is replaced, or its identity or process cannot be verified, focused or not. It does not attach to a replacement launch, including when a shared conversation keeps its identity. Busy launch or inbox locks do not suspend the timeout or launch checks. Before reporting unread messages, it checks the launch's processes again.
+
+The harness decides how to notify you when the background shell exits. Claude starts a turn for its background-task notification. Codex shows command completion but does not start a new turn after the current turn ends; check the result and inbox at your next turn. mv2 does not send a separate wake message.
 
 ## Report progress
 
@@ -280,15 +316,21 @@ In Codex and launch-only sessions, ask the agent in words instead, such as "Plea
 
 ## Ask a side question
 
+To run the harness's own commands, such as `/compact` or `/model`, use [mv2 slash](harness-commands.md).
+
 ```sh
 mv2 ask worker --question 'Which file holds the parser?'
 ```
 
-`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. Only Claude Code with a live connection supports it. When there is no answer, `ask` prints why and exits 1. Right after a start, a resume or `/clear`, Claude can't answer until the agent finishes its next turn.
+`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. When there is no answer, `ask` prints why and exits 1.
+
+Claude Code needs a live connection. Right after a start, a resume or `/clear`, Claude can't answer until the agent finishes its next turn.
+
+Codex answers from a private copy, with or without a live connection. See [Codex's requirements](../use/harnesses.md#codexs-questions-and-one-shot-runs) for supported releases, models and logins.
 
 ## Scripts
 
-Every command on this page takes `--json` and then prints the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
+Except for `listen`, commands on this page take `--json` and then print the full record. With several recipients, `send --json` returns `recipients` and an overall `ok`.
 
 If inbox-state.json is damaged, send still saves the new message, names the file,
 and makes no native submission. Repair or reset that file before retrying.

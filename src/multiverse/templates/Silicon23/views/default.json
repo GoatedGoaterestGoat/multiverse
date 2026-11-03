@@ -1,0 +1,5 @@
+{
+  "columns": ["name", "unread", "harness", "status", "tokens", "phase", "summary"],
+  "accent": "auto",
+  "description": "Process observations and agent-reported progress stay separate."
+}

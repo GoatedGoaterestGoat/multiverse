@@ -8,12 +8,14 @@ import sys
 import time
 import threading
 import shutil
+import signal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from multiverse.runtime import lifecycle
 from multiverse.runtime import attachments, recovery
+from multiverse.runtime.process import process_snapshot, start_matches
 from multiverse.harnesses.types import AttachmentSpec, NativeActivity, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity, RpcSpec
 from multiverse.store import read, write
 from multiverse.terminal.tmux import Tmux, observe
@@ -68,7 +70,138 @@ update_runtime(directory, launch.name, state='stopped', exit_code=code, stopped_
 '''
 
 
+HANGUP_RUNNER = r'''
+import signal, subprocess, sys, threading, time
+from pathlib import Path
+from multiverse.runtime import runner, attachments
+from multiverse.store import read
+launch = Path(sys.argv[1])
+directory = launch.parent.parent
+route = sys.argv[2]
+original_wait = subprocess.Popen.wait
+original_signal = signal.signal
+original_finish = attachments.finish
+armed = False
+def install(signum, handler):
+    if signum in (signal.SIGHUP, signal.SIGTERM) and callable(handler):
+        def observed(*args):
+            (launch / f'signal-{signum}-observed').touch()
+            return handler(*args)
+        return original_signal(signum, observed)
+    return original_signal(signum, handler)
+signal.signal = install
+def finish(*args, **kwargs):
+    if route == 'waitpid-lock':
+        (launch / 'finishing-cleanup').touch()
+        while not (launch / 'release-cleanup').exists(): time.sleep(.01)
+    return original_finish(*args, **kwargs)
+attachments.finish = finish
+class WaitWindow:
+    def __init__(self, lock): self.lock = lock; self.armed = False
+    def acquire(self, *args, **kwargs):
+        acquired = self.lock.acquire(*args, **kwargs)
+        if acquired and not self.armed:
+            self.armed = True
+            # Pause after real acquisition but before Popen enters its
+            # release try/finally: an asynchronous exception leaks this lock.
+            (launch / 'waiting-for-child').touch()
+            while not (launch / 'release-window').exists(): time.sleep(.01)
+        return acquired
+    def release(self): return self.lock.release()
+    def __enter__(self): return self.lock.__enter__()
+    def __exit__(self, *args): return self.lock.__exit__(*args)
+def observe_wait(child):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        frame = sys._current_frames().get(threading.main_thread().ident)
+        while frame is not None:
+            if frame.f_code is subprocess.Popen._wait.__code__ and frame.f_locals.get('self') is child:
+                # Publish only once the main thread entered the real wait,
+                # not just before it (where a pending handler could run first).
+                (launch / 'waiting-for-child').touch()
+                return
+            frame = frame.f_back
+        time.sleep(.001)
+def wait(child, timeout=None):
+    global armed
+    facts = read(directory / 'runtime.json')
+    if not armed and facts.get('pid') == child.pid and (route == 'waitpid-lock' or facts.get('startup_checked')):
+        # Make the OS's permitted choice of a helper thread deterministic.
+        # Helpers already exist and retain their unblocked signal mask.
+        if route == 'waitpid-lock':
+            threads = threading.enumerate()
+            assert len(threads) == 1, threads
+            child._waitpid_lock = WaitWindow(child._waitpid_lock)
+        else:
+            assert any(t.name == 'session binding' and t.is_alive() for t in threading.enumerate())
+            threading.Thread(target=observe_wait, args=(child,), daemon=True).start()
+            if route == 'helper':
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
+        armed = True
+    return original_wait(child, timeout=timeout)
+subprocess.Popen.wait = wait
+sys.argv = ['runner', str(launch)]
+raise SystemExit(runner.main())
+'''
+
+
 class LegacyAttachmentTest(TerminalBase):
+    def test_server_hangup_reaches_cleanup_without_stranding_the_child_wait(self):
+        """A helper-delivered hangup or one inside Popen's lock acquisition must not strand the runner and child after tmux dies."""
+        script = self.work / 'hangup-runner.py'
+        script.write_text(HANGUP_RUNNER)
+        create = Tmux.create
+
+        def gone(pid):
+            snapshot = process_snapshot(pid)
+            if snapshot is not None:
+                return snapshot[1].startswith('Z')
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        def cleanup(owned):
+            # Reap a failing control too, without touching a reused PID.
+            for pid, started in owned:
+                if not gone(pid) and start_matches(started, pid):
+                    os.kill(pid, signal.SIGKILL)
+            until(lambda: all(gone(pid) for pid, _ in owned))
+
+        for route in ('normal', 'helper', 'waitpid-lock'):
+            with self.subTest(signal_thread=route):
+                if route == 'waitpid-lock':
+                    recipe = self.root / 'harnesses/fake/harness.json'
+                    write(recipe, {**read(recipe), 'session': 'assigned'})
+                def wrapper(backend, name, workdir, argv):
+                    return create(backend, name, workdir, [sys.executable, str(script), argv[-1], route])
+                with patch.object(Tmux, 'create', wrapper):
+                    launched = lifecycle.start(self.root, route, '', 'fake', socket_path=self.socket)
+                directory = self.root / 'state' / 'agents' / launched['id']
+                launch = directory / 'launches' / launched['runtime']['launch_id']
+                until(lambda: (launch / 'waiting-for-child').exists())
+                facts = read(directory / 'runtime.json')
+                owned = [(facts['pid'], facts['pid_started']), (facts['runner_pid'], facts['runner_started'])]
+                self.addCleanup(cleanup, owned)
+                self.assertTrue(all(start_matches(started, pid) for pid, started in owned))
+                self.assertEqual(read(launch / 'cleanup.json')['state'], 'active')
+                self.backend.run('kill-server')
+                if route == 'waitpid-lock':
+                    # kill-server returning is not proof the hangup arrived.
+                    # Release only after the real installed handler saw it.
+                    until(lambda: (launch / f'signal-{signal.SIGHUP}-observed').exists())
+                    (launch / 'release-window').touch()
+                    until(lambda: (launch / 'finishing-cleanup').exists(), seconds=10)
+                    self.assertTrue(start_matches(facts['runner_started'], facts['runner_pid']))
+                    os.kill(facts['runner_pid'], signal.SIGTERM)
+                    until(lambda: (launch / f'signal-{signal.SIGTERM}-observed').exists())
+                    (launch / 'release-cleanup').touch()
+                until(lambda: all(gone(pid) for pid, _ in owned), seconds=10)
+                self.assertEqual(read(launch / 'cleanup.json')['state'], 'complete')
+                for role in (launch / 'roles').glob('*.json'):
+                    self.assertEqual(read(role)['state'], 'closed')
+
     def test_pre_update_runner_without_cleanup_record_can_stop_and_resume(self):
         """An agent started by a runner from before the cleanup marker can still be killed and resumed; fragile because
         it is an upgrade path nobody exercises after release, and a break leaves existing agents unresumable after an
