@@ -64,7 +64,7 @@ def _parent_gone(owner):
     return False
 
 
-def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL_TIMEOUT):
+def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL_TIMEOUT, check_stop=lambda: None):
     """Wait through progressing preparation, fail promptly on a dead parent, always stay bounded.
 
     Old/manual requests without a parent record retain their previous bounded wait.
@@ -74,6 +74,7 @@ def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL
     owner, sequence, next_check = None, -1, started
     missing = object()
     while not (launch / 'ready').exists():
+        check_stop()
         observed = time.monotonic()
         try:
             record = read(launch / 'registration.json')

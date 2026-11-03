@@ -82,7 +82,7 @@ runner.py LAUNCH_DIR                                tmux pane
 
 Shared-service adapters are prepared again after the endpoint is available. Both preparations receive the same proven storage-key selection, so unknown legacy keys keep their inherited behavior in the final connected tool environment.
 
-The runner waits for its child in bounded intervals so it can handle a terminal hangup even when a helper thread receives the signal. Its existing shutdown path closes its helpers and terminates its own child; shared native services stay running.
+The runner waits for its child in bounded intervals so it can handle a terminal hangup even when a helper thread receives the signal. A hangup or termination signal records a stop request; registration, startup and child-wait checkpoints act on it outside subprocess's locks. Repeated signals cannot interrupt cleanup. The shutdown path closes the runner's helpers and terminates its own child; shared native services stay running.
 
 Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core validates socket lengths before asking the adapter, but creates the run directory and performs terminal recovery only after the adapter accepts the launch. Core owns processes, tmux, records and locks. The tmux creation reply binds pane operations to its server PID and start time, separately from the OS proof needed to signal that server. Each bound command checks that identity in the same tmux command group before acting; a replacement server cannot inherit the pane merely by reusing its number. A new spawn refused before native preparation releases its name. Once native preparation begins, a failed launch keeps its record with the error, so `mv2 resume` can retry.
 

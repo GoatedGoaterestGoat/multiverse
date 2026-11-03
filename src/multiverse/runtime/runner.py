@@ -517,10 +517,11 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
         return selected, child
 
 
-def wait_startup_candidate(directory, launch_id, process, child_at):
+def wait_startup_candidate(directory, launch_id, process, child_at, *, check_stop=lambda: None):
     """Keep an unstarted screen eligible without delaying a recognized composer."""
     from multiverse.runtime.refusal import STARTUP_WINDOW_SECONDS
     while True:
+        check_stop()
         elapsed = time.monotonic() - child_at
         facts = runtime(directory)
         if facts.get('launch_id') != launch_id or facts.get('ending_at'):
@@ -533,6 +534,7 @@ def wait_startup_candidate(directory, launch_id, process, child_at):
                 update_runtime(directory, launch_id, startup_checked=True)
         try:
             process.wait(timeout=.1)
+            check_stop()
             return False
         except subprocess.TimeoutExpired:
             pass
@@ -624,15 +626,32 @@ def main():
     runner_started = process_started(os.getpid())
     attachments.begin(launch, runner_started)
 
-    def stop(_signum, _frame):
-        raise SystemExit(128 + _signum)
+    stop_signal = None
+    def stop(signum, _frame):
+        nonlocal stop_signal
+        # An asynchronous exception can strand subprocess's waitpid lock
+        # between acquire() and its try/finally, deadlocking our own cleanup.
+        # Repeated signals also must not interrupt that cleanup.
+        if stop_signal is None:
+            stop_signal = signum
+
+    def check_stop():
+        if stop_signal is not None:
+            raise SystemExit(128 + stop_signal)
+
+    def wait_child(timeout):
+        try:
+            return process.wait(timeout=timeout)
+        finally:
+            check_stop()  # subprocess has released its locks before we exit.
 
     previous_handlers = {signum: signal.signal(signum, stop) for signum in (signal.SIGHUP, signal.SIGTERM)}
     # The native CLI decides whether Ctrl+C interrupts a turn or exits. A caught
     # handler resets to the default on exec, unlike inheriting SIG_IGN.
     previous_handlers[signal.SIGINT] = signal.signal(signal.SIGINT, lambda *_: None)
     try:
-        registration.wait_for_release(launch)
+        registration.wait_for_release(launch, check_stop=check_stop)
+        check_stop()
         request = read(launch / "request.json")
         env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
@@ -752,6 +771,7 @@ def main():
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
         def spawn(selected):
             nonlocal process
+            check_stop()
             process = subprocess.Popen(selected['argv'], env=env, stdin=None)
             child_started = process_started(process.pid)
             try:
@@ -759,6 +779,7 @@ def main():
             except (OSError, ValueError):
                 pass  # Extra recovery evidence must not prevent primary PID registration.
             update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=child_started)
+            check_stop()
             return process
         child_at = time.monotonic()
         initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
@@ -775,12 +796,13 @@ def main():
             refusal_monitor.start()
         survived_startup = False
         if request.get('startup_retry'):
-            survived_startup = wait_startup_candidate(agent_dir, launch.name, process, child_at)
+            survived_startup = wait_startup_candidate(agent_dir, launch.name, process, child_at, check_stop=check_stop)
             if not survived_startup:
                 selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
                                          native_id=initial_native_id, prelude=printed_prelude)
                 if selected is not None:
                     request, process = selected
+        check_stop()
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
@@ -799,7 +821,7 @@ def main():
         try:
             if survived_startup:
                 raise subprocess.TimeoutExpired(request['argv'], STARTUP_SECONDS)
-            code = process.wait(timeout=STARTUP_SECONDS)
+            code = wait_child(STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
             startup_checked = True
             native_refusal = runtime(agent_dir).get('native_refusal')
@@ -815,7 +837,7 @@ def main():
             # its child after tmux exits. Return to Python at bounded intervals.
             while True:
                 try:
-                    code = process.wait(timeout=1)
+                    code = wait_child(1)
                     break
                 except subprocess.TimeoutExpired:
                     pass
@@ -896,6 +918,7 @@ def main():
             schedule_wrapper_cleanup(launch)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        check_stop()
 
 
 if __name__ == "__main__":

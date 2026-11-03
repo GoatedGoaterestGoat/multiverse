@@ -73,13 +73,43 @@ update_runtime(directory, launch.name, state='stopped', exit_code=code, stopped_
 HANGUP_RUNNER = r'''
 import signal, subprocess, sys, threading, time
 from pathlib import Path
-from multiverse.runtime import runner
+from multiverse.runtime import runner, attachments
 from multiverse.store import read
 launch = Path(sys.argv[1])
 directory = launch.parent.parent
-route_to_helper = sys.argv[2] == 'helper'
+route = sys.argv[2]
 original_wait = subprocess.Popen.wait
+original_signal = signal.signal
+original_finish = attachments.finish
 armed = False
+def install(signum, handler):
+    if signum in (signal.SIGHUP, signal.SIGTERM) and callable(handler):
+        def observed(*args):
+            (launch / f'signal-{signum}-observed').touch()
+            return handler(*args)
+        return original_signal(signum, observed)
+    return original_signal(signum, handler)
+signal.signal = install
+def finish(*args, **kwargs):
+    if route == 'waitpid-lock':
+        (launch / 'finishing-cleanup').touch()
+        while not (launch / 'release-cleanup').exists(): time.sleep(.01)
+    return original_finish(*args, **kwargs)
+attachments.finish = finish
+class WaitWindow:
+    def __init__(self, lock): self.lock = lock; self.armed = False
+    def acquire(self, *args, **kwargs):
+        acquired = self.lock.acquire(*args, **kwargs)
+        if acquired and not self.armed:
+            self.armed = True
+            # Pause after real acquisition but before Popen enters its
+            # release try/finally: an asynchronous exception leaks this lock.
+            (launch / 'waiting-for-child').touch()
+            while not (launch / 'release-window').exists(): time.sleep(.01)
+        return acquired
+    def release(self): return self.lock.release()
+    def __enter__(self): return self.lock.__enter__()
+    def __exit__(self, *args): return self.lock.__exit__(*args)
 def observe_wait(child):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -95,13 +125,18 @@ def observe_wait(child):
 def wait(child, timeout=None):
     global armed
     facts = read(directory / 'runtime.json')
-    if not armed and facts.get('pid') == child.pid and facts.get('startup_checked'):
+    if not armed and facts.get('pid') == child.pid and (route == 'waitpid-lock' or facts.get('startup_checked')):
         # Make the OS's permitted choice of a helper thread deterministic.
         # Helpers already exist and retain their unblocked signal mask.
-        assert any(t.name == 'session binding' and t.is_alive() for t in threading.enumerate())
-        threading.Thread(target=observe_wait, args=(child,), daemon=True).start()
-        if route_to_helper:
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
+        if route == 'waitpid-lock':
+            threads = threading.enumerate()
+            assert len(threads) == 1, threads
+            child._waitpid_lock = WaitWindow(child._waitpid_lock)
+        else:
+            assert any(t.name == 'session binding' and t.is_alive() for t in threading.enumerate())
+            threading.Thread(target=observe_wait, args=(child,), daemon=True).start()
+            if route == 'helper':
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
         armed = True
     return original_wait(child, timeout=timeout)
 subprocess.Popen.wait = wait
@@ -111,8 +146,8 @@ raise SystemExit(runner.main())
 
 
 class LegacyAttachmentTest(TerminalBase):
-    def test_server_hangup_reaches_cleanup_when_a_helper_receives_the_signal(self):
-        """A helper can receive the hangup while the main thread waits for its child; an unlimited wait strands both after tmux dies."""
+    def test_server_hangup_reaches_cleanup_without_stranding_the_child_wait(self):
+        """A helper-delivered hangup or one inside Popen's lock acquisition must not strand the runner and child after tmux dies."""
         script = self.work / 'hangup-runner.py'
         script.write_text(HANGUP_RUNNER)
         create = Tmux.create
@@ -134,8 +169,11 @@ class LegacyAttachmentTest(TerminalBase):
                     os.kill(pid, signal.SIGKILL)
             until(lambda: all(gone(pid) for pid, _ in owned))
 
-        for route in ('normal', 'helper'):
+        for route in ('normal', 'helper', 'waitpid-lock'):
             with self.subTest(signal_thread=route):
+                if route == 'waitpid-lock':
+                    recipe = self.root / 'harnesses/fake/harness.json'
+                    write(recipe, {**read(recipe), 'session': 'assigned'})
                 def wrapper(backend, name, workdir, argv):
                     return create(backend, name, workdir, [sys.executable, str(script), argv[-1], route])
                 with patch.object(Tmux, 'create', wrapper):
@@ -149,6 +187,16 @@ class LegacyAttachmentTest(TerminalBase):
                 self.assertTrue(all(start_matches(started, pid) for pid, started in owned))
                 self.assertEqual(read(launch / 'cleanup.json')['state'], 'active')
                 self.backend.run('kill-server')
+                if route == 'waitpid-lock':
+                    # kill-server returning is not proof the hangup arrived.
+                    # Release only after the real installed handler saw it.
+                    until(lambda: (launch / f'signal-{signal.SIGHUP}-observed').exists())
+                    (launch / 'release-window').touch()
+                    until(lambda: (launch / 'finishing-cleanup').exists(), seconds=10)
+                    self.assertTrue(start_matches(facts['runner_started'], facts['runner_pid']))
+                    os.kill(facts['runner_pid'], signal.SIGTERM)
+                    until(lambda: (launch / f'signal-{signal.SIGTERM}-observed').exists())
+                    (launch / 'release-cleanup').touch()
                 until(lambda: all(gone(pid) for pid, _ in owned), seconds=10)
                 self.assertEqual(read(launch / 'cleanup.json')['state'], 'complete')
                 for role in (launch / 'roles').glob('*.json'):
