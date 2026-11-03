@@ -4,7 +4,7 @@ import threading
 import io
 import sys
 from contextlib import redirect_stdout, redirect_stderr
-import time
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -136,6 +136,13 @@ class WaitTest(BaseTest):
         """wait never follows a replacement launch, reports the failure the runner publishes after the pane exits,
         and stays bounded when the runner died; pane exit races the last write, and losing the failed-outcome
         guard silently prints success and exits zero for a failed --wait (2adfa85)."""
+        # Disk writes and scheduling must not consume this fixture's short
+        # finalization grace. Advance only wait_ready's clock when it polls.
+        elapsed = [0.0]
+        def sleep(seconds):
+            elapsed[0] += seconds
+        clock = SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep)
+        self.enterContext(patch.object(lifecycle, 'time', clock))
         with self.subTest(launch='replaced'):
             write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
             with self.assertRaisesRegex(ValueError, 'refusing to follow a replacement'):
@@ -168,12 +175,12 @@ class WaitTest(BaseTest):
 
         self.starting()
         with self.subTest(launch='runner died'):
-            started = time.monotonic()
+            started = clock.monotonic()
             with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
                 result = self.wait(timeout=2)
             self.assertFalse(result['ready'])
             self.assertIn('ended before becoming ready', result['error'])
-            self.assertLess(time.monotonic() - started, 1, 'A dead runner must not consume the full readiness timeout')
+            self.assertLess(clock.monotonic() - started, 1, 'A dead runner must not consume the full readiness timeout')
             # A replacement during the finalization grace is never followed.
             def replaced(*args):
                 write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
