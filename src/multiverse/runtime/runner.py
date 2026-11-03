@@ -810,7 +810,15 @@ def main():
             update_runtime(agent_dir, launch.name, startup_checked=True)
             from multiverse.runtime.lifecycle import note_ready
             note_ready(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)
-            code = process.wait()
+            # A hangup may reach a helper thread. Python runs its handler only
+            # on this thread, so an unlimited waitpid can strand the runner and
+            # its child after tmux exits. Return to Python at bounded intervals.
+            while True:
+                try:
+                    code = process.wait(timeout=1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
         ending = runtime(agent_dir).get('ending_at')
         remove_wrapper = not ending and (startup_checked or code in (-signal.SIGINT, 130))
         diagnostic = {}
