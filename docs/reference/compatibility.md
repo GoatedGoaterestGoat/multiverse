@@ -17,7 +17,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Harness | Version | What was checked |
 | --- | --- | --- |
 | Codex CLI | 0.166.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and the composer and footer the dashboard's live pane leaves out, from its panes and its renderer's snapshots. |
-| Claude Code | 2.1.316 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Claude Code | 2.1.317 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 The Codex check compared the official app-server and config schemas with the previous checked release, including mv2's plugin allowlist. Private native fixtures covered plain and connected launches, permissions and read-only retry, shared identity, refusals, steering, queued messages, side conversations and daemon recovery. They used isolated homes with updates disabled and local scripted providers; no account or real model calls were needed. Existing CLI flags, config keys and rollout reading remain compatible. The bundled model table includes GPT-6.1 Terra. See the [Codex release notes](https://github.com/openai/codex/releases/tag/rust-v0.166.0) and [audit details](../design/harness-adapters.md#codex-01660-compatibility-audit).
