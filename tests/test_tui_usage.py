@@ -71,6 +71,16 @@ print("returned", flush=True)
 
 
 class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def release(self, d, gate):
+        """Let a held usage read finish while the stand-in reader is still patched in and the dashboard runs: left
+        held, it went on after the test with the real reader, under a HOME already given back."""
+        gate.set()
+        await d.until(lambda: not d.app.usage_reading, "the held usage read to finish")
+
+    def assertNoUsageRead(self):
+        alive = [thread for thread in threading.enumerate() if thread.name == "mv2-usage" and thread.is_alive()]
+        self.assertEqual(alive, [], "a usage read outlived the test")
+
     def cells(self, d):
         """Each agent's Context cell, by name."""
         headers, rows = d.table()
@@ -130,6 +140,8 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     d.app.apply_usage({usage_key(row): (then, reading(1000))})
                     await d.settle()
                     self.assertEqual(self.cells(d)["ada"], "82k/200k")
+                await self.release(d, gate)
+            self.assertNoUsageRead()
 
     async def test_the_refresh_timer_starts_no_listing_during_the_first_usage_read_for_at_most_its_bound(self):
         """While the first usage read of a dashboard runs, the refresh timer starts no listing, for at most
@@ -178,6 +190,8 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(listings), before)
                     clock[0] += 1.0
                     await d.until(lambda: len(listings) > before, "a timer listing after the bound")
+                await self.release(d, gate)
+            self.assertNoUsageRead()
 
     def test_quitting_never_waits_for_a_usage_read(self):
         """q ends the process while a usage read is still running, leaving that read behind; fragile because a read
