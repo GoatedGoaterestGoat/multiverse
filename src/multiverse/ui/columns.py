@@ -15,6 +15,7 @@ import copy
 from dataclasses import dataclass, field
 import threading
 
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
 from ..display import clean, live_label
@@ -60,25 +61,44 @@ class Column:
 
 
 class NameColumn(Column):
-    """Tree guides in each ancestor's accent, a fold arrow on groups, a dot on agents waiting for input,
-    a ring on focused agents, and the unread inbox count where the view turns it on."""
-    def render(self, row):
+    """Tree guides in each ancestor's accent, a fold arrow on groups, a dot on agents waiting for input, a warning
+    on damaged ones, a ring on focused agents, and the unread inbox count where the view turns it on.
+
+    Given the cell's `width`, a name too long for it is shortened, never the marks after it: a damaged agent's
+    name is its whole ID, and a clipped cell would hide the only sign that it needs attention. `extra` adds marks
+    of the dashboard's own, such as one for the row being moved."""
+    def render(self, row, width=None, extra=()):
         color = row["accent"]
         group = row["kind"] == "group"
         label = Text(style=f"bold {color} on {theme.BASE}" if group else color)
         for guide, accent in row["guides"]:
             label.append(guide, style=f"not bold {accent}")
         label.append(("▾ " if row["expanded"] else "▸ ") if group else "  ")
-        label.append(clean(row["name"]))
+        marks = []
         if not group and row.get("status") == "waiting":
-            label.append(" ●", style=f"bold {theme.PEACH}")
+            marks.append((" ●", f"bold {theme.PEACH}"))
         if not group and row.get("damaged"):
-            label.append(" ⚠", style=f"bold {theme.RED}")
+            marks.append((" ⚠", f"bold {theme.RED}"))
         if not group and row.get("focus"):
-            label.append(" ◉", style=f"bold {theme.MAUVE}")
+            marks.append((" ◉", f"bold {theme.MAUVE}"))
         unread = row.get(UNREAD)
         if not group and isinstance(unread, int) and not isinstance(unread, bool) and unread > 0:
-            label.append(f" ✉{unread}", style=theme.PEACH)  # last: the marks that need the person stay in view
+            marks.append((f" ✉{unread}", theme.PEACH))
+        marks.extend(extra)
+        name = clean(row["name"])
+        if width is not None:
+            fixed = sum(cell_len(text) for text, _ in marks)
+            room = width - label.cell_len - fixed
+            if cell_len(name) > room and room < 2:
+                # A deep tree's guides leave the name no room: they give way first, from the left, until it has at
+                # least one cell and its ellipsis (or all of a name that short).
+                label = label[min(len(label.plain), min(cell_len(name), 2) - room):]
+                room = width - label.cell_len - fixed
+            if cell_len(name) > room:
+                name = set_cell_size(name, room - 1).rstrip() + "…" if room >= 2 else "…"[:max(0, room)]
+        label.append(name)
+        for text, style in marks:
+            label.append(text, style=style)
         return label
 
 

@@ -62,12 +62,17 @@ class FleetView:
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else lookup(field).render(row)
-                                  for field in fields]) for row in projected]
-        if self.moving:
-            for key, cells in rendered:
-                if key == self.moving["key"]:
-                    cells[0].append("  ⇢ moving", style=f"italic {theme.YELLOW}")
+        moving = (("  ⇢ moving", f"italic {theme.YELLOW}"),)
+
+        def cell(row, field):
+            if row["kind"] == "draft":
+                return self.draft_cell(row, field)
+            if field == "name":  # its marks stay in view: a long name is shortened to the column's width instead
+                return COLUMNS["name"].render(row, widths["name"],
+                                              moving if self.moving and row["key"] == self.moving["key"] else ())
+            return lookup(field).render(row)
+
+        rendered = [(row["key"], [cell(row, field) for field in fields]) for row in projected]
         signature = (list(widths.items()), rendered)
         if signature != self._table_signature:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):

@@ -7,9 +7,13 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from rich.cells import cell_len
 from textual.widgets import DataTable, Static
 from multiverse.plugins.testing import PluginTestCase
+from multiverse.store import write
+from multiverse.universe import mailbox
 from multiverse.ui.backend import LocalBackend
+from multiverse.ui.columns import COLUMNS
 
 UNREADABLE_WORKS = os.geteuid() != 0
 DAMAGE = {"list": "[]", "truncated": '{"id":', "empty": ""}
@@ -70,6 +74,33 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             await d.press("p")
             await d.until(lambda: "Damaged:" in self.inspector_text(d), "the inspector to name the damaged file")
             self.assertIn(f"state/agents/{victim.name}/properties.json", self.inspector_text(d))
+
+    async def test_a_long_name_is_shortened_so_its_marks_stay_in_view(self):
+        """A name too long for the name column is shortened, never the marks after it: a damaged agent's name is its
+        whole ID, so a clipped cell hid its warning and nothing else in the row said it needs attention; a break goes
+        unnoticed because the table keeps the full text and only the screen cuts it (BUG-DASHBOARD-009)."""
+        damaged = self.agent("soon-damaged")
+        long = self.agent("a-name-much-longer-than-the-name-column-allows")
+        mailbox.append_message(long, "hello", {"name": "lead"})
+        write(self.root / "views" / "default.json", {"columns": ["name", "unread", "live", "summary"]})
+        self.damage(damaged, "properties.json", "list")  # its row is named by its ID
+        for size in ((130, 40), (60, 20)):
+            async with self.dashboard(size=size) as d:
+                table = d.app.query_one("#agents", DataTable)
+                width = next(column.width for column in table.columns.values() if column.key.value == "name")
+                for directory, mark in ((damaged, " ⚠"), (long, " ✉1")):
+                    with self.subTest(size=size, mark=mark):
+                        cell = self.row(d, directory)[0]
+                        self.assertLessEqual(cell_len(cell), width, cell)  # all of it is drawn
+                        self.assertTrue(cell.endswith(mark), cell)
+                        self.assertIn("…", cell)  # the name is what gave way
+        for depth, name in ((10, "a-very-long-agent-name"), (20, "n")):
+            with self.subTest("a deep tree's guides give way too", depth=depth):  # the reviewer's repro at 0c007ac
+                row = {"accent": "#ffffff", "kind": "agent", "guides": [("│ ", "#ffffff")] * depth,
+                       "expanded": False, "name": name, "unread": 1}
+                cell = COLUMNS["name"].render(row, width=23).plain
+                self.assertLessEqual(cell_len(cell), 23, cell)
+                self.assertTrue(cell.endswith(f"{name if depth == 20 else 'a…'} ✉1"), cell)
 
     async def test_the_dashboard_offers_exactly_the_recovery_the_listing_hints(self):
         """On real folders, K kills a damaged row only when the listing's hint says kill can recover it (launch history
