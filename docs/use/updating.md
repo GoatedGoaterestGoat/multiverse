@@ -33,6 +33,16 @@ not revisited. If you update by
 `git pull` instead, run `mv2 plugins migrate --apply --recursive` once to perform
 this pass; later runs do not rescan the messages.
 
+The same step restarts the universe tree's [plugin host](plugins.md#the-plugin-host)
+when it still runs the code from before the update, once the work it has in
+flight is done, and the update says so. The first update from an mv2 older
+than this runs that older updater, which doesn't show what became of the host:
+afterwards, `mv2 plugins host` says whether it still runs the code from before,
+and `mv2 plugins migrate --apply` restarts it then. After a `git pull`, `mv2
+plugins migrate --apply` restarts it too. A host whose process can't be proven
+to be the host (it may have ended, its pid now another process's) is never
+signalled; the update says so.
+
 After updating, do these three things:
 
 1. **Restart the dashboard.**

@@ -63,6 +63,30 @@ class HostStartTest(PluginTestCase):
                 self.assertTrue(stalled.wait(5))
                 time.sleep(2.5)  # well past HEARTBEAT_SECONDS with the loop stuck
                 self.assertTrue(host.running(self.root))
+        stopping.set()
+        thread.join(10)  # the stalled one above holds the host lock
+        with self.subTest("it stops a worker that finishes its call first"):
+            stopping, stopped = threading.Event(), threading.Event()
+            ready = self.work / "finishing.ready"
+            worker = subprocess.Popen([sys.executable, "-c", "import signal, sys, time; signal.signal(signal.SIGTERM, "
+                                       "lambda *_: (time.sleep(3), exit(0))); open(sys.argv[1], 'w').close(); "
+                                       "time.sleep(60)", str(ready)], start_new_session=True)
+            self.addCleanup(host._reap, worker)
+            self.assertTrue(_until(ready.exists, 10))  # its SIGTERM handler is in place
+            with mock.patch.object(host, "needed", lambda root: {"slow": [root]}), \
+                    mock.patch.object(host, "_start_worker", lambda root, name: worker), \
+                    mock.patch.object(host, "HEARTBEAT_SECONDS", 1.0), mock.patch.object(host, "SUPERVISE_SECONDS", 0.1):
+                thread = threading.Thread(target=lambda: (host.supervise(self.root, stopping=stopping), stopped.set()),
+                                          daemon=True)
+                thread.start()
+                self.addCleanup(thread.join, 10)
+                self.assertTrue(_until(lambda: host.running(self.root), 5))
+                stopping.set()
+                time.sleep(2.0)  # well past HEARTBEAT_SECONDS while its worker still finishes
+                self.assertTrue(host.running(self.root), "a host stopping its workers looked stopped")
+                self.assertTrue(stopped.wait(10))
+                self.assertEqual(worker.returncode, 0, "the worker was killed before it finished")
+                self.assertFalse(host.running(self.root))
 
     def test_a_second_start_that_finds_the_session_is_already_starting(self):
         """Concurrent host starts never make two supervisors or overwrite a running one's status, whether the other
@@ -114,6 +138,19 @@ class HostStartTest(PluginTestCase):
                             mock.patch.object(tmux, 'Tmux', side_effect=AssertionError('Unproven host pane targeted')) as terminal:
                         host.stop(self.root)
                     terminal.assert_not_called()
+        with self.subTest("a supervisor that does not exit keeps its session"):
+            ready = self.work / "stubborn.ready"
+            stubborn = subprocess.Popen([sys.executable, "-c", "import signal, sys, time; signal.signal(signal.SIGTERM, "
+                                         "signal.SIG_IGN); open(sys.argv[1], 'w').close(); time.sleep(60)", str(ready)])
+            self.addCleanup(lambda: (stubborn.kill(), stubborn.wait()))
+            self.assertTrue(_until(ready.exists, 10))  # it ignores SIGTERM now
+            self.status(pid=stubborn.pid, session="mv2-plugins-x", socket="s",
+                        server_identity={"pid": 1234, "epoch": 5678})
+            calls = []
+            with mock.patch.object(host, "STOP_SECONDS", -14.0), \
+                    mock.patch.object(tmux.Tmux, "run", lambda backend, *args: calls.append(args)):
+                result = host.stop(self.root)
+            self.assertEqual((result["exited"], calls), (False, []), "the session of a running supervisor was removed")
 
 
 HOLDER = """
@@ -152,6 +189,22 @@ def register(mv):
                 handle.write(str(child.pid))
             child.wait()  # a call that never returns, with a child process
         threading.Thread(target=run, daemon=True).start()
+    mv.service(start)
+"""
+
+DRAINING_SERVICE = """
+import os
+import subprocess
+import time
+from pathlib import Path
+
+def register(mv):
+    def start(context):
+        child = subprocess.Popen(["sleep", "300"])
+        Path(os.environ["ORPHAN_CHILD"]).write_text(str(child.pid))
+        context.stopping.wait()
+        Path(os.environ["ORPHAN_DRAINING"]).write_text("1")
+        time.sleep(120)  # still finishing when its supervisor dies
     mv.service(start)
 """
 
@@ -255,6 +308,29 @@ class SupervisorGoneTest(PluginTestCase):
             self.assertFalse(answers(), "the service still holds its socket")
             self.assertFalse(_alive(workers[1]), "the stuck call's child outlived its worker")
             self.assertIn("holder: supervisor gone; stopping", log.read_text())
+        with self.subTest("killed while its worker drains"):
+            self.write_plugin("draining", {"module": "plugin", "extends": ["service"]}, {"plugin.py": DRAINING_SERVICE})
+            self.enable("draining")
+            child_pid, draining = self.work / "drain-child.pid", self.work / "draining"
+            environment = {**os.environ, "ORPHAN_CHILD": str(child_pid), "ORPHAN_DRAINING": str(draining),
+                           "PYTHONPATH": str(SOURCE)}
+            # A supervisor stand-in: it starts the worker, says its pid, and waits to be killed.
+            stand_in = subprocess.Popen([sys.executable, "-c", "import sys, time; from multiverse.plugins import host; "
+                                         "print(host._start_worker(sys.argv[1], 'draining').pid, flush=True); "
+                                         "time.sleep(120)", str(self.root)], env=environment, text=True,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: (stand_in.kill(), stand_in.wait(10), stand_in.stdout.close()))
+            worker = int(stand_in.stdout.readline())
+            self.addCleanup(_kill_group, worker)
+            self.assertTrue(_until(lambda: child_pid.exists() and child_pid.read_text(), 60), "its service never came up")
+            child = int(child_pid.read_text())
+            self.addCleanup(_kill, child)
+            os.kill(worker, signal.SIGUSR1)
+            self.assertTrue(_until(draining.exists, 20), "its service never began to finish")
+            stand_in.kill()
+            stand_in.wait(10)
+            self.assertTrue(_until(lambda: not _alive(worker), 15), "the draining worker outlived its supervisor")
+            self.assertTrue(_until(lambda: not _alive(child), 5), "a child of the draining worker outlived it")
         with self.subTest("dead before its worker loaded the plugin"):
             self.write_plugin("late", {"module": "plugin", "extends": ["service"]}, {"plugin.py": SLOW_LOADER})
             self.enable("late")
@@ -362,6 +438,261 @@ class WorkerExitTest(PluginTestCase):
                 _until(lambda: _process_state(ended.pid) == "Z", 10)
                 self.assertTrue(host._exited(ended))
                 self.assertEqual(_process_state(ended.pid), "Z", "the check reaped the worker")
+
+
+SLOW_HANDLER = """
+import os
+import time
+from pathlib import Path
+
+def register(mv):
+    def write(text):
+        with Path(os.environ["SLOW_LOG"]).open("a") as out:
+            out.write(f"{text} {os.getpid()}\\n")
+
+    def first(event):
+        write(f"start {event.data['n']}")
+        gate, deadline = event.data.get("gate"), time.monotonic() + 30
+        while gate and not Path(gate).exists() and time.monotonic() < deadline:
+            time.sleep(0.05)  # in flight until the test sees the host draining
+        write(f"end {event.data['n']}")
+    mv.events.on("agent.reported", first)
+    mv.events.on("agent.reported", lambda event: write(f"second {event.data['n']}"))
+
+    def service(context):
+        context.stopping.wait()
+        time.sleep(6)  # finishing a request: longer than a person's stop gives a service
+        write("service done")
+    mv.service(service)
+"""
+
+
+class RefreshTest(PluginTestCase):
+    def test_update_restarts_a_host_on_the_code_from_before_and_cuts_nothing_in_flight(self):
+        """mv2 update's migrate step (run with the new code by old and new updaters) has a host on the code from
+        before drain and run the new code in place, stops and starts one from an older mv2, and leaves a current one,
+        another mv2's and safe mode alone; while draining, the worker starts no new handler call, not even another
+        handler's of the same event, and finishes the one in flight, so no event is lost or repeated; fragile because
+        tests always run one version, while in the field a host started before an update mixes old and new modules
+        and its plugins fail until it restarts (PR #32 review)."""
+        from multiverse import plugins
+        from multiverse.plugins import events
+        from multiverse.terminal import tmux
+        from multiverse.tools import plugins as tool
+        current, request = host.code(), host.host_directory(self.root) / host.RESTART
+        moved = {**current, "signature": "0" * 64}
+        cases = (  # (what status.json records about the host, what refresh does, its state)
+            ("an older mv2's host records no code", {}, "stop and start", "restarted"),
+            ("files moved, and nothing takes the request", {"code": moved}, "request", "failed"),
+            ("a restart under way", {"code": moved, "restarting": True}, None, "restarting"),
+            ("it runs this code", {"code": current}, None, "current"),
+            ("another mv2's host", {"code": {"source": "/elsewhere/src", "signature": "1" * 64}}, None, "other"),
+        )
+        for name, recorded, does, state in cases:
+            with self.subTest(name):
+                request.unlink(missing_ok=True)
+                write(host.host_directory(self.root) / "status.json", {"state": "running", "pid": os.getpid(),
+                      "updated_at": now(), "started_at": "s", **recorded})
+                calls = []
+                with mock.patch.object(host, "stop", lambda root: calls.append("stop") or {"running": False}), \
+                        mock.patch.object(host, "start", lambda root: calls.append("start") or {"running": True}), \
+                        mock.patch.object(host, "RESTART_WAIT", 0.3):
+                    result = host.refresh(self.root)
+                self.assertEqual(result["state"], state)
+                self.assertEqual(calls, ["stop", "start"] if does == "stop and start" else [])
+                self.assertEqual(request.exists(), does == "request")
+        request.unlink(missing_ok=True)
+        outcomes = (  # (what the host's status shows after the request, what refresh says)
+            ("a new start on this code", {"started_at": "new", "code": current}, "restarted"),
+            ("a new start on other code", {"started_at": "new", "code": moved}, "failed"),
+            ("still draining", {"started_at": "old", "code": moved, "restarting": True}, "restarting"),
+            ("gone", {"started_at": "old", "code": moved, "restarting": True, "pid": 2 ** 22 + 12345}, "failed"),
+        )
+        for name, shown, state in outcomes:
+            with self.subTest("what the restart came to", shows=name), mock.patch.object(host, "RESTART_WAIT", 0.3):
+                write(host.host_directory(self.root) / "status.json",
+                      {"state": "running", "pid": os.getpid(), "updated_at": now(), **shown})
+                self.assertEqual(host._restart_outcome(self.root.resolve(), "old")["state"], state)
+        from multiverse.runtime import process as processes
+
+        def helper(name):  # an owned stand-in at the recorded pid: it notes a SIGTERM, then exits
+            ready, signalled = self.work / f"{name}.ready", self.work / f"{name}.signalled"
+            child = subprocess.Popen([sys.executable, "-c", "import pathlib, signal, sys, time\n"
+                                      "signal.signal(signal.SIGTERM, lambda *_: (pathlib.Path(sys.argv[2]).touch(), "
+                                      "sys.exit(0)))\npathlib.Path(sys.argv[1]).touch()\ntime.sleep(60)",
+                                      str(ready), str(signalled)])
+            self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait(10)))
+            threading.Thread(target=child.wait, daemon=True).start()  # reaped, as a host's pane would be
+            self.assertTrue(_until(ready.exists, 10))
+            return child, signalled
+        proofs = (  # (what status.json says about the pid, what tmux shows in its pane, whether it is signalled)
+            ("an older mv2's host: a pid alone, now another process's", {}, None, False),
+            ("its process start is another's", {"pid_started": processes.process_started(os.getpid())}, None, False),
+            ("its process start matches", "own start", None, True),
+            ("an older mv2's host whose pane runs another pid", {}, "other", False),
+            ("an older mv2's host whose pane is dead, showing that pid", {}, "dead", False),
+            ("an older mv2's host whose pane runs that pid", {}, "same", True),
+        )
+        for name, extra, pane, signalled in proofs:
+            with self.subTest("only a proven host is signalled", case=name):
+                child, mark = helper(name.split(":")[0].replace(" ", "-").replace("'", ""))
+                if extra == "own start":
+                    extra = {"pid_started": processes.process_started(child.pid)}
+                terminal = {"socket": "s", "session": "mv2-plugins-x", "pane": "%1",
+                            "server_identity": {"pid": 1234, "epoch": 5678}} if pane else {}
+                write(host.host_directory(self.root) / "status.json", {"state": "running", "pid": child.pid,
+                      "updated_at": now(), "started_at": "s", **extra, **terminal})
+                shown = {"same": f"0 {child.pid}", "other": f"0 {child.pid + 100000}", "dead": f"1 {child.pid}"}.get(pane)
+                with mock.patch.object(host, "start", side_effect=AssertionError("started")), \
+                        mock.patch.object(tmux.Tmux, "run", lambda backend, *args: shown):
+                    if signalled:
+                        self.assertTrue(host.stop(self.root)["exited"])
+                    else:
+                        result = host.refresh(self.root) if not extra.get("pid_started") else host.stop(self.root)
+                        self.assertIn("could not be proven", str(result.get("reason") or result.get("refused")))
+                self.assertEqual(_until(mark.exists, 3 if signalled else 0.5), signalled,
+                                 "an unproven pid was signalled" if not signalled else "the proven host was not stopped")
+        with self.subTest("mv2 plugins host says it runs the code from before"):
+            # What a person checks after the first update from an mv2 whose updater shows no host result.
+            elsewhere = {"source": "/elsewhere/src", "signature": "1" * 64}
+            for recorded, stale in (({}, True), ({"code": moved}, True), ({"code": current}, False),
+                                    ({"code": elsewhere}, False)):
+                write(host.host_directory(self.root) / "status.json", {"state": "running", "pid": os.getpid(),
+                      "updated_at": now(), "started_at": "s", **recorded})
+                result = tool.run(self.root, plugin_action="host", name="status")
+                said = tool.text("host", result)
+                self.assertEqual((result["stale"], "runs the code from before an update" in said), (stale, stale))
+                self.assertEqual("It runs the mv2 in /elsewhere/src" in said, recorded.get("code") == elsewhere)
+        (host.host_directory(self.root) / "status.json").unlink()
+        with self.subTest("a call past its limit is waited for"):
+            self.write_plugin("calls", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
+            self.enable("calls")
+            loaded = host.loader.load(host.loader.entry(self.root, "calls"))
+            self.assertEqual(host.loader.guarded(loaded, "h", time.sleep, 1.0, timeout=0.1, key="k").state, "timeout")
+            draining, began = threading.Event(), time.monotonic()
+            draining.set()
+            host._finish_calls(loaded, draining, os.getppid())
+            self.assertGreater(time.monotonic() - began, 0.7, "a drain left a call running past its limit")
+            self.assertEqual(host.loader.running_calls(loaded), 0)
+        with self.subTest("a drain the moment a worker starts waits for it to be ready"):
+            self.write_plugin("early", {"module": "plugin", "extends": ["service"]},
+                              {"plugin.py": "def register(mv):\n    mv.service(lambda context: context.stopping.wait())\n"})
+            self.enable("early")
+            worker = host._start_worker(self.root, "early")
+            self.addCleanup(_kill_group, worker.pid)
+            worker.send_signal(signal.SIGUSR1)  # before its interpreter is even up
+            self.assertEqual(worker.wait(60), 0, "a drain ended a worker that was still starting")
+            self.enable("early", on=False)
+        with self.subTest("a draining worker whose supervisor is gone stops waiting for its services"):
+            self.write_plugin("deaf", {"module": "plugin", "extends": ["service"]},
+                              {"plugin.py": "import threading\ndef register(mv):\n"
+                                            "    mv.service(lambda context: threading.Event().wait(30))\n"})
+            self.enable("deaf")
+            deaf = host.loader.load(host.loader.entry(self.root, "deaf"))
+            services = host._Services(deaf, host.api.Plugin(deaf), self.root, "deaf", threading.Event())
+            services.start([self.root])
+            stopper = threading.Thread(target=services.stop, kwargs={"wait": None, "supervisor": -1}, daemon=True)
+            stopper.start()
+            stopper.join(5)
+            self.assertFalse(stopper.is_alive(), "it waited on for a supervisor that was gone")
+            self.enable("deaf", on=False)  # its service never returns: no host below may run it
+        with self.subTest("a stop ends a drain that would wait forever"):
+            (host.host_directory(self.root) / "status.json").unlink(missing_ok=True)  # the table's stand-in
+            stopping = threading.Event()
+            # A worker whose call never returns: it ignores a drain (SIGUSR1) and ends on a stop (SIGTERM).
+            ready = self.work / "stuck.ready"
+            worker = subprocess.Popen([sys.executable, "-c", "import signal, sys, time; signal.signal(signal.SIGUSR1, "
+                                       "signal.SIG_IGN); open(sys.argv[1], 'w').close(); time.sleep(60)", str(ready)],
+                                      start_new_session=True)
+            self.addCleanup(host._reap, worker)
+            self.assertTrue(_until(ready.exists, 10))  # it ignores a drain now
+            answer = []
+            with mock.patch.object(host, "needed", lambda root: {"stuck": [root]}), \
+                    mock.patch.object(host, "_start_worker", lambda root, name: worker), \
+                    mock.patch.object(host, "SUPERVISE_SECONDS", 0.1):
+                thread = threading.Thread(target=lambda: answer.append(host.supervise(self.root, stopping=stopping)),
+                                          daemon=True)
+                thread.start()
+                self.addCleanup(thread.join, 20)
+                self.assertTrue(_until(lambda: host.running(self.root) and host.status(self.root).get("workers"), 5))
+                write(request, {"for": host.status(self.root)["started_at"], "pid": os.getpid()})
+                self.assertTrue(_until(lambda: host.status(self.root).get("restarting"), 5))
+                time.sleep(0.5)
+                self.assertTrue(thread.is_alive())  # draining, with no deadline
+                stopping.set()
+                thread.join(20)
+            self.assertEqual(answer, [0], "a stop during a drain still restarted")
+            self.assertIsNotNone(worker.returncode)
+        with self.subTest("plugins are off or no host runs"), \
+                mock.patch.object(host, "stop", side_effect=AssertionError("stopped")):
+            with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
+                self.assertEqual(host.refresh(self.root)["state"], "skipped")
+            (host.host_directory(self.root) / "status.json").unlink()
+            self.assertEqual(host.refresh(self.root)["state"], "not_running")
+            self.assertFalse(request.exists())
+        with self.subTest("a real host, a handler call in flight"):
+            self.write_plugin("slow", {"module": "plugin", "extends": ["events", "service"], "events": ["agent.reported"]},
+                              {"plugin.py": SLOW_HANDLER})
+            plugins.set_enabled(self.root, "slow", True)  # its cursor starts now, as `mv2 plugins enable` does
+            log, supervisors, created = self.work / "slow.log", [], []
+            environment = {**os.environ, "SLOW_LOG": str(log), "PYTHONPATH": str(SOURCE)}
+
+            def create(backend, name, cwd, command, *arguments, **options):  # a plain process: no tmux
+                supervisors.append(subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
+                                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                threading.Thread(target=supervisors[-1].wait, daemon=True).start()  # reaped as tmux reaps a pane
+                created.append(name)
+                return {"socket": "s", "session": name, "pane": "%1", "server_identity": None}
+
+            def cleanup():
+                for supervisor in supervisors:
+                    if supervisor.poll() is None:
+                        supervisor.terminate()
+                    supervisor.wait(30)
+            self.addCleanup(cleanup)
+            with mock.patch.object(tmux.Tmux, "create", create):
+                self.assertTrue(host.start(self.root)["running"])
+            self.assertTrue(_until(lambda: any(info["state"] == "running" for info in
+                                               (host.status(self.root).get("workers") or {}).values()), 30))
+            started = host.status(self.root)["started_at"]
+            # A request left for an earlier supervisor never restarts this one.
+            write(request, {"for": "an earlier start", "pid": supervisors[0].pid})
+            self.assertTrue(_until(lambda: not request.exists(), 10))
+            self.assertEqual(host.status(self.root)["started_at"], started)
+            gate = self.work / "call.gate"
+            events.emit(self.root, "agent.reported", {"id": "a", "name": "w"}, data={"n": 1, "gate": str(gate)})
+            events.emit(self.root, "agent.reported", {"id": "a", "name": "w"}, data={"n": 2})
+            self.assertTrue(_until(lambda: log.exists() and "start 1" in log.read_text(), 30))
+            codes, answered = iter([moved]), []  # the host's code differs from this one's at first; then they agree
+            with mock.patch.object(host, "code", lambda: next(codes, current)):
+                updating = threading.Thread(target=lambda: answered.append(  # what mv2 update runs
+                    tool.run(self.root, plugin_action="migrate", apply=True)), daemon=True)
+                updating.start()
+                self.assertTrue(_until(lambda: host.status(self.root).get("restarting"), 30), "it never began to drain")
+                time.sleep(1.0)  # its workers have the drain signal (sent right after "restarting" is written)
+                gate.touch()  # the call in flight ends now, while its worker drains
+                updating.join(60)
+            result = answered[0]
+            self.assertEqual(result["host"]["state"], "restarted", result.get("host"))
+            recorded = host.status(self.root)
+            self.assertEqual((len(supervisors), recorded["pid"]), (1, supervisors[0].pid), "not restarted in place")
+            self.assertNotEqual(recorded["started_at"], started)
+            self.assertEqual((recorded["code"], recorded.get("restarting")), (current, None))
+            self.assertTrue(processes.start_matches(recorded.get("pid_started"), supervisors[0].pid),
+                            "the restarted host cannot prove its pid")
+            self.assertEqual((recorded.get("session"), recorded.get("pane")), (created[0], "%1"), "where it runs was lost")
+            self.assertTrue(_until(lambda: "second 2" in log.read_text(), 30), "the events behind it never came")
+            calls = [line.split() for line in log.read_text().splitlines()]
+            done = [call for call in calls if call[:2] == ["service", "done"]]
+            self.assertEqual([pid for *_, pid in done], [calls[0][2]], "the draining worker's service was cut")
+            calls = [call for call in calls if call not in done]
+            self.assertEqual([what for what, _, _ in calls],
+                             ["start", "end", "second", "start", "end", "second"], calls)
+            self.assertEqual([number for _, number, _ in calls], ["1", "1", "1", "2", "2", "2"], "an event came twice")
+            old, new = calls[0][2], calls[2][2]
+            self.assertEqual(calls[1][2], old, "the call in flight was cut")
+            self.assertNotEqual(new, old, "the draining worker started another handler's call")
+            self.assertEqual({pid for _, _, pid in calls[2:]}, {new})
 
 
 class RunningSourceTest(PluginTestCase):

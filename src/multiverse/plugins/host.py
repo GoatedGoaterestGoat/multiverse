@@ -11,19 +11,27 @@ and exits once no plugin needs it.
 
 A worker loads its plugin once, starts its services in threads, and tails the
 journal of every universe in the tree where the plugin is on, calling the
-handlers that match each event. When the plugin is turned on or off in a
+handlers that match each event. Stopped (SIGTERM), it starts no new handler
+call and has 10 s to stop; drained (SIGUSR1, for a restart), it starts none
+either and waits, with no deadline, for every handler call still running
+(those past their limit too), then for its services. When the plugin is turned on or off in a
 universe, its services stop and start again with the new set of universes. Its cursor per universe is
 state/plugins/NAME/events.cursor, so after a restart a handler sees events at
 least once; a worker that starts with no cursor begins at the journal's end.
 
 `mv2 plugins host start|stop|status` runs the supervisor in a tmux session
 mv2 owns. Its state is state/plugins/host/ of the top-level universe:
-host.lock (held while it runs), status.json and host.log.
+host.lock (held while it runs), status.json and host.log. status.json also
+records the code the supervisor runs, so `mv2 update` (through `mv2 plugins
+migrate --apply`, which updaters old and new run with the new code) asks a
+host still running the code from before to restart (restart.json): it drains
+its workers, then runs itself again with the new code, in the same pane.
 """
 import argparse
 from datetime import datetime, timezone
 import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,6 +43,7 @@ import threading
 import time
 
 from .. import universe as universes
+from ..runtime import process as processes
 from ..store import now, write, lock
 from . import api, events, loader, trust
 
@@ -45,6 +54,10 @@ SUPERVISE_SECONDS = 2.0
 WORKER_POLL_SECONDS = 0.5
 PRUNE_SECONDS = 3600
 HANDLER_SECONDS = 60.0
+STOP_SECONDS = 10.0  # a stopped worker has this long before its process group is ended (a restart waits, unbounded)
+SERVICES_STOP_SECONDS = 5.0  # a stopped worker waits this long for its services (a draining one waits until done)
+RESTART = "restart.json"  # state/plugins/host/: a request for the supervisor to drain and run the new code
+RESTART_WAIT = 20.0  # seconds refresh() waits to see the host back before it says the restart is under way
 TIMEOUTS_PER_EVENT = 3  # a handler out of time on one event this many times is given up on for that event
 READ_LIMIT = 500  # events one journal read returns
 PAGES_PER_POLL = 4  # reads one poll may make, so handlers ahead of a stuck one keep going
@@ -60,6 +73,31 @@ NEEDS = frozenset({"events", "service"})
 
 def host_directory(root):
     return Path(root) / "state" / "plugins" / "host"
+
+
+def code():
+    """{source, signature} of the mv2 this process runs: its import root, and a fingerprint (path, size,
+    modification time) of its package's files, its checkout's plugins and uv.lock. A host records it as it starts:
+    after an update its workers would import new modules into a process that has the old ones (PR #32 review)."""
+    from .. import source
+    digest, repository = hashlib.sha256(), Path(source()).parent
+    # The checkout's plugins/ the way the loader finds it, from the source itself: the same in every process.
+    checkout = repository / "plugins" if (repository / "src" / "multiverse" / "plugins").is_dir() else None
+    for top in (Path(source()) / "multiverse", checkout, repository / "uv.lock"):
+        if top is None:
+            continue
+        for directory, names, files in ([(str(top.parent), [], [top.name])] if top.is_file() else os.walk(top)):
+            names[:] = sorted(name for name in names if name not in ("__pycache__", ".git", "node_modules"))
+            for file in sorted(files):
+                if file.endswith((".pyc", ".pyo")):
+                    continue
+                path = os.path.join(directory, file)
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue
+                digest.update(f"{os.path.relpath(path, top.parent)}\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
+    return {"source": source(), "signature": digest.hexdigest()}
 
 
 STATUS_TEXT = ("state", "started_at", "updated_at", "socket", "session", "pane")
@@ -86,6 +124,13 @@ def _recorded(root):
         recorded["server_identity"] = value["server_identity"]  # Tmux validates before any pane command.
     if _is_pid(value.get("pid")):
         recorded["pid"] = value["pid"]
+    if processes.valid_start(value.get("pid_started")):
+        recorded["pid_started"] = value["pid_started"]
+    if value.get("restarting") is True:
+        recorded["restarting"] = True
+    running_code = value.get("code")
+    if isinstance(running_code, dict) and all(isinstance(running_code.get(key), str) for key in ("source", "signature")):
+        recorded["code"] = {key: running_code[key] for key in ("source", "signature")}
     if isinstance(value.get("workers"), dict):
         recorded["workers"] = {name: {"pid": info["pid"] if _is_pid(info.get("pid")) else None,
                                       "state": info["state"] if isinstance(info.get("state"), str) else "unknown",
@@ -165,12 +210,25 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(signum, lambda *_: stopping.set())
     workers, restarts, stopped, hung = {}, {}, {}, {}
-    started, pruned = now(), 0.0
+    started, pruned, running_code, restart = now(), 0.0, code(), False
+    # This process's start: what proves a pid in status.json is still this supervisor (an exec keeps it).
+    as_started = processes.process_started(os.getpid())
     _log(root, f"host started (pid {os.getpid()})")
     beating = threading.Event()
-    threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True).start()
+    beat = threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True)
+    beat.start()
     try:
         while not stopping.is_set():
+            if _restart_requested(root, started):
+                # mv2 update: drain every worker, with no deadline, then run the new code (main() does). A stop
+                # (SIGTERM) during the drain stops instead.
+                _log(root, "restarting with the new code: draining the workers")
+                _write_status(root, started, workers, restarts, stopped, code=running_code, restarting=True,
+                              pid_started=as_started)
+                if _drain_workers(list(workers.values()), stopping):
+                    workers.clear()
+                    restart = True
+                break
             try:
                 wanted = needed(root)
             except Exception as error:  # a broken tree must not end the host; try again
@@ -196,7 +254,7 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 if name in stopped:
                     continue
                 workers[name] = _start_worker(root, name)
-            _write_status(root, started, workers, restarts, stopped)
+            _write_status(root, started, workers, restarts, stopped, code=running_code, pid_started=as_started)
             if time.monotonic() - pruned >= PRUNE_SECONDS:
                 pruned = time.monotonic()
                 for scope in universes.tree(root):
@@ -208,19 +266,29 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 break
             stopping.wait(SUPERVISE_SECONDS)
     finally:
+        # All at once, each finishing its call in flight; the heartbeat goes on meanwhile, so the host still counts
+        # as running and nothing starts a second one beside it.
+        _stop_workers(list(workers.values()))
         beating.set()
-        for process in workers.values():
-            _stop_worker(process)
-        _write_status(root, started, {}, restarts, stopped, state="stopped")
+        beat.join(5)  # no status write left half way when the new code takes over the process
+        if not restart:
+            _write_status(root, started, {}, restarts, stopped, state="stopped", code=running_code,
+                          pid_started=as_started)
         held.close()
-    return 0
+    return "restart" if restart else 0
 
 
 def _start_worker(root, name):
     """A plugin's worker, in a process group of its own: what its calls start (a hung subprocess.run) goes with
-    it when it ends."""
-    return subprocess.Popen(loader.module_command("multiverse.plugins.host", "--worker", "--supervisor", os.getpid(),
-                                                  root, name), stdin=subprocess.DEVNULL, start_new_session=True)
+    it when it ends. It starts with SIGUSR1 (a drain) blocked, so one sent before it is ready waits until work()
+    has its handler, instead of ending it (the signal's default)."""
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    try:
+        return subprocess.Popen(loader.module_command("multiverse.plugins.host", "--worker", "--supervisor",
+                                                      os.getpid(), root, name),
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
 
 
 def _exited(process):
@@ -278,14 +346,58 @@ def _reap(process):
         queue.close()
 
 
+def _restart_requested(root, started):
+    """Whether restart.json asks this supervisor (its pid and start) to restart. The request is removed either way:
+    one for an earlier supervisor (left by a host that ended, or already acted on) never restarts a later one."""
+    path = host_directory(root) / RESTART
+    try:
+        request = json.loads(path.read_text())
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        request = None
+    path.unlink(missing_ok=True)
+    if isinstance(request, dict) and request.get("pid") == os.getpid() and request.get("for") == started:
+        return True
+    _log(root, "ignored a restart request for another host")
+    return False
+
+
+def _drain_workers(processes, stopping):
+    """Ask workers to drain (SIGUSR1), only those this supervisor started and has not reaped (so no pid is another
+    process's): each starts no new handler call and exits once every call of its still running and its services
+    are done. Waited for with no deadline, so nothing they do is ended; True once all exited. A stop (`stopping`)
+    while they drain returns False at once: the caller then stops them, with a stop's bounds."""
+    for process in processes:
+        if not _exited(process):
+            try:
+                process.send_signal(signal.SIGUSR1)
+            except OSError:
+                pass
+    while any(not _exited(process) for process in processes):
+        if stopping.is_set():
+            return False
+        time.sleep(0.05)
+    for process in processes:
+        _reap(process)
+    return True
+
+
+def _stop_workers(processes):
+    """Ask workers to stop (SIGTERM), give them STOP_SECONDS together, then end each one's process group and reap
+    it: a stop may end work in flight, a restart (_drain_workers) never does."""
+    for process in processes:
+        if not _exited(process):
+            process.terminate()
+    deadline = time.monotonic() + STOP_SECONDS
+    while any(not _exited(process) for process in processes) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    for process in processes:
+        _reap(process)
+
+
 def _stop_worker(process):
-    """Ask a worker to stop (SIGTERM, then 10 s), then end its process group and reap it."""
-    if not _exited(process):
-        process.terminate()
-        deadline = time.monotonic() + 10
-        while not _exited(process) and time.monotonic() < deadline:
-            time.sleep(0.05)
-    _reap(process)
+    _stop_workers([process])
 
 
 def _may_restart(root, name, code, restarts, hung, stopped):
@@ -320,18 +432,21 @@ def _status_lock(root):
     return lock(host_directory(root) / ".status.lock")
 
 
-def _write_status(root, started, workers, restarts, stopped, state="running"):
+def _write_status(root, started, workers, restarts, stopped, state="running", code=None, restarting=False,
+                  pid_started=None):
     try:
         path = host_directory(root) / "status.json"
         with _status_lock(root):
             previous, _ = _recorded(root)
-            write(path, {**{key: previous[key] for key in ("socket", "session", "pane", "server_identity") if key in previous},
-                         "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
+            kept = ("socket", "session", "pane", "server_identity") + (("code",) if code is None else ())
+            write(path, {**{key: previous[key] for key in kept if key in previous},
+                         **({"code": code} if code is not None else {}), "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
                          "workers": {name: {"pid": process.pid,
                                             "state": "exited" if _exited(process) else "running",
                                             "restarts": len(restarts.get(name, []))}
                                      for name, process in workers.items()},
-                         "stopped": stopped})
+                         "stopped": stopped, **({"restarting": True} if restarting else {}),
+                         **({"pid_started": pid_started} if pid_started else {})})
     except (OSError, ValueError):
         pass
 
@@ -406,26 +521,137 @@ def start(root):
     return {**status(root), "started": True}
 
 
+def _proven(recorded):
+    """Whether status.json's pid is still the supervisor it names. A host from this fix on proves it by its process
+    start (pid_started); one from before, by its tmux pane, on the server it was created on, alive and running that
+    pid, both read in one answer (a dead pane kept by remain-on-exit still shows its old pid). A pid alone proves
+    nothing: the host may have ended and the pid gone to another process, which is never signalled."""
+    pid = recorded.get("pid")
+    if not pid:
+        return False
+    if "pid_started" in recorded:
+        return processes.start_matches(recorded["pid_started"], pid)
+    socket, pane, identity = recorded.get("socket"), recorded.get("pane"), recorded.get("server_identity")
+    if not (socket and pane and identity is not None):
+        return False
+    from ..terminal.tmux import Tmux
+    try:
+        shown = Tmux(socket, identity=identity).run("display-message", "-p", "-t", pane, "#{pane_dead} #{pane_pid}")
+    except Exception:
+        return False
+    return str(shown).split() == ["0", str(pid)]
+
+
 def stop(root):
-    """Stop the supervisor and workers; remove its tmux session only with a saved server identity."""
+    """Stop the supervisor and workers (each has STOP_SECONDS, so work in flight may be ended) and wait for the
+    supervisor to exit; remove its tmux session only with a saved server identity. A pid that cannot be proven to
+    be the supervisor (_proven) is not signalled: the result says so (refused)."""
     from ..terminal.tmux import Tmux
     root = Path(root).resolve()
     recorded = status(root)
     if recorded["running"] and recorded.get("pid"):
+        if not _proven(recorded):  # just before the signal; unknown proof is a refusal
+            return {**recorded, "exited": False, "refused": f"pid {recorded['pid']} could not be proven to be the "
+                    "plugin host (it may have ended, its pid now another process's), so nothing was signalled; if no "
+                    "host runs, remove state/plugins/host/status.json, and if one does, end its tmux session"}
         try:
             os.kill(recorded["pid"], signal.SIGTERM)
         except OSError:
             pass
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and running(root):
+        deadline = time.monotonic() + STOP_SECONDS + 15
+        while time.monotonic() < deadline and (running(root) or _alive(recorded["pid"])):
             time.sleep(0.1)
+        if _alive(recorded["pid"]):
+            return {**status(root), "exited": False}  # still running: its session stays with it
     if recorded.get("session") and recorded.get("socket") and recorded.get("server_identity") is not None:
         try:
             backend = Tmux(recorded["socket"], identity=recorded["server_identity"])
             backend.run("kill-session", "-t", recorded["session"])
         except Exception:
             pass  # already gone
-    return status(root)  # its `running` says whether it stopped
+    return {**status(root), "exited": True}  # `running` says whether a host runs now
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # someone else's process: alive
+    return True
+
+
+def _restart_outcome(top, before):
+    """What became of a restart asked of the host whose start was `before`, watched for RESTART_WAIT: restarted
+    (a new start runs, done draining, on the code on disk now), restarting (it still drains), or failed."""
+    deadline = time.monotonic() + RESTART_WAIT
+    while True:
+        recorded, alive = _recorded(top)[0], running(top)
+        if alive and recorded.get("started_at") != before and not recorded.get("restarting"):
+            if recorded.get("code") == code():
+                return {"state": "restarted", "universe": str(top)}
+            return {"state": "failed", "universe": str(top), "reason": "it restarted, but on other code than this mv2"}
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    if not alive:
+        return {"state": "failed", "universe": str(top), "reason": "it stopped while restarting: run mv2 plugins "
+                "host start"}
+    if recorded.get("restarting"):
+        return {"state": "restarting", "universe": str(top),
+                "reason": "restarts with the new code once the work it has in flight finishes"}
+    return {"state": "failed", "universe": str(top), "reason": "it did not take the restart request: run mv2 "
+            "plugins host stop, then mv2 plugins host start"}
+
+
+def refresh(root):
+    """Restart the host of the tree `root` is in when it runs other code than this process: after mv2 update it
+    would keep the old code while its workers import new modules as they go, and fail (PR #32 review).
+
+    A host that records its code is asked to restart (restart.json, naming that supervisor): its workers start no
+    new handler call, and it waits, with no deadline, for every call of theirs still running, those past their limit
+    too, then for their services' requests, and runs the new code in the same pane; refresh waits RESTART_WAIT to
+    see it back, then says it is restarting (a call that never returns keeps it so, until a person stops it). A host that records no code
+    was started by an mv2 from before this check and knows no such request: by the user's decision it is stopped
+    (its own old stop, which can end work in flight) and started again. A host of another mv2 (another checkout or
+    install, by its recorded source) is left alone, and so is everything in safe mode, where a host started now
+    would find no plugin. Never raises: {state: not_running, current, other, skipped, restarted, restarting or
+    failed, universe, reason when it says why}."""
+    top = Path(root)
+    try:
+        while universes.parent(top) is not None:
+            top = universes.parent(top)
+        top = top.resolve()
+        if loader.safe_mode():
+            return {"state": "skipped", "universe": str(top), "reason": "plugins are off here (MV2_PLUGINS=off)"}
+        if not running(top):  # a status file and a heartbeat: no plugin scan
+            return {"state": "not_running", "universe": str(top)}
+        running_code, current = _recorded(top)[0].get("code"), code()
+        if running_code == current:
+            return {"state": "current", "universe": str(top)}
+        if running_code is not None and running_code["source"] != current["source"]:
+            return {"state": "other", "universe": str(top), "reason": f"it runs the mv2 in {running_code['source']}"}
+        if running_code is not None:
+            recorded = _recorded(top)[0]
+            before = recorded.get("started_at")
+            if not recorded.get("restarting"):  # a drain under way already restarts it: no second request
+                write(host_directory(top) / RESTART, {"for": before, "pid": recorded.get("pid"), "code": current,
+                                                      "requested_at": now()})
+            return _restart_outcome(top, before)
+        _log(top, "restarting: the host was started by an older mv2")
+        stopped = stop(top)
+        if stopped.get("refused"):
+            return {"state": "failed", "universe": str(top), "reason": stopped["refused"]}
+        if stopped["running"] or not stopped.get("exited", True):
+            return {"state": "failed", "universe": str(top), "reason": "it did not stop, so it still runs the old "
+                    "code: run mv2 plugins host stop, then mv2 plugins host start"}
+        if not start(top)["running"]:
+            return {"state": "failed", "universe": str(top), "reason": "it stopped but did not start again: run "
+                    "mv2 plugins host start"}
+        return {"state": "restarted", "universe": str(top)}
+    except Exception as error:  # an update never fails over its plugin host
+        return {"state": "failed", "universe": str(top), "reason": f"{type(error).__name__}: {error}"}
 
 
 def _cursor_path(scope, name):
@@ -511,6 +737,12 @@ def work(root, name, supervisor=None):
         _log(root, f"{name}: supervisor gone; stopping")
         return 0
     loader.process = "host"
+    # Before loading: a drain (SIGUSR1) that comes while the plugin loads must not end the process (its default).
+    stopping, draining = threading.Event(), threading.Event()
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, lambda *_: (draining.clear(), stopping.set()))  # a stop, a drain's too: bounded
+    signal.signal(signal.SIGUSR1, lambda *_: (draining.set(), stopping.set()))  # a restart: wait for everything
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGUSR1})  # blocked since it started: one waiting comes now
     scopes = needed(root).get(name, [])
     if not scopes:
         return 0
@@ -520,9 +752,8 @@ def work(root, name, supervisor=None):
         _log(root, f"{name}: {error}")
         return 1
     mv = api.Plugin(loaded)
-    stopping = threading.Event()
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, lambda *_: stopping.set())
+    if stopping.is_set():
+        return 0  # stopped or drained while it loaded: nothing started yet
     failed = threading.Event()
     services = _Services(loaded, mv, root, name, failed)
     services.start(scopes)
@@ -545,7 +776,9 @@ def work(root, name, supervisor=None):
                     services.start(scopes)
             if loaded.registrations.handlers:
                 for scope in scopes:
-                    _deliver(loaded, mv, scope, name)
+                    if stopping.is_set():
+                        break
+                    _deliver(loaded, mv, scope, name, stopping)
                 _abandoned[:] = [item for item in _abandoned if loader.still_running(*item)]
                 if len(_abandoned) >= ABANDONED_PER_WORKER:
                     # Calls that never returned hold threads: a fresh worker has none (the supervisor starts it
@@ -557,12 +790,24 @@ def work(root, name, supervisor=None):
             stopping.wait(WORKER_POLL_SECONDS)
     finally:
         stopping.set()
-        services.stop()
+        _finish_calls(loaded, draining, supervisor)
+        services.stop(wait=None if draining.is_set() else SERVICES_STOP_SECONDS, supervisor=supervisor)
+        if not orphaned and os.getppid() != supervisor:  # gone while it drained or stopped, after the loop
+            _log(root, f"{name}: supervisor gone; stopping")
+            orphaned = True
         if orphaned and os.getpgrp() == os.getpid():
             # Nobody is left to end this worker's process group (the supervisor does that): end it here, with what
             # its stuck calls started (a hung subprocess.run), this worker last.
             os.killpg(os.getpgrp(), signal.SIGKILL)
     return HUNG_EXIT if hung_calls else 1 if failed.is_set() else 0
+
+
+def _finish_calls(loaded, draining, supervisor):
+    """While draining, wait for every guarded call of the plugin still running, those whose caller timed out too: a
+    timeout never stops a call's thread, and a restart ends nothing. The services keep working meanwhile. A stop
+    (which clears `draining`) or the supervisor's end stops the wait."""
+    while draining.is_set() and loader.running_calls(loaded) and os.getppid() == supervisor:
+        time.sleep(0.05)
 
 
 class _Services:
@@ -591,19 +836,26 @@ class _Services:
             thread.start()
             self.threads.append(thread)
 
-    def stop(self):
+    def stop(self, wait=SERVICES_STOP_SECONDS, supervisor=None):
+        """Stop the services: their stop() runs to its end (in this thread), then each start() has `wait` seconds
+        to return, or all the time it needs when `wait` is None (a drain), unless the worker's supervisor is gone
+        meanwhile: then nobody waits for this worker any more, and it stops waiting too."""
         if self.stopping is None:
             return
         self.stopping.set()
         for _, stop_service in self.loaded.registrations.services:
             if stop_service is not None:
                 loader.guard(self.loaded, "service stop", stop_service, root=self.root)
+        deadline = None if wait is None else time.monotonic() + wait
         for thread in self.threads:
-            thread.join(5)
+            while thread.is_alive() and (deadline is None or time.monotonic() < deadline):
+                if supervisor is not None and os.getppid() != supervisor:
+                    break
+                thread.join(0.5 if deadline is None else max(0.0, min(0.5, deadline - time.monotonic())))
         self.stopping, self.threads = None, []
 
 
-def _deliver(loaded, mv, scope, name):
+def _deliver(loaded, mv, scope, name, stopping=None):
     """Deliver what is new in `scope`'s journal, at least once to each handler.
 
     Each handler goes through the events in order on its own: one still
@@ -615,7 +867,9 @@ def _deliver(loaded, mv, scope, name):
     ("gave up" is recorded where mv2 plugins and doctor show it) and its next
     events run in calls of their own. The cursor on disk moves past an event
     once every matching handler finished with it, failed (recorded) or was given
-    up on. A universe that was removed or moved is left alone."""
+    up on. A universe that was removed or moved is left alone. Once `stopping` is set, no other call starts, not
+    even another handler's of the same event: the one in flight finishes and is kept, the rest wait in the journal
+    for the next worker."""
     scope = Path(scope)
     if not (scope / "universe.json").is_file():
         return
@@ -640,7 +894,7 @@ def _deliver(loaded, mv, scope, name):
         if not found:
             break
         for event in found:
-            if not _dispatch(loaded, universe, event, scope, held, journal):
+            if not _dispatch(loaded, universe, event, scope, held, journal, stopping):
                 complete = False
             elif complete:
                 _write_cursor(scope, name, event["seq"], journal)
@@ -707,10 +961,11 @@ _saved = {}  # (plugin, universe) -> (journal, finished) last written to handler
 _abandoned = []  # (Loaded, guard key) of calls given up on while still running, in this process
 
 
-def _dispatch(loaded, universe, event, scope, held=None, journal=None):
+def _dispatch(loaded, universe, event, scope, held=None, journal=None, stopping=None):
     """Run each matching handler that has not finished `event`; False while one of them has not finished it.
 
-    A handler in `held` (still on an earlier event) is not called: each handler sees the events in order."""
+    A handler in `held` (still on an earlier event) is not called: each handler sees the events in order. Once
+    `stopping` is set, no handler is called: the next worker gives the rest of them this event."""
     held = set() if held is None else held
     kind, seq, finished = event.get("type", ""), event.get("seq", 0), True
     for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
@@ -723,7 +978,7 @@ def _dispatch(loaded, universe, event, scope, held=None, journal=None):
             continue
         if _finished.get(key, -1) >= seq:
             continue  # it finished this one while a sibling held the cursor
-        if index in held:
+        if index in held or (stopping is not None and stopping.is_set()):
             finished = False
             continue
         value = api.Event(kind, seq, event.get("at", ""), universe, event.get("agent"), event.get("launch"),
@@ -802,7 +1057,12 @@ def main(argv=None):
         if not args.name:
             parser.error("--worker needs the plugin's name")
         return work(args.root, args.name, args.supervisor)
-    return supervise(args.root)
+    if supervise(args.root) == "restart":
+        # Drained for mv2 update: the same process, pane and pid run the new code from disk.
+        sys.stdout.flush()
+        command = loader.module_command("multiverse.plugins.host", Path(args.root).resolve())
+        os.execv(command[0], command)
+    return 0
 
 
 if __name__ == "__main__":

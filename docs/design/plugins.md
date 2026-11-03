@@ -529,7 +529,9 @@ So the host is a general **supervisor** for plugins' long-running work:
   supervisor busy stopping workers or pruning never looks stopped. A second
   start (another dashboard) finds it, and never overwrites its status.
 - **Stopping.** It exits once no plugin needs it, or on `mv2 plugins host
-  stop`, and stops its workers first. If the supervisor dies without doing so
+  stop`, and stops its workers first, all at once, its heartbeat going on
+  meanwhile. A stopped worker starts no new handler call and has 10 seconds
+  (its services 5), so a stop can end work in flight. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
   second that its parent process changed, stops its services and exits, so
   nothing keeps holding a socket or running a handler. The supervisor gives each
@@ -537,6 +539,31 @@ So the host is a general **supervisor** for plugins' long-running work:
   still starting. It tells a worker has exited without reaping it (`waitid`,
   or a kqueue on macOS before Python 3.13), so it can still end what the worker
   left in its process group.
+- **Updates.** A host keeps the code it started with, while its workers
+  import modules as they go, so after `mv2 update` they mix old and new code
+  and fail. Its status records the code it runs (its source and a fingerprint
+  of mv2's files), and `mv2 plugins migrate --apply`, the step every updater
+  runs with the code it just installed, asks it to restart when that differs
+  (`restart.json`, naming the supervisor it is for, so a request left from an
+  earlier one never restarts a later host). The supervisor then drains its
+  workers: each starts no new handler call, not even another handler's of the
+  same event, and the host waits, with no deadline, for every handler call
+  still running, those past their limit too (a timeout never stops a call's
+  thread), and then for its services, which finish their requests and admit
+  no new ones. Then it runs the new code in the same pane and pid, and the new
+  workers go on from the cursors: nothing is cut, and no handler gets again an
+  event it finished. A call that ran past its limit counted as a try, so its
+  event can come again, as delivery is at least once. A worker
+  starts with the drain signal blocked until it can take it, so a restart
+  never ends one still starting. A call that never returns keeps the host
+  restarting, and `mv2 update` says so, until a person stops it, with a
+  stop's bounds. A host of another mv2 is left alone. A host from before this check records no code and
+  knows no such request; by the user's decision it is stopped and started
+  again, with its own old stop, which can end a call in flight (its plugins
+  already fail until it restarts). Nothing is signalled unless its pid is
+  proven to be the host: by its recorded process start, or, for a host from
+  before, by its tmux pane on its recorded server running that pid. A pid
+  alone may be another process's by now.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own

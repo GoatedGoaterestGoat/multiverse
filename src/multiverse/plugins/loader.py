@@ -1066,6 +1066,12 @@ def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET
     return Outcome(outcome.get("value"))
 
 
+def running_calls(loaded):
+    """How many guarded calls of `loaded` have not returned yet, those whose caller timed out too."""
+    with _running_lock:
+        return sum(1 for owner, _ in _running if owner == id(loaded))
+
+
 def still_running(loaded, key):
     """Whether a guarded call of `loaded` with this key has not returned yet."""
     with _running_lock:

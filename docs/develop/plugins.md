@@ -365,7 +365,7 @@ def start(context):            # api.ServiceContext: universes, stopping, log
 mv.service(start)
 ```
 
-A service's `start` runs in a thread of the plugin's worker until it returns or `context.stopping` is set. When you give `stop()`, it runs as the host stops the service. Turning the plugin on or off in another universe restarts the service with the new `universes`.
+A service's `start` runs in a thread of the plugin's worker until it returns or `context.stopping` is set. When you give `stop()`, it runs as the host stops the service. When the host restarts after `mv2 update`, it starts no new handler call, lets the one in flight finish and waits for `start` to return after `context.stopping` is set, however long that takes: finish what is under way, and take nothing new. `mv2 plugins host stop` gives `start` 5 seconds. Turning the plugin on or off in another universe restarts the service with the new `universes`.
 
 ## Testing
 
