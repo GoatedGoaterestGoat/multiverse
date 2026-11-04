@@ -58,9 +58,11 @@ def named_rule(line, width):
 def notice(row, above, width):
     """Claude's hint or notice in the row above the box, or one it starts at the left. A hint ends two columns
     before the right edge and starts further in than conversation and the command menu's names (two and four
-    spaces); a wrapped description of the command menu ends there too, but starts under a word of the row above."""
+    spaces). A menu's wrapped description ends there too, but starts at the description column of the row above:
+    after a gap of two or more spaces, as a description follows its name or its own earlier row, where a sentence's
+    next word follows one. Commands and a plugin's arguments draw their menus alike."""
     lead = len(row) - len(row.lstrip(' '))
-    wrapped = at(above, lead - 1) == ' ' and at(above, lead) not in ('', ' ')
+    wrapped = at(above, lead - 2) == at(above, lead - 1) == ' ' and at(above, lead) not in ('', ' ')
     return lead >= 8 and cells(row) == width - 2 and not wrapped or row.strip().startswith(NOTICES)
 
 

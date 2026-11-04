@@ -1,0 +1,10 @@
+[
+ {
+  "name": "hint under an aligned word",
+  "note": "40 columns: Claude's 'Ctrl+Y to paste deleted text' hint, under a row whose word 'for' starts at the hint's column; it goes, since that row is not a command menu row. A real capture from claude-support's 2.1.317 check",
+  "cli_version": "2.1.317",
+  "width": 40,
+  "text": "❯ Message from user:\n  Please use the Bash tool to run this\n  exact command: python3 -c 'import\n  time; time.sleep(25)'. When it\n  finishes, say it finished in one\n  short sentence.\n\n  Ran 1 shell command\n\n❯ queued follow-up text\n\n⏺ The 25-second sleep finished. Your\n  follow-up came through as only the\n  words \"queued follow-up text,\" so I\n  don't know what you want. What should\n  I do next?\n\n✻ Sautéed for 27s · done 10:13 PM\n          Ctrl+Y to paste deleted text\n───────────────────────────────── c317 ─\n❯ Do not run any tools. Reply with\n  exactly these lines, as plain text,\n  then stop: Before the wait, After\n  the wait\n────────────────────────────────────────\n  ⚠ multiverse: starting\n  Haiku 5.5 medium | u | 52k · 5% use…\n  ⏵⏵ bypass permissions on (shift+tab\n",
+  "shown": "❯ Message from user:\n  Please use the Bash tool to run this\n  exact command: python3 -c 'import\n  time; time.sleep(25)'. When it\n  finishes, say it finished in one\n  short sentence.\n\n  Ran 1 shell command\n\n❯ queued follow-up text\n\n⏺ The 25-second sleep finished. Your\n  follow-up came through as only the\n  words \"queued follow-up text,\" so I\n  don't know what you want. What should\n  I do next?\n\n✻ Sautéed for 27s · done 10:13 PM"
+ }
+]
