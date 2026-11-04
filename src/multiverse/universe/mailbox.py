@@ -222,6 +222,7 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
 
     blocking=False raises BlockingIOError on contention so a waiter can check
     its own deadline and lifetime without keeping another lock while waiting.
+    A peek never recreates an agent directory removed before its lock opens.
     """
     if peek and (all_messages or after is not None):
         raise ValueError('--peek cannot be combined with --all or --after')
@@ -232,7 +233,7 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
-    with lock(agent_dir / '.inbox.lock', blocking=blocking):
+    with lock(agent_dir / '.inbox.lock', blocking=blocking, create_parent=not peek):
         data, read_cursor, records = _messages(agent_dir)
         states = _states(agent_dir)
         marks = _read_marks(agent_dir)
