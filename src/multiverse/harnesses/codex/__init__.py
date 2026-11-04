@@ -88,7 +88,7 @@ class CodexAdapter(ConfiguredAdapter):
 
     def navigation_target(self, session, target):
         """Require the same exact recorded-home proof as earlier-generation transcript reads."""
-        from .transcripts import readable
+        from .transcripts import view
         from ..types import normalize_session_id
         import time
         if not isinstance(session.home, str) or not Path(session.home).is_absolute():
@@ -99,11 +99,11 @@ class CodexAdapter(ConfiguredAdapter):
                 if time.monotonic() >= deadline:
                     raise TimeoutError('Saved conversation metadata could not be checked within 30 seconds')
         try:
-            proven = readable(replace(session, native_id=normalize_session_id(target)), reader=ReadBudget())
+            observed = view(replace(session, native_id=normalize_session_id(target)), reader=ReadBudget()).source
         except (OSError, ValueError) as error:
             return NativeResult('unavailable', f'Saved conversation cannot be verified: {error}')
-        if proven is not True:
-            return NativeResult('unavailable', 'The saved conversation rollout is missing, unreadable or unsupported in its recorded Codex home')
+        if observed.state != 'supported':
+            return NativeResult('unavailable', observed.reason or 'The saved conversation rollout is missing, unreadable or unsupported in its recorded Codex home')
         return NativeResult('ok')
 
     def agent_identity_policy(self):

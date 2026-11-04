@@ -15,6 +15,7 @@ import stat
 from ..types import (RowFact, TranscriptSource, TranscriptView,
                      TranscriptRowsChanged, normalize_session_id)
 from .storage import session_home, _header, _metadata_object, MAX_ENTRIES
+from .rollout import open_rollout, preferred, decoder, CompressionUnavailable, MAX_ROWS
 
 BODY_LIMIT = 16 << 20
 _indexes = OrderedDict()  # bounded metadata only; never retain row bodies
@@ -41,15 +42,7 @@ def reading_home(session):
 
 
 def open_regular(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise Unreadable('The Codex rollout is not a regular file')
-        handle = os.fdopen(fd, 'rb')
-    except BaseException:
-        os.close(fd)
-        raise
-    return handle
+    return open_rollout(path)
 
 
 def copies(home, native_id, reader=None):
@@ -78,11 +71,10 @@ def copies(home, native_id, reader=None):
                     path = Path(entry.path)
                     mode = path.lstat().st_mode
                     if name.fullmatch(entry.name):
-                        if entry.name.endswith('.zst'):
-                            path = path.with_suffix('')
-                            if not path.exists():
-                                raise Unreadable('Compressed Codex rollouts are not supported')
-                        evidence = _header(path, native_id)
+                        path = preferred(path)
+                        if path.suffix == '.zst':
+                            decoder()  # Preserve missing-module advice rather than hiding it as bad metadata.
+                        evidence = _header(path, native_id, budget=lambda: check(reader))
                         if evidence.state != 'ok':
                             raise Unreadable('The Codex rollout header cannot verify this thread')
                         found.add(path)
@@ -95,6 +87,8 @@ def copies(home, native_id, reader=None):
         except FileNotFoundError:
             if directory not in roots:
                 raise Unreadable('A Codex sessions directory disappeared') from None
+        except CompressionUnavailable:
+            raise
         except OSError:
             raise Unreadable('Codex rollout storage cannot be read') from None
     return sorted(found, key=lambda path: (path.stat().st_mtime_ns, str(path)))
@@ -417,6 +411,8 @@ def validate_scan(handle, entries, before, reader=None):
     """Never publish a mixed scan; appends are allowed only after an open-file prefix proof."""
     after = signature(os.fstat(handle.fileno()))
     if after != before:
+        if getattr(handle, 'compressed', False):
+            raise Unreadable('The compressed Codex rollout changed during its metadata scan')
         if not same_file_prefix(before, after):
             raise Unreadable('The Codex rollout changed during its metadata scan')
         try:
@@ -435,6 +431,8 @@ def read_copy(path, reader=None):
     # byte-identical lines, so a cold scan parses once and an append parses its tail.
     old_signature, old = _indexes.get(path, (None, ()))
     with open_regular(path) as handle:
+        if getattr(handle, 'compressed', False):
+            handle.set_check(lambda: check(reader))
         status = os.fstat(handle.fileno())
         stamp = signature(status)
         if stamp == old_signature:
@@ -443,6 +441,8 @@ def read_copy(path, reader=None):
         out, offset, previous = [], 0, ''
         for number, line in enumerate(handle):
             check(reader)
+            if getattr(handle, 'compressed', False) and number >= MAX_ROWS:
+                raise Unreadable('The compressed Codex rollout exceeds its row limit')
             if not line.endswith(b'\n'):
                 break
             digest = hashlib.sha256(line).hexdigest()
@@ -611,6 +611,8 @@ def view(session, *, tip=None, reader=None):
         return empty('unavailable', NO_STORAGE)
     try:
         path, entries, _ = newest(home, session.native_id, reader)
+    except CompressionUnavailable as error:
+        return empty('error', str(error))
     except (Unreadable, OSError):
         return empty('error', 'Codex rollout storage cannot be read consistently')
     if path is None:
@@ -662,8 +664,11 @@ def bodies(session, view, indexes, *, max_bytes, reader=None):
                 raise TranscriptRowsChanged()
         last = max(indexes, default=-1)
         with open_regular(path) as handle:
+            if getattr(handle, 'compressed', False):
+                handle.set_check(lambda: check(reader))
             stamp = signature(os.fstat(handle.fileno()))
-            if not same_file_prefix(expected, stamp):
+            if (not same_file_prefix(expected, stamp)
+                    or getattr(handle, 'compressed', False) and stamp != expected):
                 raise TranscriptRowsChanged()
             if stamp != expected:
                 prove_prefix(handle, entries, last, reader)
@@ -684,6 +689,8 @@ def bodies(session, view, indexes, *, max_bytes, reader=None):
                 out.append(row if isinstance(row, dict) else None)
             after = signature(os.fstat(handle.fileno()))
             if after != stamp:
+                if getattr(handle, 'compressed', False):
+                    raise TranscriptRowsChanged()
                 prove_prefix(handle, entries, last, reader)
                 if not same_file_prefix(stamp, signature(os.fstat(handle.fileno()))):
                     raise TranscriptRowsChanged()

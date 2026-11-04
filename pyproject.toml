@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "textual>=8.2.3,<9",
     "websockets>=15,<18",
+    "zstandard; python_version < '3.14'",
 ]
 
 [project.scripts]

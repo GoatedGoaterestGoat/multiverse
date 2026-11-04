@@ -64,7 +64,9 @@ Core also looks for these optional methods and attributes:
 | `retained_usage(session, runtime)` | The last usage reading, kept across resume |
 | `display_pane(text)` | The dashboard's live pane without the harness's input box and the rows under it; see [pane display](#pane-display) |
 
-Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Unreadable or malformed metadata, compressed-only or linked storage, entries that disappear during traversal and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
+Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Plain and compressed rollouts use the same bounded metadata proof, and a plain sibling takes precedence.
+
+Unreadable or malformed metadata, unavailable Zstandard support, damaged compression, linked storage, entries that disappear during traversal and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
 
 ### Types
 

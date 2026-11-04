@@ -6,7 +6,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 
 | Requirement | Version | Notes |
 | --- | --- | --- |
-| Python | 3.11 or newer | `uv sync` or `pip install .` adds the Python dependencies, `textual>=8.2.3,<9` and `websockets>=15,<18`. |
+| Python | 3.11 or newer | `uv sync` or `pip install .` adds the Python dependencies, `textual>=8.2.3,<9`, `websockets>=15,<18`, and `zstandard` below Python 3.14. Python 3.14 and newer use the built-in `compression.zstd`. |
 | tmux | 3.2 or newer | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
 | Platform | macOS or Linux | Windows isn't supported, because mv2 needs tmux and POSIX file locks. |
 | Harness CLI | See below | Install and sign in to at least one of Codex, Claude Code or Pi. Codex is the default harness. |

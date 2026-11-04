@@ -6,6 +6,7 @@ import re
 import stat
 
 from ..types import NativeResult, normalize_session_id
+from .rollout import open_rollout, preferred
 
 MAX_ENTRIES = 20000
 HEADER_BYTES = 1024 * 1024
@@ -41,14 +42,15 @@ def _metadata_object(pairs):
     return result
 
 
-def _header(path, native_id):
+def _header(path, native_id, *, budget=None):
     try:
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), 'rb') as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                return _unknown(path, 'the matching rollout is not a regular file')
+        with open_rollout(path, check=budget) as handle:
             line = handle.readline(HEADER_BYTES + 1)
-        if len(line) > HEADER_BYTES or not line.endswith(b'\n'):
-            return _unknown(path, 'the metadata header is oversized or incomplete')
+    except OSError as error:
+        return _unknown(path, str(error))
+    if len(line) > HEADER_BYTES or not line.endswith(b'\n'):
+        return _unknown(path, 'the metadata header is oversized or incomplete')
+    try:
         row = json.loads(line, object_pairs_hook=_metadata_object)
         payload = row.get('payload') if isinstance(row, dict) and row.get('type') == 'session_meta' else None
         if not isinstance(payload, dict) or normalize_session_id(payload.get('id')) != native_id:
@@ -56,7 +58,7 @@ def _header(path, native_id):
         if 'session_id' in payload:
             # Native session_id names the root; a fork has its own stable id.
             normalize_session_id(payload['session_id'])
-    except (OSError, ValueError, RecursionError) as error:
+    except (ValueError, RecursionError) as error:
         return _unknown(path, str(error))
     return NativeResult('ok', value={'present': True})
 
@@ -98,11 +100,7 @@ def session_storage_evidence(session, home):
                         return _unknown(directory, f'the scan exceeded {MAX_ENTRIES} entries')
                     candidate = Path(entry.path)
                     if filename.fullmatch(entry.name):
-                        if entry.name.endswith('.zst'):
-                            plain = candidate.with_suffix('')
-                            if not plain.exists():
-                                return _unknown(candidate, 'compressed rollout metadata cannot be verified by this reader')
-                            candidate = plain  # Native gives the plain sibling precedence.
+                        candidate = preferred(candidate)
                         return _header(candidate, native_id)
                     if entry.name.startswith('rollout-') and native_id in entry.name:
                         return _unknown(candidate, 'unsupported matching rollout filename')

@@ -390,8 +390,150 @@ class CodexTranscriptReadingTest(BaseTest):
                 self.assertEqual((damaged_view.rows[-1].kind, damaged_view.rows[-1].label), ('unreadable', 'meta'))
                 self.assertEqual(self.adapter.transcript_bodies(self.session, damaged_view, [3], max_bytes=1 << 20), [None])
 
+    def test_compressed_copies_preserve_logical_rows_bodies_and_plain_precedence(self):
+        """Cold compressed history must preserve exact identity/cursors without writing a sibling or selecting stale compressed bytes over plain data."""
+        from codex_compression import compress
+        compressed = self.path.with_suffix('.jsonl.zst')
+        for shape in ('single frame', 'multiple frames', 'empty frame', 'unknown size', 'native window', 'checksum', 'skippable', 'plain sibling'):
+            with self.subTest(shape=shape):
+                self.write([message('compressed prompt'), event('user_message', message='compressed prompt')])
+                if shape == 'native window':
+                    with self.path.open('a') as handle:
+                        handle.write(json.dumps(event('padding', content='p' * (3 << 20))) + '\n')
+                data = self.path.read_bytes()
+                plain_view = self.adapter.transcript_view(self.session)
+                if shape == 'multiple frames':
+                    header, rest = data.split(b'\n', 1)
+                    encoded = compress(header + b'\n') + compress(rest)
+                else:
+                    encoded = compress(data, content_size=shape != 'unknown size', checksum=shape == 'checksum')
+                    if shape == 'skippable':
+                        encoded = b'\x50\x2a\x4d\x18\x04\x00\x00\x00note' + encoded
+                    if shape == 'empty frame':
+                        encoded = compress(b'') + encoded
+                compressed.write_bytes(encoded)
+                if shape == 'plain sibling':
+                    self.write([message('plain wins'), event('user_message', message='plain wins')])
+                else:
+                    self.path.unlink()
+                before = {p.name: p.read_bytes() for p in self.path.parent.iterdir()}
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(view.source.state, 'supported')
+                if shape != 'plain sibling':
+                    self.assertEqual(view.rows, plain_view.rows, 'Compression cannot change logical positions or row proofs')
+                self.assertTrue(self.adapter.transcript_readable(self.session))
+                self.assertEqual(self.adapter.navigation_target(self.session, self.native).state, 'ok')
+                bodies = self.adapter.transcript_bodies(self.session, view, [1, 0, 2], max_bytes=1 << 20)
+                self.assertEqual(bodies[0]['payload']['content'][0]['text'],
+                                 'plain wins' if shape == 'plain sibling' else 'compressed prompt')
+                self.assertEqual(bodies[1]['payload']['id'], self.native)
+                self.assertEqual(view.rows[1].label, 'prompt')
+                self.assertEqual({p.name: p.read_bytes() for p in self.path.parent.iterdir()}, before)
+                compressed.unlink()
+
+        self.write([message('old compressed')])
+        compressed.write_bytes(compress(self.path.read_bytes()))
+        self.path.unlink()
+        real_open = t.open_regular
+        def publish_plain(path):
+            handle = real_open(path)
+            self.write([message('new plain')])
+            return handle
+        with self.subTest(concurrent='plain winner appears'):
+            with patch.object(t, 'open_regular', side_effect=publish_plain):
+                self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+            latest = self.adapter.transcript_view(self.session)
+            self.assertEqual(latest.source.state, 'supported')
+            self.assertEqual(self.adapter.transcript_bodies(self.session, latest, [1], max_bytes=1 << 20)[0]
+                             ['payload']['content'][0]['text'], 'new plain')
+        self.path.unlink(missing_ok=True)
+        class Expired(ValueError):
+            pass
+        class Budget:
+            inside_header = False
+            def check(self):
+                if self.inside_header:
+                    raise Expired('cancelled while checking compressed header')
+        budget, real_header = Budget(), t._header
+        def header_budget(*args, **kwargs):
+            budget.inside_header = True
+            try:
+                return real_header(*args, **kwargs)
+            finally:
+                budget.inside_header = False
+        with self.subTest(cancellation='compressed header'), patch.object(t, '_header', side_effect=header_budget):
+            with self.assertRaises(Expired):
+                self.adapter.transcript_view(self.session, reader=budget)
+
+        self.write([message('keep')])
+        encoded = compress(self.path.read_bytes())
+        self.path.unlink()
+        for name, data in (('truncated header', encoded[:5]), ('truncated data', encoded[:-1]),
+                           ('corrupt header', b'bad!' + encoded[4:]),
+                           ('unfinished trailing header', encoded + b'\x28\xb5'),
+                           ('incomplete second frame', encoded + encoded[:-1])):
+            with self.subTest(damaged_compression=name):
+                compressed.write_bytes(data)
+                self.assertEqual(self.adapter.session_storage_evidence(self.session, str(self.home)).state, 'unknown')
+                self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+                self.assertIsNone(self.adapter.transcript_readable(self.session))
+        compressed.write_bytes(encoded)
+        with patch('multiverse.harnesses.codex.rollout.import_module', side_effect=ImportError('missing')):
+            view = self.adapter.transcript_view(self.session)
+            self.assertEqual(view.source.state, 'error')
+            self.assertIn('Zstandard support is missing', view.source.reason)
+            self.assertIn('Zstandard support is missing',
+                          self.adapter.session_storage_evidence(self.session, str(self.home)).reason)
+            self.assertIn('Zstandard support is missing', self.adapter.navigation_target(self.session, self.native).reason)
+            self.write([message('plain needs no codec')])
+            self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'supported')
+            self.path.unlink()
+        for setting in ('MAX_BLOCKS', 'MAX_LINE', 'MAX_BYTES', 'MAX_INPUT'):
+            with self.subTest(bounded=setting), patch('multiverse.harnesses.codex.rollout.' + setting, 0):
+                self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+        with patch.object(t, 'MAX_ROWS', 0):
+            t._indexes.clear()
+            self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+        from multiverse.harnesses.codex import rollout
+        with self.assertRaises(rollout.RolloutError):
+            with rollout.open_rollout(compressed) as handle:
+                handle.read(0)  # Finish frame-header validation before exercising the encoded-read budget.
+                with patch.object(rollout, 'MAX_INPUT', 0):
+                    handle.read(1)
+        self.write([message('x' * 2048)])
+        compressed.write_bytes(compress(self.path.read_bytes()))
+        self.path.unlink()
+        with patch('multiverse.harnesses.codex.rollout.MAX_LINE', 1024):
+            t._indexes.clear()
+            self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+        # A valid unknown-size frame can ask for an unreasonable decoder window.
+        self.write([message('window')])
+        oversized_window = bytearray(compress(self.path.read_bytes(), content_size=False))
+        self.path.unlink()
+        self.assertFalse(oversized_window[4] & 32)
+        oversized_window[5] = (27 - 10) << 3  # 128 MiB, above the bounded reader's 64 MiB.
+        compressed.write_bytes(oversized_window)
+        self.assertEqual(self.adapter.session_storage_evidence(self.session, str(self.home)).state, 'unknown')
+        compressed.write_bytes(encoded)
+        self.path.symlink_to(self.path.with_name('missing-plain-target'))
+        # Native preference cannot depend on which sibling scandir happens to yield first.
+        scandir = os.scandir
+        class CompressedFirst:
+            def __init__(self, path):
+                self.entries = scandir(path)
+            def __enter__(self):
+                self.entries.__enter__()
+                return self
+            def __iter__(self):
+                return iter(sorted(self.entries, key=lambda item: not item.name.endswith('.zst')))
+            def __exit__(self, *args):
+                return self.entries.__exit__(*args)
+        with patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=CompressedFirst):
+            self.assertEqual(self.adapter.session_storage_evidence(self.session, str(self.home)).state, 'unknown')
+        self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+
     def test_scope_is_recorded_storage_and_uncertainty_never_becomes_absence(self):
-        """A missing, linked, compressed or foreign rollout cannot be read through another caller's home or thread."""
+        """A missing, linked, damaged or foreign rollout cannot be read through another caller's home or thread."""
         self.write([message('go')])
         for name, session, environment, state in [
                 ('recorded', self.session, {'CODEX_HOME': '/elsewhere'}, 'supported'),
@@ -490,8 +632,8 @@ class CodexTranscriptReadingTest(BaseTest):
         self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
         self.path.write_bytes(original)
         real_header = t._header
-        def moved_after_header(path, native):
-            result = real_header(path, native)
+        def moved_after_header(path, native, **kwargs):
+            result = real_header(path, native, **kwargs)
             self.path.write_bytes(original.replace(self.native.encode(), str(uuid4()).encode()))
             return result
         with patch.object(t, '_header', moved_after_header):
