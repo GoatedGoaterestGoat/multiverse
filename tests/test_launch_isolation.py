@@ -230,9 +230,9 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_legacy_storage_adopts_only_a_unique_conversation_file(self):
         """Legacy adoption must find the exact conversation or prove no child ever started; otherwise storage can strand history, bridge preparation can reject HOME as a storage key or erase unknown keys, and two independent fresh-start decisions can repeat their notice."""
         from multiverse.harnesses.claude import project_key
-        cases = ('server', 'caller', 'caller-missing-other-stores', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
+        cases = ('server', 'compressed', 'caller', 'caller-missing-other-stores', 'request', 'none', 'multiple', 'unreadable', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling', 'empty-before-child', 'empty-may-have-child', 'empty-accepted')
         for family, found in ((family, found) for family in ('claude', 'codex') for found in cases):
-            if family == 'claude' and found in ('restored-spelling', 'scope-spelling', 'default-server-bridge', 'default-server-auto'):
+            if family == 'claude' and found in ('compressed', 'restored-spelling', 'scope-spelling', 'default-server-bridge', 'default-server-auto'):
                 continue
             with self.subTest(family=family, found=found):
                 key = 'CLAUDE_CONFIG_DIR' if family == 'claude' else 'CODEX_HOME'
@@ -271,7 +271,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         properties['native_service_identity'] = {'provider': 'codex', 'scope': {'CODEX_HOME': str(homes['server'])}}
                     write(directory / 'properties.json', properties)
                 request = {'env': {} if found == 'restored-spelling' else {key: str(homes['request'])}, 'unset_env': []}
-                if found in ('server', 'unreadable', 'same-home-alias', 'server-spelling') or found.startswith('default-server'):
+                if found in ('server', 'compressed', 'unreadable', 'same-home-alias', 'server-spelling') or found.startswith('default-server'):
                     request['env'] = {}  # This launch actually inherited the server's storage.
                 request_path = directory / 'launches' / launch / 'request.json'
                 if found.startswith('empty-'):
@@ -289,13 +289,18 @@ class LaunchIsolationTest(unittest.TestCase):
                         continue  # Ordinary adoption can still find the conversation in the caller's home.
                     folder = home / 'projects' / project_key(str(self.work)) if family == 'claude' else home / 'sessions'
                     folder.mkdir(parents=True)
-                    if found in (source, 'multiple') or (found in ('unreadable', 'caller-missing-other-stores') and source == 'caller') or (found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
+                    if found in (source, 'multiple') or (found in ('unreadable', 'caller-missing-other-stores') and source == 'caller') or (found in ('compressed', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') and source == 'server'):
                         identifier = properties['native_session_id']
                         if family == 'claude':
                             (folder / (identifier + '.jsonl')).write_text(json.dumps({'type': 'user', 'sessionId': identifier}) + '\n')
                         else:
-                            (folder / ('rollout-2026-10-19T19-00-00-' + identifier + '.jsonl')).write_text(
-                                json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n')
+                            rollout = folder / ('rollout-2026-10-19T19-00-00-' + identifier + '.jsonl')
+                            content = (json.dumps({'type': 'session_meta', 'payload': {'id': identifier}}) + '\n').encode()
+                            if found == 'compressed':
+                                from codex_compression import compress
+                                rollout.with_suffix('.jsonl.zst').write_bytes(compress(content))
+                            else:
+                                rollout.write_bytes(content)
                 if found == 'same-home-alias':
                     import shutil
                     shutil.rmtree(homes['caller'])
@@ -330,7 +335,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({path: path.read_bytes() for path in paths}, before)
                         backend.create.assert_not_called()
                     else:
-                        chosen = homes['caller' if fresh or found == 'caller-missing-other-stores' else 'server' if found in ('same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
+                        chosen = homes['caller' if fresh or found == 'caller-missing-other-stores' else 'server' if found in ('compressed', 'same-home-alias', 'default-server', 'default-server-bridge', 'default-server-auto', 'server-spelling', 'restored-spelling', 'scope-spelling') else found]
                         result = lifecycle.start(self.root, resume=directory.name)
                         self.assertEqual(result['native_session_home'], str(chosen.resolve()))
                         if found in ('default-server-bridge', 'default-server-auto'):

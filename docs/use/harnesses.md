@@ -232,7 +232,7 @@ Plugins read Codex's models through `harness.models()` and `harness.check()` ([p
 
 The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
 
-Plugins also read a Codex agent's transcript from its recorded rollout files, for connected and launch-only agents. Inputs, steers, tool results, compactions and native turn endings carry the same public labels as Claude's. Ephemeral threads such as `/btw` have no rollout and read as unavailable. Compressed-only rollouts, conflicting copies and referenced rollout segments (such as native `thread/revert` histories) are reported as unreadable. See the [reading rules](../design/transcript-protocols.md#codex-rollout-rules).
+Plugins also read a Codex agent's transcript from its recorded rollout files, for connected and launch-only agents. Plain and compressed rollouts are supported; a plain sibling wins, and reads never unpack files into Codex storage. Inputs, steers, tool results, compactions and native turn endings carry the same public labels as Claude's. Ephemeral threads such as `/btw` have no rollout and read as unavailable. Truncated or corrupt compressed rollouts, conflicting copies and referenced rollout segments (such as native `thread/revert` histories) are reported as unreadable. See the [reading rules](../design/transcript-protocols.md#codex-rollout-rules).
 
 ### Codex's questions and one-shot runs
 

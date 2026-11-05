@@ -1,15 +1,18 @@
 """Batch isolation, redacted failure reasons, and delivery advice that follows the agent's state."""
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 from unittest.mock import patch
 from uuid import uuid4
 from types import SimpleNamespace
 
-from test_multiverse import BaseTest
+from test_multiverse import BaseTest, ROOT
 from multiverse import cli, harnesses, store
-from multiverse.universe import mailbox
+from multiverse.universe import mailbox, relocate, templates
 from multiverse.runtime import lifecycle, native, storage_adoption
 from multiverse.harnesses.types import NativeResult
 from multiverse.terminal import tmux
@@ -66,6 +69,129 @@ class MessagingCliTest(BaseTest):
 
     def texts(self, name, text):
         return [record for record in self.history(name) if record['text'] == text]
+
+    def test_send_reminders_peek_once_and_match_the_recipient_not_its_name(self):
+        """A reminder must survive renames and moves without consuming unread messages or confusing names and native-queued senders."""
+        directory = self.directories['third']
+        properties = store.read(directory / 'properties.json')
+        store.write(directory / 'properties.json', {**properties, 'universe_id': store.read(self.root / 'universe.json')['id']})
+        environment = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_DIR': str(directory),
+                       'MV2_AGENT_ID': directory.name, 'MV2_LAUNCH_ID': store.read(directory / 'runtime.json')['launch_id']}
+        first = {'agent_id': self.directories['first'].name, 'universe': str(self.root), 'name': 'old name'}
+        second = {'agent_id': self.directories['second'].name, 'universe': str(self.root), 'name': 'second'}
+        mailbox.append_message(directory, 'already read', first)
+        mailbox.inbox(directory)
+        mailbox.append_message(directory, 'held and read', second, intended='steer', focus='ended')
+        mailbox.held(directory, 'ended')
+        mailbox.append_message(directory, 'already in the native queue', second, delivery='follow-up')
+        mailbox.append_message(directory, 'another universe', {**second, 'agent_id': str(uuid4()),
+                                                             'universe': str(self.work / 'elsewhere')})
+        for _ in range(51):
+            mailbox.append_message(directory, 'same name is not the recipient', {'name': 'first'})
+        mailbox.append_message(directory, 'answer me', first)
+        with (directory / 'inbox.jsonl').open('ab') as stream:
+            stream.write(b'{"id":')  # An unfinished append does not hide the complete rows before it.
+        def snapshot():
+            return {p.name: p.read_bytes() for p in directory.glob('inbox*') if p.is_file()}
+        before = snapshot()
+        with patch.dict(os.environ, environment):
+            for delivery in ('steer', 'follow-up', 'inbox-only'):
+                with self.subTest(delivery=delivery), patch.object(mailbox, 'inbox', wraps=mailbox.inbox) as peek:
+                    output = self.output('send', f"first,{self.directories['first'].name},second",
+                                         '--delivery', delivery, '--text', 'reply')
+                    self.assertEqual(len(output.splitlines()), 2)
+                    self.assertTrue(output.splitlines()[0].endswith('Reminder: you have unread messages from first.'))
+                    self.assertNotIn('Reminder:', output.splitlines()[1])
+                    peek.assert_called_once_with(directory, limit=None, peek=True, blocking=False)
+                    self.assertEqual(snapshot(), before)
+            self.behavior = NativeResult('error', 'fixture refusal')
+            self.output('send', 'first', '--text', 'failed reply', code=1)
+            self.assertTrue(self.stderr.strip().endswith('Reminder: you have unread messages from first.'))
+            self.assertEqual(snapshot(), before)
+            with self.subTest('a launch notice and the reminder stay separate'), \
+                    patch.object(native, 'send_or_wake', return_value={'state': 'native_queued',
+                                 'notices': ['Note: this launch starts it fresh under the same session ID']}):
+                output = self.output('send', 'first', '--text', 'with a launch notice')
+                self.assertTrue(output.endswith('same session ID\nReminder: you have unread messages from first.\n'), output)
+            with patch.object(mailbox, 'inbox', side_effect=AssertionError('JSON and plugin sends do not peek')) as peek:
+                result = json.loads(self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'json', '--json'))
+                self.assertEqual(result['state'], 'queued')
+                lines = []
+                send.run(self.root, agent='first', text='plugin', sender={'plugin': 'fixture'},
+                         delivery='inbox-only', _present=lines.append)
+                self.assertNotIn('Reminder:', lines[0])
+                peek.assert_not_called()
+            destination = templates.create(self.root / 'subverses/moved', 'moved', workdir=self.work)
+            first_properties = store.read(self.directories['first'] / 'properties.json')
+            with patch.object(relocate, 'observe', return_value={'live': 'dormant', 'reason': ''}):
+                relocate.move_agent(self.root, 'first', destination)
+            with self.subTest('the same recipient after a move'), patch.object(self, 'root', destination):
+                output = self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'after a move')
+                self.assertTrue(output.strip().endswith('Reminder: you have unread messages from first.'), output)
+            replacement = self.root / 'state/agents' / str(uuid4())
+            store.write(replacement / 'properties.json', {**first_properties, 'id': replacement.name,
+                        'native_session_id': str(uuid4())})
+            with self.subTest('a different agent reusing the old name'):
+                output = self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'new agent')
+                self.assertNotIn('Reminder:', output)
+            self.assertEqual(snapshot(), before)
+        with patch.object(mailbox, 'inbox', side_effect=AssertionError('A person does not peek')) as peek:
+            self.assertNotIn('Reminder:', self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'person'))
+            peek.assert_not_called()
+
+    def test_send_skips_a_busy_or_damaged_sender_inbox(self):
+        """Optional reminder reads must not turn inbox lock contention or a damaged file into a blocked or failed send."""
+        directory = self.directories['third']
+        properties = store.read(directory / 'properties.json')
+        store.write(directory / 'properties.json', {**properties, 'universe_id': store.read(self.root / 'universe.json')['id']})
+        environment = {**os.environ, 'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_DIR': str(directory),
+                       'MV2_AGENT_ID': directory.name, 'MV2_LAUNCH_ID': store.read(directory / 'runtime.json')['launch_id']}
+        mailbox.append_message(directory, 'unread', {'agent_id': self.directories['first'].name,
+                              'universe': str(self.root), 'name': 'first'})
+        def send_child(reminder=False):
+            child = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root), 'send',
+                                    'first', '--delivery', 'inbox-only', '--text', 'still sent'],
+                                   env=environment, capture_output=True, text=True, timeout=5)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertIn("Saved to first's inbox", child.stdout)
+            self.assertEqual('Reminder:' in child.stdout, reminder)
+        for name in ('.inbox.lock', '.launch.lock'):
+            with self.subTest(lock=name), store.lock(directory / name):
+                send_child(reminder=name == '.launch.lock')
+        for name, damaged in (('inbox.cursor', b'bad'), ('inbox-state.json', b'[]'),
+                              ('inbox.jsonl', b'[]\n'), ('inbox.jsonl', None), ('.inbox.lock', None)):
+            with self.subTest(file=name, damage=damaged):
+                path = directory / name
+                original = path.read_bytes() if path.exists() else None
+                path.unlink(missing_ok=True)
+                try:
+                    if damaged is None:
+                        os.mkfifo(path)
+                    else:
+                        path.write_bytes(damaged)
+                    send_child()
+                finally:
+                    path.unlink(missing_ok=True)
+                    if original is not None:
+                        path.write_bytes(original)
+        send_child(reminder=True)
+        acquire = mailbox.lock
+        removed = False
+        @contextmanager
+        def remove_before_the_peek_lock(path, **options):
+            nonlocal removed
+            if path == directory / '.inbox.lock' and not removed:
+                removed = True
+                shutil.rmtree(directory)
+            with acquire(path, **options):
+                yield
+        with patch.dict(os.environ, environment), \
+                patch.object(mailbox, 'lock', side_effect=remove_before_the_peek_lock):
+            output = self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'after removal')
+        self.assertIn("Saved to first's inbox", output)
+        self.assertNotIn('Reminder:', output)
+        self.assertTrue(removed)
+        self.assertFalse(directory.exists(), 'Optional advice must not recreate a removed sender')
 
     def test_delivery_check_summarizes_confirmations_without_hiding_other_evidence(self):
         """Large checks must keep uncertain and failed messages visible without burying them in confirmed rows;

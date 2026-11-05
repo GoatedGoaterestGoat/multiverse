@@ -1,0 +1,26 @@
+[
+ {
+  "name": "argument menu, 40 columns",
+  "note": "the /multiverse typeahead's argument menu after typing '/multiverse c': its last row, a wrapped description ending two columns before the edge right above the box, stays, since it starts at the description column after a two-space gap. The tail of a real capture from claude-support's check (a scratch universe)",
+  "cli_version": "2.1.318",
+  "width": 40,
+  "text": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    coordination    skill · Spawn,\n                    inspect and commu…\n─────────────────────────────────── pd ─\n❯ /multiverse c\n────────────────────────────────────────\n  ⚠ multiverse: starting\n  Haiku 5.5 medium | u | 43k · 4% use…\n  ⏵⏵ bypass permissions on (shift+tab\n",
+  "shown": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    coordination    skill · Spawn,\n                    inspect and commu…"
+ },
+ {
+  "name": "argument menu, 60 columns",
+  "note": "the /multiverse typeahead's argument menu after typing '/multiverse c': its last row, a wrapped description ending two columns before the edge right above the box, stays, since it starts at the description column after a two-space gap. The tail of a real capture from claude-support's check (a scratch universe); the account's weekly figure in the status row is zeroed",
+  "cli_version": "2.1.318",
+  "width": 60,
+  "text": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    coordination   skill · Spawn, inspect and communicate\n                   with agents using ordinary shell comma…\n─────────────────────────────────────────────────────── pd ─\n❯ /multiverse c\n────────────────────────────────────────────────────────────\n  ⚠ multiverse: starting\n  Haiku 5.5 medium | u | 43k · 4% used | weekly 00% left\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+  "shown": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    coordination   skill · Spawn, inspect and communicate\n                   with agents using ordinary shell comma…"
+ },
+ {
+  "name": "argument menu, another argument",
+  "note": "the /multiverse typeahead's argument menu after typing '/multiverse m': its last row, a wrapped description ending two columns before the edge right above the box, stays, since it starts at the description column after a two-space gap. The tail of a real capture from claude-support's check (a scratch universe)",
+  "cli_version": "2.1.318",
+  "width": 40,
+  "text": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    mv2-help   skill · Explain mv2\n               capabilities and help …\n─────────────────────────────────── pd ─\n❯ /multiverse m\n────────────────────────────────────────\n  ⚠ multiverse: starting\n  Haiku 5.5 medium | u | 43k · 4% use…\n  ⏵⏵ bypass permissions on (shift+tab\n",
+  "shown": "✻ Baked for 1s · done 9:12 PM\n\n\n\n\n\n\n\n\n\n\n\n    mv2-help   skill · Explain mv2\n               capabilities and help …"
+ }
+]

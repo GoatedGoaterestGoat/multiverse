@@ -70,6 +70,10 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
+When an agent sends a message and has unread inbox messages from that recipient, its output ends with `Reminder: you have unread messages from NAME.` This applies to every delivery mode, including saved messages whose native delivery fails, and to each matching recipient in a batch. The check peeks before sending and leaves messages unread; like `inbox --peek`, it uses complete rows before an unfinished tail. A busy or unreadable inbox skips the reminder.
+
+The match follows the recipient's agent ID across renames and moves. People, plugin senders and `--json` output get no reminder.
+
 Failed delivery and check lines go to stderr and exit nonzero; successful lines
 go to stdout. With `--json`, the result stays on stdout.
 

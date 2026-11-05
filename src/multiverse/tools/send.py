@@ -40,6 +40,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
         raise ValueError("Specify --text, --file or --stdin, or pipe a message to stdin")
     if not text.strip():
         raise ValueError("Message text must not be empty")
+    caller = None
     if sender is None:
         from ..runtime.agent_identity import sender_actor
         caller = sender_actor()
@@ -48,6 +49,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
+    unread_senders = _unread_senders(caller) if _present or _present_error else set()
     results, seen = [], set()
     for reference in references:
         try:
@@ -67,7 +69,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             if directory in seen:
                 continue  # An alias of the same recipient must not duplicate a prompt.
             seen.add(directory)
-            name = read(directory / 'properties.json')['name']
+            properties = read(directory / 'properties.json')
+            name = properties['name']
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
             running = bool(_present and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             if result['state'] == 'held':
@@ -78,6 +81,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 line = f"Saved to {name}'s inbox; it sees it at its next check."
             else:
                 line = display.with_notices(delivery_line(name, receipt, delivery=delivery, text=text, running=running), receipt)
+            if properties.get('id', directory.name) in unread_senders:
+                line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
@@ -85,6 +90,22 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     if len(references) == 1:
         return {key: value for key, value in results[0].items() if key != 'agent'}
     return {'recipients': results, 'ok': all(result.get('ok', True) for result in results)}
+
+
+def _unread_senders(caller):
+    """Optional output advice: peek once before sending, outside every delivery lock."""
+    if caller is None:
+        return set()
+    try:
+        if not (caller.directory / 'inbox.jsonl').exists():
+            return set()
+        messages = mailbox.inbox(caller.directory, limit=None, peek=True, blocking=False)['messages']
+        # The agent ID survives a move; the saved universe is its old routing address.
+        return {sender['agent_id'] for message in messages
+                if isinstance(sender := message.get('from'), dict)
+                and isinstance(sender.get('agent_id'), str)}
+    except Exception:
+        return set()  # Busy or damaged inboxes must never change the send's outcome.
 
 
 def _running(directory):

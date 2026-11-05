@@ -32,7 +32,9 @@ class CodexStorageTest(unittest.TestCase):
                                ('captured', True), ('later-damaged-row', True), ('legacy-id-only', True),
                                ('reverted', True), ('archived', True), ('archived-reverted', True), ('fork-root', True),
                                ('archive-only', True), ('archive-only-empty', False), ('unreadable-archive', None),
-                               ('compressed', None), ('compressed-with-plain', True),
+                               ('compressed', None), ('compressed-valid', True), ('compressed-with-plain', True),
+                               ('compressed-module-missing', None), ('compressed-truncated', None),
+                               ('compressed-corrupt-tail', None),
                                ('foreign-header', None), ('invalid-root-id', None), ('duplicate-id', None), ('damaged', None),
                                ('incomplete', None), ('directory', None), ('symlink', None),
                                ('linked-sessions-root', None), ('linked-dated-folder', None),
@@ -94,6 +96,15 @@ class CodexStorageTest(unittest.TestCase):
                         path.unlink()
                     if case.startswith('archive-only'):
                         (home / 'sessions').rename(home / 'not-a-native-store')
+                if case in ('compressed-valid', 'compressed-module-missing', 'compressed-truncated', 'compressed-corrupt-tail'):
+                    from codex_compression import compress, BAD_FRAME
+                    if case == 'compressed-corrupt-tail':
+                        padding = b'{"type":"event_msg","payload":{"type":"padding"}}\n'
+                        encoded = compress(raw + padding * 4000) + BAD_FRAME
+                    else:
+                        encoded = compress(raw)
+                    path.with_suffix('.jsonl.zst').write_bytes(encoded[:-1] if case == 'compressed-truncated' else encoded)
+                    path.unlink()
                 if case in ('compressed', 'compressed-with-plain'):
                     compressed = path.with_suffix('.jsonl.zst')
                     compressed.write_bytes(b'unsupported compressed data')
@@ -124,6 +135,8 @@ class CodexStorageTest(unittest.TestCase):
                 self.assertEqual(adapter.session_storage_evidence(target, candidate).state, 'unknown')
 
     def _patch_case(self, case, home):
+        if case == 'compressed-module-missing':
+            return patch('multiverse.harnesses.codex.rollout.import_module', side_effect=ImportError('not installed'))
         if case == 'unreadable':
             return patch('multiverse.harnesses.codex.storage.os.scandir', side_effect=PermissionError('denied'))
         if case == 'unreadable-archive':
