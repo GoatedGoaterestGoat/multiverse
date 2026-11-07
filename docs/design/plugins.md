@@ -262,7 +262,7 @@ where to look, and core can check, edit and refresh them the same way:
   `state/agents/<id>/NAME/`, set through the plugin's own command or screen.
 - **Reserved names.** A plugin may not be named after something an agent
   directory already holds (`launches`, `claude-asks`, `claude-receipts`,
-  `claude-commands`, `slash`, `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
+  `claude-commands`, `slash`, `prompts`, `claude-prompts`, `codex-prompts`, `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
   Compaction's existing `state/agents/<id>/compaction/` already fits this rule,
   so it needs no move.
 
@@ -626,7 +626,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 16)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 17)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,

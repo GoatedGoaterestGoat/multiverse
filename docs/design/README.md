@@ -11,6 +11,7 @@ These pages record decisions, rationale and detailed contracts for maintainers. 
 | [future-work.md](future-work.md) | Agreed ideas that are not scheduled yet |
 | [transcript-protocols.md](transcript-protocols.md) | How plugins read an agent's conversation (API 1.13): cursors and generations, labels, history and context, turns, and what a harness adapter provides for them |
 | [harness-commands.md](harness-commands.md) | How mv2 runs a harness's own command in a running agent (`mv2 slash`): which commands run, waiting, the result, what mv2 records, and what an adapter provides |
+| [waiting-prompts.md](waiting-prompts.md) | How mv2 reads and answers the prompt a waiting agent is blocked on (`mv2 answer`): who may answer, stale answers, outcomes, and what an adapter provides |
 | [plugins.md](plugins.md) | The plugin system's design: discovery, trust, settings, the API and its versions, harness extensions, the event journal and host, and moving compaction into a plugin |
 | [codex-plugins.md](codex-plugins.md) | The Codex investigation behind the plugin design's Codex section: what 0.159.3 and 0.162.1 support, the launch contribution, and the full inventory of config keys |
 

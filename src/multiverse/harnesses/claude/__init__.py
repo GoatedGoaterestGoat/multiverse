@@ -59,11 +59,13 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
-BRIDGE = 'claude-mod-v3'  # the mod that also runs Claude's commands for mv2 (`mv2 slash`)
-# Mods that read a tag's send time. An older one (v1) is sent tags without one, and a mod older than BRIDGE is never
+BRIDGE = 'claude-mod-v4'  # the mod that also publishes the prompts an agent waits on (`mv2 answer`)
+# Mods that read a tag's send time. An older one (v1) is sent tags without one, and a mod older than v3 is never
 # sent a command frame: it would miss a tag it can't parse and show the model the raw frame, with no result.
-SENT_BRIDGES = ('claude-mod-v2', BRIDGE)
-BRIDGES = ('claude-mod-v1', 'claude-mod-v2', BRIDGE)
+SENT_BRIDGES = ('claude-mod-v2', 'claude-mod-v3', BRIDGE)
+COMMAND_BRIDGES = ('claude-mod-v3', BRIDGE)
+PROMPT_BRIDGES = (BRIDGE,)
+BRIDGES = ('claude-mod-v1', 'claude-mod-v2', 'claude-mod-v3', BRIDGE)
 LIST_TIMEOUT = 10  # the mod answers a command list at once, from Claude's own
 COMMAND_BYTES = 1 << 20  # a command result holds at most 64 KiB of output, JSON-escaped
 # A name mv2 slash can address: Claude also lists MCP prompts under a display name with a space ('… (MCP)').
@@ -562,6 +564,12 @@ def _agent_name(session):
     return name if isinstance(name, str) and name.strip() and not any(c.isspace() for c in name) else None
 
 
+def _restart(session):
+    """How the person gets an agent onto the current mod, naming it when its record says who it is."""
+    name = _agent_name(session)
+    return f'mv2 kill {name}, then mv2 resume {name}' if name else 'mv2 kill, then mv2 resume'
+
+
 def _form_refusal(forms, version):
     """Why these forms of a built-in don't run, each a screen or not in the table at all, with the version once."""
     why = ['it opens an interactive screen' if form == 'screen' else "it isn't classified" for form in forms]
@@ -754,6 +762,262 @@ def message_delivered(native_id, message_id, text, since, environment, workspace
 def prompt_recorded(native_id, prompt, since, environment):
     """prompt_evidence's answer alone: True, False or None."""
     return prompt_evidence(native_id, prompt, since, environment)[0]
+
+
+PROMPTS_FOLDER = 'claude-prompts'
+PROMPT_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+PROMPT_FILE = re.compile(rf'({PROMPT_ID.pattern})\.json')
+PROMPT_BYTES = 1 << 20  # a published prompt keeps its call's input to 64 KiB, JSON-escaped
+PROMPT_KINDS = ('permission', 'question', 'plan', 'form')
+PROMPTS_SINCE = (2, 1, 319)  # the first Claude Code its answer path was checked on, live
+PROMPT_ROWS = 16 << 20  # how far an outcome read looks into the transcript, from where the prompt opened
+NOT_TAKEN_SECONDS = 5  # Claude records a hook's decision at once; this long without one, it didn't take it
+
+
+def checked_version():
+    """The Claude Code version the last version check covered (defaults.json)."""
+    return json.loads(Path(__file__).with_name('defaults.json').read_text())['checked_cli_version']
+
+
+def _version(text):
+    found = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)', text) if isinstance(text, str) else None
+    return tuple(map(int, found.groups())) if found else None
+
+
+def _short(value, limit=4096):
+    return value if isinstance(value, str) and len(value) <= limit else None
+
+
+def published_prompt(record, id, session):
+    """A prompt the mod published, as core lists it, or None when it isn't this launch's and conversation's open
+    prompt or doesn't read as one. An answer path not checked on its Claude Code version is listed, not answerable."""
+    if not record or record.get('schema') != 1 or record.get('id') != id or record.get('kind') not in PROMPT_KINDS:
+        return None
+    if record.get('launch') != session.launch_id or session.native_id and record.get('session') != session.native_id:
+        return None
+    summary, detail, reason = _short(record.get('summary'), 512), record.get('detail'), record.get('reason')
+    if summary is None or not isinstance(detail, dict) or type(record.get('answerable')) is not bool or reason is not None and _short(reason) is None:
+        return None
+    schema = prompt_schema(record)
+    if schema is None:
+        return None
+    choices, questions, duplicate = schema
+    answerable = record['answerable'] and not duplicate
+    if duplicate and record['answerable']:  # Claude's dialog tells them apart by place; an answer by label can't
+        reason = 'Two of its options have the same label: answer it in the terminal'
+    claude = _version(record.get('claude'))
+    if answerable and (claude is None or not PROMPTS_SINCE <= claude <= _version(checked_version())):
+        answerable = False
+        reason = (f"mv2's answers aren't checked on Claude Code {record.get('claude') or 'of unknown version'}: answer it in "
+                  'the terminal')
+    return {'id': id, 'kind': record['kind'], 'summary': summary, 'detail': detail, 'asked_at': _short(record.get('asked_at'), 64),
+            'tool': _short(record.get('tool'), 256), 'choices': choices, 'questions': questions, 'answerable': answerable,
+            'reason': reason if not answerable else None, 'subagent': _short(record.get('subagent'), 256)}
+
+
+def prompt_schema(record):
+    """(choices, questions, whether an option label repeats) as the mod published them, or None when they don't read
+    as a prompt's: what an answer is checked against, and what an outcome's person_answer is filtered by."""
+    choices, questions, duplicate = [], [], False
+    for item in record.get('choices') or []:
+        if (not isinstance(item, dict) or not isinstance(item.get('id'), str) or not re.fullmatch(r'[a-z_0-9]{1,64}', item['id'])
+                or _short(item.get('label'), 512) is None or type(item.get('saves_rule')) is not bool
+                or type(item.get('takes_message')) is not bool or any(c['id'] == item['id'] for c in choices)):
+            return None
+        choices.append({k: item[k] for k in ('id', 'label', 'saves_rule', 'takes_message')})
+    for item in record.get('questions') or []:
+        if not isinstance(item, dict) or _short(item.get('id')) is None or _short(item.get('question')) is None:
+            return None
+        options, labels = [], set()
+        for pair in item.get('options') or []:
+            if not isinstance(pair, list) or len(pair) != 2 or _short(pair[0], 512) is None or _short(pair[1]) is None:
+                return None
+            if pair[0] in labels:
+                duplicate = True
+                continue
+            labels.add(pair[0])
+            options.append([pair[0], pair[1]])
+        questions.append({'id': item['id'], 'question': item['question'], 'header': _short(item.get('header'), 512) or '',
+                          'options': options, 'multiple': item.get('multiple') is True, 'free_text': item.get('free_text') is not False,
+                          'secret': False, 'required': True})
+    return choices, questions, duplicate
+
+
+def prompt_answer_problem(prompt, answer):
+    """Why the mod would refuse this answer to this prompt (the same checks it makes), or None."""
+    message = answer.message if isinstance(answer.message, str) and answer.message.strip() else None
+    if prompt['kind'] == 'question':
+        given = dict(answer.answers or {})
+        if answer.choice is not None:
+            return 'A question prompt is answered per question, not with a choice'
+        if set(given) != {q['id'] for q in prompt['questions']}:
+            return 'Answer every question it asks, and only those'
+        for question in prompt['questions']:
+            labels = tuple(given[question['id']] or ())
+            if not labels or not all(isinstance(label, str) and label.strip() for label in labels):
+                return 'Every question needs an answer'
+            if len(labels) > 1 and not question['multiple']:
+                return 'That question takes one answer'
+        return None
+    choice = next((c for c in prompt['choices'] if c['id'] == answer.choice), None)
+    if choice is None:
+        return 'That choice is not offered for this prompt'
+    if choice['saves_rule'] and answer.allow_rule is not True:
+        return "That choice also saves a rule to the person's settings, so only the person can choose it"
+    if message is not None and not choice['takes_message']:
+        return 'That choice takes no message'
+    if answer.answers:
+        return 'This prompt asks no questions'
+    return None
+
+
+def _person(decision, row):
+    """What the person chose, from the call's stored result: their choice, or their answers to its questions."""
+    if decision.get('decision') == 'reject' or row.get('toolDenialKind') == 'user-rejected':
+        return {'choice': 'deny'}
+    result = row.get('toolUseResult')
+    answers = result.get('answers') if isinstance(result, dict) else None
+    if isinstance(answers, dict) and answers:
+        return {'answers': {q: v for q, v in answers.items() if isinstance(q, str) and isinstance(v, str)}}
+    if decision.get('grantScope') == 'session':
+        return {'choice': 'allow_session'}
+    return {'choice': 'allow_always' if decision.get('source') == 'user_permanent' else 'allow'}
+
+
+def sent_decision(end):
+    """The decision the mod returned with the answer it sent, 'allow' or 'deny', from its end record (the mod's own
+    mapping: a question's answers and a plan's approval allow, every allow choice allows, deny denies), or None."""
+    kind, choice = end.get('kind'), end.get('choice')
+    if kind == 'question':
+        return 'allow' if choice is None else None
+    if kind not in ('permission', 'plan') or not isinstance(choice, str):
+        return None
+    if choice == 'deny':
+        return 'deny'
+    if choice == 'allow' or kind == 'permission' and re.fullmatch(r'allow_(session|always)(_[0-9]+)?', choice):
+        return 'allow'
+    return None
+
+
+def prompt_call_evidence(session, end):
+    """What Claude stored for the prompt's call after it opened: {'hook': its decision, 'person': what the person
+    chose, 'resolved': whether the call has its result, 'conflict': whether the rows disagree}, or None when the
+    call or its transcript can't be read.
+
+    Only this session's own transcript counts: the end record's path must be one of this conversation's transcripts
+    in the launch's recorded storage (session.home; linked project folders included), never another storage that
+    holds a file of the same name, and never this process's default storage."""
+    call = end.get('tool_use_id')
+    source = end.get('transcript')
+    storage = launch_storage(session, None)
+    if not isinstance(call, str) or not call or not isinstance(source, dict) or not session.native_id or storage is None:
+        return None
+    path = source.get('path')
+    if not isinstance(path, str) or Path(path).name != f'{session.native_id}.jsonl':
+        return None
+    try:
+        own = {os.path.realpath(found) for found in
+               rows_source.session_transcripts(session.native_id, storage, (session.workspace,), links=True)}
+    except (OSError, rows_source.Unreadable):
+        return None
+    if os.path.realpath(path) not in own:
+        return None
+    try:
+        with rows_source.open_regular(path) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            offset = source.get('offset')
+            handle.seek(offset if type(offset) is int and 0 <= offset <= size else 0)
+            data = handle.read(PROMPT_ROWS)
+    except (OSError, rows_source.Unreadable):
+        return None
+    found = {'hook': None, 'person': None, 'resolved': False, 'conflict': False}
+    hooks = set()
+    needle = call.encode()
+    for line in data.split(b'\n'):
+        if needle not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        # Another conversation's row in this file. A row with no sessionId field is taken as this session's; an
+        # explicit null names none, as the delivery evidence reader holds.
+        if 'sessionId' in row and row['sessionId'] != session.native_id:
+            found['conflict'] = True
+            continue
+        attachment = row.get('attachment')
+        if isinstance(attachment, dict) and attachment.get('type') == 'hook_permission_decision' and attachment.get('toolUseID') == call:
+            hooks.add(attachment.get('decision'))
+        content = (row.get('message') or {}).get('content') if isinstance(row.get('message'), dict) else None
+        if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id') == call
+                                             for b in content):
+            found['resolved'] = True
+            decision = row.get('permissionDecision') if isinstance(row.get('permissionDecision'), dict) else {}
+            origin = decision.get('source')
+            if origin == 'hook':
+                hooks.add({'accept': 'allow', 'reject': 'deny'}.get(decision.get('decision'), decision.get('decision')))
+            elif isinstance(origin, str) and origin.startswith('user') or row.get('toolDenialKind') == 'user-rejected':
+                found['person'] = _person(decision, row)
+    # One decision, or the rows disagree: two decisions, or a hook's and the person's both for one call. A word other
+    # than allow or deny never matches the decision mv2 sent (prompt_settled), so it is never credited either.
+    if len(hooks) > 1 or hooks and found['person'] is not None:
+        found['conflict'] = True
+    found['hook'] = next(iter(hooks)) if len(hooks) == 1 else None
+    return found
+
+
+CONTRADICTED = {'state': 'unknown', 'cause': 'contradicted', 'reason': (
+    "Claude's stored rows for this call don't match the answer mv2 sent, so mv2 can't tell whose answer took.")}
+
+
+def prompt_settled(end, evidence, session=None):
+    """The outcome core records, from how the mod ended the prompt and what Claude stored (prompt_call_evidence)."""
+    if evidence and evidence['conflict']:
+        return dict(CONTRADICTED)
+    if end['how'] == 'sent':
+        if evidence and evidence['hook'] is not None:
+            # A decision row proves which call, not that it is mv2's: it must be the decision mv2 sent.
+            if evidence['hook'] != sent_decision(end):
+                return dict(CONTRADICTED)
+            return {'state': 'answered', 'saved_rule': end.get('saved_rule') is True, 'reason': None}
+        if evidence and evidence['person'] is not None:
+            return {'state': 'person', 'cause': 'person', 'person_answer': evidence['person'],
+                    'reason': 'The person answered it in the terminal first; mv2 did not replace their answer.'}
+        if evidence and evidence['resolved']:
+            return {'state': 'unknown', 'reason': "Claude finished the call but didn't record whose answer it took."}
+        at = end.get('at')
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(at.replace('Z', '+00:00'))).total_seconds()
+        except (AttributeError, TypeError, ValueError):
+            age = None
+        if age is not None and age < NOT_TAKEN_SECONDS:
+            return {'state': 'submitted', 'reason': None}
+        return {'state': 'unknown', 'cause': 'not_taken', 'reason': (
+            "Claude hasn't recorded taking mv2's answer. For some prompts it takes only a refusal from a plugin (one "
+            "auto mode couldn't classify, for example), so this one may still be waiting in the terminal.")}
+    cause = end.get('cause')
+    if evidence and evidence['person'] is not None or cause == 'person':
+        person = evidence and evidence['person']
+        # Claude stores Esc on its dialog as the person's rejection, the same as No: both stop the turn.
+        refused = isinstance(person, dict) and person.get('choice') == 'deny'
+        return {'state': 'person', 'cause': 'person', 'person_answer': person, 'reason': (
+            'The person refused it in the terminal first (No, or Esc). Nothing was sent.' if refused else
+            'The person answered it in the terminal first. Nothing was sent.')}
+    if cause in ('interrupted', 'turn_ended', 'stopped'):
+        return {'state': 'gone', 'cause': cause, 'reason': None}
+    # Stopping the agent closed it, whatever the old mod saw last (its calls end as it stops): its launch is no
+    # longer the agent's, or it is but no longer runs and Claude stored no result for the call. A person's answer
+    # always leaves one (an allow runs the tool; No and Esc store their rejection).
+    launch = end.get('launch')
+    if isinstance(launch, str) and launch and session is not None and session.launch_id and launch != session.launch_id:
+        return {'state': 'gone', 'cause': 'stopped', 'reason': None}
+    if session is not None and session.state != 'running' and evidence is not None and not evidence['resolved']:
+        return {'state': 'gone', 'cause': 'stopped', 'reason': None}
+    # Nothing better is known: it closed during its own launch, without a record of who answered.
+    return {'state': 'gone', 'cause': 'closed', 'reason': (
+        "The prompt closed before mv2's answer reached it, most likely answered in the terminal. Nothing was sent.")}
 
 
 def ignored_storage(caller, effective, home=None):
@@ -1185,6 +1449,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         problem = self._slash_bridge(session)
         result['slash'] = (Capability('supported', mechanism='claude-mod-command') if problem is None
                            else Capability('unavailable', problem.reason))
+        problem = self._prompt_bridge(session)
+        result['answer'] = (Capability('supported', mechanism='claude-mod-prompts') if problem is None
+                            else Capability('unavailable', problem.reason))
         return result
 
     def _would_support(self, executor):
@@ -1202,7 +1469,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             why = problem and (f'Launches of this harness refuse to start: {problem}' if self.bridge_policy == 'required'
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
-                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt', 'slash': 'claude-mod-command'}
+                      'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt', 'slash': 'claude-mod-command',
+                      'answer': 'claude-mod-prompts'}
         result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
                          else Capability('unavailable', why, required=name.startswith('send_')))
                   for name, mechanism in mechanisms.items()}
@@ -1482,11 +1750,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         bridge = self._bridge(session)
         if not bridge.ready:
             return unavailable(bridge)
-        if session.bridge != BRIDGE:
-            name = _agent_name(session)
-            restart = f'mv2 kill {name}, then mv2 resume {name}' if name else 'mv2 kill, then mv2 resume'
+        if session.bridge not in COMMAND_BRIDGES:
             return NativeResult('unavailable', "This launch's multiverse mod predates mv2 slash; it runs commands from "
-                                f"the agent's next start ({restart})")
+                                f"the agent's next start ({_restart(session)})")
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         return None
@@ -1586,6 +1852,104 @@ class ClaudeAdapter(ConfiguredAdapter):
         if effort is not None and model_table.takes_effort(model, effort):
             value['effort'] = effort
         return NativeResult('ok', 'Ran', value)
+
+    # The prompts an agent waits on (`mv2 answer`). The mod publishes each open one as claude-prompts/<id>.json with
+    # the choices it can return, holds it, takes core's answer from prompts/<id>.answer.json and writes
+    # <id>.end.json once it ends. Whether an answer took, or the person answered first, is what Claude stored.
+
+    def _prompt_bridge(self, session):
+        """None when this launch's mod publishes its prompts, else the NativeResult why not."""
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return (NativeResult('unavailable', "This agent runs without mv2's Claude plugin (launch-only), so mv2 can't "
+                                 'see its prompts; answer them in its terminal') if bridge.final else unavailable(bridge))
+        if session.bridge not in PROMPT_BRIDGES:
+            return NativeResult('unavailable', "This launch's multiverse mod predates mv2 answer; it publishes prompts "
+                                f"from the agent's next start ({_restart(session)})")
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        return None
+
+    def waiting_prompts(self, session, executor=None):
+        """Every prompt this launch's mod has open now, for this conversation, oldest first."""
+        problem = self._prompt_bridge(session)
+        if problem is not None:
+            return problem
+        folder = Path(session.session_file).parent / PROMPTS_FOLDER
+        try:
+            names = set(os.listdir(folder))
+        except FileNotFoundError:
+            names = set()
+        except OSError:
+            return NativeResult('unavailable', f"{folder} can't be read")
+        prompts = []
+        for name in names:
+            found = PROMPT_FILE.fullmatch(name)
+            if found is None or f'{found[1]}.end.json' in names:
+                continue
+            prompt = published_prompt(_json_record(folder / name, PROMPT_BYTES), found[1], session)
+            if prompt is not None:
+                prompts.append(prompt)
+        prompts.sort(key=lambda p: (p['asked_at'] or '', p['id']))
+        if prompts or session.status != 'waiting':
+            return NativeResult('ok', value={'prompts': prompts, 'coverage': 'complete', 'reason': None})
+        return NativeResult('ok', value={'prompts': [], 'coverage': 'unknown', 'reason': (
+            "The agent waits, but its mv2 plugin has published no prompt yet: one may still be opening, or be one mv2 "
+            'cannot see. Read again, or answer it in its terminal')})
+
+    def answer_prompt(self, session, answer, executor):
+        """Check the answer against the prompt as the mod published it, then have core write it once."""
+        listed = self.waiting_prompts(session, executor)
+        if listed.state != 'ok':
+            return listed
+        prompt = next((p for p in listed.value['prompts'] if p['id'] == answer.id), None)
+        if prompt is None:
+            return NativeResult('unavailable', 'That prompt is no longer open; read the current prompts')
+        if not prompt['answerable']:
+            return NativeResult('unavailable', prompt['reason'] or 'mv2 cannot answer this prompt; answer it in the terminal')
+        problem = prompt_answer_problem(prompt, answer)
+        if problem is not None:
+            return NativeResult('error', problem)
+        return executor.write_prompt_answer(session, answer)
+
+    def prompt_outcome(self, session, answer, executor=None):
+        """How the prompt ended, read only: the mod's end record, and what Claude stored for its call."""
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        if PROMPT_ID.fullmatch(answer.id or '') is None:
+            return NativeResult('ok', value={'state': 'unknown', 'reason': 'That is not a prompt ID this agent publishes'})
+        folder = Path(session.session_file).parent / PROMPTS_FOLDER
+        # An end record keeps the prompt's choices and questions, as the published one does: read it as large.
+        end = _json_record(folder / f'{answer.id}.end.json', PROMPT_BYTES)
+        if end is None:
+            still = _json_record(folder / f'{answer.id}.json', PROMPT_BYTES)
+            # Submitted only with core's answer for it, waiting or already taken by the mod: an open prompt mv2 sent
+            # nothing to is just open.
+            answers = Path(session.session_file).parent / 'prompts'
+            sent = any((answers / f'{answer.id}{suffix}').exists() for suffix in ('.answer.json', '.answer.taken.json'))
+            if still and sent:
+                return NativeResult('ok', value={'state': 'submitted', 'reason': None})
+            if still:
+                return NativeResult('ok', value={'state': 'unknown', 'cause': 'open',
+                                                 'reason': 'That prompt is still open; mv2 has sent no answer to it.'})
+            return NativeResult('ok', value={'state': 'unknown', 'reason': 'mv2 has no record of how this prompt ended'})
+        if not end or end.get('schema') != 1 or end.get('id') != answer.id or end.get('how') not in ('sent', 'refused', 'closed'):
+            return NativeResult('ok', value={'state': 'unknown', 'reason': "The prompt's end record could not be read"})
+        if end['how'] == 'refused':
+            return NativeResult('ok', value={'state': 'refused', 'cause': 'invalid_answer', 'reason': (
+                "The agent's mv2 plugin did not take the answer, so the prompt is left for the person in its terminal")})
+        value = prompt_settled(end, prompt_call_evidence(session, end), session)
+        schema = prompt_schema(end)
+        if schema is not None:
+            value['choices'], value['questions'] = schema[0], schema[1]
+        person = value.get('person_answer')
+        if isinstance(person, dict) and isinstance(person.get('answers'), dict):
+            # Claude joins a multi-select's labels with ", ": split it back only where every part is an offered label,
+            # so typed text with a comma in it stays whole.
+            offered = {q['id']: {label for label, _ in q['options']} for q in (schema[1] if schema else [])}
+            person['answers'] = {q: (v.split(', ') if all(part in offered.get(q, ()) for part in v.split(', ')) else [v])
+                                 for q, v in person['answers'].items()}
+        return NativeResult('ok', value=value)
 
     def get_delivery(self, session, message_id, executor=None):
         """The mod's receipt for this delivery attempt (core gives each attempt its own message ID): delivered once

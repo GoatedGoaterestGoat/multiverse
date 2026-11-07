@@ -297,6 +297,10 @@ class NativeExecutor:
                 pass
         return NativeResult('ok', 'Written to the inbox')
 
+    def write_prompt_answer(self, session, answer):
+        from .prompts import write_answer
+        return write_answer(self, session, answer)
+
 
 def framed_text(root, message, *, at=None):
     """The recipient's text: who sent the message, then the message as written."""

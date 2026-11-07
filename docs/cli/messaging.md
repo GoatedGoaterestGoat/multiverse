@@ -322,7 +322,7 @@ In Codex and launch-only sessions, ask the agent in words instead, such as "Plea
 
 ## Ask a side question
 
-To run the harness's own commands, such as `/compact` or `/model`, use [mv2 slash](harness-commands.md).
+To run the harness's own commands, such as `/compact` or `/model`, use [mv2 slash](harness-commands.md). To answer the permission prompt or question a `waiting` agent is stopped at, use [mv2 answer](waiting-prompts.md).
 
 ```sh
 mv2 ask worker --question 'Which file holds the parser?'

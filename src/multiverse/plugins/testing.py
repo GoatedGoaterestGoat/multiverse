@@ -459,19 +459,11 @@ class FakeSlash:
         from dataclasses import fields
         from .. import harnesses
         from ..harnesses import types
-        from ..runtime import native, slash
         self.requests, self.answers, self._finished, self._ended = [], list(answers), {}, set()
         names = {item.name for item in fields(types.SlashCommand)}
         listed = [types.SlashCommand(**{name: getattr(item, name) for name in names if hasattr(item, name)})
                   for item in commands]
-        work, fake = str(test.work), self
-
-        def mine(path):
-            return str(Path(path).resolve()).startswith(work + os.sep)
-
-        def fixture(facts):  # an agent this test made: its record names a tmux socket inside the test's folder
-            socket_path = ((facts or {}).get("tmux") or {}).get("socket")
-            return isinstance(socket_path, str) and socket_path.startswith(work + os.sep)
+        fake = self
 
         class Scripted:
             def slash_commands(self, session, executor):
@@ -497,41 +489,115 @@ class FakeSlash:
                     return types.NativeResult("ok", value=dict(fake._finished[request.id]))
                 return types.NativeResult("unknown", value={"absent": True})
 
-        load, observe, owned = harnesses.load, native.observe, native.owned
-        launch_ended = slash.delivery_evidence.launch_ended
-
-        def scripted_load(root, name, *arguments, **keywords):
-            adapter = load(root, name, *arguments, **keywords)
-            if not mine(root) or getattr(adapter, "family", None) != "claude":
-                return adapter  # another harness keeps its own answer: Codex and Pi say unavailable
-            wrapped = object.__new__(type(f"Scripted{type(adapter).__name__}", (Scripted, type(adapter)), {}))
-            wrapped.__dict__.update(adapter.__dict__)  # every other attribute and hook as the real adapter has it
-            return wrapped
-
-        def scripted_observe(properties, facts):
-            seen = observe(properties, facts)
-            return {**seen, "live": "alive"} if fixture(facts) and (facts or {}).get("state") == "running" else seen
-
-        def scripted_owned(properties, facts, *arguments, **keywords):
-            if fixture(facts):
-                return None
-            return owned(properties, facts, *arguments, **keywords)
-
-        def scripted_ended(directory, launch_id):
-            if mine(directory):
-                return Path(directory).name in fake._ended
-            return launch_ended(directory, launch_id)
-
-        for target, name, replacement in ((harnesses, "load", scripted_load), (native, "observe", scripted_observe),
-                                          (native, "owned", scripted_owned),
-                                          (slash.delivery_evidence, "launch_ended", scripted_ended)):
-            patcher = mock.patch.object(target, name, replacement)
-            patcher.start()
-            test.addCleanup(patcher.stop)
+        _script_harness(test, Scripted, fake._ended)
 
     def finish(self, id, answer=None):
         """The harness ran a queued command: slash_result(id) reads `answer` (a dict, as for the script) from now."""
         self._finished[id] = {"state": "ran", **(answer or {})}
+
+
+def _script_harness(test, scripted, ended):
+    """For the rest of `test`, the Claude adapter of its own universes answers with `scripted`'s methods, and its
+    agents count as running and owned; `ended` holds the ids of agents whose launch has ended. Everything else of
+    the adapter, and all of core, stays real."""
+    from .. import harnesses
+    from ..runtime import delivery_evidence, native
+    work = str(test.work)
+
+    def mine(path):
+        return str(Path(path).resolve()).startswith(work + os.sep)
+
+    def fixture(facts):  # an agent this test made: its record names a tmux socket inside the test's folder
+        socket_path = ((facts or {}).get("tmux") or {}).get("socket")
+        return isinstance(socket_path, str) and socket_path.startswith(work + os.sep)
+
+    load, observe, owned = harnesses.load, native.observe, native.owned
+    launch_ended = delivery_evidence.launch_ended
+
+    def scripted_load(root, name, *arguments, **keywords):
+        adapter = load(root, name, *arguments, **keywords)
+        if not mine(root) or getattr(adapter, "family", None) != "claude":
+            return adapter  # another harness keeps its own answer: Codex and Pi say unavailable
+        wrapped = object.__new__(type(f"Scripted{type(adapter).__name__}", (scripted, type(adapter)), {}))
+        wrapped.__dict__.update(adapter.__dict__)  # every other attribute and hook as the real adapter has it
+        return wrapped
+
+    def scripted_observe(properties, facts):
+        seen = observe(properties, facts)
+        return {**seen, "live": "alive"} if fixture(facts) and (facts or {}).get("state") == "running" else seen
+
+    def scripted_owned(properties, facts, *arguments, **keywords):
+        if fixture(facts):
+            return None
+        return owned(properties, facts, *arguments, **keywords)
+
+    def scripted_ended(directory, launch_id):
+        if mine(directory):
+            return Path(directory).name in ended
+        return launch_ended(directory, launch_id)
+
+    for target, name, replacement in ((harnesses, "load", scripted_load), (native, "observe", scripted_observe),
+                                      (native, "owned", scripted_owned),
+                                      (delivery_evidence, "launch_ended", scripted_ended)):
+        patcher = mock.patch.object(target, name, replacement)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+
+class FakePrompts:
+    """The prompts a harness shows, answered from a script (1.17), for PluginTestCase.fake_prompts(). The real API
+    and core run: access and permission, the caller rule, the status gate, the checks of an answer against the
+    prompt, the one exclusive answer file and the record, the outcome's wording, the wait and the events. Only the
+    harness's side is replaced, and this test's agents count as running with mv2's bridge; they count as waiting
+    when their runtime says so (self.agent(..., runtime={"status": "waiting"})).
+
+    `prompts` are the api.WaitingPrompt the harness shows, until each is answered and settled. Each answer takes the
+    next outcome: a dict of what the harness reports (state, default "answered"; saved_rule, person_answer, cause) or
+    "pending" (submitted, with no outcome until settle(id, outcome)). `answers` holds each answer the harness
+    received, oldest first: {id, choice, message, answers, notes}, a secret question's answer and note masked."""
+
+    def __init__(self, test, prompts, outcomes):
+        from dataclasses import asdict
+        from ..harnesses import types
+        self.open = {item.id: asdict(item) for item in prompts}  # the API's dataclass, as the dict core reads
+        self.outcomes, self.answers, self._settled, self._ended = list(outcomes), [], {}, set()
+        fake = self
+
+        class Scripted:
+            def waiting_prompts(self, session, executor):
+                return types.NativeResult("ok", value={"prompts": list(fake.open.values()), "coverage": "complete"})
+
+            def answer_prompt(self, session, answer, executor):
+                secret = {item["id"] for item in (fake.open.get(answer.id) or {}).get("questions", ())
+                          if item.get("secret")}
+                fake.answers.append({"id": answer.id, "choice": answer.choice, "message": answer.message,
+                                     "answers": {key: ("***",) if key in secret else tuple(values)
+                                                 for key, values in answer.answers.items()},
+                                     "notes": {key: "***" if key in secret else value  # a secret question's too
+                                               for key, value in (getattr(answer, "notes", None) or {}).items()}})
+                if not fake.outcomes:
+                    return types.NativeResult("error", "the test's script has no outcome left for this answer")
+                outcome = fake.outcomes.pop(0)
+                written = executor.write_prompt_answer(session, answer)  # core's own exclusive answer file
+                if outcome == "pending":
+                    return written
+                if not isinstance(outcome, dict):
+                    raise TypeError('fake_prompts outcomes are dicts and "pending"')
+                fake.settle(answer.id, outcome)
+                return types.NativeResult("ok", value=dict(fake._settled[answer.id]))
+
+            def prompt_outcome(self, session, answer, executor):
+                if answer.id in fake._settled:
+                    return types.NativeResult("ok", value=dict(fake._settled[answer.id]))
+                return types.NativeResult("ok", value={"state": "submitted"})
+
+        _script_harness(test, Scripted, self._ended)
+
+    def settle(self, id, outcome=None):
+        """The harness settled a pending answer: prompt_result(id) reads `outcome` (a dict, as for the script) from
+        now, and the prompt is no longer shown."""
+        self._settled[id] = {"state": "answered", **(outcome or {})}
+        self.open.pop(id, None)
 
 
 class FakeRuns:
@@ -715,6 +781,12 @@ class PluginTestCase(unittest.TestCase):
         """Harness commands answered from this script for the rest of the test (1.16): a FakeSlash, whose
         `requests` records each command the harness was sent. Everything but the harness's side is real."""
         return FakeSlash(self, commands, answers)
+
+    def fake_prompts(self, prompts=(), *outcomes):
+        """The prompts this test's waiting agents show, answered from this script for the rest of the test (1.17):
+        a FakePrompts, whose `answers` records each answer the harness received. Everything but the harness's side
+        is real."""
+        return FakePrompts(self, prompts, outcomes)
 
     def fake_runs(self, *answers):
         """One-shot runs answered from this script for the rest of the test (1.14): a FakeRuns, whose `requests`

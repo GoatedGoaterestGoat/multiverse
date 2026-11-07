@@ -153,6 +153,8 @@ A plugin adds; it never alters mv2. It adds commands, columns, status items, cap
 | `agent.ask(question)` | The answer to a side question that never enters the conversation | `messages.ask` |
 | `agent.slash(command, args="", timeout=600, wait=True)`, `agent.slash_result(id)` | A `CommandResult`: the harness's own command run in the agent (1.16); see [harness commands](#harness-commands) | `agents.control`; `agents.read` for the result |
 | `agent.slash_commands()` | A `CommandList` of what the agent's harness offers, and why mv2 refuses any (1.16) | `agents.read` |
+| `agent.waiting_prompts()`, `agent.prompt_result(id)` | A `PromptList` of the prompts the agent waits on now; an earlier answer's `PromptResult` (1.17); see [waiting prompts](#waiting-prompts) | `agents.read` |
+| `agent.answer_prompt(id, choice=None, message=None, answers=None, timeout=30, wait=True)` | A `PromptResult`: the answer, given through the harness's own answer path (1.17) | `prompts.answer` |
 | `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`; `inbox()` leaves them unread | `messages.read` |
 | `agent.transcript()`, `transcript_rows(...)`, `iter_transcript_rows(...)`, `transcript_turns(...)`, `transcript_turn(id, ...)` | The agent's conversation, by cursor (1.13); see [transcripts](#transcripts) | `transcripts.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |
@@ -176,9 +178,9 @@ Every call above has an effect class, and a plugin works under the access level 
 
 | Class | Means | Calls |
 | --- | --- | --- |
-| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, the transcript reads, a harness's `models()`, `check()` and `run_options()`, `harness_info(..., agent=)`, `slash_commands()`, `slash_result()`, `session`, `agent_at`, `current_agent` |
+| `observe` | Reads, and changes nothing | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `catalog`, `command`, `refresh()`, `inbox`, `history`, the transcript reads, a harness's `models()`, `check()` and `run_options()`, `harness_info(..., agent=)`, `slash_commands()`, `slash_result()`, `waiting_prompts()`, `prompt_result()`, `session`, `agent_at`, `current_agent` |
 | `spend` | Uses model tokens, money or time, still changing nothing | `ask`, a harness's `run_once()` |
-| `act` | Changes a session, a launch, an inbox or a universe's files | `spawn`, `resume`, `kill`, `send`, `slash`, `refresh(apply=True)`, `mv.settings.edit`, launch contributions and harness extensions |
+| `act` | Changes a session, a launch, an inbox or a universe's files | `spawn`, `resume`, `kill`, `send`, `slash`, `answer_prompt`, `refresh(apply=True)`, `mv.settings.edit`, launch contributions and harness extensions |
 
 A plugin writing its own state is outside the classes: `mv.state_dir`, `mv.agent_state_dir`, `api.files`, `mv.log`, `mv.statusline.write`, `mv.events.emit` and `mv.settings.read` never raise for access, so they stay safe in `finally` blocks. So are a universe's own facts that a plugin needs to configure itself before it is turned on there: `universe.id`, `.name`, `.parent`, `.subverses()` and `mv.harness_info(universe, name)` without `agent=`. With `agent=`, `harness_info` reads that agent's records and is `observe`.
 
@@ -278,12 +280,35 @@ agent.resume(model="sonnet", effort="high")     # an agent's own model and effor
 - **Settings:** a command with `changes_settings` (Claude's `/model`, `/effort`, ...) also saves the person's own Claude defaults, so it runs only when the person runs it. A plugin's is refused; change an agent's own model or effort with `agent.resume(model=, effort=)` instead. `effort="default"` clears the agent's saved effort. A model change without an effort drops an incompatible saved level and reports it.
 - **Where:** Claude agents launched with mv2's bridge. Codex and Pi say unavailable. Call `slash()` from a command, a helper action or a service thread; it's `act`, so column, panel and settings-check code can't call it.
 
+### Waiting prompts
+
+```python
+agent = mv.universe(universe).agent("worker")
+waiting = agent.waiting_prompts()               # observe: .state, .coverage, .reason, .prompts
+for prompt in waiting.prompts:                  # kind: permission, question, plan, form
+    if prompt.kind == "permission" and prompt.answerable:
+        result = agent.answer_prompt(prompt.id, choice="allow")
+    elif prompt.kind == "question" and prompt.answerable:
+        first = prompt.questions[0]
+        result = agent.answer_prompt(prompt.id, answers={first.id: first.options[0][0]})
+if result.state == "submitted":                 # the wait ended first: it may still take
+    later = agent.prompt_result(prompt.id)
+```
+
+- **Only now:** prompts are read and answered only while the agent's status is `waiting`, and only one open at that moment. `PromptList.state` is `ok`, `unavailable` (a harness or launch that can't show them) or `refused` (an agent that isn't waiting, or a read from an agent's shell), with `reason`. A later prompt, a new launch or a switched conversation never matches an earlier `id`.
+- **`WaitingPrompt`:** `summary` is one line (the command, the file, the first question); `detail` is the rest, at most 64 KiB; `choices` are a permission's decisions in the harness's order; `questions` are a question's or a form's fields, keyed by `id` in `answers`. One with `answerable` false says where to answer it in `reason`. `coverage` is `unknown`, with a reason, when the agent waits on something mv2 can't see.
+- **The answer:** a permission's `choice` (with `message` where it `takes_message`), or `answers` mapping each required question's `id` to one of its labels, typed text where `free_text`, or a list of labels where `multiple`, and `notes` mapping a question that `takes_note` (Codex) to a note sent with its label. It's sent once: anything else, a second answer, or a choice that `saves_rule` to the person's settings, comes back `refused` and sends nothing. A secret question's answer and note are never recorded, logged or shown back, and no note a plugin or mv2 sends is kept in mv2's records (a person's own nonsecret note is shown back in `person_answer.typed`).
+- **`PromptResult`:** `state` is `answered` (it took; `saved_rule`), `sent_first` (mv2's answer reached the harness first while the prompt was open and nothing contradicts it, but the harness doesn't confirm it took it, as with Codex; count it as success, and never answer again), `person` (the person answered first; `person_answer` is `{choice?, answers?: {question id: [offered labels]}, typed?: {question id: [typed text, a note included]}, truncated?: true}`, at most 64 KiB, never a message or a secret answer), `gone` (the prompt closed another way), `submitted` (the wait ended first: read it later with `prompt_result(id)`, never answer again), `unknown` (sent, and which answer took can't be told) or `refused`; treat one you don't know like `unknown`. Every state but `answered` says why in `reason`: as a fact where mv2 knows it, as possibilities where it doesn't, always keeping "nothing was sent" apart from "sent, possibly taken". `cause` names a known one for code (`person`, `replaced`, whose `reason` names the prompt the agent waits on now, `interrupted`, `turn_ended`, `stopped`, `switched`, or a refusal's: `already_answered`, `not_offered`, `person_only`, `missing_answer`, `agent_caller`, ...); it's an open set, and `None` when the cause is unknown.
+- **Who:** a plugin and the person. An agent can't read or answer them. A focused agent can still be answered: answering is attention to it.
+- **Where:** Claude agents launched with mv2's bridge, on a checked Claude Code version, and Codex agents on mv2's verified bridge, on a checked Codex CLI and app-server (0.166.0). Pi says unavailable. Answering is `act`, so call it from a command, a helper action or a service thread.
+
 ### Permissions
 
 | Permission | Checked | Where |
 | --- | --- | --- |
 | `agents.read` | By the API | `agents`, `agent`, `reload`, `terminal`, `usage`, `capabilities`, `doctor`, `agent_at`, `current_agent`; without it a panel's `context.agents` is empty |
 | `agents.control` | By the API | `spawn`, `resume`, `kill`, `slash` (1.16) |
+| `prompts.answer` | By the API (1.17) | `answer_prompt`: approving an agent's commands and answering its questions, with your authority. It needs `act`, but no level carries it, so a manifest relying on `access` alone can't answer: list it in `permissions` (with every other permission the plugin uses, since a manifest with a list gets only what it lists), and `mv2 plugins enable` shows it |
 | `messages.send`, `messages.ask`, `messages.read` | By the API | `send`; `ask`; `inbox` and `history` |
 | `transcripts.read` | By the API | The transcript reads (1.13) |
 | `universe.write` | By the API | `refresh(apply=True)` |
@@ -399,6 +424,7 @@ Each test gets:
 - no inherited agent identity: none of the `MV2_*`, `CODEX_*` or `CLAUDE_CODE_*` variables of the shell or agent running the tests (its identity, identity mode, universe and sockets among them), nor Claude's or tmux's, except `MV2_PYTHON`, set to the test's own Python;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
 - `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. Claude and Codex runs both work (Codex from 1.16): the test's `bin/` gets stand-in `claude` and `codex` that only print a checked version, and its home a Codex file login whose contents are never read. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
+- `self.fake_prompts(prompts, *outcomes)` (1.17): the prompts this test's agents wait on, answered from a script for the rest of the test. `prompts` are the `api.WaitingPrompt` the harness shows; each answer it receives takes the next outcome: a dict of what the harness reports (`state`, default `answered`; `saved_rule`, `person_answer`), or `"pending"` (no outcome until `fake.settle(id, outcome)`). The API's and core's checks, refusals, the exclusive answer, its record and the wait are real; agents count as waiting only while the test sets their status so. `fake.answers` holds each answer the harness received, with its notes, a secret question's answer and note masked;
 - `self.fake_slash(commands, *answers)` (1.16): harness commands answered from a script for the rest of the test. `commands` are the `api.SlashCommand` the harness lists; each run takes the next answer: a dict of what it reports (`output`, `prompted`, ...), `"queued"` (no result until `fake.finish(id, answer)`) or `"lost"` (the agent stops before it runs). The API's and core's checks, refusals, run records and wait are real, and this test's agents count as running with mv2's bridge. `fake.requests` holds each command the harness was sent;
 - a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 

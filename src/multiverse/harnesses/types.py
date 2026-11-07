@@ -20,10 +20,11 @@ EFFECTS: Mapping[str, Effect] = {
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
         'models', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
+        'waiting_prompts', 'prompt_outcome',
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
-    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash'), 'act'),
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash', 'answer_prompt'), 'act'),
 }
 
 
@@ -245,7 +246,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash', 'answer')
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ class Executor(Protocol):
     def command(self, specification: CommandSpec, timeout: float = 10): ...
     def rpc(self, specification: RpcSpec, timeout: float = 10) -> NativeResult: ...
     def write_lines(self, session: SessionHandle, lines: list[str], timeout: float = 10) -> NativeResult: ...
+    def write_prompt_answer(self, session: SessionHandle, answer: 'PromptAnswer') -> NativeResult: ...
 
 
 class HarnessAdapter(Protocol):
@@ -385,6 +387,77 @@ class SlashProvider(Protocol):
     def slash_commands(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def run_slash(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
     def slash_result(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptChoice:
+    id: str
+    label: str
+    saves_rule: bool = False
+    takes_message: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptQuestion:
+    id: str
+    question: str
+    header: str = ''
+    options: tuple[tuple[str, str], ...] = ()
+    multiple: bool = False
+    free_text: bool = True
+    secret: bool = False
+    required: bool = True
+    takes_note: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class WaitingPrompt:
+    id: str
+    kind: str
+    summary: str
+    detail: Mapping[str, Any] = field(default_factory=dict)
+    asked_at: str | None = None
+    tool: str | None = None
+    choices: tuple[PromptChoice, ...] = ()
+    questions: tuple[PromptQuestion, ...] = ()
+    answerable: bool = True
+    reason: str | None = None
+    subagent: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptList:
+    state: str
+    coverage: str = 'unknown'
+    reason: str | None = None
+    prompts: tuple[WaitingPrompt, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptAnswer:
+    id: str
+    choice: str | None = None
+    message: str | None = None
+    answers: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    allow_rule: bool = False  # Set by core only for a person; checked again at the native boundary.
+    notes: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptResult:
+    id: str
+    state: str
+    reason: str | None = None
+    saved_rule: bool = False
+    person_answer: Mapping[str, Any] | None = None
+    cause: str | None = None
+
+
+class PromptProvider(Protocol):
+    """Exact open prompts, one exclusive answer, and read-only outcomes for the original request."""
+    def waiting_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
+    def answer_prompt(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
+    def prompt_outcome(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
 
 
 class AttachmentProvider(Protocol):

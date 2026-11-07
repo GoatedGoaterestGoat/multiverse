@@ -1289,7 +1289,7 @@ The pieces keep to their own side of the boundary:
 
 - **Adapter** (`harnesses/claude/__init__.py`): launch flags, the inbox socket,
   the peer-token format, the `<<MV2>>` tag, the registered bridge id (`BRIDGE`,
-  `claude-mod-v2`), receipts, `ask`, capabilities and readiness. Everything about
+  `claude-mod-v4`), receipts, `ask`, `mv2 slash`, waiting prompts, capabilities and readiness. Everything about
   a launch's bridge comes from one pure `Bridge` view (`launched`, `registered`,
   `ready`, `reason`), so capabilities, `send`, `ask` and readiness cannot disagree.
 - **Mod** (`mod/`): hooks inside Claude. It reports itself once running
@@ -1511,9 +1511,39 @@ read. The text is its first line, cleaned and shortened like a summary, and an
 empty or missing file shows nothing. A malformed record, a name that breaks the
 manifest rule or is a core name, and a repeated name declare nothing.
 
-The mod also registers the bridge (`BRIDGE`, `claude-mod-v2`; the ID changes
-when the tag gains a part an older mod can't read: a mod still on `claude-mod-v1`
-until it reloads stays connected and gets tags without a send time) for its launch
+Waiting prompts (`mv2 answer`, [waiting-prompts.md](waiting-prompts.md)) go
+through `classic.PermissionRequest`, which Claude runs beside its own dialog: the
+first answer wins. Once the rest of the hook chain (the person's own hooks) has
+left a prompt undecided, the mod publishes it as `claude-prompts/<id>.json`, with
+the choices it can return and its call: a prompt names no call ID, but it carries
+exactly the input `tool.check` saw for that call, so the mod pairs them by tool and
+input, never by order, and lists a prompt it can't pair (two identical calls asked
+at once) as one to answer in the terminal. It holds the hook in `$.process.run` waits, which
+don't count against a hook's budget (`$.clock.sleep` does). It takes core's answer
+from `prompts/<id>.answer.json`, checks it against what it published, returns the
+decision and writes `<id>.end.json`. Claude gives a deny's message to the model as
+the call's bare result, which a model can take for an error, so the mod words it as
+an answer and says who gave it, from the answer's `caller`: "The user declined this
+tool use through mv2: …", or "The plugin NAME, answering for the user through mv2,
+declined this tool use: …" (for a plan, "…wants you to keep planning…"). The adapter reads the outcome from Claude's
+stored rows, in that conversation's own transcript in the launch's recorded
+storage (`session.home`), never a file of the same name elsewhere: a
+`hook_permission_decision` row with the decision mv2 sent means its answer took,
+and the person's accept or rejection on the call's result means they answered
+first. A row naming another decision, two decisions for one call, a hook's and the
+person's both, or another conversation's row leaves it unknown (`contradicted`). Two
+things Claude can't tell apart decide the choices: a hook's deny with `interrupt`
+is stored exactly like the person's No or Esc, so mv2 offers no "deny and stop",
+and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
+the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
+form are listed, never held.
+
+The mod also registers the bridge (`BRIDGE`, `claude-mod-v4`; the ID changes
+when the mod gains something an older one can't do: v2 reads a tag's send time,
+v3 runs `mv2 slash` commands and v4 publishes the prompts the agent waits on. A
+mod still on an older ID until it reloads stays connected and is sent only what it
+reads: tags without a send time for v1, no command frames before v3, and no
+prompts are listed before v4) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command. Each
