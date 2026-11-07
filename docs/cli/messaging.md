@@ -28,16 +28,18 @@ If the sender's record is unreadable or damaged, the sender line keeps the messa
 
 ```sh
 mv2 send worker --delivery follow-up --text 'When you finish, also update the changelog.'
-mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
+mv2 send worker --delivery inbox-only --text 'FYI: old meeting notes are archived.'
 ```
 
 | Delivery | Use it for | Arrives |
 | --- | --- | --- |
-| `steer` (default) | Corrections and anything that changes the current work | At the next safe point in the current turn. If the agent is idle, it starts a turn |
-| `follow-up` | The next thing to do | After the current turn ends |
-| `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
+| `steer` (default) | Urgent messages relevant to the current work | At the next safe point in the current turn. If the agent is idle, it starts a turn |
+| `follow-up` | Tasks, needed replies and results the recipient is waiting for | After the current turn ends |
+| `inbox-only` | FYIs requiring no action and no reply your work depends on | Only when the agent runs `mv2 inbox` |
 
-Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` for a new task, when they want a quick reply, or to return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. A follow-up reply arrives as a prompt, not in the inbox, so an agent waits for one by ending its turn rather than with `mv2 inbox --wait`. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
+Choose delivery explicitly. Use `inbox-only` only when both hold: the recipient needn't act on the message, and none of your work waits on a reply, even if it reads its inbox much later. Otherwise use `follow-up`, or `steer` when urgent and immediately relevant to the recipient's current work. Keep asks short: the question plus only what is needed to answer. Put background and side notes in your notes, or inbox-only if both tests pass.
+
+A follow-up reply arrives as a prompt, not in the inbox. Await it by ending your turn, rather than with `mv2 inbox --wait`. Report status through `mv2 report`.
 
 Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a [focused](#focus-an-agent) agent is saved as an `inbox-only` message instead. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
@@ -46,7 +48,7 @@ If a wake is refused, `send` and `deliver --check` show the complete reason, inc
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
 
-A running agent without a live connection can't receive `steer` or `follow-up` messages, so send it `inbox-only` messages instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
+A running agent without a live connection can't receive `steer` or `follow-up` messages. Inbox-only still requires both tests above; if action or a needed reply cannot wait, attach to its terminal instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
 
 ## Read the result
 
