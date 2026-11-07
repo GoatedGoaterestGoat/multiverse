@@ -353,6 +353,9 @@ class CodexAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        from .prompts import supported
+        result['answer'] = (Capability('supported', mechanism='codex-terminal-relay') if supported(session) else
+                            Capability('unavailable', 'Waiting prompts need a live prompt relay on Codex CLI and daemon 0.166.0; resume with it'))
         result['ask'] = (Capability('supported', mechanism='private-codex-copy')
                          if session.native_id and session.home and session.session_file else
                          Capability('unavailable', 'No recorded Codex conversation and home'))
@@ -402,6 +405,19 @@ class CodexAdapter(ConfiguredAdapter):
             result['get_usage'] = Capability('supported', 'Last known context from an earlier bridge reading',
                                              mechanism='codex-app-server-context')
         return result
+
+    def waiting_prompts(self, session, executor):
+        from .prompts import catalog
+        executor.check_session()
+        return catalog(session)
+
+    def answer_prompt(self, session, answer, executor):
+        from .prompts import submit
+        return submit(session, answer, executor)
+
+    def prompt_outcome(self, session, answer, executor):
+        from .prompts import outcome
+        return outcome(session, answer)
 
     def get_usage(self, session, executor=None):
         from .usage import measured

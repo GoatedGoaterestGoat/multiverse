@@ -146,6 +146,46 @@ the form, and holding it to wait for mv2 would hide the form from the person.
 The path is checked live at each Claude Code version check. A version newer than the last check lists its prompts
 but doesn't answer them until it is checked.
 
-### Codex and Pi
+### Codex
 
-Not available yet: `answer` reports them unavailable.
+Only a launch on the verified bridge, with the Codex CLI and daemon at a checked version, and only the conversation
+the launch is bound to. A `/btw` side conversation's prompts and a review's are listed, to be answered in the
+terminal, and so is every prompt while the relay can't yet tell the conversation's mode (it joined in the middle of
+a turn), until a turn starts that it saw begin. Another thread's requests, such as a subagent's, aren't listed; while
+the agent waits on one, the read's coverage is unknown.
+
+The bridge's relay already carries the conversation's requests (command, file change and permission approvals, the
+agent's questions, MCP forms) and the terminal's replies. It publishes each open request with a handle for this
+launch and conversation, the decisions the terminal offers in its order, and for a file change the exact diff from
+its item, or lists the request as not answerable without it. It closes a request on the terminal's reply (keeping
+the person's choice, never a secret), on Codex's notice that the request is resolved, when the turn ends, or when the
+launch or conversation changes, and keeps a short record of how each closed.
+
+mv2's answer is Codex's own typed reply to that request, checked twice against what the request offers, since a
+malformed first reply would use the request up. It goes up the terminal's own connection, through the one gate the
+terminal's replies pass, never another connection to the daemon and never a keystroke, steer or prompt. So the relay
+knows which reply went first:
+
+- **The terminal's:** `person`, with the choice the terminal sent; mv2's answer is never sent.
+- **mv2's:** Codex says neither whose reply it took nor that it took one: another client attached to Codex outside
+  mv2, or a cancellation, can use the request up, and no effect afterwards tells them apart (allowing once and for
+  the session start the same item; an identical reply looks the same). So the outcome is `sent_first`: mv2's answer
+  went first from the agent's terminal, the request was still open, and nothing seen contradicts it. Its reason names
+  what was seen (the command ran, the file change applied) and that Codex doesn't confirm mv2's choice, or its scope,
+  was the one taken. A cancellation, a lost connection, no resolution, or an effect contradicting mv2's decision is
+  `unknown`. A contradiction, or cancellation before a corresponding item effect, seen after the wait ended
+  turns a later `--result` into `unknown` with the observed cause.
+
+A late terminal reply after mv2's is dropped. A choice that saves a rule (an execution or network policy amendment,
+whether it allows or denies, or an MCP approval's "always allow") is the person's only; "for this session" is not
+saved. Only the terminal's options are offered: not an amendment the terminal hides, nor a file change's decline.
+MCP forms are answerable where the terminal could fill them in; URL and device-verification requests, and number or
+several-choice fields, are listed, to be answered in the terminal. A question's note is sent as Codex encodes it.
+
+A secret answer or note lives only in the answer file until the relay sends it, then the file is removed; mv2's
+records, events and logs never hold it. Codex itself hands the answer to the model and may log it, as when the
+person types it.
+
+### Pi
+
+Not available: `answer` reports it unavailable.

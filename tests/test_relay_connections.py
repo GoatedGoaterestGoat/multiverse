@@ -195,6 +195,127 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
         await client.send(json.dumps({'id': identifier, 'method': method, 'params': params}))
         return json.loads(await asyncio.wait_for(client.recv(), 2))
 
+    async def test_optional_prompt_pickup_orders_replies_and_isolates_secret_hook_failures(self):
+        """An optional answer path must send once on this socket without leaking answers or losing ordinary forwarding."""
+        from unittest.mock import patch
+        real_connect = rpc.unix_connect
+        original = View.outgoing
+        for case in ('person_first', 'mv2_first', 'bad_generated', 'context_error', 'pickup_error', 'close_error', 'close_timeout', 'send_cancel'):
+            with self.subTest(case=case):
+                await self.fresh()
+                self.proxy.relay_context = {'agent_directory': str(self.folder), 'launch_id': 'trusted-launch'}
+                self.proxy.RELAY_CLOSE_TIMEOUT = .05
+                enable, written, in_send = threading.Event(), threading.Event(), threading.Event()
+                contexts, callbacks, closes, claims = [], [], [], []
+
+                def context(view, value):
+                    contexts.append(value)
+                    view.winner = None
+                    if case == 'context_error':
+                        raise ValueError('SENTINEL_SECRET_CONTEXT')
+
+                async def pickup(view, send):
+                    if case == 'pickup_error':
+                        raise ValueError('SENTINEL_SECRET_PICKUP')
+                    while not enable.is_set():
+                        await asyncio.sleep(.005)
+                    await send({'id': 'server-call', 'result': {'decision': 'mv2'}})
+                    await asyncio.Event().wait()
+
+                def claim(view, candidate):
+                    claims.append(candidate['id'])
+                    if view.winner == 'person':
+                        return None
+                    view.winner = 'mv2'
+                    if case == 'bad_generated':
+                        return {'id': 'server-call', 'method': 'turn/start', 'params': {'threadId': 'foreign'}}
+                    return candidate
+
+                def sent(view, candidate, success):
+                    callbacks.append(success)
+                    written.set()
+
+                async def close(view):
+                    closes.append(view.token)
+                    if case == 'close_error':
+                        raise ValueError('SENTINEL_SECRET_CLOSE')
+                    if case == 'close_timeout':
+                        await asyncio.Event().wait()
+
+                def outgoing(view, value):
+                    if value.get('id') == 'server-call' and 'method' not in value:
+                        if view.winner == 'mv2':
+                            return None
+                        view.winner = 'person'
+                    return original(view, value)
+
+                class BlockedConnection:
+                    def __init__(self, connection):
+                        self.connection = connection
+                    def __getattr__(self, name):
+                        return getattr(self.connection, name)
+                    def __aiter__(self):
+                        return self.connection.__aiter__()
+                    async def send(self, value):
+                        if case == 'send_cancel' and json.loads(value).get('id') == 'server-call':
+                            in_send.set()
+                            await asyncio.Event().wait()
+                        await self.connection.send(value)
+
+                class Connect:
+                    def __init__(self, *args, **kwargs):
+                        self.manager = real_connect(*args, **kwargs)
+                    async def __aenter__(self):
+                        return BlockedConnection(await self.manager.__aenter__())
+                    async def __aexit__(self, *args):
+                        return await self.manager.__aexit__(*args)
+
+                async def until(predicate):
+                    async with asyncio.timeout(2):
+                        while not predicate():
+                            await asyncio.sleep(.005)
+
+                with patch.object(View, 'relay_context', context, create=True), \
+                        patch.object(View, 'relay_run', pickup, create=True), \
+                        patch.object(View, 'relay_claim', claim, create=True), \
+                        patch.object(View, 'relay_sent', sent, create=True), \
+                        patch.object(View, 'relay_close', close, create=True), \
+                        patch.object(View, 'outgoing', outgoing), patch.object(rpc, 'unix_connect', Connect):
+                    client = await self.connect()
+                    self.assertEqual((await self.request(client, 1, 'bind'))['result']['bind'], True)
+                    self.assertEqual(contexts, [self.proxy.relay_context])
+                    if case == 'person_first':
+                        await client.send(json.dumps({'id': 'server-call', 'result': {'decision': 'person'}}))
+                        await until(lambda: any(v.get('id') == 'server-call' for v in self.received))
+                        enable.set()
+                        await until(lambda: bool(claims))
+                        self.assertEqual(callbacks, [])
+                    elif case in ('mv2_first', 'bad_generated', 'send_cancel'):
+                        enable.set()
+                        if case == 'send_cancel':
+                            self.assertTrue(await asyncio.to_thread(in_send.wait, 2))
+                        else:
+                            self.assertTrue(await asyncio.to_thread(written.wait, 2))
+                            await client.send(json.dumps({'id': 'server-call', 'result': {'decision': 'late-person'}}))
+                    if case != 'send_cancel':
+                        self.assertEqual((await self.request(client, 2, 'echo', label='still-connected'))['result']['label'],
+                                         'still-connected')
+                    await client.close()
+                    await until(lambda: self.protocol.views[0].closed_count == 1)
+                values = [v for v in self.received if v.get('id') == 'server-call']
+                if case in ('person_first', 'mv2_first'):
+                    self.assertEqual(len(values), 1)
+                    self.assertEqual(values[0]['result']['decision'], 'person' if case == 'person_first' else 'mv2')
+                if case == 'mv2_first':
+                    self.assertEqual(callbacks, [True])
+                if case in ('send_cancel', 'bad_generated'):
+                    self.assertEqual(callbacks, [False])
+                    self.assertEqual(values, [])
+                    self.assertEqual(claims, ['server-call'])
+                self.assertEqual(len(closes), 0 if case == 'context_error' else 1)
+                self.assertNotIn('SENTINEL_SECRET', json.dumps(self.errors + self.losses))
+                self.assertFalse(self.losses)
+
     async def test_navigation_core_waits_never_block_relay_forwarding_or_publish_before_commit(self):
         """A core switch waits for delivery locks, so blocking the relay loop would deadlock the response that releases them."""
         from unittest.mock import patch

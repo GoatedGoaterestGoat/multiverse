@@ -40,6 +40,8 @@ private daemon and local provider, alongside the relay and lineage tests. Includ
 loading failure after RPC success. The [selection boundary](../design/session-lineage.md#codex-conversation-switches)
 must remain explicit; a successful RPC does not prove which view the TUI shows.
 
+Codex waiting prompts have a separate **CLI and daemon 0.166.0** gate. Before extending it, check the terminal's offered decisions and typed response schemas, review and side-thread routing, request resolution and cancellation, and any observable effects. Run `test_codex_prompts` and `test_relay_connections` with their fake native peer, alongside the core, CLI and plugin prompt tests. Startup-screen support alone does not qualify answering prompts, and a resolution notice still does not identify whose response Codex took.
+
 When checking a new Claude Code or Codex release, also add its screens to
 `tests/fixtures/`: real captures, or Codex's renderer snapshots labelled as
 such. Then run `tests/test_pane_display.py`. The dashboard's live pane must
@@ -56,6 +58,7 @@ Other releases may behave differently. The Claude Code mod API is early access a
 | `/multiverse` typeahead in Claude's prompt box | Claude Code 2.1.292 | The typeahead isn't loaded, but the `/multiverse` command works without it. A version mv2 can't read also skips it, unlike the bridge: Claude refuses a plugin that uses an event it doesn't know, and suggestions aren't worth that risk. |
 | Codex bridge | No version check | Other CLI releases receive a launch notice that mv2 startup screen checks are disabled. Native side conversations separately require a supported daemon release and a client that supports them. At each launch, mv2 checks that the CLI, the shared app-server and its relay work. It falls back to plain when `inbox_bridge` is unset. The CLI and app-server versions are recorded at launch and may differ. |
 | Codex in-terminal conversation navigation | CLI and daemon 0.166.0 | Other releases refuse primary conversation switches through the bridge. Plain and fallback launches are not upgraded into navigation support. |
+| Codex waiting prompts | CLI and daemon 0.166.0, with a current verified prompt relay | Other versions and older launches require a checked bridge resume. Plain and fallback launches cannot publish or answer prompts. |
 | Pi bridge | No version check | The bridge is off unless `inbox_bridge` is `true`. |
 
 See [harnesses](../use/harnesses.md) for `inbox_bridge` and launch-only agents.

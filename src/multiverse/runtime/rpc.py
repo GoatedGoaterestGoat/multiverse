@@ -1,7 +1,9 @@
 """Bounded core transport for adapter-owned native JSON-RPC control plans.
 
 This connects only to a declared local Unix WebSocket endpoint. It never starts,
-resumes, interrupts or stops a native server, and never answers native requests.
+resumes, interrupts or stops a native server. Short-lived control plans never
+answer native requests; the launch relay can carry adapter-validated answers
+over the owning terminal's existing connection.
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -144,11 +146,12 @@ class LaunchProxy:
     MAX_MESSAGE_SIZE = 64 * 1024 * 1024
     MAX_QUEUE = 2
     POST_BIND_TIMEOUT = 3
+    RELAY_CLOSE_TIMEOUT = 1
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
                  record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None,
-                 navigation=None):
+                 navigation=None, relay_context=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -158,6 +161,7 @@ class LaunchProxy:
         self.record_connection = record_connection
         self.record_primary_event = record_primary_event
         self.navigation = navigation
+        self.relay_context = dict(relay_context or {})
         self.owner = None
         self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
@@ -218,6 +222,20 @@ class LaunchProxy:
         failure = None
         connection_id = str(uuid4())
         protocol = self.protocol
+        relay_enabled, relay_closed = False, False
+
+        async def close_optional():
+            nonlocal relay_closed
+            if not relay_enabled or relay_closed:
+                return
+            relay_closed = True
+            close_relay = getattr(protocol, 'relay_close', None)
+            if close_relay is not None:
+                try:
+                    async with asyncio.timeout(self.RELAY_CLOSE_TIMEOUT):
+                        await close_relay()
+                except Exception:
+                    self._record_error('Native prompt cleanup is unavailable; its answers remain unconfirmed')
         if self.record_connection:
             self.record_connection({'id': connection_id, 'role': 'terminal relay',
                                     'endpoint': self.spec['upstream_path'], 'state': 'opening'})
@@ -225,9 +243,39 @@ class LaunchProxy:
             for_connection = getattr(self.protocol, 'for_connection', None)
             if for_connection is not None:
                 protocol = for_connection(connection_id, lambda: self.owner is client)
+            prepare_relay = getattr(protocol, 'relay_context', None)
+            if prepare_relay is not None:
+                try:
+                    prepare_relay(dict(self.relay_context))
+                    relay_enabled = True
+                except Exception:
+                    self._record_error('Native prompt context is unavailable; answer in the terminal')
             async with unix_connect(self.spec['upstream_path'], compression=None, open_timeout=5,
                                     close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE,
                                     max_queue=self.MAX_QUEUE) as upstream:
+                send_gate = asyncio.Lock()
+
+                async def generated(candidate):
+                    # The adapter claims/revalidates under the same gate as the
+                    # terminal's transform and send, after its off-loop pickup.
+                    async with send_gate:
+                        value = protocol.relay_claim(candidate)
+                        if value is None:
+                            return
+                        try:
+                            if (not isinstance(value, dict) or set(value) - {'jsonrpc', 'id', 'result'}
+                                    or 'result' not in value or type(value.get('id')) not in (str, int)
+                                    or value.get('jsonrpc', '2.0') != '2.0'):
+                                raise ValueError('Native prompt pickup must produce a JSON-RPC result response')
+                            payload = json.dumps(value, ensure_ascii=False, allow_nan=False)
+                            if len(payload.encode()) > self.MAX_MESSAGE_SIZE:
+                                raise ValueError('Native relay generated message exceeds size limit')
+                            await upstream.send(payload)
+                        except BaseException:
+                            protocol.relay_sent(candidate, False)
+                            raise
+                        protocol.relay_sent(candidate, True)
+
                 async def local_error(error, value, outgoing):
                     # Correlation is adapter-owned, but the transport never
                     # reflects a different ID, answers a notification, or sends
@@ -268,90 +316,98 @@ class LaunchProxy:
                             failed(event, str(error))
                         raise LocalProtocolError(str(error), request_id=value.get('id')) from error
 
+                async def transfer(payload, target, outgoing):
+                    try:
+                        value = json.loads(payload)
+                    except (ValueError, UnicodeError):
+                        if isinstance(payload, bytes):
+                            await target.send(payload)
+                            return
+                        raise ValueError('Native relay received malformed JSON')
+                    if not isinstance(value, dict):
+                        raise ValueError('Native relay received a non-object')
+                    original = value
+                    resolved_navigation = None
+                    if outgoing:
+                        try:
+                            value = protocol.outgoing(value)
+                            if value is None:
+                                return
+                            resolved_navigation = await navigate('outgoing', value)
+                        except LocalProtocolError as error:
+                            await local_error(error, value, True)
+                            return
+                        except (ValueError, TypeError, KeyError) as error:
+                            self._record_error(str(error))
+                            await client.send(json.dumps({'id': value.get('id'), 'error': {
+                                'code': -32602, 'message': f'Native launch preparation failed: {error}'}}))
+                            return
+                        observe_event = getattr(protocol, 'primary_event', None)
+                        if observe_event is not None:
+                            event = observe_event('outgoing', value)
+                            if event is not None:
+                                self.record_primary_event(event)
+                    else:
+                        try:
+                            native_id = protocol.incoming(value)
+                            resolved_navigation = await navigate('incoming', value)
+                        except LocalProtocolError as error:
+                            await local_error(error, value, False)
+                            return
+                        except (ValueError, TypeError, KeyError) as error:
+                            if not getattr(protocol, 'bound', False):
+                                self.record_refusal({'source': 'adapter-validation', 'method': 'binding',
+                                                     'code': None, 'message': str(error), 'native_id': None})
+                            raise
+                        observe_event = getattr(protocol, 'primary_event', None)
+                        if observe_event is not None:
+                            event = observe_event('incoming', value)
+                            if event is not None:
+                                self.record_primary_event(event)
+                        refusal = getattr(protocol, 'launch_refusal', None)
+                        if refusal is not None:
+                            self.record_refusal(refusal)
+                        if native_id is not None:
+                            self.bind(native_id)
+                            self.owner = client
+                            after_bind = getattr(protocol, 'after_bind', None)
+                            if after_bind is not None:
+                                try:
+                                    spec = after_bind(self.spec['upstream_path'])
+                                    if spec is not None:
+                                        observed = await _execute(spec, self.POST_BIND_TIMEOUT, self.record_connection)
+                                        if observed.state != 'ok':
+                                            raise ValueError(observed.reason)
+                                except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+                                    self._record_error(f'Native session naming failed: {error}')
+                        observe = getattr(protocol, 'usage', None)
+                        if observe is not None:
+                            try:
+                                usage = observe(value)
+                                if usage is not None:
+                                    self.publish_usage(usage)
+                            except (OSError, ValueError, TypeError, KeyError):
+                                pass  # Optional telemetry must not disrupt the TUI.
+                    if value is not original:
+                        encoded = json.dumps(value, ensure_ascii=False)
+                        if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
+                            raise ValueError('Native relay message exceeds size limit')
+                        payload = encoded.encode() if isinstance(payload, bytes) else encoded
+                    await target.send(payload)
+                    if resolved_navigation is not None:
+                        try:
+                            await asyncio.to_thread(self.navigation, 'flush', resolved_navigation)
+                        except (OSError, ValueError, RuntimeError) as error:
+                            self._record_error(f'Saved input after conversation switch: {error}')
                 async def forward(source, target, outgoing):
                     nonlocal ended
                     try:
                         async for payload in source:
-                            try:
-                                value = json.loads(payload)
-                            except (ValueError, UnicodeError):
-                                if isinstance(payload, bytes):
-                                    await target.send(payload)
-                                    continue
-                                raise ValueError('Native relay received malformed JSON')
-                            if not isinstance(value, dict):
-                                raise ValueError('Native relay received a non-object')
-                            original = value
-                            resolved_navigation = None
                             if outgoing:
-                                try:
-                                    value = protocol.outgoing(value)
-                                    resolved_navigation = await navigate('outgoing', value)
-                                except LocalProtocolError as error:
-                                    await local_error(error, value, True)
-                                    continue
-                                except (ValueError, TypeError, KeyError) as error:
-                                    self._record_error(str(error))
-                                    await client.send(json.dumps({'id': value.get('id'), 'error': {
-                                        'code': -32602, 'message': f'Native launch preparation failed: {error}'}}))
-                                    continue
-                                observe_event = getattr(protocol, 'primary_event', None)
-                                if observe_event is not None:
-                                    event = observe_event('outgoing', value)
-                                    if event is not None:
-                                        self.record_primary_event(event)
+                                async with send_gate:
+                                    await transfer(payload, target, True)
                             else:
-                                try:
-                                    native_id = protocol.incoming(value)
-                                    resolved_navigation = await navigate('incoming', value)
-                                except LocalProtocolError as error:
-                                    await local_error(error, value, False)
-                                    continue
-                                except (ValueError, TypeError, KeyError) as error:
-                                    if not getattr(protocol, 'bound', False):
-                                        self.record_refusal({'source': 'adapter-validation', 'method': 'binding',
-                                                             'code': None, 'message': str(error), 'native_id': None})
-                                    raise
-                                observe_event = getattr(protocol, 'primary_event', None)
-                                if observe_event is not None:
-                                    event = observe_event('incoming', value)
-                                    if event is not None:
-                                        self.record_primary_event(event)
-                                refusal = getattr(protocol, 'launch_refusal', None)
-                                if refusal is not None:
-                                    self.record_refusal(refusal)
-                                if native_id is not None:
-                                    self.bind(native_id)
-                                    self.owner = client
-                                    after_bind = getattr(protocol, 'after_bind', None)
-                                    if after_bind is not None:
-                                        try:
-                                            spec = after_bind(self.spec['upstream_path'])
-                                            if spec is not None:
-                                                observed = await _execute(spec, self.POST_BIND_TIMEOUT, self.record_connection)
-                                                if observed.state != 'ok':
-                                                    raise ValueError(observed.reason)
-                                        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
-                                            self._record_error(f'Native session naming failed: {error}')
-                                observe = getattr(protocol, 'usage', None)
-                                if observe is not None:
-                                    try:
-                                        usage = observe(value)
-                                        if usage is not None:
-                                            self.publish_usage(usage)
-                                    except (OSError, ValueError, TypeError, KeyError):
-                                        pass  # Optional telemetry must not disrupt the TUI.
-                            if value is not original:
-                                encoded = json.dumps(value, ensure_ascii=False)
-                                if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
-                                    raise ValueError('Native relay message exceeds size limit')
-                                payload = encoded.encode() if isinstance(payload, bytes) else encoded
-                            await target.send(payload)
-                            if resolved_navigation is not None:
-                                try:
-                                    await asyncio.to_thread(self.navigation, 'flush', resolved_navigation)
-                                except (OSError, ValueError, RuntimeError) as error:
-                                    self._record_error(f'Saved input after conversation switch: {error}')
+                                await transfer(payload, target, False)
                     finally:
                         code = source.close_code
                         if ended is None:
@@ -361,6 +417,18 @@ class LaunchProxy:
                                                reason=source.close_reason or '')
                 tasks = [asyncio.create_task(forward(client, upstream, True)),
                          asyncio.create_task(forward(upstream, client, False))]
+                pickup = getattr(protocol, 'relay_run', None) if relay_enabled else None
+                async def run_pickup():
+                    try:
+                        await pickup(generated)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # An adapter must not put an answer or credential in a
+                        # diagnostic, or lose the TUI for optional prompt I/O.
+                        self._record_error('Native prompt pickup is unavailable; answer in the terminal')
+                        await close_optional()
+                pickup_task = asyncio.create_task(run_pickup()) if pickup is not None else None
                 try:
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
@@ -368,7 +436,10 @@ class LaunchProxy:
                 finally:
                     for task in tasks:
                         task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    if pickup_task is not None:
+                        pickup_task.cancel()
+                    await asyncio.gather(*tasks, *([pickup_task] if pickup_task else []), return_exceptions=True)
+                    await close_optional()
         except (OSError, ValueError, TypeError, WebSocketException) as error:
             failure = str(error)
             self._record_error(str(error))
