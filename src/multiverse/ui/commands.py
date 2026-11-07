@@ -9,7 +9,9 @@ from ..display import clean
 from ..tools.inbox import readable
 from ..tools.unfocus import summary as unfocus_summary
 from ..universe import focus
+from ..tools.answer import outcome as answer_outcome
 from .plugin_service import error_text, in_daemon
+from .prompt_screen import AnswerScreen, prompt_line
 from .screens import ChoiceScreen, Details, Form
 
 # The focus lengths the dashboard offers: (choice, label, backend arguments).
@@ -129,6 +131,61 @@ class AgentCommands:
                 f"{'it' if one else 'them'} here doesn't mark {'it' if one else 'them'} read.")
         self.push_screen(Details(f"{name} · {len(messages)} unread inbox message{'' if one else 's'}",
                                  note + "\n\n" + "\n".join(clean(line) for line in text.splitlines())))
+
+    def action_answer(self):
+        if self.ready() and self.selected:
+            row = dict(self.selected)
+            if row.get("status") != "waiting":
+                self.set_status(f"{clean(row['name'])} isn't waiting on a prompt.")
+                return
+            self.open_answer(row)
+
+    @work(group="answer-view", exclusive=True, exit_on_error=False)
+    async def open_answer(self, row):
+        """Read the agent's prompts fresh, then open the one to answer; nothing is sent until the person answers."""
+        name = clean(row["name"])
+        try:
+            found = await asyncio.to_thread(self.backend.waiting_prompts, Path(row["universe"]), row["id"])
+        except Exception as error:
+            self.set_status(f"{name}: its prompts can't be read: {error_text(error, kind=False)}", error=True)
+            return
+        if found.get("state") != "ok":
+            self.set_status(f"{name}: " + clean(found.get("reason") or "its prompts can't be read"), error=True)
+            return
+        open_prompts = [item for item in found.get("prompts") or () if item.get("answerable", True)]
+        if not open_prompts:
+            closed = (found.get("prompts") or [None])[0]
+            self.set_status(f"{name}: " + (clean(closed.get("reason") or "answer it in the terminal") if closed else
+                                           "no prompt mv2 can see"
+                                           + (f" ({clean(found.get('reason'))})" if found.get("reason") else "") + "."))
+            return
+        if len(open_prompts) == 1:
+            self.answer_screen(row, open_prompts[0])
+            return
+
+        def picked(prompt_id):
+            if prompt_id:
+                self.answer_screen(row, next(item for item in open_prompts if item["id"] == prompt_id))
+        self.push_screen(ChoiceScreen(f"{name} waits on {len(open_prompts)} prompts",
+                                      [(item["id"], prompt_line(item)) for item in open_prompts]), picked)
+
+    def answer_screen(self, row, item):
+        def answered(values):
+            if values is None:  # Esc: nothing was sent
+                return
+            agent = row["id"]
+
+            def describe(result):
+                try:
+                    said, ok = answer_outcome(result, row["name"]), True
+                except ValueError as refused:
+                    said, ok = str(refused), False
+                self.prompt_outcomes[agent] = (said, ok)
+                return said, not ok
+            self.submit_operation(f"Answer {clean(row['name'])}", self.backend.answer_prompt, Path(row["universe"]),
+                                  agent, item["id"], values, describe=describe,
+                                  after=lambda result: self.inspector.show_prompts(None) if self.inspector.row else None)
+        self.push_screen(AnswerScreen(row["name"], item), answered)
 
     def action_stop(self):
         self.action_kill()

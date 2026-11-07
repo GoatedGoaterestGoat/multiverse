@@ -32,7 +32,7 @@ class DemoBackend:
             (self.root, "kernel-worker", "alive", "working", "working", "Compare fused attention kernels on the reference inputs"),
             (self.root, "training-check", "stopped", "-", "done", "Regression suite passed; evidence is ready for review"),
             (review, "reviewer", "alive", "working", "working", "Trace the changed call sites and verify findings"),
-            (review, "pr-writer", "alive", "idle", "blocked", "Waiting for benchmark evidence before drafting the PR"),
+            (review, "pr-writer", "alive", "waiting", "blocked", "Waiting for benchmark evidence before drafting the PR"),
             (cad, "harness-builder", "alive", "working", "working", "Validate the new constraint solver adapter"),
             (verify, "verifier", "stopped", "-", "done", "Reproduced the gearbox trial across three seeds"),
         ]
@@ -40,6 +40,17 @@ class DemoBackend:
             self.agents.append({"id": f"00000000-0000-4000-8000-{index + 1:012d}", "name": name,
                                 "universe": str(path), "harness": "codex" if index % 2 == 0 else "claude", "live": live, "status": status,
                                 "phase": phase, "summary": summary, "task": summary, "runtime": {}})
+        self.answers = []
+        writer = next(agent["id"] for agent in self.agents if agent["name"] == "pr-writer")
+        self.prompts = {writer: [{
+            "id": "demo-permission", "kind": "permission", "tool": "Bash", "summary": "git push origin draft-pr",
+            "detail": {"command": "git push origin draft-pr", "description": "Publish the draft branch"},
+            "asked_at": None, "answerable": True, "reason": None, "subagent": None, "questions": [],
+            "choices": [{"id": "allow", "label": "Yes", "saves_rule": False, "takes_message": False},
+                        {"id": "allow_always", "label": "Yes, and don't ask again for git push", "saves_rule": True,
+                         "takes_message": False},
+                        {"id": "deny", "label": "No, and tell it what to do instead", "saves_rule": False,
+                         "takes_message": True}]}]}
 
     def snapshot(self, root):
         with self.lock:
@@ -107,6 +118,27 @@ class DemoBackend:
         with self.lock:
             agent = self.find(root, reference)
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
+
+    def waiting_prompts(self, root, reference):
+        """The prompts a waiting demo agent is stopped at, in core's listing shape."""
+        with self.lock:
+            agent = self.find(root, reference)
+            prompts = deepcopy(self.prompts.get(reference, [])) if agent.get("status") == "waiting" else []
+            return {"state": "ok", "coverage": "complete", "reason": None, "prompts": prompts}
+
+    def answer_prompt(self, root, reference, prompt_id, values):
+        """Take the answer as the harness would: the prompt closes, and with none left the agent goes back to work."""
+        with self.lock:
+            agent, waiting = self.find(root, reference), self.prompts.get(reference, [])
+            if agent.get("status") != "waiting" or not any(item["id"] == prompt_id for item in waiting):
+                return {"id": prompt_id, "state": "refused", "reason": "The agent isn't waiting on that prompt.",
+                        "cause": "not_waiting", "saved_rule": False, "person_answer": None}
+            self.answers.append((reference, prompt_id, deepcopy(values)))
+            self.prompts[reference] = [item for item in waiting if item["id"] != prompt_id]
+            if not self.prompts[reference]:
+                agent["status"] = "working"
+            return {"id": prompt_id, "state": "answered", "reason": None, "cause": None, "saved_rule": False,
+                    "person_answer": None}
 
     def unread(self, root, reference):
         """Messages sent inbox-only to the agent; the demo's agents never read them."""
