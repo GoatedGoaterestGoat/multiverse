@@ -188,6 +188,10 @@ is reported once with the message text and advice to send a new message delibera
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
 lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
+Codex checks up to 100 queued entries and the latest 20 full turns, with a 64 MiB
+limit per reply. Large tool output within that limit does not prevent receipt
+confirmation. A missing receipt, larger reply or transport failure leaves
+consumption unconfirmed; checking never resends input or loads an old conversation.
 A message that woke an agent is checked against that launch's own starting
 prompt, with the harness's transcript evidence (Claude Code today), on each
 `mv2 deliver --check` until it settles; listings and the dashboard never read it.

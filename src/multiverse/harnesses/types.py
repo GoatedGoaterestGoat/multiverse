@@ -216,6 +216,7 @@ class RpcSpec:
     socket_path: str
     plan: Callable[[], Generator[RpcRequest, Mapping[str, Any], 'NativeResult']]
     max_requests: int = 16
+    max_response_bytes: int = 1024 * 1024
 
 
 @dataclass(frozen=True)

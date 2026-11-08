@@ -443,7 +443,9 @@ class CodexAdapter(ConfiguredAdapter):
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
             return NativeResult('unavailable', 'No Codex app-server endpoint')
-        return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
+        # Full turn items and pending inputs can exceed the small control default.
+        return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id),
+                                    max_response_bytes=64 * 1024 * 1024))
 
     def continue_queued(self, session, accepted_receipts, executor):
         if (not isinstance(accepted_receipts, Mapping) or any(

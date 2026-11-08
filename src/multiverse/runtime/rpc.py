@@ -16,6 +16,16 @@ from websockets.exceptions import WebSocketException
 from ..harnesses.types import LocalProtocolError, NativeResult
 
 
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+def _response_limit(spec):
+    limit = spec.max_response_bytes
+    if type(limit) is not int or not 1 <= limit <= MAX_RESPONSE_BYTES:
+        raise ValueError('Native RPC response budget must be between 1 byte and 64 MiB')
+    return limit
+
+
 async def _exchange(connection, plan, request, max_requests, send):
     """Send a plan's requests in turn, feeding it each response, until it returns.
 
@@ -52,10 +62,11 @@ async def _execute(spec, timeout, record_connection=None):
     if record_connection:
         record_connection({'id': connection_id, 'role': 'control RPC', 'endpoint': spec.socket_path, 'state': 'opening'})
     try:
+        response_limit = _response_limit(spec)
         async with asyncio.timeout(timeout):
             async with unix_connect(spec.socket_path, compression=None, open_timeout=timeout,
-                                    close_timeout=0.2, ping_interval=None, max_size=1024 * 1024,
-                                    max_queue=8) as connection:
+                                    close_timeout=0.2, ping_interval=None, max_size=response_limit,
+                                    max_queue=2 if response_limit > 1024 * 1024 else 8) as connection:
                 async def send(value, _kind):
                     payload = json.dumps(value, ensure_ascii=False)
                     if len(payload.encode()) > 1024 * 1024:
@@ -105,9 +116,11 @@ async def watch(spec, interpret, publish, timeout=5, *, record_connection=None):
     if record_connection:
         record_connection({'id': connection_id, 'role': 'status stream', 'endpoint': spec.socket_path, 'state': 'opening'})
     try:
+        response_limit = _response_limit(spec)
         async with unix_connect(spec.socket_path, compression=None, open_timeout=timeout,
                                 close_timeout=0.2, ping_interval=20, ping_timeout=20,
-                                max_size=1024 * 1024, max_queue=8) as connection:
+                                max_size=response_limit,
+                                max_queue=2 if response_limit > 1024 * 1024 else 8) as connection:
             async with asyncio.timeout(timeout):
                 async def send(value, kind):
                     payload = json.dumps(value)

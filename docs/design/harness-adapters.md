@@ -952,8 +952,12 @@ and reply interpretation; core owns WebSocket connections, backpressure, size
 limits, error recording, exact session binding and cleanup.
 Interactive relay messages have a separate 64 MiB limit and a two-frame receive
 queue: native resume replies include conversation history and can exceed the
-1 MiB budget used for small control RPCs. Oversized messages still close the
-connection with a runtime diagnostic.
+1 MiB default used for small control RPCs. A control plan can request a larger
+receive budget through `RpcSpec.max_response_bytes`, capped at 64 MiB with a
+two-frame queue. Codex receipt reads use this budget for full history and queued
+input; turn-count pagination cannot bound the size of one tool result or message.
+Outgoing control requests retain their 1 MiB cap. Oversized incoming messages
+still close the connection with a runtime diagnostic and never authorize a resend.
 
 An adapter may supply `for_connection(connection_id, owns_primary)` to give each
 relay connection a protocol view. The owner callback reads current ownership;

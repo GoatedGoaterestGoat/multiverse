@@ -136,6 +136,13 @@ A bridged Codex conversation can have several clients at once. Its tool configur
 
 ## Bridge and plain
 
+An adapter's `RpcSpec.max_response_bytes` bounds each incoming WebSocket message,
+including notifications. It defaults to 1 MiB; core accepts integer budgets from
+1 byte through 64 MiB. Larger budgets use a two-frame receive queue. Codex receipt
+reads opt into 64 MiB because full turn items and queued input can exceed 1 MiB.
+Outgoing control requests remain capped at 1 MiB, with the same request-count
+and time limits. An oversized or unreadable reply gives no permission to resend.
+
 The user docs call these a **live connection** and **launch-only**. In both, mv2 never types into the terminal.
 
 A **plain** launch is the CLI in its pane. mv2 sees whether it is alive, can stop it, and can resume it with a message as its first prompt. It can't reach the running session. A **bridge** adds an endpoint that core can write to, plus an integration that reports back.
