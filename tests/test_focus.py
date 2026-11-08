@@ -24,6 +24,22 @@ from multiverse.tools import focus as focus_tool, listen, send, unfocus
 from multiverse.universe import agents, focus, mailbox, templates
 
 
+SPECIAL_FOCUS = '''import os,sys,threading
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from multiverse.universe import focus
+from multiverse.terminal import statusline
+directory=Path(sys.argv[2])
+assert threading.active_count()==1
+for reader,expected in ((focus.current,None),(statusline.focus_text,'')):
+    descriptors=len(os.listdir('/dev/fd'))
+    for _ in range(20):
+        assert reader(directory)==expected
+    remaining=len(os.listdir('/dev/fd'))
+    assert remaining==descriptors,(reader.__name__,remaining,descriptors)
+'''
+
+
 class FocusRecordTest(BaseTest):
     def setUp(self):
         super().setUp()
@@ -109,11 +125,12 @@ class FocusRecordTest(BaseTest):
             with self.subTest(label):
                 path = self.directory / focus.FILE
                 path.mkdir() if label == 'directory' else os.mkfifo(path)
-                descriptors = len(os.listdir('/dev/fd'))
-                for _ in range(20):
-                    self.assertIsNone(focus.current(self.directory))   # a FIFO must not block
-                    self.assertEqual(statusline.focus_text(self.directory), '')
-                self.assertEqual(len(os.listdir('/dev/fd')), descriptors)   # every read closes what it opened
+                # The runner's sampler opens unrelated FDs in this process. Check each reader in a single-threaded
+                # child instead, retaining exact FD counts and a timeout for a FIFO that would block.
+                result = subprocess.run([sys.executable, '-I', '-c', SPECIAL_FOCUS,
+                                         str(Path(__file__).resolve().parents[1] / 'src'), str(self.directory)],
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.status('working')
                 self.status('idle')
                 self.assertIsNone(focus.end(self.directory))
