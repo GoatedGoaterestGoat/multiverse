@@ -1,4 +1,5 @@
 """The dashboard shows the prompt a waiting agent is stopped at, and answers it as the person."""
+import asyncio
 from pathlib import Path
 import sys
 import unittest
@@ -44,6 +45,23 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
             await self.app.workers.wait_for_complete()
         await pilot.pause()
 
+    async def until(self, pilot, check, what, timeout=10.0):
+        """Wait for `check` on the dashboard's own loop, bounded: a slow runner delays its timers, not their order."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not check():
+            if asyncio.get_running_loop().time() > deadline:
+                self.fail(f"timed out waiting for {what}")
+            await pilot.pause(0.02)
+            await self.app.workers.wait_for_complete()
+
+    async def inspect(self, pilot, agent):
+        """Select `agent` and wait until the inspector shows it: a selection reaches the inspector through a timer,
+        which settle() does not wait for, and then its prompt read runs in a worker."""
+        self.app.select_key(agent_key(agent))
+        await self.until(pilot, lambda: bool(self.app.inspector.row) and self.app.inspector.row["id"] == agent["id"],
+                         f"the inspector to show {agent['name']}")
+        await self.settle(pilot)
+
     def line(self):
         widget = self.app.query_one("#inspect-prompt", Static)
         return str(widget.render()) if widget.display else ""
@@ -52,8 +70,7 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
         return str(self.app.query_one("#status", Static).render())
 
     async def open(self, pilot, agent):
-        self.app.select_key(agent_key(agent))
-        await self.settle(pilot)
+        await self.inspect(pilot, agent)
         await pilot.press("a")
         await self.settle(pilot)
 
@@ -67,12 +84,11 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             await pilot.press("p")
             with self.subTest("the line shows only for a waiting agent"):
-                self.app.select_key(agent_key(self.other))
-                await self.settle(pilot)
-                self.assertEqual(self.line(), "")
-                self.app.select_key(agent_key(self.writer))
-                await self.settle(pilot)
+                await self.inspect(pilot, self.writer)
+                await self.until(pilot, lambda: "Waiting on" in self.line(), "the waiting prompt's line")
                 self.assertIn("⏸ Waiting on: permission · Bash: git push origin draft-pr · a answers it", self.line())
+                await self.inspect(pilot, self.other)  # from a waiting agent to one that isn't: the line goes
+                self.assertEqual(self.line(), "")
             with self.subTest("a on an agent that isn't waiting says so and opens nothing"):
                 await self.open(pilot, self.other)
                 self.assertNotIsInstance(self.app.screen, AnswerScreen)
@@ -104,6 +120,7 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.backend.answers, [(self.writer["id"], "demo-permission", {
                     "choice": "deny", "message": "push to a fork instead", "answers": {}, "notes": {}})])
                 self.assertIn("Answered.", self.status())
+                await self.until(pilot, lambda: "Last answer" in self.line(), "the outcome in the inspector")
                 self.assertIn("Last answer: Answered.", self.line())
                 self.assertNotIn("Waiting on", self.line())  # its only prompt is answered: it works again
             with self.subTest("questions: labels picked, a masked secret, nothing sent while one is empty"):
@@ -205,6 +222,7 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                     self.backend.answer_prompt = answer
                 self.assertIn("The person answered in the terminal first. They answered 'Which parts?' with UI.",
                               self.status())
+                await self.until(pilot, lambda: "Last answer: The person" in self.line(), "the outcome in the inspector")
                 self.assertIn("Last answer: The person answered", self.line())
 
 
