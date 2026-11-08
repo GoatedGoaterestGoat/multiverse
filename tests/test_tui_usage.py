@@ -77,7 +77,12 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         gate.set()
         await d.until(lambda: not d.app.usage_reading, "the held usage read to finish")
 
-    def assertNoUsageRead(self):
+    def assertNoUsageRead(self, patience=10):
+        """No usage read outlives the test. A finished read's thread still has to return from handing the dashboard
+        its result, which a loaded runner may not schedule at once, so each gets `patience` seconds to end."""
+        deadline = time.monotonic() + patience
+        for thread in [thread for thread in threading.enumerate() if thread.name == "mv2-usage"]:
+            thread.join(max(0, deadline - time.monotonic()))
         alive = [thread for thread in threading.enumerate() if thread.name == "mv2-usage" and thread.is_alive()]
         self.assertEqual(alive, [], "a usage read outlived the test")
 
