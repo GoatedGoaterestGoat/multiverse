@@ -105,7 +105,8 @@ const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
 // The status line under the prompt (statusline.ts holds the logic and the slot).
 // A timer looks at its files' size and time,
 // with no subprocess, and reads only what changed; `mv2 inbox --peek` runs only
-// when the inbox changed. Plugin items add runtime.json (which declares them) and
+// when one of the files that decide the unread count changed: the inbox, its
+// cursor, the delivery ledger or the read marks. Plugin items add runtime.json (which declares them) and
 // the file of each item that is on.
 const REFRESH_MS = 2000
 const watched = new Map<string, string>()
@@ -152,9 +153,10 @@ async function refreshStatus($: EngineInterface) {
     if (!directory || !universe) return
     const configFile = `${universe}/statusline.json`
     const properties = `${directory}/properties.json`
-    const [configChanged, propertiesChanged, inboxChanged, cursorChanged, runtimeChanged] = await Promise.all([
-      changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
-      changed($, `${directory}/runtime.json`)])
+    const [configChanged, propertiesChanged, inboxChanged, cursorChanged, ledgerChanged, marksChanged, runtimeChanged] =
+      await Promise.all([
+        changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
+        changed($, `${directory}/inbox-state.json`), changed($, `${directory}/inbox-read.json`), changed($, `${directory}/runtime.json`)])
     let itemsChanged = false
     if (runtimeChanged) {
       // Status reports rewrite runtime.json often; the items it declares rarely change.
@@ -202,7 +204,7 @@ async function refreshStatus($: EngineInterface) {
         } catch { /* the name shows once universe.json reads */ }
       }
     }
-    if ((inboxChanged || cursorChanged) && cli) {
+    if ((inboxChanged || cursorChanged || ledgerChanged || marksChanged) && cli) {
       try {
         const result = await $.process.run([cli, "inbox", "--peek", "--json"], { timeoutMs: 10000 })
         const data: unknown = result.exitCode === 0 ? JSON.parse(result.stdout) : undefined

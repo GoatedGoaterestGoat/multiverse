@@ -26,7 +26,7 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from textual.css.query import NoMatches
 from textual.worker import WorkerFailed
 
-from ..display import clean
+from ..display import clean, phase_label
 from ..plugins import loader
 from . import columns, theme
 from .backend import LocalBackend, usage_identity, usage_key
@@ -776,6 +776,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
             row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
+                   **({"phase": phase_label(row) or "—"} if self.selected else {}),
                    "fallback_reason": (mode or {}).get("fallback_reason") or "",
                    "plugin_outcomes": plugin_outcomes(row)[0] if self.selected else ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields

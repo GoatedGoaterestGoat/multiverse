@@ -51,6 +51,36 @@ def state(row):
     return live_label(row)
 
 
+def blocked_label(value):
+    """What a blocked agent waits on, as its reported phase shows it: `lifecycle`, `qa-claude in qa`, `user`, `self`.
+
+    `value` is a listing row's `blocked_on`. An agent named like one of the two other sources reads `agent user`,
+    so it is never taken for the person; one the listing can no longer find adds `: gone`. Anything else is None."""
+    if not isinstance(value, dict):
+        return None
+    if value.get("kind") in ("user", "self"):
+        return value["kind"]
+    name = clean(value.get("name")).strip() if value.get("kind") == "agent" and isinstance(value.get("name"), str) else ""
+    if not name:
+        return None
+    if name in ("user", "self"):
+        name = f"agent {name}"
+    place = value.get("universe")
+    if isinstance(place, str) and place:
+        if place.startswith("/"):  # outside this universe's subverses: the universe's own folder name
+            parts = place.rstrip("/").split("/")
+            place = parts[-2] if parts[-1] == ".multiverse" and len(parts) > 1 else parts[-1]
+        name += f" in {clean(place)}"
+    return name + (": gone" if value.get("gone") else "")
+
+
+def phase_label(row):
+    """An agent's reported phase, with what it is blocked on when it says: `blocked (lifecycle)`."""
+    phase = row.get("phase")
+    target = blocked_label(row.get("blocked_on")) if phase == "blocked" else None
+    return f"blocked ({target})" if target else phase
+
+
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
 
 

@@ -337,12 +337,18 @@ def rebind_session(root, reference, previous, session_id, reason, launch_id, *, 
         return _rebind_session(root, agent_dir, previous, session_id, reason, launch_id, home=home)
 
 
-def report(root, reference, phase=None, summary=None):
+def report(root, reference, phase=None, summary=None, *, blocked_on=None):
     agent_dir = directory(root, reference, allow_damaged=True)
     with lock(agent_dir / ".properties.lock"):
         data = records.properties(agent_dir / "properties.json", harness_optional=True)
         if phase is not None:
             data["phase"] = phase
+        if phase is not None or data.get("phase") != "blocked":
+            data.pop("blocked_on", None)
+        if blocked_on is not None:
+            if data.get("phase") != "blocked":
+                raise ValueError("--blocked-on requires --phase blocked")
+            data["blocked_on"] = blocked_on
         if summary is not None:
             data["summary"] = summary
         data["updated_at"] = now()
@@ -357,7 +363,8 @@ def _reported(agent_dir, data):
         launch = runtime(agent_dir).get("launch_id")
     except Exception:
         launch = None
-    _event(agent_dir, "agent.reported", launch, {"phase": data.get("phase"), "summary": data.get("summary")}, data)
+    _event(agent_dir, "agent.reported", launch, {"phase": data.get("phase"), "summary": data.get("summary"),
+                                                     **({"blocked_on": data["blocked_on"]} if data.get("blocked_on") else {})}, data)
 
 
 def record_recovery(directory, launch_id, state, reason, **extra):

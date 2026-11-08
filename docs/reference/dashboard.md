@@ -33,6 +33,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `harness` | The harness the agent runs |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
+| `blocked_on` | Not a column of its own: a blocked agent's Phase says what it's blocked on, such as `blocked (lifecycle)`, `blocked (tester in qa)`, `blocked (user)` or `blocked (self)` (off by default). An agent mv2 can no longer find reads `: gone`, and one named `user` or `self` reads `agent user`. A view without `phase` (or `core:phase`) shows it nowhere, the inspector included; a plugin column standing in for Phase shows its own value, and the plain phase where it has none |
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
@@ -129,7 +130,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | --- | --- |
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
-| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name instead of a column; the `Silicon23` template turns it on, `base` leaves it off |
+| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, and `blocked_on` what a blocked agent waits on to its Phase, instead of a column each; the `Silicon23` template turns both on, `base` leaves them off |
 | `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 

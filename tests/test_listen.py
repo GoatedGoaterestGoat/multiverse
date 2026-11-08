@@ -19,7 +19,7 @@ from multiverse import cli, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity, focus_note, native
 from multiverse.runtime.process import process_started
-from multiverse.tools import listen, send
+from multiverse.tools import inbox as inbox_tool, listen, send
 from multiverse.universe import focus, mailbox
 
 
@@ -74,7 +74,7 @@ class ListenTest(BaseTest):
 from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0,sys.argv[1])
-from multiverse.tools import listen, send
+from multiverse.tools import inbox as inbox_tool, listen, send
 from multiverse.tools._common import output
 original=fcntl.flock
 def locking(fd,operation):
@@ -99,6 +99,33 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
             if process.poll() is None:
                 process.terminate()
             process.communicate(timeout=5)
+
+    def test_waiters_notice_an_inbox_copy_after_only_its_ledger_changes(self):
+        """Unread upgrade copies depend on delivery evidence even if the log and read cursor stay unchanged."""
+        for waiter in ('listen', 'inbox'):
+            with self.subTest(waiter=waiter):
+                mailbox.inbox(self.directory)  # Keep each waiter independent if its neighbor fails.
+                message = mailbox.append_message(self.directory, 'native notice', {}, delivery='follow-up',
+                                                 inbox_only_text='original reply')
+                mailbox.update_message(self.directory, message['id'], submission_state='accepted',
+                                       native_receipt={'transcript_confirmed': True})
+                self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
+                tick, changed = 0.0, False
+                def sleeping(delay):
+                    nonlocal tick, changed
+                    if not changed:
+                        # Correct only the authoritative delivery evidence. No new append/cursor write.
+                        mailbox.update_message(self.directory, message['id'], submission_state='failed',
+                                               native_receipt={}, transcript_confirmed_at=None)
+                        changed = True
+                    tick += max(delay, .2)
+                module = listen if waiter == 'listen' else inbox_tool
+                with patch.object(module, 'time', SimpleNamespace(monotonic=lambda: tick, sleep=sleeping)):
+                    result = (listen.run(self.root, timeout='1') if waiter == 'listen' else
+                              inbox_tool.run(self.root, agent=self.agent, wait=True, peek=True, timeout='1'))
+                self.assertTrue(changed)
+                self.assertTrue(result.get('ok', True), result)
+                self.assertEqual([m['text'] for m in mailbox.inbox(self.directory)['messages']], ['original reply'])
 
     def test_listen_notifies_only_for_unread_manual_messages_and_never_consumes_them(self):
         """A background notification must neither repeat native prompts nor mark quiet work read before the agent sees it."""

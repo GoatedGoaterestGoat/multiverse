@@ -470,8 +470,9 @@ to `claude --resume UUID` (never `--print`); Codex appends it after the UUID in
 `codex resume`; Pi appends literal text after `--` while reopening its exact
 session file. All remain interactive. The `wake` capability is supported by
 these adapters in both plain and bridge modes; legacy manifests have no verified
-resume-prompt recipe. Dashboard `m` uses the same send path. Inbox-only never
-wakes, and a live plain session still reports native delivery unavailable.
+resume-prompt recipe. Dashboard `m` uses the same send path. An inbox-only send can upgrade to follow-up
+when the recipient reports blocked on its sender; otherwise it never wakes. A live plain session still
+reports native delivery unavailable.
 
 Core records the wake attempt before releasing the runner. Surviving the startup
 check becomes `accepted` with `delivery_method: resume_prompt` and consumption

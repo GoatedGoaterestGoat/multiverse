@@ -279,7 +279,7 @@ mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delive
 | `--text` | `TEXT` |  |  |
 | `--file` | `FILE` |  |  |
 | `--stdin` |  | Read stdin (automatic for piped or redirected input) |  |
-| `--queue-only` |  | Save for manual inbox reading; do not submit natively |  |
+| `--queue-only` |  | Save inbox-only; becomes a follow-up if the recipient reports being blocked on you |  |
 | `--delivery` | `steer`, `follow-up`, `inbox-only` | Native timing: next safe boundary or the next turn | `steer` |
 
 Use at most one of `--text`, `--file`, `--stdin`.
@@ -363,7 +363,7 @@ mv2 unfocus [--json] [agent]
 Report agent phase and current work.
 
 ```sh
-mv2 report [--agent AGENT] [--phase {starting,working,blocked,done}] [--summary SUMMARY]
+mv2 report [--agent AGENT] [--phase {starting,working,blocked,done}] [--summary SUMMARY] [--blocked-on BLOCKED_ON] [--blocked-on-universe BLOCKED_ON_UNIVERSE]
 ```
 
 Alias: `status`.
@@ -373,6 +373,8 @@ Alias: `status`.
 | `--agent` | `AGENT` |  | `$MV2_AGENT_ID` |
 | `--phase` | `starting`, `working`, `blocked`, `done` |  |  |
 | `--summary` | `SUMMARY` |  |  |
+| `--blocked-on` | `BLOCKED_ON` | With --phase blocked: agent name/ID, user, or self; agent:NAME disambiguates |  |
+| `--blocked-on-universe` | `BLOCKED_ON_UNIVERSE` | Universe or subverse of the blocked-on agent (otherwise this universe) |  |
 
 ## status
 

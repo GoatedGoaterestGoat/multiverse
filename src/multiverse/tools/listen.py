@@ -39,7 +39,7 @@ def _processes(facts):
 
 def _signature(directory):
     stamps = []
-    for name in ('inbox.jsonl', 'inbox.cursor'):
+    for name in ('inbox.jsonl', 'inbox.cursor', 'inbox-state.json', 'inbox-read.json'):
         try:
             info = (directory / name).stat()
             stamps.append((info.st_ino, info.st_size, info.st_mtime_ns))

@@ -9,9 +9,10 @@ from . import records
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None, intended=None, focus=None,
-                   focus_note=None):
+                   focus_note=None, inbox_only_text=None):
     """Append a message. `intended` and `focus` mark a steer or follow-up that a focus held as inbox-only;
-    `focus_note` marks mv2's follow-up about that focus's held messages."""
+    `focus_note` marks mv2's follow-up about that focus's held messages. `inbox_only_text` preserves the original
+    input when an inbox-only send was upgraded; it remains readable until delivery is confirmed."""
     if not text.strip():
         raise ValueError("Message cannot be empty")
     if delivery not in ("steer", "follow-up", "inbox-only"):
@@ -20,9 +21,13 @@ def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_ses
         raise ValueError("A held message is inbox-only and names its intended delivery and focus")
     if focus_note is not None and (delivery != "follow-up" or not isinstance(focus_note, str) or not focus_note):
         raise ValueError("A focus note is a follow-up and names its focus")
+    if inbox_only_text is not None and (delivery != 'follow-up' or not isinstance(inbox_only_text, str)
+                                       or not inbox_only_text.strip()):
+        raise ValueError('An inbox-only upgrade must preserve its original text')
     message = {"schema": 2, "target_session": target_session, "delivery": delivery, "id": uid(), "at": now(), "from": sender, "text": text,
                **({"intended": intended, "focus": focus} if intended else {}),
-               **({"focus_note": focus_note} if focus_note else {})}
+               **({"focus_note": focus_note} if focus_note else {}),
+               **({'inbox_only_text': inbox_only_text} if inbox_only_text is not None else {})}
     agent_dir = Path(agent_dir)
     with lock(agent_dir / ".inbox.lock"):
         path = agent_dir / "inbox.jsonl"
@@ -216,6 +221,43 @@ def _manual(message):
     return message.get('schema') != 2 or message['delivery'] == 'inbox-only'
 
 
+def _dated(value):
+    """Only a timezone-bearing timestamp can attest confirmation or a consumed inbox copy."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def inbox_copy(message, state):
+    """Only blocked-on upgrades retain manual input without positive delivery confirmation.
+
+    Queue acceptance is not confirmation. The copy shares the saved message ID and can overlap a native
+    delivery; it neither retries nor cancels that attempt. A successful inbox read consumes only the copy.
+    """
+    receipt = state.get('native_receipt') or {}
+    return (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
+            and isinstance(message.get('inbox_only_text'), str)
+            and not _dated(state.get('transcript_confirmed_at')) and receipt.get('transcript_confirmed') is not True)
+
+
+def _copy_text(message, state):
+    original = message['inbox_only_text']
+    if inbox_fallback(message, state) or state.get('final_reason') == 'lost':
+        return original
+    return 'This message may also have arrived as a follow-up.\n\n' + original
+
+
+def inbox_fallback(message, state):
+    """A failed upgrade is final manual input, including a failure written by a pre-update runner."""
+    return (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
+            and isinstance(message.get('inbox_only_text'), str)
+            and (state.get('submission_state') in ('failed', 'launch-only')
+                 or bool(state.get('inbox_fallback_at') and state.get('dismissed_at'))))
+
+
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
           last=None, since=None, present=None, blocking=True):
     """Read unread manual messages; peek and full history do not consume them.
@@ -256,18 +298,25 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
             records = [(offset, message) for offset, message in records if recent(message)][-last:]
         cursor = start
         messages, cursors = [], []
+        copies = []
         for offset, message in records:
-            if offset <= start:
+            state = states.get(message['id'], {})
+            unread_copy = inbox_copy(message, state) and not _dated(state.get('inbox_copy_read_at'))
+            # Native rows may have been skipped before their evidence changed. Their original inbox input
+            # remains unread independently of the cursor; no second message or native attempt is created.
+            if offset <= start and (all_messages or not unread_copy):
                 continue
             if limit is not None and len(messages) >= limit:
                 break
-            cursor = offset
+            cursor = max(cursor, offset)
             if not recent(message):
                 continue
-            state = states.get(message['id'], {})
             if all_messages:
                 messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
                                                          **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
+            elif unread_copy:
+                messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
+                copies.append(message['id'])
             elif _manual(message) and message['id'] not in marks:
                 messages.append(message)
             else:
@@ -281,8 +330,13 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
         # output leaves the page unread; concurrent consumers cannot overtake it.
         if present is not None:
             present(result)
-        consumed = not all_messages and not peek and cursor > read_cursor
+        consumed = not all_messages and not peek and (cursor > read_cursor or bool(copies))
         if consumed:
+            if copies:
+                stamp = now()
+                for identifier in copies:
+                    states[identifier] = {**states.get(identifier, {}), 'inbox_copy_read_at': stamp}
+                write(agent_dir / 'inbox-state.json', states)
             write(agent_dir / 'inbox.cursor', cursor)
             if marks:
                 ahead = {message['id'] for offset, message in records if offset > cursor}
@@ -401,11 +455,19 @@ def update_message(agent_dir, message_id, **changes):
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
         _, _, records = _messages(agent_dir)
-        if not any(m['id'] == message_id for _, m in records):
+        message = next((m for _, m in records if m['id'] == message_id), None)
+        if message is None:
             raise ValueError('Message does not belong to this recipient inbox')
         states = _states(agent_dir)
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
+        if (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
+                and isinstance(message.get('inbox_only_text'), str)
+                and after.get('submission_state') in ('failed', 'launch-only') and not after.get('dismissed_at')):
+            # One atomic ledger write finalizes the original as manual input and excludes every native retry.
+            # Unconfirmed attempts keep their native state and also have an inbox copy, without this dismissal.
+            stamp = now()
+            after.update(dismissed_at=stamp, inbox_fallback_at=stamp)
         write(agent_dir / 'inbox-state.json', states)
         if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled', 'launch-only'):
             proof = agent_dir / 'inbox-unsubmitted' / (message_id + '.json')
@@ -420,7 +482,7 @@ def update_message(agent_dir, message_id, **changes):
     # Transitions only, each once: accepted, then (maybe later) confirmed in the transcript; or a definite failure.
     if after.get('submission_state') == 'accepted' and before.get('submission_state') != 'accepted':
         _event(agent_dir, "message.delivered", {"id": message_id, "stage": "accepted"})
-    if after.get('transcript_confirmed_at') and not before.get('transcript_confirmed_at'):
+    if _dated(after.get('transcript_confirmed_at')) and not _dated(before.get('transcript_confirmed_at')):
         _event(agent_dir, "message.delivered", {"id": message_id, "stage": "confirmed"})
     if after.get('submission_state') == 'failed' and before.get('submission_state') != 'failed':
         attempts = after.get('attempts') or [{}]
@@ -537,3 +599,17 @@ def end_startup_messages(directory, launch_id, reason, cancelled=False):
                            attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
             count += 1
     return count
+
+
+def unread_senders(directory):
+    """Best-effort advice, never a consuming read or a wait on another inbox reader."""
+    try:
+        if not (directory / 'inbox.jsonl').exists():
+            return set()
+        messages = inbox(directory, limit=None, peek=True, blocking=False)['messages']
+        # IDs survive moves; the saved universe is the sender's old routing address.
+        return {sender['agent_id'] for message in messages
+                if isinstance(sender := message.get('from'), dict)
+                and isinstance(sender.get('agent_id'), str)}
+    except Exception:
+        return set()

@@ -112,7 +112,7 @@ On launch-only spawn and resume, including automatic fallback, mv2 requests an e
 {"schema": 2, "adapter": "codex", "settings": {"args": ["--sandbox", "workspace-write"]}}
 ```
 
-**Interrupted queues.** After an interrupt (such as Esc), accepted server-side queued messages stay paused with Codex's own queue. The pause survives closing only the terminal attachment and resuming it. A new terminal prompt lets Codex continue its queue; a new steer or follow-up submitted by mv2 starts the native FIFO head, even when waking a stopped agent. Server-side queued messages, from mv2 or another client, run oldest first. A prompt queued with Tab in the terminal comes back to your editable composer after an interrupt and stays unsent until you submit it. Default `mv2 kill` cancels queued work; `deliver --check` reports those messages as cancelled. Inbox-only messages, `deliver --check` and `deliver --retry` do not restart it. A retry accepted into a paused queue reports that pause and what ends it. `deliver --check` shows server-side queued messages as paused until a new turn starts; it never resends them.
+**Interrupted queues.** After an interrupt (such as Esc), accepted server-side queued messages stay paused with Codex's own queue. The pause survives closing only the terminal attachment and resuming it. A new terminal prompt lets Codex continue its queue; a new steer or follow-up submitted by mv2 starts the native FIFO head, even when waking a stopped agent. Server-side queued messages, from mv2 or another client, run oldest first. A prompt queued with Tab in the terminal comes back to your editable composer after an interrupt and stays unsent until you submit it. Default `mv2 kill` cancels queued work; `deliver --check` reports those messages as cancelled. Inbox-only sends do not restart it unless they upgrade to follow-up because the recipient is blocked on the sender. `deliver --check` and `deliver --retry` do not restart it. A retry accepted into a paused queue reports that pause and what ends it. `deliver --check` shows server-side queued messages as paused until a new turn starts; it never resends them.
 
 `mv2 kill` also stops a fresh `/new` or `/clear` conversation before its first message. It verifies the exact idle thread, cancels queued input and cleans its background terminals even when Codex has not stored turn history yet. An unrelated native stop error keeps a running terminal attached and reports the reason.
 
@@ -267,6 +267,8 @@ Each agent's tmux bar shows a short live line instead of tmux's session list and
 | Claude | `reader · claude` (its status line carries the rest) |
 
 While an agent is focused, its bar also shows `focused`, with the time left of a timed focus, such as `focused 18m`.
+
+The bar's unread count includes unconfirmed blocked-on upgrades. Its scan is limited to 1 MiB of inbox history, including already-read messages, and 1 MiB per ledger. `inbox ?` means it could not establish a count within those limits or because files were unreadable. Use `mv2 inbox --peek` for the authoritative unread messages; it does not mark them read.
 
 The `tmux` block of `statusline.json` chooses the items: `agent`, `harness`, `focus`, `status`, `phase`, `summary`, `inbox` and `context`. List them in `tmux.items` in the order you want. Items you leave out follow in their default order.
 

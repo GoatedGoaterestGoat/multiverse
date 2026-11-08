@@ -17,8 +17,8 @@ from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse.universe import templates
 from multiverse.terminal import statusline
-from multiverse.universe.mailbox import append_message, inbox
-from multiverse.store import read, write
+from multiverse.universe.mailbox import append_message, inbox, update_message
+from multiverse.store import read, write, now as store_now
 from test_multiverse import BaseTest, TerminalBase
 
 
@@ -87,6 +87,35 @@ class StatusRendererTest(BaseTest):
         self.assertEqual(statusline.unread(self.directory), len(inbox(self.directory, peek=True)['messages']))
         self.assertEqual(statusline.unread(self.directory), 2)
         self.assertEqual(paths, {path: path.read_bytes() for path in self.directory.iterdir() if path.is_file()})
+
+    def test_upgrade_copy_count_follows_confirmation_and_consumption_even_behind_cursor(self):
+        """The independent bounded status counter must match the new inbox view without consuming it."""
+        message = append_message(self.directory, 'native notice', {}, 'follow-up', inbox_only_text='original')
+        self.assertEqual(statusline.unread(self.directory), 1)
+        write(self.directory / 'inbox.cursor', (self.directory / 'inbox.jsonl').stat().st_size)
+        self.assertEqual(statusline.unread(self.directory), 1)
+        update_message(self.directory, message['id'], native_receipt={'transcript_confirmed': True})
+        self.assertEqual(statusline.unread(self.directory), 0)
+        update_message(self.directory, message['id'], native_receipt={}, transcript_confirmed_at=store_now())
+        self.assertEqual(statusline.unread(self.directory), 0)
+        update_message(self.directory, message['id'], native_receipt={}, transcript_confirmed_at=None,
+                       submission_state='failed')
+        self.assertEqual(statusline.unread(self.directory), 1)
+        self.assertEqual([m['text'] for m in inbox(self.directory)['messages']], ['original'])
+        self.assertEqual(statusline.unread(self.directory), 0)
+        states = read(self.directory / 'inbox-state.json')
+        for field in ('transcript_confirmed_at', 'inbox_copy_read_at'):
+            for damaged in ({'bad': True}, True, 7, 'not a timestamp', '2026-11-07', '2026-11-07T12:00:00'):
+                with self.subTest(field=field, damaged=damaged):
+                    state = {**states[message['id']], 'inbox_copy_read_at': None, 'transcript_confirmed_at': None,
+                             field: damaged}
+                    write(self.directory / 'inbox-state.json', {message['id']: state})
+                    self.assertEqual(statusline.unread(self.directory), 1)
+        # A damaged or oversized ledger cannot be mistaken for no confirmation/read marker.
+        for data in ('not json', '[]', '{"' + 'x' * statusline.READ_LIMIT + '": {}}'):
+            (self.directory / 'inbox-state.json').write_text(data)
+            self.assertIsNone(statusline.unread(self.directory))
+
 
 
 class StatusWrapperTest(TerminalBase):

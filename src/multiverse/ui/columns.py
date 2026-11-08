@@ -18,7 +18,7 @@ import threading
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from ..display import clean, live_label
+from ..display import clean, live_label, phase_label
 from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
@@ -28,7 +28,12 @@ COMPACT_WIDTH = 110
 # A view key that is not a column of its own: listed in a view's `columns`, it adds the agent's unread inbox count
 # to the name cell (the backend reads it only then).
 UNREAD = "unread"
-MARKS = frozenset({UNREAD})
+# Another such key: listed in a view, a blocked agent's Phase cell says what it is blocked on, `blocked (lifecycle)`.
+# A view without the Phase column shows neither.
+BLOCKED_ON = "blocked_on"
+MARKS = frozenset({UNREAD, BLOCKED_ON})
+# The widest a Phase cell grows to say what an agent is blocked on; a longer name is shortened inside it.
+PHASE_WIDE = 24
 # Columns no plugin column stands in for: they say whether an agent needs the person or is held.
 ATTENTION = frozenset(ATTENTION_COLUMNS)
 
@@ -129,6 +134,20 @@ class FocusColumn(Column):
         return f'{row["focused"]} ◉' if row.get("focused") else ""
 
 
+class PhaseColumn(Column):
+    """The reported phase; a blocked agent's says what it waits on where the view lists `blocked_on`.
+
+    Given the cell's `width`, a long name is shortened inside the parentheses, so the cell still reads as blocked
+    on someone; a cell too narrow for even that says only `blocked`."""
+    def render(self, row, width=None):
+        if row["kind"] == "group":
+            return self.group(row)
+        value = clean(phase_label(row) or "—")
+        if width is not None and cell_len(value) > width and value.startswith("blocked ("):
+            value = "blocked (" + set_cell_size(value[9:-1], width - 11).rstrip() + "…)" if width >= 12 else "blocked"
+        return Text(value, style=STATE_COLORS.get(value.partition(" ")[0], theme.SUBTEXT0))
+
+
 class ContextColumn(Column):
     LEVELS = {"warn": theme.YELLOW, "high": f"bold {theme.RED}"}
 
@@ -158,7 +177,7 @@ COLUMNS = {column.key: column for column in (
     Column("cost", "Cost", 7, compact=False),
     StatusColumn("status", "Status", 9, compact=False),
     FocusColumn("focus", "Focus", 6, compact=False),
-    Column("phase", "Phase", 8),
+    PhaseColumn("phase", "Phase", 8),
     SummaryColumn("summary", "Working on", 48, flexible=True),
     Column("id", "ID", 12, compact=False),
     Column("universe", "Universe", 24),

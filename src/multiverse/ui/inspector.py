@@ -8,7 +8,7 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean, live_label
+from ..display import clean, live_label, phase_label
 from . import theme
 from .plugin_service import in_daemon
 from .prompt_screen import prompt_line
@@ -306,7 +306,7 @@ def damage(state, row):
 
 def progress(state, row):
     state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
-    state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
+    state.append(" · Reported: " + clean(phase_label(row) or "unknown"), style=theme.SUBTEXT0)
 
 
 def focused(state, row):
