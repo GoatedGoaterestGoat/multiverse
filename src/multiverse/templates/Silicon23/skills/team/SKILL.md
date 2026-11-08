@@ -25,6 +25,8 @@ The rule for both: a lead never deals with, asks about or hears about anything i
 
 ## Delivery between them
 
-- `--delivery follow-up`: a new task with its scope; a task or bug fix that is done; an answer the other agent asked you for.
+- `--delivery follow-up`: a new task with its scope; results the other agent is waiting for; a question or answer your work needs.
 - `--delivery steer`: only something urgent that affects the other agent's work under way, such as a bug you found outside your own scope that breaks it.
-- `--delivery inbox-only`: anything else the other agent may want to know but isn't waiting for.
+- `--delivery inbox-only`: only FYIs requiring no action and no reply your work depends on, even if read much later. Otherwise use follow-up, or steer when urgent and relevant to current work.
+
+Keep asks short: the question plus only what is needed to answer. Put background in notes or inbox-only if both tests pass.

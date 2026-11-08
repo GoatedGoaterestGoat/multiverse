@@ -694,7 +694,8 @@ def main():
                 record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
                 record_connection=attachments.connection_logger(launch, started=runner_started),
                 record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
-                navigation=navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name))
+                navigation=navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name),
+                relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name})
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()

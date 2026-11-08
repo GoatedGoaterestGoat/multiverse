@@ -353,6 +353,9 @@ class CodexAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        from .prompts import supported
+        result['answer'] = (Capability('supported', mechanism='codex-terminal-relay') if supported(session) else
+                            Capability('unavailable', 'Waiting prompts need a live prompt relay on Codex CLI and daemon 0.166.0; resume with it'))
         result['ask'] = (Capability('supported', mechanism='private-codex-copy')
                          if session.native_id and session.home and session.session_file else
                          Capability('unavailable', 'No recorded Codex conversation and home'))
@@ -403,6 +406,19 @@ class CodexAdapter(ConfiguredAdapter):
                                              mechanism='codex-app-server-context')
         return result
 
+    def waiting_prompts(self, session, executor):
+        from .prompts import catalog
+        executor.check_session()
+        return catalog(session)
+
+    def answer_prompt(self, session, answer, executor):
+        from .prompts import submit
+        return submit(session, answer, executor)
+
+    def prompt_outcome(self, session, answer, executor):
+        from .prompts import outcome
+        return outcome(session, answer)
+
     def get_usage(self, session, executor=None):
         from .usage import measured
         bridge = self._uses_bridge(session)
@@ -427,7 +443,9 @@ class CodexAdapter(ConfiguredAdapter):
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
             return NativeResult('unavailable', 'No Codex app-server endpoint')
-        return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
+        # Full turn items and pending inputs can exceed the small control default.
+        return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id),
+                                    max_response_bytes=64 * 1024 * 1024))
 
     def continue_queued(self, session, accepted_receipts, executor):
         if (not isinstance(accepted_receipts, Mapping) or any(

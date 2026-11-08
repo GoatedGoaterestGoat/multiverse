@@ -30,6 +30,7 @@ Every command takes `--help`, and most take `--json` for scripts.
 
 - [Agents](agents.md): start, find, watch, stop, resume, move and remove agents.
 - [Messaging](messaging.md): send messages, choose how they're delivered, read inboxes, report progress.
+- [Answer a waiting agent](waiting-prompts.md): read the permission prompt or question an agent waits on, and answer it.
 - [Universes](universes.md): universes and subverses, `-u`, templates, catalogs and `doctor`.
 - [Prompts](prompts.md): change what your agents are told.
 - [Reference](reference.md): every command and flag, generated from mv2 itself.

@@ -17,7 +17,8 @@ NAME_LENGTH = 40
 # A plugin's per-agent state is state/agents/<id>/NAME/, so it may not take a
 # name an agent directory already uses, or one core keeps for itself.
 RESERVED_NAMES = frozenset({
-    "launches", "claude-asks", "claude-receipts", "claude-commands", "slash", "status-items", "events", "plugins", "host",
+    "launches", "claude-asks", "claude-receipts", "claude-commands", "slash", "prompts", "claude-prompts",
+    "codex-prompts", "status-items", "events", "plugins", "host",
     "state", "inbox", "properties", "runtime", "session", "mv2", "multiverse", "core",
 })
 # Extension points of this mv2's plugin API; a later minor version adds more.
@@ -51,6 +52,7 @@ PERMISSIONS = {
     "messages.send": "send messages to any agent in this universe, as this plugin",
     "messages.ask": "ask agents side questions",
     "messages.read": "read agents' messages",
+    "prompts.answer": "answer agents' permission prompts and questions, with your authority",
     "transcripts.read": "read agents' transcripts: their conversations, tool calls and results",
     "universe.write": "change this universe's definition files (refresh)",
     "network.listen": "listen for network connections",
@@ -60,6 +62,9 @@ PERMISSIONS = {
     "harness.pi": "add to Pi launches",
 }
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
+# Needs act, but no level carries it (1.17): approving an agent's commands is more than the act grants made before
+# it allowed, so a plugin lists it, and mv2 plugins enable shows it, before it can.
+ANSWERING = frozenset({"prompts.answer"})
 # The permissions each access level carries, for a manifest with "access" and no "permissions" (1.13).
 # harness.*, process.spawn and network.listen are declarations of what the plugin's own code does: never derived.
 LEVEL_PERMISSIONS = {
@@ -197,7 +202,7 @@ def permission_needs(name):
     which no level gates (process.spawn, network.listen)."""
     if MODEL_PERMISSION.fullmatch(name) or name == "models.*":
         return "spend"
-    if name.startswith("harness."):
+    if name.startswith("harness.") or name in ANSWERING:
         return "act"
     return next((level for level in levels.LEVELS if name in LEVEL_PERMISSIONS[level]), None)
 

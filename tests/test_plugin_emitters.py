@@ -89,8 +89,13 @@ class EmitterTest(EmitterBase):
             self.assertEqual(self.recorded(kind="message.delivered") + self.recorded(kind="message.failed"), [])
             mailbox.update_message(self.agent_dir, message["id"], submission_state="accepted")
             mailbox.update_message(self.agent_dir, message["id"], submission_state="accepted")
-            mailbox.update_message(self.agent_dir, message["id"], transcript_confirmed_at="now")
-            mailbox.update_message(self.agent_dir, message["id"], transcript_confirmed_at="later")
+            # A malformed stamp is not transcript confirmation, even when its JSON value is truthy.
+            for invalid in ("now", "later", {"damaged": True}, True, 1, "2026-11-07T10:00:00"):
+                mailbox.update_message(self.agent_dir, message["id"], transcript_confirmed_at=invalid)
+                self.assertEqual([event["data"]["stage"] for event in self.recorded(kind="message.delivered")],
+                                 ["accepted"], invalid)
+            mailbox.update_message(self.agent_dir, message["id"], transcript_confirmed_at="2026-11-07T10:00:00+00:00")
+            mailbox.update_message(self.agent_dir, message["id"], transcript_confirmed_at="2026-11-07T10:00:01+00:00")
             self.assertEqual([event["data"]["stage"] for event in self.recorded(kind="message.delivered")],
                              ["accepted", "confirmed"])
             other = mailbox.append_message(self.agent_dir, "x", {}, "follow-up")

@@ -26,7 +26,7 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from textual.css.query import NoMatches
 from textual.worker import WorkerFailed
 
-from ..display import clean
+from ..display import clean, phase_label
 from ..plugins import loader
 from . import columns, theme
 from .backend import LocalBackend, usage_identity, usage_key
@@ -105,6 +105,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), Binding("i", "inbox", "Inbox", show=False),
+        Binding("a", "answer", "Answer", show=False),
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
         Binding("r", "resume", "Resume", show=False), Binding("P", "plugins", "Plugins", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
@@ -139,6 +140,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self._harness_options = None
         self.scan_count = 0
         self.usage_reading = False  # a usage read is running in its daemon thread
+        self.prompt_outcomes = {}  # agent id -> (what the last answer sent from here came to, whether it took)
         self.first_usage_started, self.first_usage_done = None, False  # the dashboard's first read: cold, seconds long
         self._table_signature = None
         self.history = []
@@ -774,6 +776,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
             row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
+                   **({"phase": phase_label(row) or "—"} if self.selected else {}),
                    "fallback_reason": (mode or {}).get("fallback_reason") or "",
                    "plugin_outcomes": plugin_outcomes(row)[0] if self.selected else ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields

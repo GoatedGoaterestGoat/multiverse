@@ -68,7 +68,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
             _present(root, result)
     def signature():
         stamps = []
-        for name in ('inbox.jsonl', 'inbox.cursor'):
+        for name in ('inbox.jsonl', 'inbox.cursor', 'inbox-state.json', 'inbox-read.json'):
             try:
                 facts = (directory / name).stat()
                 stamps.append((facts.st_size, facts.st_mtime_ns))

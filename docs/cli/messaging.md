@@ -28,25 +28,27 @@ If the sender's record is unreadable or damaged, the sender line keeps the messa
 
 ```sh
 mv2 send worker --delivery follow-up --text 'When you finish, also update the changelog.'
-mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
+mv2 send worker --delivery inbox-only --text 'FYI: old meeting notes are archived.'
 ```
 
 | Delivery | Use it for | Arrives |
 | --- | --- | --- |
-| `steer` (default) | Corrections and anything that changes the current work | At the next safe point in the current turn. If the agent is idle, it starts a turn |
-| `follow-up` | The next thing to do | After the current turn ends |
-| `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
+| `steer` (default) | Urgent messages relevant to the current work | At the next safe point in the current turn. If the agent is idle, it starts a turn |
+| `follow-up` | Tasks, needed replies and results the recipient is waiting for | After the current turn ends |
+| `inbox-only` | FYIs requiring no action and no reply your work depends on | When the agent runs `mv2 inbox`, unless upgraded to follow-up as described below |
 
-Agents are told to send `inbox-only` by default, so progress notes and FYIs wait in the inbox. They send `follow-up` for a new task, when they want a quick reply, or to return a task's results, and `steer` only when a message is urgent and immediately relevant to the recipient's current work. A follow-up reply arrives as a prompt, not in the inbox, so an agent waits for one by ending its turn rather than with `mv2 inbox --wait`. Their status goes through `mv2 report`, so a lead isn't interrupted by status updates.
+Choose delivery explicitly. Use `inbox-only` only when both hold: the recipient needn't act on the message, and none of your work waits on a reply, even if it reads its inbox much later. Otherwise use `follow-up`, or `steer` when urgent and immediately relevant to the recipient's current work. Keep asks short: the question plus only what is needed to answer. Put background and side notes in your notes, or inbox-only if both tests pass.
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a [focused](#focus-an-agent) agent is saved as an `inbox-only` message instead. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+A follow-up reply arrives as a prompt, not in the inbox. Await it by ending your turn, rather than with `mv2 inbox --wait`. Report status through `mv2 report`.
+
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a [focused](#focus-an-agent) agent is saved as an `inbox-only` message instead. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` send wakes an agent only if it upgrades to a follow-up as described below.
 
 If a wake is refused, `send` and `deliver --check` show the complete reason, including the exact record paths and recovery instructions. Reflected message text remains hidden.
 
 If a name or UUID prefix matches several agents, the error lists their names
 and full UUIDs. Use one full UUID; nothing is saved to an ambiguous recipient.
 
-A running agent without a live connection can't receive `steer` or `follow-up` messages, so send it `inbox-only` messages instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
+A running agent without a live connection can't receive `steer` or `follow-up` messages. Inbox-only still requires both tests above; if action or a needed reply cannot wait, attach to its terminal instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
 
 ## Read the result
 
@@ -71,6 +73,8 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
 When an agent sends a message and has unread inbox messages from that recipient, its output ends with `Reminder: you have unread messages from NAME.` This applies to every delivery mode, including saved messages whose native delivery fails, and to each matching recipient in a batch. The check peeks before sending and leaves messages unread; like `inbox --peek`, it uses complete rows before an unfinished tail. A busy or unreadable inbox skips the reminder.
+
+If the recipient reports that it is blocked on the sending agent, an inbox-only send becomes a follow-up. The sender's output says why before its usual delivery result. The recipient's natively delivered message begins with `This message was delivered as a follow-up because your status is blocked on NAME.` Update your reported status when that dependency is resolved. This applies to `--queue-only` too; explicit steer and follow-up sends keep their timing. Each recipient in a batch is checked separately. A focused recipient still holds the upgraded message in its inbox as an intended follow-up: `mv2 held` reads it after focus ends, and the focus-end note counts it. The sender and held message say that the follow-up was scheduled and held, rather than delivered natively. Reading it never submits it again. If the recipient is launch-only and cannot take a follow-up now, or its follow-up availability cannot be checked, the send stays inbox-only and says so; it remains available to `mv2 inbox`. A stopped agent that supports waking still resumes with the follow-up. If the follow-up is definitely refused before delivery, the original text stays readable in `mv2 inbox` and cannot be retried natively. This also applies when startup fails after send returned. The send output says it tried a follow-up and saved the message in the inbox, without claiming delivery. If delivery is not confirmed, the original is also readable in the inbox with a note that it may also have arrived as a follow-up. Queue acceptance, a pending wake and an unknown result are not delivery confirmation: keeping the input readable takes priority over avoiding a possible duplicate between the conversation and inbox. The native attempt is not sent again. A confirmed delivery needs no unread inbox copy; `mv2 deliver AGENT --check` can record that confirmation. This fallback applies only to blocked-on upgrades, not explicit steer or follow-up sends.
 
 The match follows the recipient's agent ID across renames and moves. People, plugin senders and `--json` output get no reminder.
 
@@ -186,6 +190,10 @@ is reported once with the message text and advice to send a new message delibera
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
 lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
+Codex checks up to 100 queued entries and the latest 20 full turns, with a 64 MiB
+limit per reply. Large tool output within that limit does not prevent receipt
+confirmation. A missing receipt, larger reply or transport failure leaves
+consumption unconfirmed; checking never resends input or loads an old conversation.
 A message that woke an agent is checked against that launch's own starting
 prompt, with the harness's transcript evidence (Claude Code today), on each
 `mv2 deliver --check` until it settles; listings and the dashboard never read it.
@@ -273,7 +281,7 @@ mv2 inbox --agent worker --all --since 2h
 mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
 ```
 
-Plain `inbox` shows unread `inbox-only` messages, including [held](#read-held-messages) ones, and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
+Plain `inbox` shows unread `inbox-only` messages, including [held](#read-held-messages) ones and the original input of unconfirmed blocked-on upgrades, and marks them read once printed. Ordinary explicit steer and follow-up messages are not repeated there. A blocked-on upgrade can appear in both the conversation and inbox when delivery has not been confirmed. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
 
 An unreadable or damaged delivery ledger is reported with its full file path and
 a repair/reset hint, including for `inbox --all` and `--peek`. Back it up before
@@ -286,7 +294,7 @@ bookkeeping is not evidence that the agent never received an older message.
 
 When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. After reading and handling the messages, start it again when you are waiting.
 
-Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Steers and follow-ups do not end the wait.
+Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Ordinary steers and follow-ups do not end the wait; the unread inbox copy of a blocked-on upgrade does.
 
 On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. Run `mv2 inbox` to read them. It waits without a time limit unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
 
@@ -303,7 +311,24 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. Only a report whose phase is `done` includes the unread inbox count, for example `Reported done. You have 2 unread inbox messages.` Other reports say only the phase, such as `Reported working.` or `Reported blocked on helper.`, plus the targeted reminder below when it applies. Counting never marks messages read.
+
+Name one dependency when reporting blocked:
+
+```sh
+mv2 report --phase blocked --blocked-on reviewer --summary 'Waiting for the review'
+mv2 report --phase blocked --blocked-on qa-claude --blocked-on-universe qa
+mv2 report --phase blocked --blocked-on user --summary 'Waiting for a decision'
+mv2 report --phase blocked --blocked-on self --summary 'Waiting for my background shell'
+```
+
+An agent target accepts the same name, full ID or unique ID prefix as `send`. Use `--blocked-on-universe` for another universe or a subverse path; without it, the target is in the reporter's universe. `user` and `self` are special sources. To name an agent literally called user or self, use `agent:user` or `agent:self`, or its ID. An unknown or ambiguous target refuses the report without changing the previous status. Reporting blocked on your own agent is the same as `self`.
+
+The dependency follows the agent's ID, so renaming it or reusing its old name cannot redirect a follow-up. The display finds moves within the known universe trees; a target that cannot be found shows its saved name with `gone`. For a move outside those trees, report the target's new universe to update its displayed address. Incoming messages still match by ID. A new `--phase` report clears the previous dependency unless it also supplies `--blocked-on`, including another plain `--phase blocked`. Updating only the summary keeps it.
+
+When an agent reports and has unread inbox messages from its blocked-on agent, its output ends with `Reminder: you have unread messages from NAME.` This is the same nonblocking peek as send's reminder: it never marks anything read, and a busy or damaged inbox skips it.
+
+Text `mv2 list` always includes the dependency in Phase, such as `blocked (reviewer)`; `--json` includes `blocked_on` as a field. In the dashboard, the `blocked_on` view option adds the dependency inside Phase without adding a column. It has no effect when Phase is hidden. The option is off by default except in the Silicon23 template.
 
 ## Inside Claude and Pi sessions
 
@@ -320,7 +345,7 @@ In Codex and launch-only sessions, ask the agent in words instead, such as "Plea
 
 ## Ask a side question
 
-To run the harness's own commands, such as `/compact` or `/model`, use [mv2 slash](harness-commands.md).
+To run the harness's own commands, such as `/compact` or `/model`, use [mv2 slash](harness-commands.md). To answer the permission prompt or question a `waiting` agent is stopped at, use [mv2 answer](waiting-prompts.md).
 
 ```sh
 mv2 ask worker --question 'Which file holds the parser?'

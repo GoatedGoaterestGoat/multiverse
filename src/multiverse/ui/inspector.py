@@ -8,9 +8,10 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean, live_label
+from ..display import clean, live_label, phase_label
 from . import theme
 from .plugin_service import in_daemon
+from .prompt_screen import prompt_line
 from .tree import within
 
 
@@ -30,12 +31,15 @@ class Inspector(Vertical):
         self.plugin_revision = None
         self.reading_inbox = False
         self.inbox_revision = None
+        self.reading_prompts = False
+        self.prompts_revision = None
 
     def compose(self):
         yield Static("", id="inspect-name", markup=False)
         yield Static("", id="inspect-meta", markup=False)
         yield Static("", id="inspect-state", markup=False)
         yield Static("", id="inspect-inbox", markup=False)
+        yield Static("", id="inspect-prompt", markup=False)
         yield Static("", id="inspect-plugins", markup=False)
         yield Static("CURRENT WORK", id="inspect-label")
         yield Static("", id="inspect-work", markup=False)
@@ -96,11 +100,13 @@ class Inspector(Vertical):
                     clean(line) for line in (row.get('reason') or message).splitlines())))
         self.query_one("#inspect-state", Static).update(state)
         if changed:
-            self.plugin_revision = self.inbox_revision = None
+            self.plugin_revision = self.inbox_revision = self.prompts_revision = None
             self.show_plugin_lines([])
             self.show_unread(0)
+            self.show_prompts(None)
         self.plugin_facts_if_needed()
         self.inbox_if_needed()
+        self.prompts_if_needed()
         self.capture_if_needed()
 
     def show_plugin_lines(self, lines):
@@ -159,6 +165,63 @@ class Inspector(Vertical):
             self.show_unread(count)
         elif self.row:
             self.inbox_if_needed()
+
+    def show_prompts(self, found):
+        """The prompt the agent waits on (`found`: core's listing, None for no line), and the outcome of the last
+        answer sent from here, which shows until another one is sent."""
+        widget = self.query_one("#inspect-prompt", Static)
+        text = Text()
+        if isinstance(found, dict) and found.get("state") == "ok":
+            prompts = found.get("prompts") or []
+            if prompts:
+                first = prompts[0]
+                text.append("⏸ Waiting on: " + (f"{len(prompts)} prompts, first " if len(prompts) > 1 else "")
+                            + prompt_line(first), style=theme.PEACH)
+                answerable = any(item.get("answerable", True) for item in prompts)
+                text.append(" · a answers it" if answerable else
+                            " · " + clean(first.get("reason") or "answer it in the terminal"), style=theme.SUBTEXT0)
+            if found.get("coverage") != "complete":
+                text.append(("\n" if prompts else "") + "mv2 may not see every prompt it waits on: "
+                            + clean(found.get("reason") or "coverage unknown"), style=theme.OVERLAY1)
+        elif isinstance(found, dict):  # the read failed: why, quietly
+            text.append("Prompts: " + clean(found.get("reason") or found.get("state") or "unavailable"),
+                        style=theme.OVERLAY1)
+        last = (self.app.prompt_outcomes.get(self.row["id"]) if self.row and self.row.get("kind") == "agent"
+                and hasattr(self.app, "prompt_outcomes") else None)
+        if last:
+            said, ok = last
+            text.append(("\n" if text.plain else "") + "Last answer: " + said,
+                        style=theme.SUBTEXT0 if ok else theme.RED)
+        widget.display = bool(text.plain)
+        widget.update(text)
+
+    def prompts_if_needed(self):
+        """What a waiting agent waits on, read off the event loop once per scan; nothing is read for another agent."""
+        row = self.row
+        revision = (self.generation, self.app.scan_count)
+        if not (row and row["kind"] == "agent" and callable(getattr(self.app.backend, "waiting_prompts", None))):
+            return
+        if row.get("status") != "waiting":
+            self.prompts_revision = revision
+            self.show_prompts(None)
+            return
+        if not self.reading_prompts and revision != self.prompts_revision:
+            self.prompts_revision = revision
+            self.reading_prompts = True
+            self.read_prompts(dict(row), self.generation)
+
+    @work(group="prompts", exit_on_error=False)
+    async def read_prompts(self, row, generation):
+        try:
+            found = await asyncio.to_thread(self.app.backend.waiting_prompts, Path(row["universe"]), row["id"])
+        except Exception as error:  # the agent stopped meanwhile, or the harness can't say: the line says why
+            found = {"state": "unavailable", "reason": str(error)}
+        finally:
+            self.reading_prompts = False
+        if self.row and generation == self.generation:
+            self.show_prompts(found)
+        elif self.row:
+            self.prompts_if_needed()
 
     def capture_if_needed(self):
         row = self.row
@@ -243,7 +306,7 @@ def damage(state, row):
 
 def progress(state, row):
     state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
-    state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
+    state.append(" · Reported: " + clean(phase_label(row) or "unknown"), style=theme.SUBTEXT0)
 
 
 def focused(state, row):

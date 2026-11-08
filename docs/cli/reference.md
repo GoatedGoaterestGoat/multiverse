@@ -50,6 +50,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`native-status`](#native-status) | Read optional native observations; unavailable and failed observations are explicit. |
 | [`ask`](#ask) | Ask an isolated side question without changing the main conversation. |
 | [`slash`](#slash) | Run a harness command when the agent is idle, or read its command list and results. |
+| [`answer`](#answer) | Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path. |
 | [`get-usage`](#get-usage) | Read measured usage for the exact native session. |
 | [`tui`](#tui) | Browse universes and operate agents. |
 | [`doctor`](#doctor) | Check local definitions and report uncertain agent state. |
@@ -278,7 +279,7 @@ mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delive
 | `--text` | `TEXT` |  |  |
 | `--file` | `FILE` |  |  |
 | `--stdin` |  | Read stdin (automatic for piped or redirected input) |  |
-| `--queue-only` |  | Save for manual inbox reading; do not submit natively |  |
+| `--queue-only` |  | Save inbox-only; becomes a follow-up if the recipient reports being blocked on you |  |
 | `--delivery` | `steer`, `follow-up`, `inbox-only` | Native timing: next safe boundary or the next turn | `steer` |
 
 Use at most one of `--text`, `--file`, `--stdin`.
@@ -362,7 +363,7 @@ mv2 unfocus [--json] [agent]
 Report agent phase and current work.
 
 ```sh
-mv2 report [--agent AGENT] [--phase {starting,working,blocked,done}] [--summary SUMMARY]
+mv2 report [--agent AGENT] [--phase {starting,working,blocked,done}] [--summary SUMMARY] [--blocked-on BLOCKED_ON] [--blocked-on-universe BLOCKED_ON_UNIVERSE]
 ```
 
 Alias: `status`.
@@ -372,6 +373,8 @@ Alias: `status`.
 | `--agent` | `AGENT` |  | `$MV2_AGENT_ID` |
 | `--phase` | `starting`, `working`, `blocked`, `done` |  |  |
 | `--summary` | `SUMMARY` |  |  |
+| `--blocked-on` | `BLOCKED_ON` | With --phase blocked: agent name/ID, user, or self; agent:NAME disambiguates |  |
+| `--blocked-on-universe` | `BLOCKED_ON_UNIVERSE` | Universe or subverse of the blocked-on agent (otherwise this universe) |  |
 
 ## status
 
@@ -473,6 +476,27 @@ mv2 slash [--list | --result ID] [--timeout TIMEOUT] [--no-wait] [--json] agent 
 | `--json` |  | Print the complete result as JSON |  |
 
 Use at most one of `--list`, `--result`.
+
+## answer
+
+Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path.
+
+```sh
+mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--note QUESTION=TEXT] [--stdin] [--result ID] [--timeout TIMEOUT] [--json] agent [id]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  | The waiting agent |  |
+| `id` |  | The prompt to answer, as listed |  |
+| `--choice` | `CHOICE` | One of the prompt's choices, such as allow or deny |  |
+| `--message` | `MESSAGE` | Text that goes with the choice, where the choice takes one |  |
+| `--answer` | `QUESTION=LABEL` (repeatable) | An answer to one question: its number, header or text, then one of its labels, or typed text where the question allows it. Repeat it for each question, and for each label of a question that allows several |  |
+| `--note` | `QUESTION=TEXT` (repeatable) | A note to go with the answer to a question that takes one, once per question |  |
+| `--stdin` |  | Read the answer as JSON on standard input: {"choice", "message", "answers": {QUESTION: LABEL or [LABELS]}, "notes": {QUESTION: TEXT}}. Use it for secret answers, which must not appear on the command line |  |
+| `--result` | `ID` | Read an earlier answer's outcome as it stands now; never sends |  |
+| `--timeout` | `TIMEOUT` | Seconds to wait for the outcome (default: 30); 0 returns once it is sent | `30` |
+| `--json` |  | Print the complete result as JSON |  |
 
 ## get-usage
 

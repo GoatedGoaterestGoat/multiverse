@@ -5,6 +5,7 @@ import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parse
 import type { Config, Facts, PluginItem } from './statusline'
 import { pythonEnv } from './python'
 import { registerUsage } from './usage'
+import { closeAll, closeKeys, form, hold as holdPrompt, sweep } from './prompts'
 
 // Multiverse sends each message over this session's peer inbox at `next`
 // priority, its text between `<<MV2 steer id=UUID>>` (or `follow-up`) and
@@ -85,9 +86,18 @@ let sessionId: string | undefined
 // `waiting`.
 const waiting = new Map<string, string>()
 
-// Tool calls the permission check answered `ask`, by tool_use_id, until a
-// prompt opens for one of them (the mode may settle the ask instead).
-const asked = new Map<string, string>()
+// Tool calls the permission check answered `ask`, by tool_use_id, with the
+// check's reason and the call's input, until a prompt opens for one of them
+// (the mode may settle the ask instead). A prompt carries no call ID, but it
+// carries exactly the call's input (checked on every prompt recorded on
+// 2.1.319), so it is paired by tool and input, never by order.
+const asked = new Map<string, { tool: string; reason?: string; input: string }>()
+
+// The input as text with its keys in order: two calls are the same call's only when this is equal.
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (key, v) => v !== null && typeof v === "object" && !Array.isArray(v)
+    ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : v) ?? ""
+}
 
 // Tools whose call is itself a question to the person.
 const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
@@ -95,7 +105,8 @@ const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
 // The status line under the prompt (statusline.ts holds the logic and the slot).
 // A timer looks at its files' size and time,
 // with no subprocess, and reads only what changed; `mv2 inbox --peek` runs only
-// when the inbox changed. Plugin items add runtime.json (which declares them) and
+// when one of the files that decide the unread count changed: the inbox, its
+// cursor, the delivery ledger or the read marks. Plugin items add runtime.json (which declares them) and
 // the file of each item that is on.
 const REFRESH_MS = 2000
 const watched = new Map<string, string>()
@@ -142,9 +153,10 @@ async function refreshStatus($: EngineInterface) {
     if (!directory || !universe) return
     const configFile = `${universe}/statusline.json`
     const properties = `${directory}/properties.json`
-    const [configChanged, propertiesChanged, inboxChanged, cursorChanged, runtimeChanged] = await Promise.all([
-      changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
-      changed($, `${directory}/runtime.json`)])
+    const [configChanged, propertiesChanged, inboxChanged, cursorChanged, ledgerChanged, marksChanged, runtimeChanged] =
+      await Promise.all([
+        changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
+        changed($, `${directory}/inbox-state.json`), changed($, `${directory}/inbox-read.json`), changed($, `${directory}/runtime.json`)])
     let itemsChanged = false
     if (runtimeChanged) {
       // Status reports rewrite runtime.json often; the items it declares rarely change.
@@ -192,7 +204,7 @@ async function refreshStatus($: EngineInterface) {
         } catch { /* the name shows once universe.json reads */ }
       }
     }
-    if ((inboxChanged || cursorChanged) && cli) {
+    if ((inboxChanged || cursorChanged || ledgerChanged || marksChanged) && cli) {
       try {
         const result = await $.process.run([cli, "inbox", "--peek", "--json"], { timeoutMs: 10000 })
         const data: unknown = result.exitCode === 0 ? JSON.parse(result.stdout) : undefined
@@ -233,9 +245,9 @@ async function report($: EngineInterface) {
     while (!registered || reported !== status()) {
       const value = status()
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
-      // v2 reads a tag's send time and v3 also runs Claude's commands for mv2; mv2 sends either only to a mod that
-      // registered it.
-      if (!registered) argv.push("--bridge", "claude-mod-v3")
+      // v2 reads a tag's send time, v3 also runs Claude's commands for mv2 and v4 publishes the prompts the agent
+      // waits on; mv2 relies on each only for a mod that registered it.
+      if (!registered) argv.push("--bridge", "claude-mod-v4")
       let result
       try {
         result = await $.process.run(argv, { timeoutMs: 10000, env: await pythonEnv($) })
@@ -299,12 +311,16 @@ async function moved($: EngineInterface, previous: string, session: string) {
 
 // A call has finished or run: nothing of it waits on the person any more. A
 // prompt that matched no call ends with the next finished call of its tool.
-function settle($: EngineInterface, id: string | undefined, tool?: string) {
+// `cause` says how its published prompt ended, if one is still open: "resolved" (the call ended without mv2's
+// answer), "person" (it ran, so someone allowed it) or "denied".
+function settle($: EngineInterface, id: string | undefined, tool?: string, cause = "resolved") {
   if (id === undefined) return
   asked.delete(id)
-  const removed = [waiting.delete(`question:${id}`), waiting.delete(`permission:${id}`)]
+  const keys = [`question:${id}`, `permission:${id}`]
   const unmatched = [...waiting].find(([key, name]) => key.startsWith("permission:unmatched-") && name === tool)
-  if (unmatched !== undefined) removed.push(waiting.delete(unmatched[0]))
+  if (unmatched !== undefined) keys.push(unmatched[0])
+  closeKeys($, keys, cause)
+  const removed = keys.map((key) => waiting.delete(key))
   if (removed.some(Boolean)) void report($)
 }
 
@@ -639,6 +655,7 @@ export const register: Register = (on) => {
   on("session.start", async ($, e, next) => {
     const result = await next(e)
     void report($)
+    void sweep($)
     void $.session.id().then((id) => { sessionId = id }, () => {})
     $.command.register({ name: NAME, description: DESCRIPTION, argumentHint: HINT, immediate: true })
       .catch((error: unknown) => $.ui.log(`multiverse: could not register /${NAME}: ${String(error)}`))
@@ -694,6 +711,7 @@ export const register: Register = (on) => {
       takenBeforeTurn = []
       expireLater($, pending())
       // An ended turn has closed its prompts and questions.
+      closeAll($, e.isAborted ? "interrupted" : "turn_ended")
       waiting.clear()
       asked.clear()
       void report($)
@@ -720,39 +738,55 @@ export const register: Register = (on) => {
   // `ask` may open a permission prompt for this call, or the mode settles it.
   on("tool.check", async ($, e, next) => {
     const verdict = await next(e)
-    if (verdict.decision === "ask" && e.tool_use_id !== undefined) asked.set(e.tool_use_id, e.tool)
+    if (verdict.decision === "ask" && e.tool_use_id !== undefined) {
+      asked.set(e.tool_use_id, { tool: e.tool, reason: verdict.reason, input: canonical(e.input) })
+    }
     return verdict
   })
 
-  // The prompt is open: it belongs to the oldest asked call of that tool.
+  // The prompt is open: it belongs to the asked call with its tool and input, when exactly one has them (two
+  // identical calls asked at once can't be told apart). The rest of the chain (the person's own hooks) answers
+  // first; one it leaves undecided is published for mv2 and held until mv2 answers or it closes.
   on("classic.PermissionRequest", async ($, e, next) => {
-    const id = [...asked].find(([, tool]) => tool === e.tool_name)?.[0]
+    const input = canonical(e.tool_input)
+    const matches = [...asked].filter(([, a]) => a.tool === e.tool_name && a.input === input)
+    const found = matches.length === 1 ? matches[0] : undefined
+    const id = found?.[0]
     if (id !== undefined) asked.delete(id)
     prompts += 1
-    waiting.set(`permission:${id ?? `unmatched-${prompts}`}`, e.tool_name)
+    const key = `permission:${id ?? `unmatched-${prompts}`}`
+    waiting.set(key, e.tool_name)
     void report($)
-    return next(e)
+    const below = await next(e)
+    if (below?.decision !== undefined) return below
+    return holdPrompt($, e, below, { toolUseId: id, key, reason: found?.[1].reason }, next.signal)
   })
 
   on("classic.PermissionDenied", async ($, e, next) => {
-    settle($, e.tool_use_id)
+    settle($, e.tool_use_id, undefined, "denied")
     return next(e)
   })
 
   // An approved Bash call draws its progress row once it runs.
   on("ui.render", { component: "ToolProgress" }, async ($, e, next) => {
-    if (waiting.has(`permission:${e.props.tool_use_id}`)) settle($, e.props.tool_use_id)
+    if (waiting.has(`permission:${e.props.tool_use_id}`)) settle($, e.props.tool_use_id, undefined, "person")
     return next(e)
   })
 
   on("classic.Elicitation", async ($, e, next) => {
-    waiting.set(`elicitation:${e.elicitation_id ?? e.mcp_server_name}`, e.mcp_server_name)
+    const key = `elicitation:${e.elicitation_id ?? e.mcp_server_name}`
+    waiting.set(key, e.mcp_server_name)
     void report($)
+    // Listed for the person, never held: holding it would keep Claude from drawing the form. One another hook
+    // answers is closed again by its ElicitationResult.
+    void form($, key, e)
     return next(e)
   })
 
   on("classic.ElicitationResult", async ($, e, next) => {
-    if (waiting.delete(`elicitation:${e.elicitation_id ?? e.mcp_server_name}`)) void report($)
+    const key = `elicitation:${e.elicitation_id ?? e.mcp_server_name}`
+    closeKeys($, [key], "person")
+    if (waiting.delete(key)) void report($)
     return next(e)
   })
 

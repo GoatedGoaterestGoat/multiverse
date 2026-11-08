@@ -17,7 +17,7 @@ from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
-from ..universe import agents, catalog, focus, mailbox, records, storage as storage_records
+from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
@@ -106,7 +106,7 @@ def _listing_runtime(directory, facts, *, prepare=False):
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
-    'id', 'universe_id', 'name', 'harness', 'model', 'effort', 'slash_settings', 'task', 'phase', 'summary',
+    'id', 'universe_id', 'name', 'harness', 'model', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
     'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
@@ -139,7 +139,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
-    rows, snapshots = [], {}
+    rows, snapshots, dependencies = [], {}, {}
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
         paths = [agents_dir / only / "properties.json"] if only is not None else agents.record_paths(scope)
@@ -200,7 +200,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
-                             "focus": focus.current(path.parent), "runtime": facts}))
+                             "focus": focus.current(path.parent), "runtime": facts,
+                             "blocked_on": blocked.display(scope, properties, dependencies)}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
             except Exception as error:  # content no reader expected: this agent's row says so, the others still list

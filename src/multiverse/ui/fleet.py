@@ -1,13 +1,14 @@
 """Filling the agent table from a snapshot, and selecting rows in it."""
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.css.query import NoMatches
 from textual.widgets import DataTable, Input, Static
 
-from ..display import clean
+from ..display import clean, phase_label
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, MARKS, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, PHASE_WIDE, lookup
 from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
@@ -39,6 +40,13 @@ class FleetView:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
         flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
                     or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
+        for key in [key for key in widths if lookup(key) is COLUMNS["phase"]]:  # `phase` or `core:phase`, not a
+            # plugin column standing in for it: a blocked agent's phase may say what it waits on, so it grows to fit,
+            # but only into the room the other columns leave, the flexible one keeping its least width
+            room = (available - 2 * len(fields) - (6 if flexible else 0)
+                    - sum(w for k, w in widths.items() if k not in (key, flexible)))
+            widths[key] = max(widths[key], min(PHASE_WIDE, room, max(
+                (cell_len(clean(phase_label(row) or "")) for row in projected if row["kind"] == "agent"), default=0)))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -70,7 +78,10 @@ class FleetView:
             if field == "name":  # its marks stay in view: a long name is shortened to the column's width instead
                 return COLUMNS["name"].render(row, widths["name"],
                                               moving if self.moving and row["key"] == self.moving["key"] else ())
-            return lookup(field).render(row)
+            column = lookup(field)
+            if column is COLUMNS["phase"]:
+                return column.render(row, widths[field])
+            return column.render(row)
 
         rendered = [(row["key"], [cell(row, field) for field in fields]) for row in projected]
         signature = (list(widths.items()), rendered)

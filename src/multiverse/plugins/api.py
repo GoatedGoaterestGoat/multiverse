@@ -20,6 +20,7 @@ Versioning: VERSION's minor rises when something is added, its major when
 something changes or goes. Fields of `record` (an operation's full result)
 are not covered.
 """
+from collections.abc import Mapping
 from contextlib import contextmanager, ExitStack
 import copy
 import functools
@@ -1540,6 +1541,17 @@ def _from_core(kind, value):
         values["commands"] = tuple(_from_core(SlashCommand, item) for item in values.get("commands") or ())
     elif kind is CommandResult:
         values["changed"] = tuple(values.get("changed") or ())
+    elif kind is PromptList:
+        values["prompts"] = tuple(_from_core(WaitingPrompt, item) for item in values.get("prompts") or ())
+    elif kind is WaitingPrompt:
+        values["detail"] = copy.deepcopy(dict(values.get("detail") or {}))
+        values["choices"] = tuple(_from_core(PromptChoice, item) for item in values.get("choices") or ())
+        values["questions"] = tuple(_from_core(PromptQuestion, item) for item in values.get("questions") or ())
+    elif kind is PromptQuestion:
+        values["options"] = tuple((str(label), str(description)) for label, description in values.get("options") or ())
+    elif kind is PromptResult:
+        values["person_answer"] = (copy.deepcopy(dict(values["person_answer"])) if values.get("person_answer")
+                                   else None)
     elif kind is RunOptions:
         values["reason"] = values.get("reason") or None
         values["formats"] = tuple(values.get("formats") or ())
@@ -1589,6 +1601,84 @@ class CommandResult:
     changed: tuple = ()         # what mv2 recorded because of it: "session", "model", "effort"
     reason: str | None = None
     saved_default: bool = False  # it was also saved as the person's own default (a person's /model, say)
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptChoice:
+    """One decision a permission prompt offers (1.17), in the harness's order: allow, allow_session, allow_always,
+    deny, stop, accept, decline, cancel (treat one you don't know like the label says). `label` is mv2's wording,
+    not the terminal's."""
+    id: str
+    label: str
+    saves_rule: bool = False      # it also saves a rule to the person's settings: only the person can choose it
+    takes_message: bool = False   # it can carry a message (a refusal's reason, say)
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptQuestion:
+    """One question of a question prompt, or one field of a form (1.17)."""
+    id: str                       # what answer_prompt's answers are keyed by
+    question: str
+    header: str = ""
+    options: tuple = ()           # (label, description)
+    multiple: bool = False        # several labels may be chosen
+    free_text: bool = True        # typed text is accepted, besides the labels
+    secret: bool = False          # its answer is never shown back, recorded or logged
+    required: bool = True
+    takes_note: bool = False      # a note may go with the chosen label (1.17, Codex): answer_prompt's notes
+
+
+@dataclass(frozen=True, kw_only=True)
+class WaitingPrompt:
+    """A prompt an agent is blocked on now (1.17): a permission, a question, a plan to approve or a form (`kind`;
+    treat one you don't know as not answerable). `id` names this one request: a later prompt, a new launch or a
+    switched conversation never matches it."""
+    id: str
+    kind: str
+    summary: str                  # one line: the command, the file, the first question, the server
+    detail: dict = field(default_factory=dict)  # kind-specific, at most 64 KiB; a fresh copy
+    asked_at: str | None = None
+    tool: str | None = None
+    choices: tuple = ()           # PromptChoice
+    questions: tuple = ()         # PromptQuestion
+    answerable: bool = True
+    reason: str | None = None     # why not answerable, and where to answer it
+    subagent: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptList:
+    """The prompts an agent waits on now (1.17). `state` is ok, or unavailable with `reason` (a harness or launch
+    that can't show them). `coverage` is complete, or unknown with `reason`: the agent waits, but on something mv2
+    can't see."""
+    state: str
+    coverage: str = "unknown"
+    reason: str | None = None
+    prompts: tuple = ()           # WaitingPrompt
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptResult:
+    """An answer's outcome (1.17). `state`: answered (it took; `saved_rule` marks a choice that saves a rule,
+    which the harness writes and may warn about, not proof that it did), sent_first (mv2's answer reached the
+    harness first while the prompt was still open, and nothing contradicts it, but the harness doesn't confirm it
+    took it: Codex; counts as success, and is never sent again), person (the
+    person answered first; `person_answer` holds their choice where the harness shows it), gone (the prompt closed
+    another way), submitted (sent, its outcome not known yet: read it with prompt_result(id), never answer again),
+    unknown (sent; which answer took can't be told) or refused (nothing was sent; `reason` says why). Treat a state
+    a later minor adds like unknown. Every state but answered says why in `reason`, as a fact where it is known
+    and as possibilities where not; `cause` names a known one for code: person, replaced (the agent now waits on
+    another prompt, which `reason` names), interrupted, turn_ended, stopped, switched, or a refusal's
+    (already_answered, not_offered, person_only, missing_answer, agent_caller, ...); an open set, None when unknown."""
+    id: str
+    state: str
+    reason: str | None = None
+    saved_rule: bool = False
+    # {choice?, answers?: {question id: [offered labels]}, typed?: {question id: [typed text, a note included]},
+    # truncated?: True},
+    # at most 64 KiB; never a message or a secret answer
+    person_answer: dict | None = None
+    cause: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1710,6 +1800,61 @@ class Agent:
         from ..runtime import slash
         with _acting(self._plugin._loaded, "observe", self.universe, "reading a command's result"):
             return _from_core(CommandResult, _call(slash.result, self.universe.path, self.id, id))
+
+    def waiting_prompts(self):
+        """The prompts this agent is blocked on now, with the choices its harness offers (1.17; observe, needs
+        agents.read): an api.PromptList. Only while its status is waiting; empty otherwise."""
+        self._plugin._need("agents.read")
+        from ..runtime import prompts
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading what it waits on"):
+            return _from_core(PromptList, _call(prompts.waiting, self.universe.path, self.id,
+                                                caller=self._prompt_caller()))
+
+    def answer_prompt(self, id, *, choice=None, message=None, answers=None, notes=None, timeout=30, wait=True):
+        """Answer a prompt this agent waits on now, through its harness's own answer path, as the person would in
+        its terminal (1.17; act, needs prompts.answer): a permission by `choice` (one of the prompt's choices, with
+        an optional `message` where it takes one), a question or a form by `answers` ({question id: label, typed text
+        where allowed, or a list of labels where it takes several}), with `notes` ({question id: text}) for a
+        question that `takes_note`. Only an open prompt of a waiting agent, once:
+        a second answer, a choice that saves a rule to the person's settings, or a missing answer comes back refused
+        and sends nothing. Waits up to `timeout` seconds for the outcome; when the wait ends first it is submitted:
+        read it with prompt_result(id), never answer again. A secret answer is never recorded or logged."""
+        self._plugin._need("prompts.answer")
+        if not isinstance(id, str) or not id:
+            raise Error("answer_prompt() takes a prompt's id")
+        if (choice is not None and not isinstance(choice, str)) or (message is not None and not isinstance(message, str)):
+            raise Error("answer_prompt() takes a choice and a message as text")
+        if answers is not None and (not isinstance(answers, Mapping) or not all(
+                isinstance(key, str) and (isinstance(value, str) or (isinstance(value, (list, tuple))
+                                                                     and all(isinstance(item, str) for item in value)))
+                for key, value in answers.items())):
+            raise Error("answer_prompt() takes answers as {question id: text, or a list of texts}")
+        if notes is not None and (not isinstance(notes, Mapping) or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in notes.items())):
+            raise Error("answer_prompt() takes notes as {question id: text}")
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0
+                or not isinstance(wait, bool)):
+            raise Error("answer_prompt() takes a number of seconds (0 or more) as timeout and True or False as wait")
+        from ..runtime import prompts
+        with _acting(self._plugin._loaded, "act", self.universe, "answering what it waits on"):
+            return _from_core(PromptResult, _call(prompts.answer, self.universe.path, self.id, id, choice=choice,
+                                                  message=message, answers=None if answers is None else dict(answers),
+                                                  notes=None if notes is None else dict(notes),
+                                                  timeout=timeout, wait=wait, caller=self._prompt_caller()))
+
+    def prompt_result(self, id):
+        """The outcome of an earlier answer_prompt() on this agent, by the prompt's id, as it stands now (1.17;
+        observe, needs agents.read). It never answers again."""
+        self._plugin._need("agents.read")
+        if not isinstance(id, str) or not id:
+            raise Error("prompt_result() takes a prompt's id")
+        from ..runtime import prompts
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading an answer's outcome"):
+            return _from_core(PromptResult, _call(prompts.result, self.universe.path, self.id, id,
+                                                  caller=self._prompt_caller()))
+
+    def _prompt_caller(self):
+        return {"kind": "plugin", "name": self._plugin.name}  # never a person: no rule-saving choice
 
     def send(self, text, delivery="steer"):
         """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).

@@ -44,7 +44,7 @@ Every message is saved to the recipient's inbox first, and then delivered. You c
 | --- | --- |
 | `steer` (default) | During the current turn at the next safe point, or as a new turn if the agent is idle |
 | `follow-up` | When the current turn ends |
-| `inbox-only` | Not delivered. The agent reads it with `mv2 inbox` at its next check |
+| `inbox-only` | At the next `mv2 inbox` check, unless the recipient is blocked on the sender and it upgrades to a follow-up |
 
 A `steer` or `follow-up` message to a stopped agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. A saved or delivered message has not necessarily been read or answered.
 

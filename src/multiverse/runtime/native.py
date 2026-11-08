@@ -27,7 +27,7 @@ from ..store import lock, now, read
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
 from ..universe import agents, records
-from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
+from ..universe.mailbox import end_startup_messages, inbox, inbox_fallback, message_record, update_message
 
 
 def environment(command):
@@ -296,6 +296,10 @@ class NativeExecutor:
             while connection.recv(65536):
                 pass
         return NativeResult('ok', 'Written to the inbox')
+
+    def write_prompt_answer(self, session, answer):
+        from .prompts import write_answer
+        return write_answer(self, session, answer)
 
 
 def framed_text(root, message, *, at=None):
@@ -766,7 +770,7 @@ def finalize_launch_only(root, directory, message_id):
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
-        if tracking.get('dismissed_at'):
+        if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
             return _dismissed_receipt(message_id)
         if receipt_failure(tracking):
             return None  # A later native receipt can still settle this exact attempt.
@@ -797,7 +801,7 @@ def reopen_launch_only(root, directory, message_id):
     effects.require('send', directory.name)
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
-        if tracking.get('dismissed_at'):
+        if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
             return False
         if tracking.get('submission_state') != 'launch-only':
             return True  # A concurrent result still goes through normal no-resend checks.
@@ -818,6 +822,15 @@ def reopen_launch_only(root, directory, message_id):
         receipt = {**previous, 'value': {**value, 'final': False}, 'reconsidered_at': now()}
         update_message(directory, message_id, submission_state='failed', final_reason=None, last_receipt=receipt)
         return True
+
+
+def _manual_fallback(directory, message, tracking):
+    """Finalize an old runner's definite tagged failure on this mutation path, never from a peek."""
+    if not inbox_fallback(message, tracking):
+        return False
+    if not tracking.get('dismissed_at'):
+        update_message(directory, message['id'])
+    return True
 
 
 def _dismissed_receipt(message_id):
@@ -959,7 +972,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
-        if tracking.get('dismissed_at'):
+        if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
             return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
@@ -1004,6 +1017,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                 reason = executor.facts.get('reason') if deferred == session.launch_id else None
                 end_startup_messages(directory, deferred, (reason or 'Launch ended before delivery') + '; use deliver AGENT --retry')
                 _, tracking = message_record(directory, message_id)
+                if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
+                    return _dismissed_receipt(message_id)
             elif check:
                 return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         if check:
@@ -1013,6 +1028,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
             if not _retryable_receipt(receipt):
                 return receipt
             _, tracking = message_record(directory, message_id)
+            if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
+                return _dismissed_receipt(message_id)
         selected_mode = message.get('delivery', 'inbox-only')
         if selected_mode not in ('steer', 'follow-up'):
             raise ValueError('Native delivery requires steer or follow-up')
@@ -1114,7 +1131,7 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
-        if tracking.get('dismissed_at'):
+        if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
             return _dismissed_receipt(message_id)
         if tracking.get('uncheckable_reported_at'):
             return _final_lineage_receipt(message_id)
@@ -1158,6 +1175,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         if wake and receipt_failure(tracking):
             with lock(directory / '.delivery.lock'):
                 message, tracking = message_record(directory, message_id)
+                if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
+                    return _dismissed_receipt(message_id)
                 if not receipt_failure(tracking):
                     return {'state': 'unknown', 'ok': False, 'message_id': message_id,
                             'reason': 'Delivery changed while preparing its retry; check it again'}
@@ -1168,6 +1187,8 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
                 if not _retryable_receipt(receipt):
                     return receipt
                 _, tracking = message_record(directory, message_id)
+                if tracking.get('dismissed_at') or _manual_fallback(directory, message, tracking):
+                    return _dismissed_receipt(message_id)
         capability = effects.call(adapter, 'capabilities', session).get('wake') if wake else None
         if wake and (capability is None or capability.state != 'supported'):
             launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None

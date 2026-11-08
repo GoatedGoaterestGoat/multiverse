@@ -9,11 +9,13 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
 from test_multiverse import BaseTest
+from isolation import track
 from multiverse import cli, harnesses, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity, focus_note, native
@@ -650,6 +652,23 @@ class FocusCommandTest(BaseTest):
     def test_turn_focus_needs_reported_turns_and_ends_with_the_next_turn(self):
         """focus --turn is refused while the harness reports no status, and once accepted it holds sends until the
         turn ends; otherwise a turn focus would never end."""
+        senders = []
+        def finish_note(process):
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                self.fail('The focus-end note sender did not finish')
+        def start_note(*args, **kwargs):
+            process = subprocess.Popen(*args, **kwargs)
+            senders.append(process)
+            self.addCleanup(finish_note, process)
+            track(pid=process.pid)
+            return process
+        # Turn reporting deliberately detaches the note. Reap that exact child before BaseTest removes its files.
+        self.enterContext(patch.object(focus, 'subprocess',
+                                       SimpleNamespace(Popen=start_note, DEVNULL=subprocess.DEVNULL)))
         directory = self.directories['asker']
         store.write(directory / 'runtime.json', {**store.read(directory / 'runtime.json'), 'status': 'unknown'})
         with self.assertRaisesRegex(ValueError, 'not reporting its turns'):
@@ -664,6 +683,7 @@ class FocusCommandTest(BaseTest):
             agents.update_runtime(directory, self.launch, status=status)
         self.assertIsNone(focus.current(directory))
         self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping'))
+        self.assertEqual(len(senders), 1)
 
     def test_retry_waits_for_unfocus_but_check_does_not(self):
         """deliver --retry is refused while focused and works after unfocus, and --check is never held back; a retry

@@ -1,4 +1,5 @@
 """Dashboard data/actions, separate from rendering so the UI can run headlessly."""
+from dataclasses import asdict
 from pathlib import Path
 import threading
 
@@ -9,9 +10,9 @@ from ..store import read
 from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse, unfocus)
 from .. import display, plugins
-from ..runtime import lifecycle
+from ..runtime import lifecycle, prompts
 from . import columns, plugin_panels, theme
-from .columns import COLUMNS, MARKS, UNREAD
+from .columns import BLOCKED_ON, COLUMNS, MARKS, UNREAD
 from .panels import error_widget
 from .tree import counts, within
 from .views import view
@@ -70,6 +71,9 @@ def inbox_stamp(directory):
             tuple((path.name, _file_stamp(path)) for path in records))
 
 
+ANSWER_WAIT = 15  # seconds the dashboard waits for an answer's outcome; later, it says how to read it
+
+
 class LocalBackend:
     demo = False
 
@@ -77,6 +81,16 @@ class LocalBackend:
         # The last usage read per agent, kept with what it was read for: a refresh shows it until the next read lands.
         self._usage, self._usage_lock = {}, threading.Lock()
         self._unread = {}  # agent key -> (inbox_stamp, unread count): read again only once a stamp changes
+
+    def waiting_prompts(self, root, reference):
+        """The prompts the agent waits on now, as core lists them: never an answer, never a write."""
+        return asdict(prompts.waiting(root, reference))
+
+    def answer_prompt(self, root, reference, prompt_id, values):
+        """Answer one prompt as the person, through core, which checks it against a fresh read and sends it once."""
+        return asdict(prompts.answer(root, reference, prompt_id, choice=values.get("choice"),
+                                     message=values.get("message"), answers=values.get("answers") or None,
+                                     notes=values.get("notes") or None, timeout=ANSWER_WAIT))
 
     def unread_count(self, row):
         """The agent's unread inbox count, as the inspector and mv2 inbox count them, or None when its inbox can't be
@@ -136,6 +150,12 @@ class LocalBackend:
             for member in members:
                 if not isinstance(member.get("damaged"), dict):
                     member[UNREAD] = self.unread_count(member)
+        if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "phase" or key == "phase"
+                                                           for key in config["columns"]):
+            # Shown only where the view lists both: otherwise a blocked agent is plainly blocked everywhere, the
+            # inspector and details included.
+            for member in members:
+                member.pop(BLOCKED_ON, None)
         replace = config.get("replace", True)
         plugin_columns = (any(key not in COLUMNS and key not in MARKS and not columns.core_key(key)
                               for key in config["columns"])

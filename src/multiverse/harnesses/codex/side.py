@@ -40,6 +40,7 @@ class LaunchConnection:
         self.reselections = set()
         self.primary_frame = False
         self.ended = False
+        self.prompts = None
         from .navigation import Selection
         self.selection = Selection(self)
 
@@ -146,10 +147,14 @@ class LaunchConnection:
         if self.ended:
             raise local_error('This native connection is closed', value.get('id'))
         self._sync()
+        if self.prompts is not None and not self.prompts.terminal(value):
+            return None
         selected = self.selection.outgoing(value)
         if selected is not None:
             return selected
         method, identifier = value.get('method'), value.get('id')
+        if self.prompts is not None:
+            self.prompts.observe('outgoing', value)
         if method is None:
             return value  # Replies to native host requests have a separate ID namespace.
         params = value.get('params')
@@ -224,6 +229,8 @@ class LaunchConnection:
         if self.ended:
             return None
         self._sync()
+        if self.prompts is not None:
+            self.prompts.observe('incoming', value)
         self._grant_update(value)
         if self.selection.incoming(value):
             return None
@@ -293,6 +300,30 @@ class LaunchConnection:
 
     def navigation_done(self, event, result):
         self.selection.done(event, result)
+        if self.prompts is not None:
+            self.prompts.synchronize()
+
+    def relay_context(self, context):
+        from .prompts import Relay
+        try:
+            self.prompts = Relay(self, context)
+        except (OSError, ValueError, TypeError):
+            self.prompts = None  # Old runners keep their existing TUI without answer support.
+
+    async def relay_run(self, send):
+        if self.prompts is not None:
+            await self.prompts.run(send)
+
+    def relay_claim(self, candidate):
+        return self.prompts.claim(candidate) if self.prompts is not None else None
+
+    def relay_sent(self, candidate, sent):
+        if self.prompts is not None:
+            self.prompts.sent(candidate, sent)
+
+    async def relay_close(self):
+        if self.prompts is not None:
+            await self.prompts.close()
 
     def navigation_failed(self, event, reason=''):
         self.selection.failed(event)

@@ -33,6 +33,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `harness` | The harness the agent runs |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
+| `blocked_on` | Not a column of its own: a blocked agent's Phase says what it's blocked on, such as `blocked (lifecycle)`, `blocked (tester in qa)`, `blocked (user)` or `blocked (self)` (off by default). An agent mv2 can no longer find reads `: gone`, and one named `user` or `self` reads `agent user`. A view without `phase` (or `core:phase`) shows it nowhere, the inspector included; a plugin column standing in for Phase shows its own value, and the plain phase where it has none |
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
@@ -57,6 +58,7 @@ Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A
 | `p` | Show or hide the inspector |
 | `v` | Show full details of an agent or folder |
 | `i` | Read the selected agent's unread inbox messages; they stay unread for the agent |
+| `a` | Answer the prompt a waiting agent is stopped at: a permission prompt, a question or a plan |
 | `x` | Move the selected agent or subverse |
 | `d` | Send the selected agent or subverse to the trash, after confirming |
 | `P` | Open the selected universe's plugins: turn each on or off (choosing its access when it can work with less than it asks for), see what it adds and its access, and Configure it; see [plugins](../use/plugins.md) |
@@ -85,6 +87,7 @@ Press `g` for a new subverse, type a name and press `Enter`. The subverse uses i
 - **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. On a focused agent, the message goes to its inbox without interrupting it; to answer it, attach with Enter. If the agent focuses while the form is open, your message goes to its inbox.
 - **`f`** asks how long to [focus](../cli/messaging.md#focus-an-agent) the selected agent: 5 minutes, 20 minutes, 1 hour, until its next turn ends, or until you unfocus it. The turn choice shows only while the harness reports the agent's status. On a focused agent, `f` unfocuses it and says how many inbox messages wait. The inspector and `v` say until when an agent is focused.
 - **`i`** shows the selected agent's unread inbox messages as the agent will read them with `mv2 inbox`. Reading them here doesn't mark them read, so the agent still gets them.
+- **`a`** answers the prompt a `waiting` agent is stopped at, as [`mv2 answer`](../cli/waiting-prompts.md) does. The inspector names the prompt (`⏸ Waiting on: permission · Bash: git push`). `a` opens it with the call and the choices the harness offers, or its questions. A choice that saves a rule to your settings is marked. A form with both questions and choices, such as Codex's cancel, takes one or the other: its answers, or a choice you pick instead, which goes alone; `Enter` on the picked choice again takes it back. A question that takes a note, such as Codex's "Other", has a note box beside it. A secret answer or note is typed into a hidden box. Nothing counts until you pick it: a choice with `Enter`, an option with `Space`. `Ctrl+Enter` answers and `Esc` closes without sending. The outcome, and why when the answer didn't take, shows on the bottom line and in the inspector as `Last answer`. A prompt takes one answer, so mv2 never sends a second one.
 - **`K`** asks for confirmation, then kills the agent. Its record and conversation are kept.
 - **`r`** resumes it.
 
@@ -127,7 +130,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | --- | --- |
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
-| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name instead of a column; the `Silicon23` template turns it on, `base` leaves it off |
+| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, and `blocked_on` what a blocked agent waits on to its Phase, instead of a column each; the `Silicon23` template turns both on, `base` leaves them off |
 | `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 

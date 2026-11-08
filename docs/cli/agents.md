@@ -36,7 +36,7 @@ mv2 list --columns name,phase   # only these columns, in this order
 mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, status, reported phase and summary. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. A blocked agent's phase says what it's blocked on when it reported that, such as `blocked (lifecycle)` or `blocked (user)`; `--json` gives it as `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
 `--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
 
@@ -94,7 +94,7 @@ While waiting for native exit, `kill` retries a temporarily unavailable observat
 
 Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.
 
-A `steer` or `follow-up` message to a stopped agent also resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
+A `steer` or `follow-up` message to a stopped agent also resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` send can also wake an agent if it [upgrades to a follow-up because the recipient is blocked on the sender](messaging.md).
 
 For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window or your explicit `--wait-timeout` ends without either, a healthy process that passed its startup check proceeds with a notice that screen startup could not be confirmed. A process that has not passed that check still times out. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
 

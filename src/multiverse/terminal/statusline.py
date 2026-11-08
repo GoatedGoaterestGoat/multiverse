@@ -104,42 +104,80 @@ def clean(value, limit=80):
     return cut.rstrip(' ,;:.-') + '…'
 
 
-def unread(directory):
-    """Bounded observation of unread manual messages; never locks or advances a cursor.
+def _dated(value):
+    """Only a timezone-bearing timestamp can attest confirmation or a consumed inbox copy."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
 
-    Native-delivered messages do not count. Incomplete append tails are ignored,
-    like store.inbox. Unknown/corrupt/over-budget counts are None, never zero.
+
+def _inbox_bytes(path, limit):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError('Not a regular inbox file')
+        with os.fdopen(descriptor, 'rb', closefd=False) as source:
+            return source.read(limit + 1)
+    finally:
+        os.close(descriptor)
+
+
+def _inbox_object(path):
+    try:
+        data = _inbox_bytes(path, READ_LIMIT)
+    except FileNotFoundError:
+        return {}
+    if len(data) > READ_LIMIT:
+        raise ValueError('Inbox ledger exceeds the status read budget')
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise ValueError('Inbox ledger is not an object')
+    return value
+
+
+def unread(directory):
+    """Bounded observation of unread manual input; never locks or advances a cursor.
+
+    Blocked-on upgrade copies can precede the cursor, so the bounded scan includes history. Ordinary
+    native messages do not count. Unknown/corrupt/over-budget counts are None, never zero.
     """
     try:
         try:
-            with (directory / 'inbox.cursor').open() as source:
-                cursor = int(source.read(64))
+            cursor_data = _inbox_bytes(directory / 'inbox.cursor', 64)
+            cursor = int(cursor_data) if len(cursor_data) <= 64 else -1
         except FileNotFoundError:
             cursor = 0
         if cursor < 0:
             return None
         try:
-            source = (directory / 'inbox.jsonl').open('rb')
+            data = _inbox_bytes(directory / 'inbox.jsonl', READ_LIMIT)
         except FileNotFoundError:
             return 0 if cursor == 0 else None
-        with source:
-            if cursor > source.seek(0, 2):
-                return None
-            if cursor:
-                source.seek(cursor - 1)
-                if source.read(1) != b'\n':
-                    return None
-            source.seek(cursor)
-            data = source.read(READ_LIMIT + 1)
-        count = 0
-        read_ahead = read_object(directory / 'inbox-read.json')  # read by mv2 held, past the read position
+        if cursor > len(data) or cursor and data[cursor - 1:cursor] != b'\n':
+            return None
+        states = _inbox_object(directory / 'inbox-state.json')
+        read_ahead = _inbox_object(directory / 'inbox-read.json')
+        count, offset = 0, 0
         for line in data[:READ_LIMIT].splitlines(keepends=True):
             if not line.endswith(b'\n'):
                 break
+            offset += len(line)
             message = json.loads(line)
             if not isinstance(message, dict):
                 return None
-            if (message.get('schema') != 2 or message['delivery'] == 'inbox-only') and message.get('id') not in read_ahead:
+            state = states.get(message.get('id'), {})
+            if not isinstance(state, dict) or not isinstance(state.get('native_receipt') or {}, dict):
+                return None
+            copy = (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
+                    and isinstance(message.get('inbox_only_text'), str) and not _dated(state.get('inbox_copy_read_at'))
+                    and not _dated(state.get('transcript_confirmed_at'))
+                    and (state.get('native_receipt') or {}).get('transcript_confirmed') is not True)
+            manual = (offset > cursor and (message.get('schema') != 2 or message['delivery'] == 'inbox-only')
+                      and message.get('id') not in read_ahead)
+            if copy or manual:
                 count += 1
                 if count >= INBOX_LIMIT:
                     return INBOX_LIMIT

@@ -102,6 +102,31 @@ describe('status line', () => {
     expect(w.lines.at(-1)).toBe('working')
   })
 
+  // The unread count also follows the delivery ledger and the read marks: a held message's copy is unread until its
+  // mark lands, with no change to the inbox or its cursor, and a count missing that would sit wrong until the next.
+  test('a change to only the ledger, or only the read marks, recounts the inbox', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/inbox.jsonl`, '{"id":"1"}\n')
+    await start($)
+    await w.clock.settle()
+    expect(w.peeks.length).toBe(1)
+    const rows: [string, string, unknown[], string][] = [
+      ['inbox-state.json', '{"1": {"state": "delivered"}}', [{ text: 'a' }], 'working · inbox 1'],
+      ['inbox-read.json', '{"1": "2026-11-07T12:00:00Z"}', [], 'working'],
+    ]
+    for (const [name, text, unread, line] of rows) {
+      w.setUnread(unread)
+      w.disk(`${AGENT}/${name}`, text)
+      const before = w.peeks.length
+      await w.clock.advance(2000)
+      expect([name, w.peeks.length]).toEqual([name, before + 1])
+      expect(w.lines.at(-1)).toBe(line)
+      await w.clock.advance(2000)
+      expect([name, w.peeks.length]).toEqual([name, before + 1])  // unchanged since, no more subprocess
+    }
+  })
+
   test('statusline.json sets the items and their order, and a change applies on the next tick', async ($, on) => {
     const w = session(on)
     w.disk(`${AGENT}/properties.json`, properties('working', 'reading the diff'))
