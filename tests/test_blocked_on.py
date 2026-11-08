@@ -121,19 +121,22 @@ class BlockedOnTest(BaseTest):
         mailbox.append_message(directory, 'name alone is not identity', {'name': 'helper'})
         with patch.dict(os.environ, self.environment('asker')):
             line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
-            self.assertNotIn('Reminder:', line)
+            self.assertEqual(line.strip(), 'Reported blocked on helper.')
             mailbox.append_message(directory, 'reply', source)
             files = lambda: {p.name: p.read_bytes() for p in directory.glob('inbox*') if p.is_file()}
             before = files()
             line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
-            self.assertTrue(line.strip().endswith('Reminder: you have unread messages from helper.'), line)
+            self.assertEqual(line.strip(), 'Reported blocked on helper. Reminder: you have unread messages from helper.')
             self.assertEqual(files(), before)
             with patch.dict(os.environ):
                 for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID'):
                     os.environ.pop(key, None)
                 operator = self.output('report', '--agent', 'asker', '--phase', 'blocked', '--blocked-on', 'helper')
-                self.assertNotIn('Reminder:', operator)
+                self.assertEqual(operator.strip(), 'Reported blocked on helper.')
             self.assertEqual(files(), before)
+            for source_kind in ('user', 'self'):
+                self.assertEqual(self.output('report', '--phase', 'blocked', '--blocked-on', source_kind).strip(),
+                                 f'Reported blocked on {source_kind}.')
             with store.lock(directory / '.inbox.lock'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
                 self.assertNotIn('Reminder:', line)

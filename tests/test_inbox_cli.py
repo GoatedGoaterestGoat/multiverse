@@ -199,16 +199,16 @@ class InboxCliTest(BaseTest):
             with self.assertRaises(ValueError):
                 inbox_tool.run(self.root, agent=self.agent, timeout='1s')
             unchanged('invalid options')
+            for phase in ('starting', 'working', 'blocked'):
+                with self.subTest(phase=phase), patch.object(report, 'unread') as counted:
+                    self.assertEqual(report.cli_run(self.root, agent=self.agent, phase=phase), f'Reported {phase}.')
+                counted.assert_not_called()
+                unchanged(f'report {phase}')
             with patch('subprocess.Popen') as spawned, patch('subprocess.run') as ran:
-                line = report.cli_run(self.root, agent=self.agent, phase='working')
+                line = report.cli_run(self.root, agent=self.agent, phase='done')
             spawned.assert_not_called()  # The count is taken in this process.
             ran.assert_not_called()
-            self.assertIn(f'{remaining} unread inbox message', line)
-            self.assertNotIn('address', line)
-            unchanged('report')
-            # Done ends the task, so the line sends the agent to what waits instead of letting it stop.
-            line = report.cli_run(self.root, agent=self.agent, phase='done')
-            self.assertIn(f'{remaining} unread inbox messages: read them now with mv2 inbox and address them', line)
+            self.assertEqual(line, f'Reported done. You have {remaining} unread inbox messages.')
             unchanged('report done')
             doctor.run(self.root)
             unchanged('doctor')
@@ -216,6 +216,11 @@ class InboxCliTest(BaseTest):
             self.assertEqual(store.read(cursor), peek['cursor'])
         self.assertEqual(json.loads(self.output('--peek', '--json'))['messages'], [])
         self.assertNotIn('unread', report.cli_run(self.root, agent=self.agent, phase='working'))
+        self.message('one more')
+        position = cursor.read_bytes()
+        self.assertEqual(report.cli_run(self.root, agent=self.agent, phase='done'),
+                         'Reported done. You have 1 unread inbox message.')
+        self.assertEqual(cursor.read_bytes(), position)
         # A cursor past the end of the log makes the inbox unreadable: the report still succeeds, without a count.
         cursor.write_text('999999')
         self.assertNotIn('unread', report.cli_run(self.root, agent=self.agent, phase='done'))

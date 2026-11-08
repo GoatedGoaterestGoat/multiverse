@@ -311,7 +311,7 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. If the agent has unread inbox-only messages, `report` says how many, so the agent notices them. After `--phase done` it also tells the agent to read them now with `mv2 inbox` and address them before it finishes: done means its task is finished, so those messages are its next work.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. Only a report whose phase is `done` includes the unread inbox count, for example `Reported done. You have 2 unread inbox messages.` Other reports say only the phase, such as `Reported working.` or `Reported blocked on helper.`, plus the targeted reminder below when it applies. Counting never marks messages read.
 
 Name one dependency when reporting blocked:
 
