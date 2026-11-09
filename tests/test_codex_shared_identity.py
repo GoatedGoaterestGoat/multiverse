@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from native_safety import install, isolated_home
 from native_cli import forbidden_python, mv2_launcher
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, ServiceIdentity, SessionHandle
@@ -33,8 +34,8 @@ class NativeSharedIdentityTest(PluginTestCase):
         install()
         executable = shutil.which('codex')
         version = subprocess.check_output([executable, '--version'], text=True).strip()
-        if version != 'codex-cli 0.166.0':
-            self.skipTest('native shared identity evidence pinned to 0.166.0')
+        if version != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native shared identity evidence pinned to {version_text(CHECKED_VERSION)}')
         asyncio.run(self.probe(executable))
 
     async def probe(self, executable):

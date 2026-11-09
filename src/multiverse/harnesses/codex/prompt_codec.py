@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 import json
 
 
-VERSION = (0, 166, 0)
+VERSION = (0, 167, 0)
+VERSIONS = frozenset(((0, 166, 0), VERSION))
 DETAIL_BYTES = 64 << 10
 RESPONSE_BYTES = 128 << 10  # Typed wrappers and offered native values can expand a bounded answer file.
 METHODS = {
@@ -246,6 +247,11 @@ class Offer:
 
 
 def command(offer):
+    kind = offer.params.get('kind', 'command')
+    if kind == 'humanCommand':
+        raise ValueError('This approval requires a fresh human decision; answer it in the terminal')
+    if kind not in ('command', 'writeStdin'):
+        raise ValueError('This native approval kind is unsupported; answer it in the terminal')
     decisions = offer.params.get('availableDecisions')
     if not isinstance(decisions, list) or not decisions or len(decisions) > 128:
         raise ValueError('Native command decisions are missing; answer it in the terminal')

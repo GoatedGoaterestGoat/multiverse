@@ -121,7 +121,7 @@ The journal preserves history for explicit transcript or accounting features.
 
 ## Codex conversation switches
 
-On Codex 0.166.0 with mv2's bridge, the person can switch the agent's
+On [checked Codex releases](../reference/compatibility.md#checked-harness-versions) with mv2's bridge, the person can switch the agent's
 conversation from its terminal: `/new` and `/clear` start a fresh thread, and
 `/resume` returns to an earlier one. The agent, launch, workspace, Codex
 storage, grants and inbox stay; only its current conversation changes, and mv2
@@ -210,7 +210,7 @@ remain retryable even if preparing the replacement terminal fails.
 the requested conversation is authoritative. The terminal can still fail to
 load that thread's history after the reply and stay on the old one; mv2 can't
 see that. Input the old thread would then take is refused before it reaches
-Codex; Codex 0.166.0 may then exit rather than show the refusal. Closing the
+Codex; the checked releases may then exit rather than show the refusal. Closing the
 terminal (if it is still open) and running `mv2 resume` restores the recorded
 conversation. The reverse can show too: Codex's `/clear` resets the
 terminal's view before it sends its request, so a refused or uncertain

@@ -1,0 +1,98 @@
+[
+  {
+    "name": "idle after reply",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap at rust-v0.167.0 (086ccc833bc9), sha256 fcb5d60b0bd91a725a9e760257ceb62c6ef545e4efa6ea24c97627b09e8c7e45; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n› count to 1\n\n\n• 1\n\n\n› Ask Codex to do anything\n\n  gpt-5 default · /tmp/project\n",
+    "shown": "\n› count to 1\n\n\n• 1\n\n"
+  },
+  {
+    "name": "working partial reply",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_partial_answer_keeps_working_status.snap at rust-v0.167.0 (086ccc833bc9), sha256 51da8bd6eaf0546e2a9337d6d8e425e02c921fdaeeaae4432e57dc4b5cb91674; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n\n• 1\n\n• Working (0s • esc to interrupt)\n\n\n› Ask Codex to do anything\n\n  gpt-5 default · /tmp/project\n",
+    "shown": "\n\n• 1\n\n• Working (0s • esc to interrupt)\n\n"
+  },
+  {
+    "name": "queued followup",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_and_queued_messages_snapshot.snap at rust-v0.167.0 (086ccc833bc9), sha256 fa11ba4c8bd158431a70319adfb2353fafe94b6e85bd0960dbe0b129c484c1ae; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "• Working (0s • esc to interrupt)               \n                                                \n• Queued follow-up inputs                       \n  ↳ Queued follow-up question                   \n    ⇧← edit last queued message                 \n                                                \n› Ask Codex to do anything                      \n                                                \n  ? for shortcuts            100% context left\n",
+    "shown": "• Working (0s • esc to interrupt)               \n                                                \n• Queued follow-up inputs                       \n  ↳ Queued follow-up question                   \n    ⇧← edit last queued message                 \n                                                "
+  },
+  {
+    "name": "multiline recovered draft",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/tests/snapshots/codex_tui__chatwidget__tests__question_turn_end_tests__question_turn_end_recovered_composer.snap at rust-v0.167.0 (086ccc833bc9), sha256 db17df3e73e05499a96a245f4b7a355a2148764467a197ea9fd484f992a4c1b6; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "› $tool existing draft\n\n  > Which style?\n\n  Over-ear\n\n  > What budget?\n\n  Under 250\n\n  GPT-5.6-Sol default · /tmp/project\n",
+    "shown": ""
+  },
+  {
+    "name": "singleline draft",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__snapshot_tests__draft_composer.snap at rust-v0.167.0 (086ccc833bc9), sha256 74fd51997426ed950440440de63bdcaad2060c5f68743e11462b9fb717b6289b; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "                                                            \n› Explore the night sky                                     \n                                                            \n                                         100% context left\n",
+    "shown": "                                                            "
+  },
+  {
+    "name": "command approval",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__approval_modal_exec.snap at rust-v0.167.0 (086ccc833bc9), sha256 6d1120d5645c6f8ce7bea849e59e49440638de19d66661ffef49c498045fca2d; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)                                                                               \n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n",
+    "shown": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)                                                                               \n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+  },
+  {
+    "name": "permissions selection",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__approvals_selection_popup.snap at rust-v0.167.0 (086ccc833bc9), sha256 8051778117c0b5aa1cb61390c77732e77f7ff922f47d547a205d7608f9c2bd24; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "  Update Model Permissions\n\n\n› 1. Ask for approval  Read and edit workspace files and run commands, with\n                       approval required for internet access or edits outside\n                       the workspace\n  2. Full Access       Use with caution: Codex can edit files outside this\n                       workspace and access the internet without approval\n\n  enter select · esc back\n",
+    "shown": "  Update Model Permissions\n\n\n› 1. Ask for approval  Read and edit workspace files and run commands, with\n                       approval required for internet access or edits outside\n                       the workspace\n  2. Full Access       Use with caution: Codex can edit files outside this\n                       workspace and access the internet without approval\n\n  enter select · esc back\n"
+  },
+  {
+    "name": "history search",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__chat_composer__tests__footer_mode_history_search.snap at rust-v0.167.0 (086ccc833bc9), sha256 993cbb543dabb41f02f151f2fad5474d6d34998180506bf1339eb4189bad1ebd; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "                                                                                                    \n› cargo test                                                                                        \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  reverse-i-search: c  enter accept · esc cancel                                                    \n",
+    "shown": "                                                                                                    \n› cargo test                                                                                        \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n                                                                                                    \n  reverse-i-search: c  enter accept · esc cancel                                                    \n"
+  },
+  {
+    "name": "reconnecting with draft",
+    "source": "upstream renderer snapshot codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__disconnect__offline_draft.snap at rust-v0.167.0 (086ccc833bc9), sha256 86a6fcb24bedbe933de0cf0a31fd5d8976bec141ffd413ca6ad5f54f58003505; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n› only once\n\n• Reconnecting to server… (0s)\n\n• Queued follow-up inputs\n  ↳ queued before disconnect\n    ⇧← edit last queued message\n\n› keep this draft!\n\n  ⌃c quit\n",
+    "shown": "\n› only once\n\n• Reconnecting to server… (0s)\n\n• Queued follow-up inputs\n  ↳ queued before disconnect\n    ⇧← edit last queued message\n\n› keep this draft!\n\n  ⌃c quit\n"
+  },
+  {
+    "name": "config dialog",
+    "source": "upstream renderer snapshot codex-rs/tui/src/config_panel/snapshots/codex_tui__config_panel__tests__config_Text selection.snap at rust-v0.167.0 (086ccc833bc9), sha256 599935cb7699a6ad9386cad66d3b3d31d041030b855489530eedc7d7d09ffbdd; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n  Configuration\n  Changes save automatically\n\n   Appearance   Notifications   Input   Sessions   Text selection\n\n› Copy on select        Auto · On ›          Copy transcript, footer, and composer selections on release; Auto follows terminal defaults\n  Deselect after copy   [ ] Off              Remove read-only transcript and footer highlights after automatic copy succeeds\n  Right-click paste     Auto · Off ›         Paste when nothing is selected, with Auto following platform defaults and On also enabling mac…\n\n\n\n\n  left/right group · / search · enter open · esc clear search/close\n",
+    "shown": "\n  Configuration\n  Changes save automatically\n\n   Appearance   Notifications   Input   Sessions   Text selection\n\n› Copy on select        Auto · On ›          Copy transcript, footer, and composer selections on release; Auto follows terminal defaults\n  Deselect after copy   [ ] Off              Remove read-only transcript and footer highlights after automatic copy succeeds\n  Right-click paste     Auto · Off ›         Paste when nothing is selected, with Auto following platform defaults and On also enabling mac…\n\n\n\n\n  left/right group · / search · enter open · esc clear search/close\n"
+  },
+  {
+    "name": "status line with the model first",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__renamed_thread_footer_title.snap at rust-v0.167.0 (086ccc833bc9), sha256 bfccb15349d6bc2616f2abb3a28f61ab49d717efb2567fe276f3609a46cc69d8; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "                                                                                \n                                                                                \n› Ask Codex to do anything                                                      \n                                                                                \n  gpt-5.2 high · Roadmap cleanup                                                \n",
+    "shown": "                                                                                \n                                                                                "
+  },
+  {
+    "name": "status line with a context reading",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_model_with_reasoning_context_remaining_footer.snap at rust-v0.167.0 (086ccc833bc9), sha256 905f793760291a1f43a9f8acb8ff7b5cad3ce67aae1832cb64a381d3bcf0742c; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "                                                                                \n                                                                                \n› Ask Codex to do anything                                                      \n                                                                                \n  gpt-5.4 xhigh fast · Context 100% left · /tmp/project                         \n",
+    "shown": "                                                                                \n                                                                                "
+  },
+  {
+    "name": "warning count beside hints",
+    "source": "upstream renderer snapshot codex-rs/tui/src/app/snapshots/codex_tui__app__owned_transcript__empty_state_animation_tests__fresh_thread_header.snap at rust-v0.167.0 (086ccc833bc9), sha256 d118cd737a04dd2564f6b9bd9434e4bd34be05071a77e35a570f5e150690071e; disabled-animation case; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n  >_ OpenAI Codex (v0.0.0)\n     /tmp/project\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n› Ask Codex to do anything\n\n  GPT-5.6-Sol default · /tmp/project\n  ? for shortcuts                                                                              ⚠ 1 warning · f2 to view\n",
+    "shown": "\n  >_ OpenAI Codex (v0.0.0)\n     /tmp/project\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+  },
+  {
+    "name": "warning count in fullscreen",
+    "source": "upstream renderer snapshot codex-rs/tui/src/app/snapshots/codex_tui__app__owned_transcript__tests__fullscreen_footer_selection.snap at rust-v0.167.0 (086ccc833bc9), sha256 5f21b24e0b6d3aca6a59111d833d20a2c96a922771f9d9c121a6470f4ebe9c4c; JSON-quoted rows decoded when applicable, not a tmux capture",
+    "text": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                    Selecting text · esc cancel\n\n› draft stays here\n\n  GPT-5.6-Sol default · /tmp/project\n                                                       ⚠ 1 warning · f2 to view\n",
+    "shown": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                                                    Selecting text · esc cancel\n"
+  },
+  {
+    "name": "expanded patch approval stays visible",
+    "source": "upstream renderer snapshot codex-rs/tui/src/snapshots/codex_tui__app__tests__patch_approval_tests__patch_approval_expanded_inline.snap at rust-v0.167.0 (086ccc833bc9), sha256 56778df13047cd67fea27f2bca2557c13b6b322587d37489421e38624b2b07ea; not a tmux capture",
+    "text": "• Edited 3 files (+5 -2)\n  └ a-added.txt (+4 -0)\n    1 +alpha\n    2 +beta\n    3 +gamma\n    4 +delta\n\n  └ m-updated.txt (+1 -1)\n    1 -old\n\n\n  Would you like to make the following edits?\n\n  Description: Apply proposed file edits\n  Destination: /tmp/project/a-added.txt\n  Destination: /tmp/project/m-updated.txt\n  Destination: /tmp/project/z-deleted.txt\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for these files (a)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n",
+    "shown": "• Edited 3 files (+5 -2)\n  └ a-added.txt (+4 -0)\n    1 +alpha\n    2 +beta\n    3 +gamma\n    4 +delta\n\n  └ m-updated.txt (+1 -1)\n    1 -old\n\n\n  Would you like to make the following edits?\n\n  Description: Apply proposed file edits\n  Destination: /tmp/project/a-added.txt\n  Destination: /tmp/project/m-updated.txt\n  Destination: /tmp/project/z-deleted.txt\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for these files (a)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+  },
+  {
+    "name": "ownership refusal remapped keymap",
+    "source": "upstream renderer snapshot codex-rs/tui/src/app/tests/snapshots/codex_tui__app__tests__background_exit_tests__external_writer_view_respects_remapped_left.snap at rust-v0.167.0 (086ccc833bc9), sha256 5709d611f138fe436052454ec7a2690805c0222529be4b1af2e61380dfc43e21; not a tmux capture",
+    "text": "  🔒   This conversation is open in another app                                      r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   esc command center   ⌃c/q exit   ← transcript\n",
+    "shown": "  🔒   This conversation is open in another app                                      r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   esc command center   ⌃c/q exit   ← transcript\n"
+  }
+]

@@ -76,17 +76,56 @@ class PlainRefusalTest(unittest.TestCase):
         return plain_refusal(evidence)
 
     def test_refusal_classifier_on_real_0163_frames(self):
-        """Captured 0.163.0 panes, and near-misses, classify as refused or not only for tested layouts; fragile because
+        """Captured panes, source-derived keymaps and near-misses classify only for tested layouts; fragile because
         it scrapes Codex's TUI text, and a false positive marks a healthy agent refused (3a83ea2, 661fc41)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
-        # Each checked layout keeps refusal detection when the newest checked release changes.
-        for version in ('0.166.0', 'codex-cli 0.166.0', (0, 166, 0), [0, 166, 0],
-                        '0.164.0', 'codex-cli 0.164.0', (0, 164, 0), [0, 164, 0],
-                        '0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
-            with self.subTest(version=version):
-                self.assertTrue(adapter.supports_launch_refusal(version))
-                self.assertIsNotNone(adapter.launch_refusal({**captures[0], 'cli_version': version}))
+        current = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.0.json').read_text())
+        # Each release admits its own captured footer, including every public version representation.
+        for release, frames in (('0.163.0', captures), ('0.164.0', captures),
+                                ('0.166.0', captures), ('0.167.0', current)):
+            parts = tuple(map(int, release.split('.')))
+            for version in (release, 'codex-cli ' + release, parts, list(parts)):
+                for capture in frames:
+                    with self.subTest(version=version, width=capture['width']):
+                        self.assertTrue(adapter.supports_launch_refusal(version))
+                        evidence = {**capture, 'cli_version': version, 'native_id': str(uuid4())}
+                        refusal = adapter.launch_refusal(evidence)
+                        self.assertIsNotNone(refusal)
+                        self.assertEqual(refusal['source'], 'native-screen')
+                        evidence['text'] += '\n› quoted native refusal above; normal composer below\n'
+                        self.assertIsNone(adapter.launch_refusal(evidence))
+        snapshots = json.loads((Path(__file__).parent / 'fixtures/codex/upstream-screens-0.167.0.json').read_text())
+        remapped = next(row for row in snapshots if row['name'] == 'ownership refusal remapped keymap')
+        self.assertIsNotNone(adapter.launch_refusal({'cli_version': '0.167.0',
+            'cursor_visible': False, 'text': remapped['text']}))
+        # Source-derived variants from rendering.rs, key_hint.rs and keymap.rs,
+        # not additional tmux captures. The transcript hint may be absent or remapped.
+        for center in ('←/esc', 'esc'):
+            for control, hints in (('⌃', (None, '⌃t', '←', 'f24', '⌃x ⌃t', '⌃⇧⌥⌘f12', 'fwd del')),
+                                   ('^', (None, '^t', 'f12', '^x ^t', '^shift+alt+super+f24', 'backspace'))):
+                for hint in hints:
+                    with self.subTest(source_keymap=(center, control, hint)):
+                        text = current[0]['text'].replace('←/esc command center', center + ' command center')
+                        text = text.replace('⌃c/q exit', control + 'c/q exit')
+                        text = text.replace('   ⌃t transcript', '' if hint is None else '   ' + hint + ' transcript')
+                        evidence = {**current[0], 'text': text}
+                        self.assertIsNotNone(adapter.launch_refusal(evidence))
+                        self.assertIsNone(adapter.launch_refusal({**evidence, 'cursor_visible': True}))
+                        self.assertIsNone(adapter.launch_refusal({**evidence, 'text': text + '\n› composer'}))
+                        self.assertIsNone(adapter.launch_refusal({**evidence, 'cli_version': '0.166.0'}))
+        for text in (current[0]['text'].replace('f fork   ', ''),
+                     current[0]['text'].replace('f fork', 'quoted prose'),
+                     current[0]['text'].replace('🔒', '>'),
+                     current[0]['text'] + '\n  a later footer message'):
+            with self.subTest(current_near_miss=text):
+                self.assertIsNone(adapter.launch_refusal({**current[0], 'text': text}))
+        for hint in ('f0', 'f25', 'some words', 'a b c', '⌃t trailing prose', 'transcript'):
+            with self.subTest(invalid_transcript_hint=hint):
+                self.assertIsNone(adapter.launch_refusal({**current[0],
+                    'text': current[0]['text'].replace('⌃t transcript', hint + ' transcript')}))
+        self.assertIsNone(adapter.launch_refusal({**captures[0], 'cli_version': '0.167.0'}))
+        self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.166.0'}))
         for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev', 'codex-cli codex-cli 0.163.0',
                         {}, [0, 163], [False, 163, False], (0, '163', 0), True):
             with self.subTest(version=version):
@@ -98,12 +137,6 @@ class PlainRefusalTest(unittest.TestCase):
                 self.assertIn('This conversation is open in another app', refusal['message'])
                 self.assertIsNone(refusal['code'])
                 self.assertEqual(refusal['source'], 'native-screen')
-        for capture, version in ((capture, version) for capture in captures for version in ('0.163.0', '0.164.0', '0.166.0')):
-            with self.subTest(captured_width=capture['width'], version=version):
-                evidence = {**capture, 'cli_version': version, 'native_id': str(uuid4())}
-                self.assertEqual(adapter.launch_refusal(evidence)['source'], 'native-screen')
-                evidence['text'] += '\n› quoted native refusal above; normal composer below\n'
-                self.assertIsNone(adapter.launch_refusal(evidence))
         evidence = self.evidence()
         variants = [
             {**evidence, 'text': evidence['text'] + '› Ask Codex to do anything\n'},

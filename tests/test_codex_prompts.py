@@ -28,6 +28,7 @@ FILE = 'item/fileChange/requestApproval'
 PERMISSIONS = 'item/permissions/requestApproval'
 QUESTION = 'item/tool/requestUserInput'
 MCP = 'mcpServer/elicitation/request'
+NATIVE_VERSION = '.'.join(map(str, codec.VERSION))
 
 
 def params(**values):
@@ -67,6 +68,13 @@ class PromptCodecTest(unittest.TestCase):
         self.assertEqual(restricted.response(answer('stop')), {'decision': 'cancel'})
         with self.assertRaises(ValueError):
             restricted.response(answer('allow'))
+        human = codec.describe(COMMAND, params(kind='humanCommand', availableDecisions=['accept', 'decline', 'cancel']))
+        self.assertFalse(human.answerable, 'A native fresh-human checkpoint must stay in the terminal')
+        for person in (False, True):
+            with self.assertRaises(ValueError):
+                human.response(answer('allow', allow_rule=person))
+        for kind in (None, 'futureKind'):
+            self.assertFalse(codec.describe(COMMAND, params(kind=kind, availableDecisions=['accept'])).answerable)
         hidden = deepcopy(rule)
         hidden['acceptWithExecpolicyAmendment']['execpolicy_amendment']['command'] = ['echo', 'one\ntwo']
         hidden_offer = codec.describe(COMMAND, params(availableDecisions=[hidden, 'accept']))
@@ -232,7 +240,7 @@ class PromptRelayTest(unittest.TestCase):
         self.session = SessionHandle('agent', 'codex', '/workspace', launch_id=self.launch, native_id=self.native,
             session_file=str(self.directory / 'session.jsonl'), state='running', status='waiting',
             endpoint=NativeEndpoint('unix-websocket', str(self.directory / 'relay')),
-            native_versions={'cli': '0.166.0', 'daemon': '0.166.0'}, native_relay={'state': 'ready'},
+            native_versions={'cli': NATIVE_VERSION, 'daemon': NATIVE_VERSION}, native_relay={'state': 'ready'},
             native_mode={'mode': 'bridge', 'policy': 'required'})
 
 
@@ -384,6 +392,21 @@ class PromptRelayTest(unittest.TestCase):
         self.connection.side_id = None
         self.relay.disabled = False  # Continue independent version and secondary-connection controls.
         self.assertFalse(prompts.available(replace(self.session, native_versions={'cli': '0.164.0', 'daemon': '0.166.0'})))
+        for cli, daemon, expected in (('0.166.0', '0.166.0', True), ('0.167.0', '0.167.0', True),
+                                      ('0.166.0', '0.167.0', False), ('0.167.0', '0.166.0', False),
+                                      ('0.168.0', '0.168.0', False)):
+            with self.subTest(prompt_versions=(cli, daemon)):
+                self.assertEqual(prompts.available(replace(self.session,
+                    native_versions={'cli': cli, 'daemon': daemon})), expected)
+                root = SimpleNamespace(**{**vars(self.connection.root), 'settings': {
+                    **self.connection.root.settings, 'navigation_cli': list(map(int, cli.split('.')))}})
+                connection = SimpleNamespace(root=root, version=tuple(map(int, daemon.split('.'))),
+                    owns_primary=lambda: True, ended=False, connection_id='versions')
+                relay = prompts.Relay(connection, {'agent_directory': str(self.directory), 'launch_id': self.launch})
+                self.assertEqual(relay.eligible(), expected)
+        for malformed in ([0, 167, 0], {'version': '0.167.0'}):
+            self.assertFalse(prompts.available(replace(self.session,
+                native_versions={'cli': malformed, 'daemon': '0.167.0'})))
         before = self.relay.files.read('index.json')
         secondary = prompts.Relay(SimpleNamespace(root=self.connection.root, version=codec.VERSION,
             owns_primary=lambda: False, ended=False, connection_id='secondary'),
@@ -765,7 +788,7 @@ class PromptTransportTest(unittest.IsolatedAsyncioTestCase):
                 frame = json.loads(payload)
                 self.frames.append(frame)
                 if frame.get('method') == 'initialize':
-                    result = {'userAgent': 'codex/0.166.0'}
+                    result = {'userAgent': 'codex/' + NATIVE_VERSION}
                 elif frame.get('method') == 'thread/resume':
                     result = {'thread': {'id': self.native, 'cwd': '/workspace', 'status': {'type': 'idle'}},
                         'sandbox': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never', 'approvalsReviewer': 'user',
@@ -800,7 +823,7 @@ class PromptTransportTest(unittest.IsolatedAsyncioTestCase):
         self.session = SessionHandle('agent', 'codex', '/workspace', launch_id=self.launch, native_id=self.native,
             session_file=str(self.directory / 'session.jsonl'), state='running', status='waiting',
             endpoint=NativeEndpoint('unix-websocket', str(self.root / 'relay')),
-            native_versions={'cli': '0.166.0', 'daemon': '0.166.0'}, native_relay={'state': 'ready'},
+            native_versions={'cli': NATIVE_VERSION, 'daemon': NATIVE_VERSION}, native_relay={'state': 'ready'},
             native_mode={'mode': 'bridge', 'policy': 'required'})
         (self.directory / 'properties.json').write_text(json.dumps({'id': 'agent', 'name': 'worker',
             'harness': 'codex', 'workspace': '/workspace', 'native_session_id': self.native}))

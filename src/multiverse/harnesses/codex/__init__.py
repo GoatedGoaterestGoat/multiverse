@@ -355,7 +355,7 @@ class CodexAdapter(ConfiguredAdapter):
         result = super().capabilities(session, executor)
         from .prompts import supported
         result['answer'] = (Capability('supported', mechanism='codex-terminal-relay') if supported(session) else
-                            Capability('unavailable', 'Waiting prompts need a live prompt relay on Codex CLI and daemon 0.166.0; resume with it'))
+                            Capability('unavailable', 'Waiting prompts need a live prompt relay on matching checked Codex CLI and daemon releases; resume with it'))
         result['ask'] = (Capability('supported', mechanism='private-codex-copy')
                          if session.native_id and session.home and session.session_file else
                          Capability('unavailable', 'No recorded Codex conversation and home'))

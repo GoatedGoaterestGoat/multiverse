@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from native_safety import install, isolated_home
 from native_processes import PrivateDaemonGroups
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.types import NativeResult, RpcNotification, RpcRequest, RpcSpec
 from multiverse.runtime import lifecycle, native, rpc
 from multiverse.store import read, write
@@ -32,8 +33,8 @@ class NativeSideTest(TerminalBase):
         fork must leave mv2's messages on the primary conversation, and fake frames can agree while the real TUI is
         rejected or the main receipts and usage quietly move."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
-                                   text=True).strip() != 'codex-cli 0.166.0':
-            self.skipTest('native side evidence pinned to 0.166.0')
+                                   text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native side evidence pinned to {version_text(CHECKED_VERSION)}')
         work = self.work
         requests, counts = [], {'primary': 0, 'side': 0}
 

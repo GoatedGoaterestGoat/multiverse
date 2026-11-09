@@ -8,7 +8,7 @@ from multiverse.harnesses.codex.status import notification as status_notificatio
 from multiverse.harnesses.types import LocalProtocolError, SessionHandle
 
 
-# Pinned 0.166 request inventory; production instead permits only known reads.
+# Pinned 0.167 request inventory; production instead permits only known reads.
 MUTATIONS = (
     'thread/sample', 'thread/sample/cancel', 'thread/archive',
     'thread/delete', 'thread/increment_elicitation', 'thread/decrement_elicitation',
@@ -17,7 +17,7 @@ MUTATIONS = (
     'thread/queue/delete', 'thread/queue/reorder', 'thread/queue/start',
     'thread/metadata/update', 'thread/attachment/add', 'thread/attachment/remove',
     'thread/section/move', 'thread/settings/update', 'thread/memoryMode/set',
-    'thread/unarchive', 'thread/compact/start', 'thread/shellCommand',
+    'thread/unarchive', 'thread/compact/start', 'thread/guardianReview', 'thread/shellCommand',
     'thread/approveGuardianDeniedAction', 'thread/backgroundTerminals/clean', 'thread/backgroundTerminals/terminate',
     'thread/revert', 'thread/readState/update', 'thread/inject_items',
     'turn/start', 'turn/settings/update', 'turn/steer',
@@ -303,8 +303,23 @@ class CodexSideTest(unittest.TestCase):
                     with self.assertRaises(LocalProtocolError):
                         view.outgoing(input)
 
+        for version in ('0.166.0', '0.167.0'):
+            with self.subTest(navigation_version=version):
+                root, view = self.navigation_bound(navigation_cli=list(map(int, version.split('.'))))
+                self.initialize(view, 'codex/' + version)
+                request = {'id': 20, 'method': 'thread/start', 'params': {**full,
+                    'threadSource': 'user', 'ephemeral': False, 'historyMode': 'paginated'}}
+                try:
+                    forwarded = view.outgoing(request)
+                except LocalProtocolError as error:
+                    self.fail(f'The checked navigation release refused its supported request: {error}')
+                self.assertIsNotNone(forwarded)
+                self.assertEqual(root.native_id, self.main)
+
         for owner, cli, daemon, side in ((False, [0, 166, 0], '0.166.0', False),
                 (True, [0, 164, 0], '0.166.0', False), (True, [0, 166, 0], '0.164.0', False),
+                (True, [0, 166, 0], '0.167.0', False), (True, [0, 167, 0], '0.166.0', False),
+                (True, [0, 168, 0], '0.168.0', False),
                 (True, [0, 166, 0], '0.166.0', True)):
             with self.subTest(owner=owner, cli=cli, daemon=daemon, side=side):
                 root, view = self.navigation_bound(navigation_cli=cli)
@@ -674,7 +689,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for version in ('0.163.0', '0.164.0', '0.166.0'):
+        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0'):
             with self.subTest(supported=version):
                 view = self.connection('checked-' + version, lambda: True)
                 self.initialize(view, 'codex/' + version)

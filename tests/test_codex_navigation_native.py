@@ -24,6 +24,7 @@ from websockets.exceptions import WebSocketException
 from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from native_safety import install, isolated_home
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.types import NativeResult, RpcNotification, RpcRequest, RpcSpec
 from multiverse.runtime import lifecycle, native, recovery, transcripts
 from multiverse.store import existing_lock, read, write
@@ -287,8 +288,8 @@ class NativeNavigationTest(TerminalBase):
     def test_native_new_clear_and_owned_resume_follow_exact_conversation(self):
         """Real navigation can succeed while records, callbacks or queued receipts silently stay on the old thread; fake frames cannot prove the checked TUI's selection sequence."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
-                                   text=True).strip() != 'codex-cli 0.166.0':
-            self.skipTest('native navigation evidence pinned to 0.166.0')
+                                   text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native navigation evidence pinned to {version_text(CHECKED_VERSION)}')
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         requests = []
         work = self.work / 'project'
@@ -422,7 +423,7 @@ class NativeNavigationTest(TerminalBase):
         original = current()
         launch = agents.runtime(directory)['launch_id']
         self.assertEqual(agents.runtime(directory)['native_versions'],
-                         {'cli': '0.166.0', 'daemon': '0.166.0'})
+                         {'cli': version_text(CHECKED_VERSION), 'daemon': version_text(CHECKED_VERSION)})
         backend, pane = owned(properties(), agents.runtime(directory))
         def capture():
             try:

@@ -23,11 +23,14 @@ SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("claude", FIXT
            ("claude", FIXTURES / "claude/screens-2.1.318.json"), ("codex", FIXTURES / "codex/screens-0.164.0.json"),
            ("codex", FIXTURES / "codex/upstream-screens-0.164.0.json"),
            ("codex", FIXTURES / "codex/upstream-screens-0.166.0.json"),
+           ("codex", FIXTURES / "codex/upstream-screens-0.167.0.json"),
+           ("codex", FIXTURES / "codex/screens-0.167.0.json"),
            ("codex", FIXTURES / "codex/screens-0.166.0.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
-             "permissions selection", "config dialog", "warning dialog", "reconnecting with draft", "history search"}
+             "permissions selection", "config dialog", "warning dialog", "reconnecting with draft", "history search",
+             "expanded patch approval stays visible", "ownership refusal command center", "ownership refusal remapped keymap"}
 # Built from Codex 0.164.0's source and its reviewers' probes, not captured: the end of the screen under a reply, and
 # what is left of the screen, None when it stays unchanged.
 CONVERSATION = "• Previous conversation\n\n"

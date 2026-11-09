@@ -121,7 +121,7 @@ class CodexTranscriptReadingTest(BaseTest):
 
     def test_checked_native_rollout_labels_steering_followups_and_interruptions(self):
         """The checked release uses provenance and item_completed echoes, so legacy-only parsing silently loses every prompt."""
-        for version, count in (('0.164.0', 111), ('0.166.0', 110)):
+        for version, count in (('0.164.0', 111), ('0.166.0', 110), ('0.167.0', 110)):
             with self.subTest(version=version):
                 raw = (Path(__file__).parent / f'fixtures/codex/rollout-{version}.jsonl').read_bytes()
                 native_rows = [json.loads(line) for line in raw.splitlines()]
@@ -143,6 +143,15 @@ class CodexTranscriptReadingTest(BaseTest):
                 self.assertTrue(all(fact.source is None for fact in view.rows))
                 self.assertEqual(view.rows[12].preview, 'Run the offline tool sequence.')
                 self.assertEqual(view.rows[17].call_id, native_rows[17]['payload']['call_id'])
+                if version == '0.167.0':
+                    from codex_compression import compress
+                    compressed = self.path.with_suffix('.jsonl.zst')
+                    compressed.write_bytes(compress(raw, content_size=False))
+                    self.path.unlink()
+                    cold = self.adapter.transcript_view(self.session)
+                    self.assertEqual(cold.rows, view.rows)
+                    self.assertFalse(self.path.exists())
+                    compressed.unlink()
                 # Provenance is sufficient even before the UI echo is written.
                 self.path.write_bytes(b'\n'.join(raw.splitlines()[:13]) + b'\n')
                 self.assertEqual(self.adapter.transcript_view(self.session).rows[12].label, 'prompt')

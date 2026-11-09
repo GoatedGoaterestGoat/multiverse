@@ -9,6 +9,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.types import SharedServiceSpec
 from multiverse.runtime import lifecycle, native
 from multiverse.store import read, write
@@ -25,8 +26,8 @@ class NativePlainPermissionsTest(TerminalBase):
     def test_native_policy_keeps_writable_agent_roots_and_retries_only_readonly(self):
         """Native permissions and inline rendering can silently defeat an outside agent root or its one-shot retry; real tool writes must survive spawn and resume."""
         version = subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL, text=True).strip()
-        if version != 'codex-cli 0.166.0':
-            self.skipTest('native permission resolver evidence requires checked Codex 0.166.0')
+        if version != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native permission resolver evidence requires checked Codex {version_text(CHECKED_VERSION)}')
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
 
         class Handler(BaseHTTPRequestHandler):

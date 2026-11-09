@@ -6,7 +6,7 @@ from collections.abc import Mapping
 OPEN_ELSEWHERE = 'This conversation is open in another app'
 CLOSE_ELSEWHERE = 'Close it there and press R to continue here.'
 # Retain earlier checked screens and unmanaged side-thread protocols when adding a release.
-SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0), (0, 166, 0))
+SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0), (0, 166, 0), (0, 167, 0))
 
 
 def supports_plain_refusal(version):
@@ -81,15 +81,29 @@ def plain_refusal(evidence):
         return None
     lines = text.rstrip().splitlines()
     # The refusal is the native composer, at the end of the visible pane.
-    # Require its unquoted lock marker and all native controls, including the
-    # final transcript control; an ordinary live composer below it disqualifies it.
+    # Require its unquoted lock marker and complete native footer; an ordinary
+    # live composer below it disqualifies it, even when a hint is unbound.
     candidates = [i for i, line in enumerate(lines) if line.lstrip().startswith('🔒')]
     if not candidates:
         return None
     block = ' '.join(' '.join(lines[candidates[-1]:]).split())
+    version = evidence.get('cli_version')
+    command_center = (version.removeprefix('codex-cli ') == '0.167.0' if isinstance(version, str)
+                      else tuple(version) == (0, 167, 0))
+    if command_center:
+        # Pinned rendering.rs uses Esc alone when Left is remapped. Its optional
+        # transcript hint is a configured single key or two-key chord; key_hint.rs
+        # renders platform modifiers and keymap.rs limits function keys to F1-F24.
+        modifiers = r'(?:⌃?⇧?⌥?⌘?|\^?(?:shift\+)?(?:alt\+)?(?:super\+)?)'
+        key = (modifiers + r'(?:[!-~↑↓←→]|f(?:[1-9]|1\d|2[0-4])|enter|tab|backspace'
+               r'|delete|del|fwd\s+del|esc|home|end|pgup|pgdn|space)')
+        transcript = r'(?:\s+' + key + r'(?:\s+' + key + r')? transcript)?'
+        actions = r'r retry\s+f fork\s+(?:←/)?esc command center\s+[⌃^]c/q exit' + transcript
+    else:
+        actions = r'r retry\s+f fork\s+esc/⌃c/q exit\s+⌃t transcript'
     pattern = (r'🔒\s+' + re.escape(OPEN_ELSEWHERE) + r'(?:\s+r to retry)?\s+'
                + re.escape(CLOSE_ELSEWHERE)
-               + r'\s+r retry\s+f fork\s+esc/⌃c/q exit\s+⌃t transcript')
+               + r'\s+' + actions)
     if re.fullmatch(pattern, block) is None:
         return None
     return {'source': 'native-screen', 'method': 'thread/resume', 'code': None,

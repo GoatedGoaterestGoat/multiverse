@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import runpy
 from unittest.mock import patch
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse import harnesses
 from multiverse.harnesses.codex import models as m
 from test_multiverse import BaseTest
@@ -15,7 +16,7 @@ class CodexModelsTest(BaseTest):
         adapter = harnesses.load(self.root, 'codex')
         with patch('os.environ', {'CODEX_HOME': '/never/read', 'OPENAI_API_KEY': 'not-a-credential'}):
             catalog = adapter.models(environment={'CODEX_HOME': None})
-        self.assertEqual((catalog.source, catalog.version, catalog.provider, catalog.free_form), ('table', '0.166.0', None, True))
+        self.assertEqual((catalog.source, catalog.version, catalog.provider, catalog.free_form), ('table', version_text(CHECKED_VERSION), None, True))
         self.assertEqual(sum(model.default for model in catalog.models), 1)
         for model in catalog.models:
             with self.subTest(model.id):

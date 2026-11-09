@@ -1,0 +1,13 @@
+[
+  {
+    "cli_version": "0.167.0",
+    "cursor_visible": false,
+    "cursor_x": 70,
+    "cursor_y": 23,
+    "width": 80,
+    "text": "\n  >_ OpenAI Codex (v0.167.0)\n     /fixture/work\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  🔒  This conversation is open in another app                      r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t transcript",
+    "name": "ownership refusal command center",
+    "source": "real tmux capture of private Codex 0.167.0 ownership refusal; test_codex_refusal_native, private app-servers, no model call; workspace path redacted",
+    "shown": "\n  >_ OpenAI Codex (v0.167.0)\n     /fixture/work\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n  🔒  This conversation is open in another app                      r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t transcript"
+  }
+]

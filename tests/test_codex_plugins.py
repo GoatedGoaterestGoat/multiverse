@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from native_processes import PrivateProcessGroup
 
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex import plugins as codex
 from multiverse.harnesses.codex.launch import LaunchProtocol, launch_settings
@@ -435,8 +436,8 @@ def register(mv):
         install()
         executable = shutil.which('codex')
         version = subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
-        if version != 'codex-cli 0.166.0':
-            self.skipTest('native evidence requires checked Codex 0.166.0')
+        if version != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native evidence requires checked Codex {version_text(CHECKED_VERSION)}')
         mcp_output = self.work / 'mcp-env.json'
         helper = """import json, os, pathlib, sys
 keys = ('APP_TOKEN', 'OTHER_API_KEY', 'MV2_AGENT_ID')
