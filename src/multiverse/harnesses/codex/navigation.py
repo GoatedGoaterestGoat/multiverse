@@ -11,7 +11,8 @@ from .launch import LaunchProtocol
 from .protocol import object_field, result
 from .side import local_error
 
-VERSION = (0, 166, 0)
+VERSION = (0, 167, 0)
+VERSIONS = frozenset(((0, 166, 0), VERSION))
 # Pinned app-server-protocol common.rs reads. New thread-scoped methods fail
 # closed instead of accidentally granting stale-widget mutation authority.
 READ_ONLY = frozenset(('thread/goal/get', 'thread/queue/list', 'thread/attachment/list',
@@ -77,10 +78,10 @@ class Selection:
         if not isinstance(params, dict):
             raise local_error('Native conversation selection requires an object of parameters', identifier)
         cli = self.root.settings.get('navigation_cli')
-        if (not self.connection.owns_primary() or self.connection.version != VERSION
-                or not isinstance(cli, (list, tuple)) or any(type(part) is not int for part in cli)
-                or tuple(cli) != VERSION):
-            raise local_error('Conversation navigation requires the owning verified Codex 0.166.0 bridge; use mv2 resume', identifier)
+        if (not self.connection.owns_primary() or not isinstance(cli, (list, tuple))
+                or any(type(part) is not int for part in cli) or tuple(cli) not in VERSIONS
+                or self.connection.version != tuple(cli)):
+            raise local_error('Conversation navigation requires the owning verified Codex bridge on matching checked CLI and daemon releases; use mv2 resume', identifier)
         if (pending or self.connection.side_id is not None or self.connection.fork_request is not None
                 or self.connection.primary.pending is not None or self.connection.primary.prompt_request is not None):
             raise local_error('Finish the current selection, input or /btw conversation before switching', identifier)

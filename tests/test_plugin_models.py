@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.harnesses import types
 from multiverse.harnesses.claude import ClaudeAdapter
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.plugins import api, loader
 from multiverse.plugins.testing import PluginTestCase
 
@@ -56,7 +57,7 @@ class HarnessModelsTest(PluginTestCase):
 
         codex = mv.universe(self.root).harness("codex")
         catalog = codex.models()
-        self.assertEqual((catalog.source, catalog.version), ("table", "0.166.0"))
+        self.assertEqual((catalog.source, catalog.version), ("table", version_text(CHECKED_VERSION)))
         for item in catalog.models:
             check = codex.check(item.id)
             self.assertEqual((check.ok, check.verified, check.model, check.effort),

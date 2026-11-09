@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from isolation import isolate, track
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.harnesses.codex import run, run_history
 from multiverse.harnesses.types import RunDirectory, RunFailure, RunImage, RunMessage, RunOptions, RunRequest, RunRow, RunText
 
@@ -36,7 +37,7 @@ class CodexRunTests(unittest.TestCase):
 
     def test_catalogue_removes_model_selected_tools_without_changing_model_identity(self):
         """Native model metadata can enable tools despite feature switches, so every shipped model must be trimmed."""
-        self.assertEqual(run.catalogue()['codex'], '0.166.0')
+        self.assertEqual(run.catalogue()['codex'], version_text(CHECKED_VERSION))
         self.assertTrue(run.catalogue()['models'])
         for model in run.catalogue()['models']:
             with self.subTest(model=model['slug']):
@@ -70,7 +71,7 @@ class CodexRunTests(unittest.TestCase):
         with patch.object(Path, 'open', opened):
             self.assertEqual(run.login_home(environment), home)
             with patch.object(run, 'executable', return_value='/fake/codex'), patch.object(run, 'codex_version') as version:
-                for observed, supported in (((0, 166, 0), True), ((0, 166, 1), False), (None, False)):
+                for observed, supported in (((0, 166, 0), True), ((0, 167, 0), True), ((0, 166, 1), False), ((0, 167, 1), False), (None, False)):
                     version.return_value = observed
                     self.assertEqual(run.options({'spawn': ['codex']}, environment).supported, supported)
                     if supported:

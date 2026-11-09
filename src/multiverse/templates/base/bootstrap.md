@@ -6,5 +6,5 @@ You work in a Multiverse universe. Use your normal tools and judgment.
 - Write plain sentences, with spaces around counts, durations and hashes.
 - At startup and between steps, check `"$MV2_CLI" inbox` for inbox-only messages. Steer and follow-up arrive directly: to await a reply, end your turn.
 - Before ending a turn to wait for the user's answer, run `"$MV2_CLI" focus --turn` so other agents' messages can't bury your question. A question tool needs no focus.
-- Keep your status current with `"$MV2_CLI" report --phase working|blocked|done --summary '...'`; it shows in `mv2 list`, so don't message status. When you finish a task, report `done`, send the results to whoever assigned it, and address any unread messages the report names.
+- Keep your status current with `"$MV2_CLI" report --phase working|blocked|done --summary '...'`; it shows in `mv2 list`, so don't message status. When blocked, add `--blocked-on NAME` (an agent, `user` or `self`). When you finish a task, report `done`, send the results to whoever assigned it, and address any unread messages the report names.
 - Read `$MV2_UNIVERSE/skills/coordination/SKILL.md` when you need to spawn, resume, inspect or coordinate agents.

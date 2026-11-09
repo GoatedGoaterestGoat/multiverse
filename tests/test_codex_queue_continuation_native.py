@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from native_safety import install, isolated_home
 from native_processes import PrivateDaemonGroups
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse.runtime import lifecycle, native, rpc
 from multiverse.store import read, write
 from multiverse.harnesses.types import RpcRequest, RpcNotification, RpcSpec, NativeResult
@@ -31,8 +32,8 @@ class NativeQueueContinuationTest(TerminalBase):
     def test_native_interrupt_pauses_across_resume_until_new_input_then_drains_fifo(self):
         """Native interrupt pause must survive attachment resume and restart FIFO exactly once for typed or mv2 input; queue-state races otherwise lose or reorder accepted messages silently."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
-                                   text=True).strip() != 'codex-cli 0.166.0':
-            self.skipTest('native queue continuation evidence pinned to 0.166.0')
+                                   text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native queue continuation evidence pinned to {version_text(CHECKED_VERSION)}')
         work = self.work
         requests = []
 

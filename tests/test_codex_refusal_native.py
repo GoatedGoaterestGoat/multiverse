@@ -11,6 +11,7 @@ from websockets.sync.client import unix_connect
 
 from native_safety import isolated_home
 from native_processes import PrivateProcessGroup
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
 from multiverse import harnesses
 from multiverse.runtime import lifecycle, native
 from multiverse.store import write
@@ -27,8 +28,8 @@ class NativeRefusalTest(TerminalBase):
         delivery and wait_ready, attachment-only kill spares the other writer, and only a fresh resume clears them;
         fragile because it depends on Codex's exact refusal strings and screen, and a miss leaves mv2 saying ready while
         messages go nowhere."""
-        if subprocess.check_output(['codex', '--version'], text=True).strip() != 'codex-cli 0.166.0':
-            self.skipTest('native ownership widget evidence pinned to 0.166.0')
+        if subprocess.check_output(['codex', '--version'], text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
+            self.skipTest(f'native ownership widget evidence pinned to {version_text(CHECKED_VERSION)}')
         home = isolated_home(self.work / 'native-home', config=
             'model="fixture"\nmodel_provider="fixture"\n'
             '[model_providers.fixture]\nname="Private fixture"\n'

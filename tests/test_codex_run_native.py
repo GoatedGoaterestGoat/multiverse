@@ -26,7 +26,7 @@ class CodexPrivateNativeTest(BaseTest):
         """Configuration and copied native history can restore hidden tools even when the public settings look disabled."""
         binary = shutil.which('codex')
         if not binary or codex_version(binary, str(self.work)) not in run.VERSIONS:
-            self.skipTest('Requires the checked Codex 0.166.0 binary')
+            self.skipTest('Requires a separately checked Codex binary')
         source = native_safety.isolated_home(self.work / 'source-home', config='''
 cli_auth_credentials_store = "file"
 [mcp_servers.never_start]

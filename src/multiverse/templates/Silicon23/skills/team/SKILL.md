@@ -21,7 +21,7 @@ The rule for both: a lead never deals with, asks about or hears about anything i
 - Don't report the details, bugs or challenges you run into inside your scope; they're yours to handle. Report to your lead what lies outside your scope: that the feature it gave you is done, in high-level terms, or a problem beyond your scope, such as a bug in another feature.
 - Fix the findings reviewers and testers send you without reporting each one; tell your lead once, when everything it asked for is done, with the final result in a line or two.
 - When you need a decision, ask the user directly; don't ask another agent to relay your question or the answer.
-- Keep your status in `"$MV2_CLI" report`, not in messages.
+- Keep your status in `"$MV2_CLI" report`, not in messages. When blocked, add `--phase blocked --blocked-on NAME` (an agent, `user` or `self`).
 
 ## Delivery between them
 

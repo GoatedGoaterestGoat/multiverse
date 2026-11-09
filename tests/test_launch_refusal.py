@@ -192,7 +192,7 @@ class LaunchRefusalTest(BaseTest):
         self.fresh()
         fixtures = Path(__file__).parent / 'fixtures/codex'
         first = json.loads((fixtures / first_name).read_text())[0]
-        refused = json.loads((fixtures / 'refusal-0.163.0.json').read_text())[0]
+        refused = json.loads((fixtures / f'refusal-{CHECKED_CLI}.json').read_text())[0]
         clock = Clock()
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
               'startup_checked': True, 'attachment': {'readiness': 'process'},
@@ -222,7 +222,7 @@ class LaunchRefusalTest(BaseTest):
         return clock, backend, recorded
 
     def test_frame_sequences_end_observation_correctly(self):
-        """On real 0.163.0 frame sequences a started composer ends observation before a later /resume refusal, and a
+        """Real startup frames followed by the checked release's refusal must stop observing after a started composer, and a
         loading composer never hides an initial refusal; fragile because the Codex TUI changes per release (d3dd903)."""
         with self.subTest('a started composer, then a /resume refusal'):
             clock, backend, recorded = self.observe_native_frames('started-0.163.0.json')
@@ -247,7 +247,7 @@ class LaunchRefusalTest(BaseTest):
                 self.assertEqual(clock.elapsed, 10)
         with self.subTest('a startup hook never overrides a native refusal'):
             success = Mock(return_value=True)
-            clock, _, recorded = self.observe_native_frames('refusal-0.163.0.json', success)
+            clock, _, recorded = self.observe_native_frames(f'refusal-{CHECKED_CLI}.json', success)
             recorded.assert_called_once()
             self.assertEqual(clock.elapsed, 0)
             success.assert_not_called()
@@ -258,7 +258,7 @@ class LaunchRefusalTest(BaseTest):
         the deadlines otherwise silently drops failures or reports healthy launches as failed (668eca3, 858e2be)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         default_timeout = python_inspect.signature(lifecycle.start).parameters['wait_timeout'].default
-        refused = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
+        refused = json.loads((Path(__file__).parent / f'fixtures/codex/refusal-{CHECKED_CLI}.json').read_text())[0]
         with self.subTest('the plain observer stops after the startup window'):
             write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
                   'attachment': {'readiness': 'process'}, 'native_versions': {'cli': CHECKED_CLI}})

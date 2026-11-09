@@ -86,7 +86,9 @@ def available(session):
             and session.endpoint is not None and session.endpoint.transport == 'unix-websocket'
             and (session.native_mode or {}).get('mode') == 'bridge'
             and (session.native_relay or {}).get('state') == 'ready'
-            and versions.get('cli') == '0.166.0' and versions.get('daemon') == '0.166.0')
+            and isinstance(versions.get('cli'), str)
+            and versions.get('cli') in {'.'.join(map(str, known)) for known in codec.VERSIONS}
+            and versions.get('daemon') == versions.get('cli'))
 
 
 def supported(session):
@@ -103,7 +105,7 @@ def supported(session):
 
 def catalog(session):
     if not available(session):
-        return NativeResult('unavailable', 'Waiting prompts need a verified Codex CLI and daemon 0.166.0 bridge; resume with it')
+        return NativeResult('unavailable', 'Waiting prompts need a verified Codex bridge on matching checked CLI and daemon releases; resume with it')
     try:
         files = files_for(session)
         index = files.read('index.json')
@@ -195,9 +197,9 @@ class Relay:
         cli = root.settings.get('navigation_cli')
         return (not self.disabled and not connection.ended and root.bound
                 and connection.owns_primary() is True and root.launch_refusal is None
-                and isinstance(cli, (list, tuple)) and tuple(cli) == codec.VERSION
-                and all(type(part) is int for part in cli)
-                and connection.version == codec.VERSION)
+                and isinstance(cli, (list, tuple)) and all(type(part) is int for part in cli)
+                and tuple(cli) in codec.VERSIONS
+                and connection.version == tuple(cli))
 
     def envelope(self, native_id, id=None):
         return {'schema': 1, 'launch_id': self.files.launch, 'native_id': native_id,
