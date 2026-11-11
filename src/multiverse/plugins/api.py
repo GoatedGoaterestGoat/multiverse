@@ -1671,9 +1671,10 @@ class PromptResult:
     """An answer's outcome (1.17). `state`: answered (it took; `saved_rule` marks a choice that saves a rule,
     which the harness writes and may warn about, not proof that it did), sent_first (mv2's answer reached the
     harness first while the prompt was still open, and nothing contradicts it, but the harness doesn't confirm it
-    took it: Codex; counts as success, and is never sent again), person (the
-    person answered first; `person_answer` holds their choice where the harness shows it), gone (the prompt closed
-    another way), submitted (sent, its outcome not known yet: read it with prompt_result(id), never answer again),
+    took it: Codex; counts as success, and is never sent again), person (it was answered in its terminal first: by
+    the person, or, for a Codex question marked not blocking, possibly by the terminal itself after its countdown;
+    `person_answer` holds what was answered where the harness shows it), gone (the prompt closed another way),
+    submitted (sent, its outcome not known yet: read it with prompt_result(id), never answer again),
     unknown (sent; which answer took can't be told) or refused (nothing was sent; `reason` says why). Treat a state
     a later minor adds like unknown. Every state but answered says why in `reason`, as a fact where it is known
     and as possibilities where not; `cause` names a known one for code: person, replaced (the agent now waits on

@@ -288,7 +288,8 @@ class PromptRelayTest(unittest.TestCase):
                     result = self.result(id)
                     self.assertEqual(result['state'], 'person')
                     self.assertEqual(result['person_answer'], {'choice': 'deny'})
-                    self.assertIn('did not send', result['reason'])
+                    self.assertEqual(result['reason'],
+                        'The person replied to this prompt in the terminal first; mv2 did not send an answer.')
                 else:
                     frame = self.relay.claim(candidate)
                     self.assertEqual(frame, {'jsonrpc': '2.0', 'id': first, 'result': {'decision': 'acceptForSession'}})
@@ -302,6 +303,82 @@ class PromptRelayTest(unittest.TestCase):
                     self.assertEqual(candidate.answer, {})
                 self.assertFalse((self.directory / 'prompts' / (id + '.answer.json')).exists())
                 self.assertNotEqual(result['state'], 'answered')
+
+        # An untouched nonblocking question can be answered by the terminal's countdown.
+        # Its empty reply is indistinguishable from the person submitting no answers.
+        for secret in (False, True):
+            for empty in (False, True):
+                for first in ('terminal', 'mv2'):
+                    with self.subTest(countdown_empty=empty, secret=secret, first=first):
+                        wire = f'countdown-{secret}-{empty}-{first}'
+                        id = self.request(QUESTION, wire=wire, isBlocking=False, questions=[{
+                            'id': 'one', 'header': 'One', 'question': 'Value?', 'isSecret': secret, 'options': None}])
+                        self.write_answer(id, choice=None, answers={'one': ['MV2 PRIVATE DRAFT']})
+                        candidate = self.relay.files.take(id)
+                        terminal_value = 'SECRET TERMINAL VALUE' if secret else 'PUBLIC TERMINAL VALUE'
+                        native = {} if empty else {'one': {'answers': ['user_note: ' + terminal_value]}}
+                        terminal = {'id': wire, 'result': {'answers': native}}
+                        if first == 'terminal':
+                            self.assertTrue(self.relay.terminal(terminal))
+                            self.assertIsNone(self.relay.claim(candidate))
+                            self.flush()
+                            result = self.result(id)
+                            self.assertEqual((result['state'], result['cause']), ('person', 'person'))
+                            self.assertIn('did not send', result['reason'])
+                            if empty:
+                                self.assertIn('no answers', result['reason'])
+                                self.assertIn('countdown', result['reason'])
+                                self.assertIn('may also', result['reason'])
+                                self.assertNotIn('The person replied', result['reason'])
+                            else:
+                                self.assertEqual(result['reason'],
+                                    'The person replied to this prompt in the terminal first; mv2 did not send an answer.')
+                            if secret:
+                                self.assertFalse('SECRET TERMINAL VALUE' in repr(self.relay.records))
+                                for path in self.directory.rglob('*.json'):
+                                    self.assertFalse('SECRET TERMINAL VALUE' in path.read_text())
+                        else:
+                            self.assertIsNotNone(self.relay.claim(candidate))
+                            self.relay.sent(candidate, True)
+                            self.assertFalse(self.relay.terminal(terminal))
+                            self.resolve(wire)
+                            self.assertEqual(self.result(id)['state'], 'sent_first')
+                        self.assertEqual(candidate.answer, {})
+                        self.assertFalse((self.directory / 'prompts' / (id + '.answer.json')).exists())
+
+        # Terminal-only placeholders retain the flag, never the hidden request body.
+        for route in ('side', 'review'):
+            for empty in (False, True):
+                wire = f'{route}-countdown-{empty}'
+                if route == 'side':
+                    self.connection.side_id = 'side-thread'
+                else:
+                    self.relay.mode = 'review'
+                id = self.request(QUESTION, wire=wire, isBlocking=False,
+                    threadId='side-thread' if route == 'side' else self.native, questions=[{
+                        'id': 'hidden', 'header': 'Hidden', 'question': 'Hidden body?', 'isSecret': True, 'options': None}])
+                record = self.relay.records[id]
+                self.assertFalse(record['offer'].answerable)
+                self.assertEqual(record['offer'].params, {})
+                result = {'answers': {}} if empty else {'answers': {'hidden': {'answers': ['SECRET SIDE VALUE']}}}
+                self.assertTrue(self.relay.terminal({'id': wire, 'result': result}))
+                self.flush()
+                reason = self.result(id)['reason']
+                self.assertEqual('countdown' in reason, empty)
+                self.assertEqual(reason.startswith('The person replied'), not empty)
+                self.assertFalse('SECRET SIDE VALUE' in repr(self.relay.records))
+                self.relay.mode = 'normal'
+
+        # Blocking and legacy questions have no automatic terminal countdown reply.
+        for blocking in (True, 'absent'):
+            wire = f'blocking-{blocking}'
+            fields = {} if blocking == 'absent' else {'isBlocking': blocking}
+            id = self.request(QUESTION, wire=wire, questions=[{
+                'id': 'one', 'header': 'One', 'question': 'Value?', 'isSecret': False, 'options': None}], **fields)
+            self.assertTrue(self.relay.terminal({'id': wire, 'result': {'answers': {}}}))
+            self.flush()
+            self.assertEqual(self.result(id)['reason'],
+                'The person replied to this prompt in the terminal first; mv2 did not send an answer.')
 
         rule = {'acceptWithExecpolicyAmendment': {'execpolicy_amendment': {'command': ['echo', 'safe']}}}
         for label, metadata, choice, allow_rule, expected in (

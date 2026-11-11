@@ -366,7 +366,7 @@ def _outcome(id, reply, record):
         return None
     cause = value.get('cause')
     cause = cause if isinstance(cause, str) and re.fullmatch(r'[a-z_]{1,64}', cause) else None
-    reasons = {'person': 'The person already answered this prompt; mv2 did not replace their answer.',
+    reasons = {'person': 'This prompt was answered in its terminal first; mv2 did not send its answer.',
                'sent_first': 'The answer was sent first from the agent\'s terminal connection; the harness does not confirm it took it.',
                'gone': 'The prompt closed before this answer took; nothing will be sent again.',
                'submitted': 'The answer was submitted; its outcome is pending. Read --result; do not send it again.',

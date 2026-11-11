@@ -45,7 +45,7 @@ EOF
 
 `mv2 answer` refuses a secret answer or note on the command line, where your shell history and the process list would keep it. mv2 never shows a secret answer back or records it.
 
-Before it sends an answer given on the command line, `mv2 answer` reads the prompt to find its questions and to check that none is secret. If that prompt isn't among the ones it can read, it sends nothing and says what became of it: the person answered or refused it in the terminal first, it closed, the agent isn't running, or mv2 already answered it. Only when mv2 can't tell does it say to read the prompts again or to use `--stdin`. An error never quotes the answer or note you typed.
+Before it sends an answer given on the command line, `mv2 answer` reads the prompt to find its questions and to check that none is secret. If that prompt isn't among the ones it can read, it sends nothing and says what became of it: it was answered or refused in its terminal first, it closed, the agent isn't running, or mv2 already answered it. Only when mv2 can't tell does it say to read the prompts again or to use `--stdin`. An error never quotes the answer or note you typed.
 
 ## Read the outcome
 
@@ -54,12 +54,14 @@ The answer waits up to 30 seconds for its outcome; change that with `--timeout`,
 | Outcome | Means |
 | --- | --- |
 | Answered | mv2's answer took. It says when the choice was one that saves a rule to your settings, which the harness then writes |
-| The person answered first | Someone answered in the terminal before mv2's answer arrived. It says what they chose when the harness shows it |
+| Answered in the terminal first | Someone answered in the terminal, or the Codex terminal itself after its countdown, before mv2's answer arrived. It says what was submitted when the harness shows it |
 | The prompt closed | The prompt closed another way: Esc, the turn ended, or the agent stopped |
 | Sent first | mv2's answer went to the agent ahead of any answer from its terminal, but the harness doesn't confirm it took it (Codex) |
 | Sent, outcome not known yet | Read it later with `--result ID` |
 | Can't tell which answer took | Sent, but mv2 can't say whether it or the person's answer took |
 | Not sent | The answer was refused, and the reason says why |
+
+Some Codex question dialogs automatically submit an empty answer when their countdown ends. That response looks the same as submitting no answers yourself. The result says the terminal replied; it cannot identify which happened.
 
 When an answer didn't take, the result says why: as fact when mv2 knows, such as the person answering first, the turn ending, or the agent waiting on another prompt by now (then `mv2 answer NAME` shows that one), and as possible explanations when it doesn't. It never tells you to answer again after an answer was sent.
 

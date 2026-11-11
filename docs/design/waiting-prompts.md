@@ -59,7 +59,7 @@ dashboard, as a secret answer does, and mv2 never records a note it sent.
 | Outcome | Meaning |
 | --- | --- |
 | `answered` | mv2's answer took. `saved_rule` when it chose a decision that saves a rule: the harness writes it, and may warn if it can't. |
-| `person` | The person answered first; `person_answer` holds their choice, labels and typed answers when the harness shows them: never a secret, never a refusal's message. |
+| `person` | The prompt was answered in its terminal first: by the person, or, for a Codex question marked not blocking, perhaps by the terminal itself after its countdown; `person_answer` holds their choice, labels and typed answers when the harness shows them: never a secret, never a refusal's message. |
 | `sent_first` | mv2's answer went first from the agent's terminal and nothing seen contradicts it, but the harness doesn't confirm which answer it took (Codex). Counted as success. |
 | `gone` | The prompt closed another way: Esc, the turn ended or was interrupted, the agent stopped. |
 | `submitted` | Sent; the outcome isn't known yet. Read it with `--result`. |

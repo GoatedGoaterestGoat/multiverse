@@ -477,6 +477,7 @@ class Relay:
         id = str(uuid4())
         record = {'id': id, 'request': deepcopy(value['id']), 'method': value['method'],
                   'replay': replay,
+                  'countdown_question': value['method'] == 'item/tool/requestUserInput' and params.get('isBlocking') is False,
                   'native_id': self.native_id, 'target_id': params['threadId'], 'turn': params.get('turnId'), 'offer': offer,
                   'review': terminal_only == 'review', 'review_turn': self.mode_turn if terminal_only == 'review' else None,
                   'item': deepcopy(item), 'open': True, 'local': False, 'resolved': False,
@@ -495,8 +496,16 @@ class Relay:
             return True
         if record['local']:
             return False  # A late duplicate must not consume another native callback.
+        reason = 'The person replied to this prompt in the terminal first; mv2 did not send an answer.'
+        native_reply = value.get('result')
+        if (record['method'] == 'item/tool/requestUserInput'
+                and record.get('countdown_question') is True
+                and isinstance(native_reply, dict) and set(native_reply) == {'answers'}
+                and native_reply['answers'] == {}):
+            reason = ('The terminal replied with no answers, as it does when nobody answers before its countdown ends; '
+                      'the person may also have sent it. mv2 did not send an answer.')
         if record.get('terminal_only'):
-            self.result(record, 'person', 'The person replied in the terminal; mv2 did not send an answer.',
+            self.result(record, 'person', reason,
                         cause='person', person=record['offer'].person_answer(value.get('result')))
             return True
         if not self.eligible() or not record['open']:
@@ -504,7 +513,7 @@ class Relay:
         record['open'] = False
         self.jobs.extend([('remove', record['id'] + '.open.json', None),
                           ('discard', record['id'] + '.answer.json', None)])
-        self.result(record, 'person', 'The person replied to this prompt in the terminal first; mv2 did not send an answer.',
+        self.result(record, 'person', reason,
                     cause='person', person=record['offer'].person_answer(value.get('result')))
         self.index()
         return True

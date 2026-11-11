@@ -145,6 +145,9 @@ class PromptTest(BaseTest):
                                                'message': 'PRIVATE REFUSAL MESSAGE'}})
         result = prompts.result(self.root, self.agent, self.prompt_id)
         self.assertEqual(result.person_answer, {'answers': {'one': ['B']}, 'typed': {'text': ['PERSON TYPED TEXT']}})
+        self.assertEqual((result.state, result.cause), ('person', 'person'))
+        self.assertEqual(result.reason, 'This prompt was answered in its terminal first; mv2 did not send its answer.')
+        self.assertEqual(store.read(record)['result']['reason'], result.reason)
         self.assertNotIn('PRIVATE', str(result))
         self.assertNotIn('PRIVATE', record.read_text())
         for call in self.events.call_args_list:
