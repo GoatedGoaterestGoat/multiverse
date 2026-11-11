@@ -58,7 +58,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
         except ValueError as error:
             targets.append((reference, None, error))
     queue_check, queued_senders, unconfirmed_senders = None, frozenset(), None
-    if caller is not None and not force and not queue_only and delivery != 'inbox-only' and _note_for is None:
+    if (caller is not None and _note_for is None
+            and (force or not queue_only and delivery != 'inbox-only')):
         queue_check, queued_senders, unconfirmed_senders = queued_prompts.for_send(caller.root, caller.identity)
     unread_senders = None
     results, seen = [], set()
@@ -80,12 +81,14 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 continue  # An alias of the same recipient must not duplicate a prompt.
             seen.add(directory)
             properties = read(directory / 'properties.json')
+            # Recovery folders can differ from their stored agent identity.
+            recipient_id = properties.get('id', directory.name)
             name = properties['name']
-            if directory.name in queued_senders and not force:
+            if recipient_id in queued_senders and not force:
                 clean_name = display.clean(name)
                 reason = (f'Your message to {clean_name} is not delivered because you have unread messages from '
-                          f'{clean_name} queued as follow-ups. You will see them once you end this turn. '
-                          'It is recommended that you read '
+                          f'{clean_name} queued as follow-ups. End your turn to receive queued follow-ups; earlier '
+                          'queued messages may arrive first. It is recommended that you read '
                           f"{clean_name}'s messages first before messaging them. If you still want to message "
                           f'{clean_name}, resend with --force.')
                 results.append({'agent': name, 'ok': False, 'saved': False, 'reason': reason,
@@ -128,10 +131,16 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                         f"The follow-up failed: {why}. " + line)
             elif result.get('upgrade_unavailable'):
                 line = (f"{name} is blocked on you, but cannot take a follow-up in its current session. " + line)
-            if properties.get('id', directory.name) in unread_senders:
+            if recipient_id in unread_senders:
                 line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
-            if (queue_check is not None and (queue_check.state != 'ok' or queue_check.coverage != 'complete')
-                    and (unconfirmed_senders is None or directory.name in unconfirmed_senders)):
+            if (force and queue_check is not None and queue_check.state == 'ok'
+                    and queue_check.coverage == 'complete' and recipient_id not in queued_senders):
+                note = f"You have no queued follow-ups from {display.clean(name)}, so you don't need --force."
+                result['force_note'] = note
+                line += '\n' + note
+            elif (not force and queue_check is not None
+                    and (queue_check.state != 'ok' or queue_check.coverage != 'complete')
+                    and (unconfirmed_senders is None or recipient_id in unconfirmed_senders)):
                 reason = display.clean(queue_check.reason or 'The harness queue is unknown').rstrip('.')
                 note = f"mv2 couldn't check whether {name}'s follow-ups to you are still queued: {reason}."
                 result['queue_check_note'] = note

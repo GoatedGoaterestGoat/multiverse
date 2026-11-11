@@ -217,8 +217,9 @@ class QueueTest(BaseTest):
             store.write(self.directories['b'] / 'properties.json', {**props, 'name': 'renamed'})
             blocked = send.run(self.root, agent='renamed', text='outgoing')
             self.assertEqual(blocked.get('blocked_recipients'), ['renamed'])
+            self.assertTrue(send.run(self.root, agent='renamed', text='outgoing', force=True)['ok'])
             before = len(self.reads)
-            for options in ({'force': True}, {'delivery': 'inbox-only'}, {'queue_only': True},
+            for options in ({'delivery': 'inbox-only'}, {'queue_only': True},
                             {'sender': {'plugin': 'fixture', 'name': 'plugin'}},
                             {'sender': {'name': 'user'}}):
                 with self.subTest(options=options):
@@ -314,6 +315,88 @@ class QueueTest(BaseTest):
             finally:
                 store.write(properties_path, properties)
                 store.write(ledger_path, ledger)
+
+    def test_force_advice_requires_a_complete_queue_and_matches_each_recipient(self):
+        """Force advice must not mistake unreadable queues or another recipient's follow-ups for unnecessary force."""
+        self.queued('b')
+        self.queued('c', 'steer')
+        properties = self.directories['b'] / 'properties.json'
+        store.write(properties, {**store.read(properties), 'name': 'renamed'})
+        with patch.dict(os.environ, self.environment()):
+            output = []
+            result = send.run(self.root, agent='renamed,c,c', text='forced batch', force=True, _present=output.append)
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(len(result['recipients']), 2)
+            self.assertEqual(len(self.reads), 1)
+            self.assertEqual(len(self.sent), 2)
+            self.assertNotIn('force_note', result['recipients'][0])
+            self.assertIn('force_note', result['recipients'][1])
+            note = result['recipients'][1]['force_note']
+            self.assertIn('from c', note)
+            self.assertIn('--force', note)
+            self.assertNotIn('--force', output[0])
+            self.assertIn(note, output[1])
+            # Folder recovery addresses cannot hide a sender's stored identity from either queue check.
+            previous = self.directories['b']
+            recovered = previous.with_name('legacy-b-folder')
+            entries = list(self.entries)
+            previous.rename(recovered)
+            self.directories['b'] = recovered
+            try:
+                result = send.run(self.root, agent='renamed', text='forced legacy', force=True, delivery='inbox-only')
+                self.assertTrue(result['saved'], result)
+                self.assertNotIn('force_note', result)
+                before = len(self.sent)
+                result = send.run(self.root, agent='renamed,c', text='blocked legacy')
+                self.assertFalse(result['ok'], result)
+                self.assertEqual(len(result.get('recipients', [])), 2, result)
+                self.assertFalse(result['recipients'][0]['saved'])
+                self.assertEqual(result['recipients'][0]['blocked_recipients'], ['renamed'])
+                self.assertTrue(result['recipients'][1]['saved'])
+                self.assertEqual(len(self.sent), before + 1)
+                self.entries.clear()
+                self.coverage, self.reason = 'unknown', 'Fixture queue is incomplete'
+                result = send.run(self.root, agent='renamed', text='unknown legacy')
+                self.assertIn('queue_check_note', result)
+            finally:
+                recovered.rename(previous)
+                self.directories['b'] = previous
+                self.coverage, self.reason = 'complete', None
+                self.entries[:] = entries
+            saved_properties = store.read(properties)
+            store.write(properties, {key: value for key, value in saved_properties.items() if key != 'id'})
+            try:
+                result = send.run(self.root, agent='renamed', text='legacy without stored ID')
+                self.assertFalse(result['ok'], result)
+                self.assertFalse(result['saved'], result)
+                self.assertEqual(result['blocked_recipients'], ['renamed'])
+                result = send.run(self.root, agent='renamed', text='forced legacy', force=True, delivery='inbox-only')
+                self.assertTrue(result['saved'], result)
+                self.assertNotIn('force_note', result)
+            finally:
+                store.write(properties, saved_properties)
+            for state, coverage in (('ok', 'complete'), ('ok', 'unknown'), ('unavailable', 'complete')):
+                with self.subTest(state=state, coverage=coverage):
+                    self.reply_state, self.coverage = state, coverage
+                    self.entries.clear()
+                    before = len(self.sent)
+                    result = send.run(self.root, agent='renamed', text='forced', force=True, json=True)
+                    self.assertTrue(result['ok'], result)
+                    self.assertEqual(len(self.sent), before + 1)
+                    self.assertEqual('force_note' in result, state == 'ok' and coverage == 'complete', result)
+                    self.assertNotIn('queue_check_note', result)
+            self.reply_state, self.coverage = 'ok', 'complete'
+            # The flag can also be unnecessary on an inbox-only send, but it never checks a non-agent caller.
+            for options in ({'delivery': 'inbox-only'}, {'queue_only': True}):
+                with self.subTest(options=options):
+                    result = send.run(self.root, agent='c', text='forced inbox', force=True, **options)
+                    self.assertIn('force_note', result)
+            before = len(self.reads)
+            for sender in ({'name': 'user'}, {'plugin': 'fixture', 'name': 'plugin'}):
+                with self.subTest(sender=sender):
+                    result = send.run(self.root, agent='c', text='non-agent', force=True, sender=sender)
+                    self.assertNotIn('force_note', result)
+                    self.assertEqual(len(self.reads), before)
 
     def test_failed_slow_or_changed_queue_reads_are_unknown_without_mutation(self):
         """An advisory queue read cannot stall sends, trust stale binding or authorize a native mutation."""
