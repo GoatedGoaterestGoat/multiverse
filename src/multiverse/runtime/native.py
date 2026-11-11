@@ -965,6 +965,20 @@ def _receipt_evidence(directory, adapter, session, executor, message, tracking):
                               {'repair_terminal': True} if isinstance(error, Unreachable) else None).to_dict(), 'ok': False}
 
 
+def submit_input(directory, adapter, session, message, executor, *, restart_id=None):
+    """Submit one durably reserved input under the caller's launch and delivery locks.
+
+    A new input may claim one FIFO restart. Receipt checks never call this helper.
+    The caller owns audit persistence, uncertainty and the once-only decision.
+    """
+    if not session.native_id:
+        return NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
+    if restart_id is not None and adapter_hook(adapter, 'continue_queued') is not None:
+        from .queue_continuation import claim_restart
+        session = claim_restart(directory, session, restart_id)
+    return effects.call(adapter, 'send', session, message, executor)
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     effects.require('get_delivery' if check else 'send', reference)
     directory = agents.directory(root, reference)
@@ -1093,15 +1107,11 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                        last_receipt=None, native_receipt=None, transcript_confirmed_at=None,
                        final_reason=None, delivery_context=delivery_context)
         try:
-            if not session.native_id:
-                result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
-            else:
-                if (not retry and (new_message or tracking.get('restart_on_delivery') is True)
-                        and adapter_hook(adapter, 'continue_queued') is not None):
-                    from .queue_continuation import claim_restart
-                    session = claim_restart(directory, session, message_id)
-                result = effects.call(adapter, 'send', session, Message(native_message_id, message['text'], message.get('from', {}),
-                                      delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
+            restart = message_id if not retry and (new_message or tracking.get('restart_on_delivery') is True) else None
+            result = submit_input(directory, adapter, session,
+                                  Message(native_message_id, message['text'], message.get('from', {}),
+                                          delivery=selected_mode, framed=framed, sent_at=message.get('at')),
+                                  executor, restart_id=restart)
         except Denied:
             raise
         except Exception as error:

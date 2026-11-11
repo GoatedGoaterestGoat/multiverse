@@ -5,6 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+from textual.geometry import Region
 from textual.widgets import Input, SelectionList, Static
 
 from multiverse.ui.app import MultiverseApp
@@ -224,6 +225,96 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                               self.status())
                 await self.until(pilot, lambda: "Last answer: The person" in self.line(), "the outcome in the inspector")
                 self.assertIn("Last answer: The person answered", self.line())
+
+
+    async def test_a_working_agents_open_questions_show_and_a_answers_them(self):
+        """A gate kept, or a failed read taken as "none", hides a question the person can see in the terminal."""
+        asked = dict(QUESTION, id="open-question", kind="question", tool="request_user_input_async",
+                     summary="Which branch should the PR target?", requires_waiting=False,
+                     questions=[QUESTION["questions"][0]])
+        blocking = dict(asked, id="blocking-question", requires_waiting=True)  # a callback question: waiting-only
+        permission = dict(self.backend.prompts[self.writer["id"]][0], id="later-permission")
+        self.assertEqual(self.other["status"], "working")
+        async with self.app.run_test(size=(140, 40)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("p")
+            with self.subTest("a working agent with nothing open: no line, and a says so"):
+                await self.inspect(pilot, self.other)
+                self.assertEqual(self.line(), "")
+                await pilot.press("a")
+                await self.settle(pilot)
+                self.assertNotIsInstance(self.app.screen, AnswerScreen)
+                self.assertIn("isn't waiting on a prompt and has no open questions", self.status())
+            with self.subTest("a permission or a question that requires waiting, while it works, stays hidden"):
+                self.backend.prompts[self.other["id"]] = [permission, blocking]
+                self.app.refresh_snapshot()
+                await self.settle(pilot)
+                self.assertEqual(self.line(), "")
+            with self.subTest("an open question shows, and a answers it"):
+                self.backend.prompts[self.other["id"]] = [permission, blocking, asked]
+                self.app.refresh_snapshot()
+                await self.until(pilot, lambda: "Open questions" in self.line(), "the open question in the inspector")
+                self.assertIn("Open questions: ", self.line())
+                self.assertNotIn("Waiting on", self.line())
+                await pilot.press("a")
+                await self.settle(pilot)
+                self.assertIsInstance(self.app.screen, AnswerScreen)
+                self.app.screen.query_one("#q0", SelectionList).select("UI")
+                await pilot.press("ctrl+enter")
+                await self.settle(pilot)
+                self.assertEqual(self.backend.answers, [(self.other["id"], "open-question", {
+                    "choice": None, "message": None, "answers": {"Which parts?": ["UI"]}, "notes": {}})])
+                self.assertEqual(self.other["status"], "working")  # answering a question doesn't stop or start it
+            with self.subTest("once answered it isn't offered again"):
+                self.app.refresh_snapshot()
+                await self.until(pilot, lambda: "Open questions" not in self.line(), "the answered question to go")
+                await pilot.press("a")
+                await self.settle(pilot)
+                self.assertNotIsInstance(self.app.screen, AnswerScreen)
+                self.assertIn("has no open questions", self.status())
+                self.assertEqual(len(self.backend.answers), 1)
+            real = self.backend.waiting_prompts
+            with self.subTest("a failed read: the inspector stays quiet, and a says core's reason, not 'none'"):
+                self.backend.waiting_prompts = lambda root, reference: {
+                    "state": "unavailable", "reason": "The relay's question index can't be read", "prompts": []}
+                try:
+                    self.app.refresh_snapshot()
+                    await self.settle(pilot)
+                    self.assertNotIn("Open questions", self.line())
+                    self.assertNotIn("index", self.line())
+                    await pilot.press("a")
+                    await self.settle(pilot)
+                    self.assertIn("The relay's question index can't be read", self.status())
+                    self.assertNotIn("no open questions", self.status())
+                finally:
+                    self.backend.waiting_prompts = real
+            partial = {"state": "ok", "coverage": "unknown", "reason": "more than the relay keeps"}
+            with self.subTest("a partial list shows what it has and says it may be partial"):
+                self.backend.waiting_prompts = lambda root, reference: {**partial, "prompts": [asked]}
+                try:
+                    self.app.refresh_snapshot()
+                    await self.until(pilot, lambda: "Open questions" in self.line(), "the partial listing")
+                    self.assertIn("mv2 may not see every open question: more than the relay keeps", self.line())
+                    widget = self.app.query_one("#inspect-prompt", Static)
+                    await pilot.pause()
+                    drawn = " ".join(strip.text for strip in widget.render_lines(
+                        Region(0, 0, widget.size.width, widget.size.height)))
+                    self.assertIn("relay keeps", " ".join(drawn.split()))  # on screen, not cut off below its rows
+                finally:
+                    self.backend.waiting_prompts = real
+            with self.subTest("an empty partial list: a says none it can see, not none at all"):
+                self.backend.waiting_prompts = lambda root, reference: {**partial, "prompts": []}
+                try:
+                    self.app.refresh_snapshot()
+                    await self.settle(pilot)
+                    self.assertNotIn("Open questions", self.line())
+                    self.assertNotIn("may not see", self.line())  # an empty listing is background noise here
+                    await pilot.press("a")
+                    await self.settle(pilot)
+                    self.assertIn("no open questions mv2 can see; it may not see every one: more than the relay keeps",
+                                  self.status())
+                finally:
+                    self.backend.waiting_prompts = real
 
 
 if __name__ == "__main__":

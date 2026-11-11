@@ -100,5 +100,6 @@ ChoiceScreen #choices > .option-list--option-highlighted { background: $mv-curso
 #inspect-plugins { height: auto; max-height: 4; color: $mv-subtext0; }
 #inspect-plugins { display: none; }
 #inspect-inbox { height: 1; display: none; }
-#inspect-prompt { height: auto; max-height: 3; display: none; }
+#inspect-prompt { height: auto; max-height: 8; display: none; }
+.drawer #inspect-prompt { max-height: 3; }
 .view-error { height: auto; color: $mv-red; padding: 0 1; }

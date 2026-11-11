@@ -54,6 +54,16 @@ def _messages(directory, native_id, waiting_token=None):
             raise ValueError('An accepted message may still be queued; check delivery and finish its work before switching conversations')
 
 
+def _prompt_inputs(directory, properties, facts):
+    from . import prompts
+    id = prompts.pending_inputs(directory, facts['launch_id'], properties['native_session_id'],
+                                facts.get('session_generation', 0))
+    if id is not None:
+        name = properties.get('name') or properties['id']
+        raise ValueError(f'Answer input for prompt {id} may still run; read mv2 answer {name} --result {id} '
+                         'before switching conversations')
+
+
 def _current(root, directory, launch, previous):
     facts = records.runtime(directory / 'runtime.json')
     if (facts.get('launch_id') != launch or facts.get('state') != 'running'
@@ -92,6 +102,7 @@ def begin(root, directory, launch, event):
         if slash._pending(directory):
             raise ValueError('A managed command is unsettled; read its result before switching conversations')
         _messages(directory, previous)
+        _prompt_inputs(directory, properties, facts)
         if target is not None:
             effective, rows = sessions.effective(directory, properties)
             sessions.require_unretired(directory, target)
@@ -124,6 +135,7 @@ def begin(root, directory, launch, event):
             if current.get('status') != 'idle':
                 raise ValueError('Native work began during the conversation readiness check')
             _messages(directory, previous, marker['id'])
+            _prompt_inputs(directory, properties, current)
             agents.update_runtime(directory, launch, navigation={**saved, 'state': 'admitted'})
         return {'token': marker['id'], 'previous': previous, 'target': target}
     except Exception:

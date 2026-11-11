@@ -424,6 +424,7 @@ class WaitingPrompt:
     answerable: bool = True
     reason: str | None = None
     subagent: str | None = None
+    requires_waiting: bool = True  # Only retained questions may be answerable outside waiting.
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -444,6 +445,16 @@ class PromptAnswer:
     notes: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PromptInput:
+    """Transient native input recipe; core reserves and submits it through ordinary delivery.
+
+    id must be 'prompt-' + PromptAnswer.id. Text is never an audit or receipt field.
+    """
+    id: str
+    text: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class PromptResult:
     id: str
@@ -455,7 +466,10 @@ class PromptResult:
 
 
 class PromptProvider(Protocol):
-    """Exact open prompts, one exclusive answer, and read-only outcomes for the original request."""
+    """Native prompts and retained questions, one mv2 submission, and read-only outcomes.
+
+    Core reads input receipts through get_delivery; callback prompt_outcome remains read-only.
+    """
     def waiting_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def answer_prompt(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
     def prompt_outcome(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...

@@ -1,4 +1,4 @@
-"""Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path."""
+"""Read an agent's prompts and retained questions, and answer one through its harness."""
 from dataclasses import asdict
 import json as json_module
 import sys
@@ -11,7 +11,7 @@ SENT = ("answered", "sent_first", "submitted")
 
 
 def configure(parser):
-    parser.add_argument('agent', help='The waiting agent')
+    parser.add_argument('agent', help='The agent, waiting or with retained questions')
     parser.add_argument('id', nargs='?', help='The prompt to answer, as listed')
     parser.add_argument('--choice', help="One of the prompt's choices, such as allow or deny")
     parser.add_argument('--message', help='Text that goes with the choice, where the choice takes one')
@@ -204,9 +204,10 @@ def outcome(found, agent):
     from ..display import clean
     state = found['state']
     reason = '\n'.join(clean(line) for line in (found.get('reason') or '').splitlines()).strip()  # all of it, as given
-    if state == 'answered':
-        return 'Answered.' + (" It chose a decision that saves a rule to the person's settings; the harness writes "
-                              "the rule." if found.get('saved_rule') else '')
+    if state == 'answered':  # core's reason, where it gives one, says what is proven (async: delivered, not a card)
+        return 'Answered.' + (f' {reason}' if reason else '') + (
+            " It chose a decision that saves a rule to the person's settings; the harness writes the rule."
+            if found.get('saved_rule') else '')
     if state == 'sent_first':  # its reason says the harness doesn't confirm it took the answer
         return reason or "Sent first, ahead of any answer from the terminal; the harness doesn't confirm it took it."
     if state == 'submitted':
@@ -228,7 +229,8 @@ def listing(found, agent):
     for item in found['prompts']:
         what = clean(item['tool'] + ': ' if item.get('tool') else '') + clean(item['summary'])
         lines.append(f"{item['id']}  {item['kind']}  {what}" + (f"  (asked by subagent {clean(item['subagent'])})"
-                                                                 if item.get('subagent') else ''))
+                                                                 if item.get('subagent') else '')
+                     + ("  (doesn't need the agent waiting)" if item.get('requires_waiting', True) is False else ''))
         if not item.get('answerable', True):
             lines.append('    ' + clean(item.get('reason') or 'answer it in the terminal'))
             continue

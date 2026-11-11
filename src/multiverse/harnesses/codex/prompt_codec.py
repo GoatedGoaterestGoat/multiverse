@@ -482,6 +482,9 @@ def elicitation(offer):
 
 def describe(method, params, *, item=None):
     """Keep unsupported native requests visible, with no fabricated answer path."""
+    if method == 'request_user_input_async':
+        from .async_questions import describe as async_question
+        return async_question(params)
     if method not in METHODS:
         return None
     params = object_value(params)

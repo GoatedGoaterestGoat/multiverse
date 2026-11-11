@@ -42,6 +42,8 @@ must remain explicit; a successful RPC does not prove which view the TUI shows.
 
 Codex waiting prompts have a separate **matching CLI and daemon 0.166.0, 0.167.0 or 0.167.1** gate. Before extending it, check the terminal's offered decisions and typed response schemas, review and side-thread routing, request resolution and cancellation, and any observable effects. Run `test_codex_prompts` and `test_relay_connections` with their fake native peer, alongside the core, CLI and plugin prompt tests. Startup-screen support alone does not qualify answering prompts, and a resolution notice still does not identify whose response Codex took.
 
+The same gate covers asynchronous questions. Check `AgentMessage.questions`, native question IDs and the `AnsweredQuestion` message format against the release's source. Run `test_codex_async_prompts` alongside the prompt tests. Recheck that an answer uses normal delivery and receipts, keeps the exact question identity, and may still reach the conversation after a local terminal skip. A terminal card's open state is not an app-server admission check.
+
 When checking a new Claude Code or Codex release, also add its screens to
 `tests/fixtures/`: real captures, or Codex's renderer snapshots labelled as
 such. Then run `tests/test_pane_display.py`. The dashboard's live pane must

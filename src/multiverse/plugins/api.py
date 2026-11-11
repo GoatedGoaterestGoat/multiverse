@@ -1639,9 +1639,13 @@ class PromptQuestion:
 
 @dataclass(frozen=True, kw_only=True)
 class WaitingPrompt:
-    """A prompt an agent is blocked on now (1.17): a permission, a question, a plan to approve or a form (`kind`;
+    """A current prompt (1.17): a permission, a question, a plan to approve or a form (`kind`;
     treat one you don't know as not answerable). `id` names this one request: a later prompt, a new launch or a
-    switched conversation never matches it."""
+    switched conversation never matches it. `requires_waiting` (1.18) is False for a retained question the agent
+    asked without stopping (Codex's async questions): mv2 lists it and takes one answer for it, whatever the
+    agent's status, until it is answered, the conversation switches or the launch ends, even after the person
+    skipped its card in the terminal; this never says the card is still open. Its answer reaches the
+    conversation as ordinary input."""
     id: str
     kind: str
     summary: str                  # one line: the command, the file, the first question, the server
@@ -1653,13 +1657,13 @@ class WaitingPrompt:
     answerable: bool = True
     reason: str | None = None     # why not answerable, and where to answer it
     subagent: str | None = None
+    requires_waiting: bool = True
 
 
 @dataclass(frozen=True, kw_only=True)
 class PromptList:
-    """The prompts an agent waits on now (1.17). `state` is ok, or unavailable with `reason` (a harness or launch
-    that can't show them). `coverage` is complete, or unknown with `reason`: the agent waits, but on something mv2
-    can't see."""
+    """The agent's current prompts (1.17). `state` is ok, or unavailable with `reason` (a harness or launch
+    that can't show them). `coverage` is complete, or unknown with `reason`: mv2 can't establish a complete view."""
     state: str
     coverage: str = "unknown"
     reason: str | None = None
@@ -1676,10 +1680,15 @@ class PromptResult:
     `person_answer` holds what was answered where the harness shows it), gone (the prompt closed another way),
     submitted (sent, its outcome not known yet: read it with prompt_result(id), never answer again),
     unknown (sent; which answer took can't be told) or refused (nothing was sent; `reason` says why). Treat a state
-    a later minor adds like unknown. Every state but answered says why in `reason`, as a fact where it is known
+    a later minor adds like unknown. Every state but answered says why in `reason` (a retained question's answered
+    has one too, below), as a fact where it is known
     and as possibilities where not; `cause` names a known one for code: person, replaced (the agent now waits on
     another prompt, which `reason` names), interrupted, turn_ended, stopped, switched, or a refusal's
-    (already_answered, not_offered, person_only, missing_answer, agent_caller, ...); an open set, None when unknown."""
+    (already_answered, not_offered, person_only, missing_answer, agent_caller, ...); an open set, None when unknown.
+
+    For a retained async question (1.18), answered means the input is confirmed in the conversation's transcript,
+    not that a terminal card was still open. Its reason explains that distinction. Submitted or unknown never
+    authorizes another send."""
     id: str
     state: str
     reason: str | None = None
@@ -1812,8 +1821,9 @@ class Agent:
             return _from_core(CommandResult, _call(slash.result, self.universe.path, self.id, id))
 
     def waiting_prompts(self):
-        """The prompts this agent is blocked on now, with the choices its harness offers (1.17; observe, needs
-        agents.read): an api.PromptList. Only while its status is waiting; empty otherwise."""
+        """Current prompts, with the choices this agent's harness offers (1.17; observe, needs
+        agents.read): an api.PromptList. While its status is waiting, every open one; otherwise only the retained
+        questions that don't need it waiting (requires_waiting False, 1.18), often none."""
         self._plugin._need("agents.read")
         from ..runtime import prompts
         with _acting(self._plugin._loaded, "observe", self.universe, "reading what it waits on"):
@@ -1825,7 +1835,9 @@ class Agent:
         its terminal (1.17; act, needs prompts.answer): a permission by `choice` (one of the prompt's choices, with
         an optional `message` where it takes one), a question or a form by `answers` ({question id: label, typed text
         where allowed, or a list of labels where it takes several}), with `notes` ({question id: text}) for a
-        question that `takes_note`. Only an open prompt of a waiting agent, once:
+        question that `takes_note`. Only an open prompt, once, of a waiting agent unless the prompt's
+        requires_waiting is False; such a retained question's answer reaches the conversation as ordinary input,
+        even if the person skipped its card:
         a second answer, a choice that saves a rule to the person's settings, or a missing answer comes back refused
         and sends nothing. Waits up to `timeout` seconds for the outcome; when the wait ends first it is submitted:
         read it with prompt_result(id), never answer again. A secret answer is never recorded or logged."""

@@ -50,7 +50,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`native-status`](#native-status) | Read optional native observations; unavailable and failed observations are explicit. |
 | [`ask`](#ask) | Ask an isolated side question without changing the main conversation. |
 | [`slash`](#slash) | Run a harness command when the agent is idle, or read its command list and results. |
-| [`answer`](#answer) | Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path. |
+| [`answer`](#answer) | Read an agent's prompts and retained questions, and answer one through its harness. |
 | [`get-usage`](#get-usage) | Read measured usage for the exact native session. |
 | [`tui`](#tui) | Browse universes and operate agents. |
 | [`doctor`](#doctor) | Check local definitions and report uncertain agent state. |
@@ -479,7 +479,7 @@ Use at most one of `--list`, `--result`.
 
 ## answer
 
-Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path.
+Read an agent's prompts and retained questions, and answer one through its harness.
 
 ```sh
 mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--note QUESTION=TEXT] [--stdin] [--result ID] [--timeout TIMEOUT] [--json] agent [id]
@@ -487,7 +487,7 @@ mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--no
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `agent` |  | The waiting agent |  |
+| `agent` |  | The agent, waiting or with retained questions |  |
 | `id` |  | The prompt to answer, as listed |  |
 | `--choice` | `CHOICE` | One of the prompt's choices, such as allow or deny |  |
 | `--message` | `MESSAGE` | Text that goes with the choice, where the choice takes one |  |

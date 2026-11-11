@@ -1,9 +1,9 @@
 # Waiting prompts
 
 When an agent's status is `waiting`, it is blocked on a prompt in its terminal: a permission prompt, a question it
-asked, a plan to approve, or an MCP server's form. `mv2 answer` shows that prompt with the choices the harness
-offers, and answers it through the harness's own answer path, so the agent gets what it would get from the person
-in its terminal.
+asked, a plan to approve, or an MCP server's form. A Codex agent can also ask a question without stopping, and keep
+working while it stays unanswered. `mv2 answer` shows these prompts with the choices the harness offers, and answers
+one through the harness's own answer path, so the agent gets what it would get from the person in its terminal.
 
 ```text
 mv2 answer NAME                                   # the open prompts: ID, kind, the call, the choices
@@ -22,8 +22,10 @@ Plugins use `agent.waiting_prompts()`, `agent.answer_prompt()` and `agent.prompt
   plugin reads at observe and answers at act, the level of messaging. Agents can't read or answer prompts: an
   approval carries the person's authority. As with settings commands, this guards against mistakes, since an
   agent's shell carries its identity.
-- **Only now.** Only an agent whose status is `waiting`, and only a prompt open at that moment. Nothing is answered
-  ahead of time or held for a later prompt.
+- **Only now.** Only a prompt open at that moment; nothing is answered ahead of time or held for a later prompt. A
+  prompt that stops the agent is answered only while its status is `waiting`. A Codex question asked without
+  stopping is answered whatever the status, even after the person skipped it in the terminal (the user, 2026-11-10);
+  the agent acts on the answer as it would on the person's.
 - **Every grant the harness offers**: once, for the session, always. A choice that saves a rule to the person's
   settings runs only when the person answers, and its outcome says it saved one. A plugin gets the others.
 - **Focus doesn't block an answer.** Answering is attention to the agent; it buries nothing.
@@ -46,7 +48,8 @@ knows no prompt for it, such as a prompt the harness keeps from plugins.
 
 ## The answer
 
-Core and the adapter check before anything is sent: the caller may answer, the agent is `waiting`, the prompt is open
+Core and the adapter check before anything is sent: the caller may answer, the agent is `waiting` unless the prompt
+doesn't need it (`requires_waiting` false: a Codex question asked without stopping), the prompt is open
 in a fresh read and answerable, the choice is offered (and a rule-saving one comes from the person), and every
 question is answered with existing labels, one unless it takes several, typed text only where allowed. A refused
 answer sends nothing. A valid one is written once, exclusively, so a second answer to the same prompt is refused.
@@ -82,8 +85,8 @@ does not erase an already observed effect. Nothing is ever sent again.
 
 **Stale answers.** An answer names its prompt by the ID from a read, never "the agent's current prompt". If that
 prompt has closed or been replaced, the answer is `gone` (or `person`), even while the agent waits on a newer
-prompt: it is never applied to the newer one or retried against it. A fresh `waiting` status only makes an agent
-eligible; the prompt's identity is what keeps a late answer off the next prompt.
+prompt: it is never applied to the newer one or retried against it. A fresh `waiting` status, or a question still
+listed, only makes an answer eligible; the prompt's identity is what keeps a late answer off the next prompt.
 
 A sent answer is never sent again: the wait and `--result` only read. After the agent stops, an answer the
 in-session part never took is `gone`, definitely not applied; one it took without writing an outcome is `unknown`. Each answer is recorded in the agent's folder
@@ -185,6 +188,39 @@ several-choice fields, are listed, to be answered in the terminal. A question's 
 A secret answer or note lives only in the answer file until the relay sends it, then the file is removed; mv2's
 records, events and logs never hold it. Codex itself hands the answer to the model and may log it, as when the
 person types it.
+
+**Questions asked without stopping.** Codex's `request_user_input_async` tool posts its questions as part of an
+agent message and returns at once: the agent keeps working, Codex isn't waiting on a reply, and the terminal keeps
+each question's open or skipped state to itself. Its answer is ordinary input, an `AnsweredQuestion` the terminal
+sends like a steer. So these questions take a different path from the requests above:
+
+- **Listing.** The relay lists each question from the bound conversation's live agent messages, one prompt per
+  question, tied to its native item and index (never matched by its text), marked `requires_waiting` false, and
+  listed whatever the agent's status. A question is a title with optional options, offered as the terminal bounds
+  them; one the terminal would show differently is listed, to be answered in the terminal. A question stays open
+  until mv2 answers it, the terminal submits a structured answer to that exact question (then `person`, with the
+  answer), or the conversation switches or the launch ends. The terminal's outgoing input closes it before Codex
+  takes that input into the conversation. A turn ending doesn't close it, and a skip in the terminal is invisible
+  to mv2 and leaves it answerable. None is picked up from a replayed history. The relay's
+  bounds (128 open, 512 kept records) apply: at either, it takes on no further questions for that launch, keeps
+  every record it has, and says in the read's coverage that later questions can only be answered in the terminal.
+- **Answering.** The Codex side checks the answer and returns the input to deliver, Codex's exact `AnsweredQuestion`
+  envelope; it sends nothing itself. Core delivers it once, through the same send and restart claim as mv2's
+  ordinary messages, under an input ID tied to the prompt's reservation (`prompt-` and the prompt's ID): on an idle
+  agent it starts the queue's head as any new message does, queued input is never bypassed, and a paused queue
+  starts as it would for any new message. It is not an inbox message: focus doesn't hold it and no inbox record
+  keeps its text. Who answered is in mv2's record of the answer only; Codex accepts nothing beside its envelope, so
+  the agent can't be told.
+- **Outcome.** Core reads the input's own delivery receipt. Queued or accepted without confirmation is `submitted`;
+  confirmed in the conversation is `answered`, its reason saying the answer reached the conversation and that the
+  terminal's question card may still show the question open. Only Codex's explicit signal that nothing was
+  accepted is `refused` (nothing reached the agent); anything else uncertain, or contradictory, is `unknown`, and
+  never resent. Reading the outcome never sends or restarts anything. If the person also answers in the terminal
+  after mv2 did, the agent gets both answers; mv2 can't prevent that.
+- **Conversation switches.** Since the answer has no inbox record, a switch away from this conversation is refused
+  while one of its answers is still `submitted` or `unknown`, naming the prompt and `mv2 answer NAME --result ID`.
+  An answer whose delivery stays unknown keeps blocking switches for that launch, as an uncertain ordinary message
+  does; ending or replacing the launch ends the block, not the uncertainty.
 
 ### Pi
 

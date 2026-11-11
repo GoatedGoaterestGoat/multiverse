@@ -12,6 +12,7 @@ from uuid import uuid4
 
 LIMIT = 256 << 10
 ANSWER_LIMIT = 64 << 10
+CLAIM_LIMIT = 4096
 
 
 class PendingPublication(ValueError):
@@ -34,7 +35,7 @@ def unique(pairs):
 
 
 def filename(value, *, answers=False):
-    pattern = r'[A-Za-z0-9_-]{1,128}\.answer\.json' if answers else r'(?:index|[A-Za-z0-9_-]{1,128}\.(?:open|result))\.json'
+    pattern = r'[A-Za-z0-9_-]{1,128}\.answer\.json' if answers else r'(?:index|[A-Za-z0-9_-]{1,128}\.(?:open|result|input))\.json'
     if not isinstance(value, str) or not re.fullmatch(pattern, value):
         raise ValueError('Invalid prompt record filename')
     return value
@@ -75,6 +76,28 @@ class Candidate:
         return '<Codex prompt answer>'  # Never render a secret during diagnostics.
 
 
+@dataclass(frozen=True)
+class InputClaim:
+    disposition: str
+    won: bool = False
+    cause: str | None = None
+
+    def outcome(self):
+        if self.disposition == 'person':
+            return {'state': 'person', 'cause': 'person', 'reason':
+                    'This exact question was answered by native input before mv2 reserved its input; no mv2 answer was sent.'}
+        if self.disposition == 'closed':
+            return {'state': 'gone', 'cause': self.cause or 'closed', 'reason':
+                    'This question closed before mv2 reserved its input; no mv2 answer was sent.'}
+        if self.disposition == 'input':
+            reason = 'An ordinary answer input was already reserved; its delivery cannot be confirmed. '
+        else:
+            reason = ('The exclusive question/input claim cannot be verified. Another answer may already be '
+                      'reserved, or its publication may still be in progress. ')
+        return {'state': 'unknown', 'cause': 'unconfirmed', 'reason':
+                reason + 'Read its result; do not send this answer again.'}
+
+
 class Files:
     def __init__(self, directory, launch):
         if not isinstance(directory, str) or not Path(directory).is_absolute():
@@ -111,6 +134,96 @@ class Files:
         with self.folder() as folder:
             return read_at(folder, name)[0]
 
+    def claim_input(self, id, value):
+        return self.claim_decision(id, value, 'input')
+
+    def input_claim(self, id, native_id):
+        name = identifier(id) + '.input.json'
+        try:
+            with self.folder() as folder:
+                value = read_at(folder, name, CLAIM_LIMIT)[0]
+            if (set(value) != {'schema', 'launch_id', 'native_id', 'id', 'input_id', 'disposition', 'cause'}
+                    or type(value['schema']) is not int or value['schema'] != 1
+                    or value['launch_id'] != self.launch or value['native_id'] != native_id or value['id'] != id
+                    or value['input_id'] != 'prompt-' + id or value['disposition'] not in ('input', 'person', 'closed', 'uncertain')
+                    or value['cause'] not in (None, 'person', 'closed', 'switched', 'stopped', 'connection_lost',
+                                              'replaced', 'unconfirmed', 'turn_ended', 'interrupted')
+                    or value['disposition'] == 'input' and value['cause'] is not None
+                    or value['disposition'] == 'person' and value['cause'] != 'person'):
+                raise ValueError('Invalid async claim metadata')
+            return InputClaim(value['disposition'], cause=value['cause'])
+        except FileNotFoundError:
+            return InputClaim('unclaimed')
+        except (OSError, ValueError, TypeError, KeyError):
+            return InputClaim('unknown')
+
+    def claim_decision(self, id, value, disposition):
+        """Linearize input admission and observed closure with one metadata-only CAS."""
+        id = identifier(id)
+        native = value.get('native_id')
+        if not isinstance(native, str) or not native or '\0' in native or len(native) > 4096:
+            raise ValueError('Invalid async claim scope')
+        cause = 'person' if disposition == 'person' else value.get('cause') if disposition in ('closed', 'uncertain') else None
+        metadata = {'schema': 1, 'launch_id': self.launch, 'native_id': native, 'id': id,
+                    'input_id': 'prompt-' + id, 'disposition': disposition, 'cause': cause}
+        raw = json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if len(raw) > CLAIM_LIMIT or disposition not in ('input', 'person', 'closed', 'uncertain'):
+            raise ValueError('The async claim is not bounded')
+        name, temporary = id + '.input.json', '.claim-' + str(uuid4())
+        won = False
+        with self.folder(create=True) as folder:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
+            try:
+                with os.fdopen(fd, 'wb', closefd=False) as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                observed = os.fstat(fd)
+                try:
+                    os.link(temporary, name, src_dir_fd=folder, dst_dir_fd=folder, follow_symlinks=False)
+                    current = os.stat(name, dir_fd=folder, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (observed.st_dev, observed.st_ino):
+                        raise ValueError('The async claim changed during publication')
+                    won = True
+                except FileExistsError:
+                    pass
+            finally:
+                os.close(fd)
+                try:
+                    os.unlink(temporary, dir_fd=folder)
+                except FileNotFoundError:
+                    pass
+        if won:
+            return InputClaim(disposition, won=True, cause=cause)
+        claim = self.input_claim(id, native)
+        return claim if claim.disposition != 'unclaimed' else InputClaim('unknown')
+
+    def settle(self, name, value, *, closing=False):
+        """Claim closure before exposing a terminal outcome or a closed catalog."""
+        desired = ('person' if value['state'] == 'person' else
+                   'uncertain' if value['state'] in ('unknown', 'submitted') else 'closed')
+        claim = self.claim_decision(value['id'], value, desired)
+        if claim.won:
+            settled = value
+        elif claim.disposition == 'input':
+            settled = {**value, **claim.outcome(), 'person_answer': None, 'saved_rule': False}
+            if value['state'] == 'person' and not closing:
+                settled.update(state='submitted', cause='unconfirmed', reason=
+                    'Native input was observed after mv2 reserved its ordinary answer input. '
+                    'Read its delivery result; do not send it again.')
+        else:
+            settled = {**value, **claim.outcome(), 'person_answer': None, 'saved_rule': False}
+            if claim.disposition == 'person':
+                try:
+                    prior = self.read(name)
+                    if (prior.get('id') == value['id'] and prior.get('launch_id') == self.launch
+                            and prior.get('native_id') == value['native_id'] and prior.get('state') == 'person'):
+                        settled = prior
+                except (OSError, ValueError):
+                    pass
+        self.write(name, settled)
+        return settled, claim.disposition
+
     def write(self, name, value):
         filename(name)
         raw = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
@@ -141,11 +254,14 @@ class Files:
 
     def apply(self, jobs, *, final=False):
         jobs = list(jobs)
+        # A closed snapshot must never become visible before its arbitration marker.
+        jobs.sort(key=lambda item: item[0] != 'settle')
+        settled = []
         discarded = [name for action, name, _ in jobs if action == 'discard']
         if discarded:
             with self.publication_lock:
                 if self.closing.is_set() and not final:
-                    return
+                    return settled
                 try:
                     with self.folder(answers=True) as folder:
                         for name in discarded:
@@ -159,15 +275,19 @@ class Files:
         for action, name, value in jobs:
             with self.publication_lock:
                 if self.closing.is_set() and not final:
-                    return
+                    return settled
                 if action == 'write':
                     self.write(name, value)
+                elif action == 'settle':
+                    result, disposition = self.settle(name, value, closing=final)
+                    settled.append((value['id'], result, disposition))
                 elif action == 'remove':
                     self.remove(name)
                 elif action == 'discard':
                     continue
                 else:
                     raise ValueError('Unknown prompt publication action')
+        return settled
 
     def take(self, id):
         """Take exactly the exclusive core answer, removing secret bytes before send."""

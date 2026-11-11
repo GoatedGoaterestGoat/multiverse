@@ -388,7 +388,7 @@ class PromptTest(BaseTest):
 
     def test_unanswered_result_reads_closure_without_creating_or_consuming_an_answer(self):
         """A missing core attempt must still explain closure, without sending, repairing state or hiding damaged records."""
-        for name in ('.launch.lock', '.prompts.lock'):
+        for name in ('.launch.lock', '.delivery.lock', '.prompts.lock'):
             with store.lock(self.directory / name):
                 pass
         before = {p.relative_to(self.directory): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}

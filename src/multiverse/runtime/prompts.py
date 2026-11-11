@@ -10,8 +10,8 @@ import time
 from uuid import uuid4
 
 from .. import harnesses, universe
-from ..harnesses.types import (AttachmentSpec, NativeEndpoint, NativeResult, NativeServiceHandle,
-                              PromptAnswer, PromptChoice, PromptList, PromptQuestion, PromptResult,
+from ..harnesses.types import (AttachmentSpec, Message, NativeEndpoint, NativeResult, NativeServiceHandle,
+                              PromptAnswer, PromptChoice, PromptInput, PromptList, PromptQuestion, PromptResult,
                               SessionHandle, WaitingPrompt)
 from ..plugins import access, agent_files
 from ..store import lock, now
@@ -19,6 +19,7 @@ from ..universe import agents, records
 from . import delivery_evidence, effects, native
 
 LIMIT = 64 * 1024
+INPUT_LIMIT = 128 * 1024
 POLL = .5
 FINAL = frozenset(('answered', 'sent_first', 'person', 'gone', 'refused'))
 STATES = FINAL | {'submitted', 'unknown'}
@@ -26,6 +27,11 @@ AGENT_REASON = "Agents can't read or answer prompts yet; ask the person."
 UNKNOWN_REASON = ('The answer may have been sent, but its outcome is unconfirmed. The person may have answered, '
                   'the prompt may have closed, or the connection may have ended. Read --result; do not send it again.')
 STOPPED_UNANSWERED_REASON = 'The agent stopped while this prompt was open; mv2 sent no answer to it.'
+INPUT_ANSWERED_REASON = ('Delivered to the conversation as the answer; the agent acts on it as on an answer '
+                         "in the terminal. The terminal's question card may still show it open.")
+INPUT_UNKNOWN_REASON = ('The answer may have reached the conversation, but its delivery is unconfirmed. '
+                        'It may still be queued, or the connection may have ended. '
+                        'Read --result; do not send it again.')
 
 
 def _id(value):
@@ -75,6 +81,7 @@ def _prompt(value):
     item = WaitingPrompt(**value)
     _id(item.id)
     if (not _text(item.kind, empty=False) or not _text(item.summary) or type(item.answerable) is not bool
+            or type(item.requires_waiting) is not bool or not item.requires_waiting and item.kind != 'question'
             or any(v is not None and not _text(v) for v in (item.asked_at, item.tool, item.reason, item.subagent))
             or not isinstance(item.detail, Mapping) or len(item.choices) > 128 or len(item.questions) > 128):
         raise ValueError('Invalid waiting prompt')
@@ -150,9 +157,13 @@ def waiting(root, agent, *, caller=None):
             if connected is None:
                 return PromptList(state='unavailable', reason='The agent is not running')
             adapter, session, executor = connected
-            if session.status != 'waiting':
-                return PromptList(state='refused', reason='The agent is not waiting on a prompt')
             found = _catalog(adapter, session, executor)
+            found = replace(found, prompts=tuple(p for p in found.prompts
+                                                if session.status == 'waiting' or not p.requires_waiting))
+            found = replace(found, prompts=tuple(
+                replace(p, answerable=False, reason='An answer was already recorded; read --result. Do not answer again.')
+                if not p.requires_waiting and os.path.lexists(directory / 'prompts' / (p.id + '.json')) else p
+                for p in found.prompts))
             if who['kind'] == 'plugin':
                 found = replace(found, prompts=tuple(replace(p, choices=tuple(c for c in p.choices if not c.saves_rule))
                                                      for p in found.prompts))
@@ -435,6 +446,8 @@ def _settle(root, directory, record):
     current = PromptResult(**record['result'])
     if current.state in FINAL - {'sent_first'}:
         return current
+    if 'input_id' in record:
+        return _settle_input(root, directory, record)
     session = _session(record)
     try:
         adapter, executor, ended = _reader(root, record, session)
@@ -471,6 +484,89 @@ def _settle(root, directory, record):
         return _save(directory, record, replace(current, state='unknown', cause='switched',
                      reason='The agent changed launch or conversation. ' + UNKNOWN_REASON))
     return _save(directory, record, completed or current)
+
+
+def _input_outcome(id, reply):
+    """Native acceptance is not transcript proof, and transport errors never prove non-delivery."""
+    if (isinstance(reply, NativeResult) and isinstance(reply.value, dict)
+            and reply.value.get('definite_failure') is True):
+        if reply.state == 'error' and reply.value.get('transcript_confirmed') is not True:
+            return _refused(id, 'The native conversation did not accept this answer. Nothing reached the agent.',
+                            'not_delivered')
+        return PromptResult(id=id, state='unknown', reason=INPUT_UNKNOWN_REASON)
+    if isinstance(reply, NativeResult) and reply.state in ('ok', 'native_queued', 'pending'):
+        if isinstance(reply.value, dict) and reply.value.get('transcript_confirmed') is True:
+            return PromptResult(id=id, state='answered', reason=INPUT_ANSWERED_REASON)
+        return PromptResult(id=id, state='submitted', reason='The answer was accepted as conversation input; '
+                            'delivery is unconfirmed. Read --result; do not send it again.')
+    return PromptResult(id=id, state='unknown', reason=INPUT_UNKNOWN_REASON)
+
+
+def _submit_input(directory, adapter, session, executor, record, recipe):
+    if executor._prompt_written:
+        return PromptResult(id=record['id'], state='unknown', reason=INPUT_UNKNOWN_REASON)
+    try:
+        valid = (record.get('requires_waiting') is False and record['kind'] == 'question'
+                 and isinstance(recipe.id, str) and recipe.id == record.get('input_id')
+                 and isinstance(recipe.text, str) and recipe.text and '\0' not in recipe.text
+                 and len(recipe.text.encode('utf-8')) <= INPUT_LIMIT)
+    except UnicodeError:
+        valid = False
+    if not valid:
+        return _refused(record['id'], 'The harness returned an invalid answer input; nothing was sent.', 'invalid_input')
+    try:
+        executor.check_session()
+    except access.Denied:
+        raise
+    except Exception:
+        return _refused(record['id'], 'The exact session cannot take the answer; nothing was sent.', 'unconfirmed')
+    try:
+        message = Message(recipe.id, recipe.text, delivery='steer', framed=recipe.text)
+        executor._prompt_input_started = True
+        reply = native.submit_input(directory, adapter, session, message, executor, restart_id=recipe.id)
+    except access.Denied:
+        raise
+    except Exception:
+        reply = None  # An adapter error can contain the answer; never publish it.
+    return _input_outcome(record['id'], reply)
+
+
+def _settle_input(root, directory, record):
+    """Read only this reserved input's receipt, without a restart claim or a new target."""
+    outcome = PromptResult(id=record['id'], state='unknown', reason=INPUT_UNKNOWN_REASON)
+    try:
+        connected = _connect(root, directory, reconcile=False)
+        if connected is None:
+            return _save(directory, record, replace(outcome, cause='stopped'))
+        adapter, session, executor = connected
+        expected = _session(record)
+        fields = ('agent_id', 'harness', 'workspace', 'launch_id', 'native_id', 'session_file',
+                  'home', 'endpoint', 'service', 'native_mode', 'native_versions', 'pid', 'pid_started')
+        generation = executor.facts.get('session_generation', 0)
+        if (any(getattr(session, key) != getattr(expected, key) for key in fields)
+                or type(generation) is not int or generation != record['session_generation']):
+            return _save(directory, record, replace(outcome, cause='switched'))
+        executor.check_session()
+        reply = effects.call(adapter, 'get_delivery', session, record['input_id'], executor)
+        outcome = _input_outcome(record['id'], reply)
+    except access.Denied:
+        raise
+    except Exception:
+        pass  # Unreadable evidence is uncertainty, never proof that the input was not submitted.
+    return _save(directory, record, outcome)
+
+
+def pending_inputs(directory, launch_id, native_id, generation):
+    """Navigation admission only reads; it cannot settle receipts or restart queued work."""
+    for path in sorted((directory / 'prompts').glob('*.json')):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', path.stem):
+            continue  # Private callback answer files have dotted suffixes.
+        record = _record(directory, path.stem)
+        if ('input_id' in record and record['session']['launch_id'] == launch_id
+                and record['session']['native_id'] == native_id and record['session_generation'] == generation
+                and record['result']['state'] in ('submitted', 'unknown')):
+            return record['id']
+    return None
 
 
 def result(root, agent, id, *, caller=None):
@@ -510,6 +606,10 @@ def _record(directory, id, *, missing_ok=False):
                 or record.get('agent') != records.properties(directory / 'properties.json')['id']
                 or session.agent_id != record['agent'] or not session.native_id or not session.launch_id):
             raise ValueError('Invalid prompt record')
+        if ('input_id' in record or record.get('requires_waiting') is False) and (record.get('input_id') != 'prompt-' + id
+                or record.get('requires_waiting') is not False or record.get('kind') != 'question'
+                or type(record.get('session_generation')) is not int or record['session_generation'] < 0):
+            raise ValueError('Invalid prompt input record')
     except (KeyError, TypeError, ValueError):
         raise ValueError('The prompt result is damaged or does not belong to this agent') from None
     return record
@@ -529,13 +629,12 @@ def _unanswered(root, directory, id):
     if not session.native_id or not session.launch_id or not session.session_file:
         return _refused(id, 'The current conversation is not bound; nothing was sent.', 'unconfirmed')
     found = None
-    if session.status == 'waiting':
-        try:
-            found = _catalog(adapter, session, executor)
-        except access.Denied:
-            raise
-        except Exception:
-            pass  # A closed receipt may still explain a prompt absent from the current inventory.
+    try:
+        found = _catalog(adapter, session, executor)
+    except access.Denied:
+        raise
+    except Exception:
+        pass  # A closed receipt may still explain a prompt absent from the current inventory.
     return _closed(adapter, session, executor, id, found)
 
 
@@ -562,7 +661,10 @@ def _stopped(root, directory, id):
 
 
 def _closed(adapter, session, executor, id, found):
-    if found and found.state == 'ok' and any(p.id == id for p in found.prompts):
+    prompt = next((p for p in found.prompts if p.id == id), None) if found and found.state == 'ok' else None
+    if prompt is not None:
+        if prompt.requires_waiting and session.status != 'waiting':
+            return _refused(id, 'The agent is not waiting on this prompt; nothing was sent.', 'not_waiting')
         name = (executor.properties or {}).get('name') or session.agent_id
         return _refused(id, f'mv2 sent no answer to this prompt; it is still open. '
                         f'Answer it with mv2 answer {name} {id} and its answer options.', 'not_answered')
@@ -611,6 +713,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
     directory = agents.directory(root, agent)
     try:
         with lock(directory / '.launch.lock', create_parent=False, blocking=False), \
+                lock(directory / '.delivery.lock', create_parent=False, blocking=False), \
                 lock(directory / '.prompts.lock', create_parent=False, blocking=False):
             path = directory / 'prompts' / (id + '.json')
             if path.exists() or path.is_symlink():
@@ -624,8 +727,6 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             adapter, session, executor = connected
             if not session.native_id or not session.launch_id or not session.session_file:
                 return _refused(id, 'The current conversation is not bound; nothing was sent.', 'unconfirmed')
-            if session.status != 'waiting':
-                return _closed(adapter, session, executor, id, None)
             try:
                 found = _catalog(adapter, session, executor)
             except access.Denied:
@@ -637,6 +738,8 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             prompt = next((p for p in found.prompts if p.id == id), None)
             if prompt is None:
                 return _closed(adapter, session, executor, id, found)
+            if prompt.requires_waiting and session.status != 'waiting':
+                return _refused(id, 'The agent is not waiting on this prompt; nothing was sent.', 'not_waiting')
             request = _validate(prompt, id, choice, message, answers, notes, who)
             if isinstance(request, PromptResult):
                 return request
@@ -644,6 +747,13 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             if len(encoded.encode('utf-8')) > LIMIT:
                 return _refused(id, 'The complete answer file exceeds 64 KiB; shorten the answer. Nothing was sent.')
             executor.check_session()
+            input_record = {}
+            if not prompt.requires_waiting:
+                facts = executor.facts
+                generation = facts.get('session_generation', 0) if isinstance(facts, Mapping) else None
+                if type(generation) is not int or generation < 0:
+                    return _refused(id, 'The conversation generation cannot be verified; nothing was sent.', 'unconfirmed')
+                input_record = {'input_id': 'prompt-' + id, 'session_generation': generation}
             initial = PromptResult(id=id, state='submitted', reason='Answer submission is in progress; read --result, do not resend.')
             schema = _public_schema(prompt)
             public_options = schema['public_options']
@@ -651,6 +761,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             record = {'schema': 1, 'id': id, 'agent': session.agent_id, 'session': asdict(session), 'requested_at': now(),
                       'kind': prompt.kind, 'tool': prompt.tool, 'caller': who, 'choice': request.choice,
                       'question_ids': list(dict.fromkeys((*request.answers, *request.notes))),
+                      'requires_waiting': prompt.requires_waiting, **input_record,
                       **schema, 'saves_rule': bool(selected and selected.saves_rule),
                       'answers': {key: list(values) for key, values in request.answers.items()
                                   if key in public_options and all(v in public_options[key] for v in values)},
@@ -662,23 +773,38 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             except OSError:
                 return _refused(id, 'The answer could not be recorded safely; nothing was sent.', 'storage')
             executor._prompt_caller = dict(who)
-            executor._prompt_payload = encoded
+            executor._prompt_payload = encoded if prompt.requires_waiting else None
             executor._prompt_written = False
+            executor._prompt_input_started = False
             try:
                 reply = effects.call(adapter, 'answer_prompt', session, request, executor)
-                outcome = _outcome(id, reply, record)
+                recipe = reply.value if isinstance(reply, NativeResult) and reply.state == 'ok' else None
+                if isinstance(recipe, PromptInput):
+                    outcome = _submit_input(directory, adapter, session, executor, record, recipe)
+                elif 'input_id' in record:
+                    outcome = _outcome(id, reply, {**record, 'has_secret': True})
+                    if outcome is not None and outcome.state not in ('person', 'gone', 'refused'):
+                        outcome = replace(initial, state='unknown', reason=INPUT_UNKNOWN_REASON)
+                    if outcome is None:
+                        outcome = _refused(id, 'The harness did not supply a valid answer input; nothing was sent.',
+                                           'invalid_input')
+                else:
+                    outcome = _outcome(id, reply, record)
                 if (outcome is None and isinstance(reply, NativeResult) and reply.state in ('unavailable', 'error')
                         and not executor._prompt_written):
                     outcome = _refused(id, 'The harness refused this answer before submission; nothing was sent.', 'unavailable')
                 outcome = outcome or (initial if isinstance(reply, NativeResult) and reply.state in ('pending', 'ok') else
                                       replace(initial, state='unknown', reason=UNKNOWN_REASON))
             except access.Denied:
-                denied = (replace(initial, state='unknown', reason=UNKNOWN_REASON) if executor._prompt_written else
+                uncertain = executor._prompt_written or executor._prompt_input_started
+                reason = INPUT_UNKNOWN_REASON if 'input_id' in record else UNKNOWN_REASON
+                denied = (replace(initial, state='unknown', reason=reason) if uncertain else
                           _refused(id, 'Answer access was refused before submission', 'access'))
                 _save(directory, record, denied)
                 raise
             except Exception:
-                outcome = replace(initial, state='unknown', reason=UNKNOWN_REASON)
+                outcome = replace(initial, state='unknown',
+                                  reason=INPUT_UNKNOWN_REASON if 'input_id' in record else UNKNOWN_REASON)
             finally:
                 del executor._prompt_payload
                 del executor._prompt_caller
