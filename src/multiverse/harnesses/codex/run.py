@@ -19,7 +19,7 @@ from .plugins import codex_version, server_version
 from .storage import session_home
 
 FORMAT = 'codex-jsonl'
-VERSIONS = {(0, 166, 0), (0, 167, 0)}
+VERSIONS = {(0, 166, 0), (0, 167, 0), (0, 167, 1)}
 SAFE_ENV = frozenset(('PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SSL_CERT_FILE', 'SSL_CERT_DIR'))
 # Source audit: spec_plan.rs, app-server/extensions.rs and native model metadata.
 # stable_environment_tools was removed; it deliberately is not the tools switch.

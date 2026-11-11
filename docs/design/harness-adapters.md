@@ -763,6 +763,14 @@ This audit compares official tags `rust-v0.166.0` (`6ff1e1ca3b30fc8b914720681fcf
 
 Native checks used private homes and daemons, disabled updaters and scripted localhost providers, with no user home, shared daemon, login or paid model call. They also cover plain permissions, read-only retry, subscribed versus exclusive resume, plugin configuration, side conversations, queue restart, concurrent daemon startup and recovery. A changed refusal footer was the sole native compatibility failure and is corrected here. Waiting-prompt routing is checked from pinned source and fake peers, without claiming a live approval test. Historical captures retain their original version filenames and provenance. General checked-version metadata does not automatically enable separately gated features on future releases.
 
+### Codex 0.167.1 compatibility audit
+
+This compares official tags `rust-v0.167.0` (`086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a`) and `rust-v0.167.1` (`0a94398fa60c4fac0e7659e4213a0a36e613dd46`). The protocol export and installed CLI's 470 generated schema files match 0.167.0. CLI help, release asset names after version normalization, the plugin config allowlist and its resolved schemas also match. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.167.1).
+
+The patch retains hosted web search in the top-level tool list during incremental tool declaration and compaction. Its new incremental mode for regular Bedrock Responses defaults off. mv2's private runs select OpenAI, disable web search and use the trimmed model catalog. Both regenerated catalogs have the same model data and shape.
+
+The TUI renderer and rollout reader inputs retain the 0.167.0 contracts. The startup gate uses the same command-center footer matcher for both patch releases. The checked release's refusal fixture comes from its upstream renderer snapshot. The existing pane, plain and compressed rollout, navigation and waiting-prompt tests cover those contracts. Each version gate names 0.167.1 explicitly, and navigation and prompt answering still require a matching CLI and daemon pair.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
