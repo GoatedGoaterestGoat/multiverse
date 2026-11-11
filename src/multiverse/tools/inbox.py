@@ -82,7 +82,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
             callback(root, agent, agent_scoped=True)
             if launch_id and agents.runtime(directory).get('launch_id') != launch_id:
                 raise ValueError('Outdated launch')
-            if wait and not (directory / 'properties.json').is_file():
+            if wait and not store.is_file_replaced(directory / 'properties.json'):
                 raise ValueError('Agent is no longer available at this location')
             current = signature() if wait else None
             if not wait or current != previous:

@@ -40,7 +40,8 @@ def callback(root, agent, *, agent_scoped=False):
             raise ValueError('Agent identity cannot report or read another agent\'s inbox')
         return root, directory, None
     launch_id = os.environ.get('MV2_LAUNCH_ID')
-    if agent_scoped and launch_id and launch_id != agents.runtime(directory).get('launch_id'):
+    facts = agents.runtime(directory, required=True) if agent_scoped and launch_id else None
+    if agent_scoped and launch_id and launch_id != facts.get('launch_id'):
         from .. import harnesses
         from ..runtime.native import adapter_hook
         from ..harnesses.types import SessionHandle
@@ -49,12 +50,12 @@ def callback(root, agent, *, agent_scoped=False):
             properties = read(directory / 'properties.json')
             adapter = harnesses.load(root, properties['harness'])
             describe = adapter_hook(adapter, 'agent_identity_problem')
-            problem = describe(SessionHandle.from_records(properties, agents.runtime(directory), directory), os.environ) if describe else None
+            problem = describe(SessionHandle.from_records(properties, facts, directory), os.environ) if describe else None
         except (OSError, KeyError, ValueError, TypeError):
             problem = None
         if problem:
             raise ValueError(problem)
-    if launch_id and agents.runtime(directory).get("launch_id") != launch_id:
+    if launch_id and agents.runtime(directory, required=True).get("launch_id") != launch_id:
         raise ValueError("Outdated launch")
     return root, directory, launch_id
 

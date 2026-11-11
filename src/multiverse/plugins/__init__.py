@@ -14,6 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ..store import exists_replaced, is_file_replaced, retry_missing
 from . import access as levels, config, loader, manifest as manifests, settings as settings_files
 from .loader import PluginError, entries, entry
 
@@ -132,7 +133,7 @@ def problems(root, reserved=(), wait=None):
     """Why plugins here are not working, as sentences: for `mv2 doctor` and the dashboard."""
     found_problems = []
     usable = []
-    settings_problem = config.load(root).problem
+    settings_problem = config.load(root, observed=True).problem
     if settings_problem:
         found_problems.append(f"plugins.json cannot be used, so every plugin is off here until it is repaired: "
                               f"{settings_problem}")
@@ -156,7 +157,7 @@ def problems(root, reserved=(), wait=None):
     for found in entries(root):
         legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
                   else None)
-        if (legacy and (Path(root) / legacy).is_file() and not settings_files.path(root, found.name).exists()
+        if (legacy and (Path(root) / legacy).is_file() and not exists_replaced(settings_files.path(root, found.name))
                 and found.name not in _failed_conversions(root)):
             # Waiting for its first-use conversion: until then the plugin has neither its switch nor its settings.
             then = (f"nothing is converted while {loader.SAFE_MODE}=off" if loader.safe_mode()
@@ -180,8 +181,8 @@ def problems(root, reserved=(), wait=None):
             found_problems.append(found.problem or f"{found.name} is {found.state}")
         elif found.on and found.state in ("on", "loaded"):
             usable.append(found)
-            if below_minimum(root, found):
-                found_problems.append(below_minimum(root, found))
+            if minimum_problem := below_minimum(root, found):
+                found_problems.append(minimum_problem)
     claimed = {}
     for found in usable:
         for name in found.manifest.commands:
@@ -237,7 +238,7 @@ def notes(root):
     with no old settings file waiting (then nothing is lost: it only does not run). A template's plugins.json
     can turn compaction on, and a checkout without access to its repository cannot install it."""
     waiting = dict(not_installed(root))
-    unknown = config.load(root).unknown
+    unknown = config.load(root, observed=True).unknown
     newer = ([f"plugins.json has fields this mv2 does not know: {', '.join(unknown)}; update mv2 to use them"]
              if unknown else [])
     ignored = [f"{name}: {legacy} is here but ignored: its settings were converted to "
@@ -369,7 +370,7 @@ def _pending_legacy(root):
                 or entry_.state not in MIGRATABLE):
             continue
         legacy, target = Path(root) / manifest.settings.legacy, settings_files.path(root, entry_.name)
-        if legacy.is_file() and not target.exists():
+        if legacy.is_file() and not exists_replaced(target):
             found.append((entry_, legacy, target))
     return found
 
@@ -405,11 +406,11 @@ def waiting_settings(root):
         names.add(entry_.name)
         legacy = (entry_.manifest.settings.legacy if entry_.manifest is not None and entry_.manifest.settings
                   else KNOWN.get(entry_.name, {}).get("legacy"))
-        if legacy and (root / legacy).is_file() and not settings_files.path(root, entry_.name).exists():
+        if legacy and (root / legacy).is_file() and not exists_replaced(settings_files.path(root, entry_.name)):
             found[settings_files.path(root, entry_.name).relative_to(root).as_posix()] = legacy
     for name, known in KNOWN.items():
         if name not in names and (root / known["legacy"]).is_file() \
-                and not settings_files.path(root, name).exists():
+                and not exists_replaced(settings_files.path(root, name)):
             found[settings_files.path(root, name).relative_to(root).as_posix()] = known["legacy"]
     return found
 
@@ -421,8 +422,7 @@ def _old_file_here(root):
     """Whether any pre-plugin settings file a plugin could convert is here: KNOWN's and every manifest's (any
     copy, any state), from manifests alone, so the check before every command makes no trust check."""
     names = {known["legacy"] for known in KNOWN.values()}
-    names.update(found.manifest.settings.legacy for found in loader.declared(root)
-                 if found.manifest.settings is not None and found.manifest.settings.legacy)
+    names.update(loader.legacy_files(root))
     return any((Path(root) / name).is_file() for name in names)
 
 
@@ -434,7 +434,7 @@ def not_installed(root):
     found = {entry_.name for entry_ in entries(root) if entry_.manifest is not None}
     return [(name, known["legacy"]) for name, known in KNOWN.items()
             if name not in found and (Path(root) / known["legacy"]).is_file()
-            and not settings_files.path(root, name).exists()]
+            and not exists_replaced(settings_files.path(root, name))]
 
 
 def not_installed_message(name, legacy):
@@ -453,7 +453,7 @@ def _failed_conversions(root):
     A "not installed" notice is no failed conversion: an older mv2 kept it here, and such a record is ignored,
     so installing the plugin later converts its file."""
     try:
-        value = json.loads((Path(root) / "state" / "plugins" / MIGRATE_FAILED).read_text())
+        value = json.loads(retry_missing((Path(root) / "state" / "plugins" / MIGRATE_FAILED).read_text, observed=True))
     except (OSError, ValueError):
         return {}
     if not isinstance(value, dict):
@@ -464,7 +464,7 @@ def _failed_conversions(root):
 
 def _notified(root):
     try:
-        value = json.loads((Path(root) / "state" / "plugins" / NOTIFIED).read_text())
+        value = json.loads(retry_missing((Path(root) / "state" / "plugins" / NOTIFIED).read_text))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -586,11 +586,12 @@ def migrations(root):
             continue
         target = settings_files.path(root, found.name)
         legacy = Path(root) / manifest.settings.legacy if manifest.settings.legacy else None
-        if not target.is_file() and legacy is not None and legacy.is_file():
+        present = is_file_replaced(target)
+        if not present and legacy is not None and legacy.is_file():
             planned.append({"plugin": found.name, "kind": "legacy", "from": str(legacy), "to": str(target)})
-        elif target.is_file():
+        elif present:
             try:
-                version = json.loads(target.read_text()).get("schema")
+                version = json.loads(retry_missing(target.read_text)).get("schema")
             except (OSError, ValueError, AttributeError):
                 continue
             if isinstance(version, int) and not isinstance(version, bool) and version < manifest.settings.version:
@@ -820,8 +821,8 @@ def install(name):
 def _access_here(root, found):
     """listing()'s access: what the plugin asks for here and what it has."""
     wanted = found.manifest.access if found.manifest is not None else manifests.Access()
-    settings = config.load(root)
-    level = loader.access_level(root, found)
+    settings = config.load(root, observed=True)
+    level = loader.access_level(root, found, observed=True)
     # What that level lets it use of what it asked for, and what it holds back, each with the level it needs:
     # None while it is off here, where it has no level.
     allowed, held_back = found.manifest.permissions_at(level) if found.manifest is not None and level else (None, None)
@@ -842,7 +843,7 @@ def below_minimum(root, found):
     """The problem of a plugin that is on here but held below the least access it can work with, or None."""
     if found is None or not found.on or found.manifest is None:
         return None
-    level, minimum = loader.access_level(root, found), found.manifest.access.minimum
+    level, minimum = loader.access_level(root, found, observed=True), found.manifest.access.minimum
     if level is None or levels.rank(level) >= levels.rank(minimum):
         return None
     return (f"{found.name} is on but held back below its minimum here: it has {level} access and needs at least "
@@ -1009,7 +1010,7 @@ def anchor_events(root, name, again=False):
         if found.manifest is None or not found.manifest.events:
             return
         from . import events, host
-        if host._cursor_path(root, name).exists() and not again:
+        if not again and exists_replaced(host._cursor_path(root, name)):
             return
         segments = events.segments(root)
         host._write_cursor(root, name, events._last_sequence(segments[-1][1]) if segments else 0,
@@ -1074,11 +1075,11 @@ def reappeared(root):
     for entry_ in entries(root):
         legacy = (entry_.manifest.settings.legacy if entry_.manifest is not None and entry_.manifest.settings
                   else KNOWN.get(entry_.name, {}).get("legacy"))
-        if legacy and (root / legacy).is_file() and settings_files.path(root, entry_.name).is_file():
+        if legacy and (root / legacy).is_file() and is_file_replaced(settings_files.path(root, entry_.name)):
             found.append((entry_.name, legacy))
     named = {name for name, _ in found} | {entry_.name for entry_ in entries(root)}
     found.extend((name, known["legacy"]) for name, known in KNOWN.items() if name not in named
-                 and (root / known["legacy"]).is_file() and settings_files.path(root, name).is_file())
+                 and (root / known["legacy"]).is_file() and is_file_replaced(settings_files.path(root, name)))
     return found
 
 
@@ -1100,7 +1101,7 @@ def _waiting_old_file(root, found):
     legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
               else None)
     if root is not None and legacy and (Path(root) / legacy).is_file() \
-            and not settings_files.path(root, found.name).exists():
+            and not exists_replaced(settings_files.path(root, found.name)):
         return legacy
     return None
 

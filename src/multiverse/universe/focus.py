@@ -37,7 +37,7 @@ import stat
 import subprocess
 import sys
 
-from ..store import lock, uid, write
+from ..store import lock, uid, write, retry_missing
 
 FILE = "focus.json"
 LAST = "focus-last.json"
@@ -95,7 +95,7 @@ def _read(agent_dir, name=FILE):
     try:
         # Non-blocking, so a FIFO in its place never hangs a reader. The descriptor is closed here: wrapping
         # a directory's would fail and leak it.
-        descriptor = os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = retry_missing(lambda: os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK))
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return None
@@ -109,8 +109,10 @@ def _read(agent_dir, name=FILE):
     return record if isinstance(record, dict) else None
 
 
-def current(agent_dir):
-    """The focus in effect, or None."""
+def current(agent_dir, *, observed_missing=()):
+    """The focus in effect, or None; listing may supply its read-only absence snapshot."""
+    if agent_dir / FILE in observed_missing:
+        return None
     record = _read(agent_dir)
     return record if active(record) else None
 
@@ -304,7 +306,7 @@ def turn_ended(agent_dir):
     has been saved already: failing here must never fail it.
     """
     try:
-        if not (agent_dir / FILE).exists():
+        if _read(agent_dir) is None:
             return None  # Never create a lock file in an agent directory that was removed.
         with lock(agent_dir / ".focus.lock", create_parent=False):
             record = current(agent_dir)

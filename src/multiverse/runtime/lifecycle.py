@@ -15,7 +15,7 @@ import tempfile
 
 from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
-from ..store import existing_lock, lock, now, read, uid, write
+from ..store import exists_replaced, retry_missing, existing_lock, lock, missing_records, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
@@ -136,7 +136,14 @@ def row_usage(row):
     return {'usage': measured, 'tokens': display.usage_total(measured), 'usage_detail': display.usage_details(measured)}
 
 
-def listing(root, recursive=False, only=None, *, usage=True):
+def observation_paths(directories):
+    """Optional metadata a listing and its doctor checks can observe in one batch."""
+    names = ('focus.json', 'inbox-state.json', 'native-delivery.json', 'inbox.cursor', 'inbox-read.json',
+             'sessions.jsonl', 'slash/pending.json')
+    return (directory / name for directory in directories for name in names)
+
+
+def listing(root, recursive=False, only=None, *, usage=True, observed_missing=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
     One agent's damaged records never stop the others: that agent's row says which file is unusable and why
@@ -145,9 +152,14 @@ def listing(root, recursive=False, only=None, *, usage=True):
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
     rows, snapshots, dependencies, model_names = [], {}, {}, {}
+    scopes = []
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
         paths = [agents_dir / only / "properties.json"] if only is not None else agents.record_paths(scope)
+        scopes.append((scope, paths))
+    if observed_missing is None:
+        observed_missing = missing_records(observation_paths(path.parent for _, paths in scopes for path in paths), observed=True)
+    for scope, paths in scopes:
         for path in paths:
             if only is not None and not path.parent.is_dir():
                 continue
@@ -170,7 +182,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                 preparing_launch = facts.get('launch_id') if facts.get('preparing') is True else None
                 identity_problem = None
                 try:
-                    properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
+                    properties, facts = native.session_snapshot(scope, path.parent, properties, facts,
+                                                                 observed_missing=observed_missing)
                 except Exception as error:
                     identity_problem = str(error)
                     facts = records.runtime(path.parent / "runtime.json")
@@ -192,7 +205,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                                 facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
                 try:
                     delivery_problem = mailbox.delivery_problem(path.parent, properties['name'],
-                        is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
+                        is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']),
+                        observed_missing=observed_missing)
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append(text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
@@ -205,7 +219,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
-                             "focus": focus.current(path.parent), "runtime": facts,
+                             "focus": focus.current(path.parent, observed_missing=observed_missing), "runtime": facts,
                              "model_name": model_policy.recorded_name(scope, properties, model_names),
                              "blocked_on": blocked.display(scope, properties, dependencies)}))
             except records.RecordError as error:
@@ -877,7 +891,7 @@ def _publish_record(root, agent_dir, properties, launch_id):
                                 if (runtime(agent_dir) == facts
                                         and read(agent_dir / 'properties.json') == published):
                                     agent_dir.rename(staging)
-                        if agent_dir.is_dir() and (not (agent_dir / 'runtime.json').exists() or minimal):
+                        if agent_dir.is_dir() and (not exists_replaced(agent_dir / 'runtime.json') or minimal):
                             write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
                                   'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
                                   'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
@@ -1096,7 +1110,7 @@ def _request(argv, env, command, endpoint, resume_message_id):
 
 
 def launch_result(root, agent_dir):
-    properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+    properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
     notices = display.notice_lines(facts.get('launch_notices'))
     return {**properties, 'universe': str(root), 'runtime': facts,
             'session': asdict(SessionHandle.from_records(properties, facts, agent_dir)),
@@ -1158,12 +1172,12 @@ def note_ready(root, agent_dir, launch_id):
         marker = launch / 'ready-event'
         if marker.exists() or not events.subscribers(root, 'agent.ready'):
             return
-        properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+        properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
         if facts.get('launch_id') != launch_id:
             return
         adapter = harnesses.load(root, properties['harness'])
         live = observe(properties, facts)['live']
-        if not launch_ready(adapter, properties, facts, agent_dir, read(launch / 'request.json'), live):
+        if not launch_ready(adapter, properties, facts, agent_dir, retry_missing(lambda: read(launch / 'request.json')), live):
             return
         _record_ready(agent_dir, launch_id, properties)
     except Exception:
@@ -1182,7 +1196,7 @@ def _record_ready(agent_dir, launch_id, properties):
 
 def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True):
     """Observe one launch without holding the lock needed by native binding."""
-    request = read(agent_dir / 'launches' / launch_id / 'request.json')
+    request = retry_missing(lambda: read(agent_dir / 'launches' / launch_id / 'request.json'))
     deadline = time.monotonic() + timeout
     exit_deadline = None
     screen_deadline = None
@@ -1282,10 +1296,10 @@ def kill(root, reference, *, attachment_only=False):
     initial, malformed = missing_runtime.recovery_snapshot(agent_dir)
     initial_observation = None
     damaged = malformed is not None or missing_runtime.damage(agent_dir, initial)
-    if not damaged and (agent_dir / 'runtime.json').exists():
+    if not damaged and exists_replaced(agent_dir / 'runtime.json'):
         initial_observation = observe(records.properties(agent_dir / 'properties.json'), initial)
         damaged = missing_runtime.mismatch(agent_dir, initial, initial_observation)
-    if not (agent_dir / 'runtime.json').exists() or damaged:
+    if not exists_replaced(agent_dir / 'runtime.json') or damaged:
         recovered = missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
         if recovered is not None:
             return recovered

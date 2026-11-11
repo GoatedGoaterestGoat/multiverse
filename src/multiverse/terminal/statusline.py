@@ -4,6 +4,7 @@ The wrapper invokes this file with exact root, agent, launch and adapter-family
 arguments; tmux's command environment need not belong to the displayed agent.
 """
 from datetime import datetime, timezone
+import errno
 import json
 import math
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import time
 import unicodedata
 
 
@@ -40,11 +42,56 @@ def object_value(value):
     return value if isinstance(value, dict) else {}
 
 
-def read_object(path):
+def _retry_missing(operation):
+    """Standalone counterpart of store.retry_missing, only for replaced records."""
+    deadline = time.monotonic() + .05
+    for attempt in range(5):
+        try:
+            return operation()
+        except OSError as error:
+            if error.errno != errno.ENOENT:
+                raise
+            remaining = deadline - time.monotonic()
+            if attempt == 4 or remaining <= 0:
+                raise
+            time.sleep(min(.005, remaining))
+
+
+def missing_records(paths):
+    """Observe optional absences together for this render, never cache identity or file contents."""
+    def missing(candidates):
+        pending = []
+        for path in candidates:
+            try:
+                path.stat()
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    pending.append(path)
+                # The reader still diagnoses permission errors and special files.
+        return pending
+
+    pending = missing(dict.fromkeys(Path(path) for path in paths))
+    if not pending:
+        return frozenset()
+    deadline = time.monotonic() + .05
+    for _ in range(1, 5):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(.005, remaining))
+        pending = missing(pending)
+        if not pending:
+            break
+    return frozenset(pending)
+
+
+def read_object(path, *, observed_missing=()):
+    if path in observed_missing:
+        return {}
     try:
         # Non-blocking, so a FIFO in a record's place never hangs the bar. The descriptor is closed here:
         # wrapping a directory's would fail and leak it.
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = _retry_missing(lambda: os.open(path, os.O_RDONLY | os.O_NONBLOCK))
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return {}
@@ -125,9 +172,11 @@ def _inbox_bytes(path, limit):
         os.close(descriptor)
 
 
-def _inbox_object(path):
+def _inbox_object(path, *, observed_missing=()):
+    if path in observed_missing:
+        return {}
     try:
-        data = _inbox_bytes(path, READ_LIMIT)
+        data = _retry_missing(lambda: _inbox_bytes(path, READ_LIMIT))
     except FileNotFoundError:
         return {}
     if len(data) > READ_LIMIT:
@@ -138,7 +187,7 @@ def _inbox_object(path):
     return value
 
 
-def unread(directory):
+def unread(directory, *, observed_missing=()):
     """Bounded observation of unread manual input; never locks or advances a cursor.
 
     Blocked-on upgrade copies can precede the cursor, so the bounded scan includes history. Ordinary
@@ -146,7 +195,9 @@ def unread(directory):
     """
     try:
         try:
-            cursor_data = _inbox_bytes(directory / 'inbox.cursor', 64)
+            cursor_path = directory / 'inbox.cursor'
+            cursor_data = (b'0' if cursor_path in observed_missing else
+                           _retry_missing(lambda: _inbox_bytes(cursor_path, 64)))
             cursor = int(cursor_data) if len(cursor_data) <= 64 else -1
         except FileNotFoundError:
             cursor = 0
@@ -158,8 +209,8 @@ def unread(directory):
             return 0 if cursor == 0 else None
         if cursor > len(data) or cursor and data[cursor - 1:cursor] != b'\n':
             return None
-        states = _inbox_object(directory / 'inbox-state.json')
-        read_ahead = _inbox_object(directory / 'inbox-read.json')
+        states = _inbox_object(directory / 'inbox-state.json', observed_missing=observed_missing)
+        read_ahead = _inbox_object(directory / 'inbox-read.json', observed_missing=observed_missing)
         count, offset = 0, 0
         for line in data[:READ_LIMIT].splitlines(keepends=True):
             if not line.endswith(b'\n'):
@@ -186,12 +237,12 @@ def unread(directory):
         return None
 
 
-def focus_text(directory):
+def focus_text(directory, *, observed_missing=()):
     """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts.
 
     universe.focus owns the file; this follows its `active` rules for a record in effect.
     """
-    record = read_object(directory / 'focus.json')
+    record = read_object(directory / 'focus.json', observed_missing=observed_missing)
     def moment(value):
         stamp = datetime.fromisoformat(value)
         return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
@@ -257,10 +308,13 @@ def declared_items(runtime):
     return found
 
 
-def plugin_item(directory, name):
+def plugin_item(directory, name, *, observed_missing=()):
     """The first line of a plugin item's file, bounded and cleaned; '' when missing, empty or unreadable."""
+    path = directory / 'status-items' / f'{name}.txt'
+    if path in observed_missing:
+        return ''
     try:
-        with (directory / 'status-items' / f'{name}.txt').open('rb') as source:
+        with _retry_missing(lambda: path.open('rb')) as source:
             data = source.read(ITEM_READ_LIMIT)
     except OSError:
         return ''
@@ -281,7 +335,14 @@ def render(root, agent_id, launch_id, family=''):
             or not launch_id or not meta.get('id') or properties.get('universe_id') != meta['id']):
         return ''
     declared = declared_items(runtime)
-    items, _ = config(read_object(root / 'statusline.json'), family, declared)
+    # Optional files that have never been published share one retry delay, including all declared plugin items.
+    # This snapshot belongs only to this render; required identity and runtime above always read fresh records.
+    observed_missing = missing_records([
+        root / 'statusline.json', directory / 'focus.json', directory / 'inbox.cursor',
+        directory / 'inbox-state.json', directory / 'inbox-read.json',
+        *(directory / 'status-items' / f'{name}.txt' for name, _ in declared),
+    ])
+    items, _ = config(read_object(root / 'statusline.json', observed_missing=observed_missing), family, declared)
     plugins = {name for name, _ in declared}
     phase = clean(properties.get('phase'), 24)
     summary = clean(properties.get('summary'), SUMMARY_LENGTH)
@@ -305,7 +366,7 @@ def render(root, agent_id, launch_id, family=''):
             if name:
                 parts.append(name)
         elif item == 'focus':
-            text = focus_text(directory)
+            text = focus_text(directory, observed_missing=observed_missing)
             if text:
                 parts.append(text)
         elif item == 'status':
@@ -320,7 +381,7 @@ def render(root, agent_id, launch_id, family=''):
             if text:
                 parts.append(text)
         elif item == 'inbox':
-            count = unread(directory)
+            count = unread(directory, observed_missing=observed_missing)
             if count is None:
                 parts.append('inbox ?')
             elif count:
@@ -330,7 +391,7 @@ def render(root, agent_id, launch_id, family=''):
             if text:
                 parts.append(text)
         elif item in plugins:
-            text = plugin_item(directory, item)
+            text = plugin_item(directory, item, observed_missing=observed_missing)
             if text:
                 parts.append(text)
     # tmux interprets styles in job output; agent text must remain literal.

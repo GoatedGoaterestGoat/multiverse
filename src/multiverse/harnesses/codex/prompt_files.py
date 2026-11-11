@@ -9,6 +9,8 @@ import stat
 import threading
 from uuid import uuid4
 
+from ...store import retry_missing
+
 
 LIMIT = 256 << 10
 ANSWER_LIMIT = 64 << 10
@@ -132,7 +134,9 @@ class Files:
     def read(self, name):
         filename(name)
         with self.folder() as folder:
-            return read_at(folder, name)[0]
+            # Input claims are exclusive publications, not replace-written records.
+            return (read_at(folder, name) if name.endswith('.input.json') else
+                    retry_missing(lambda: read_at(folder, name)))[0]
 
     def claim_input(self, id, value):
         return self.claim_decision(id, value, 'input')

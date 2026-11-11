@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 
-from ..store import lock, write
+from ..store import lock, retry_missing, write
 from . import access as levels
 from .manifest import check_name
 
@@ -49,10 +49,10 @@ def path(root):
     return Path(root) / FILE
 
 
-def _raw(root):
+def _raw(root, *, observed=False):
     """The file's JSON object, {} when it is missing; ValueError when it cannot be used."""
     try:
-        text = path(root).read_text()
+        text = retry_missing(path(root).read_text, observed=observed)
     except FileNotFoundError:
         return None
     except OSError as error:
@@ -103,11 +103,11 @@ def parse(data, where=FILE):
                   access=dict(access), ceiling=ceiling)
 
 
-def load(root):
+def load(root, *, observed=False):
     """This universe's Config. Never raises: an unusable file reads with `problem` set, and every plugin off
     (is_on); a missing file means the defaults."""
     try:
-        data = _raw(root)
+        data = _raw(root, observed=observed)
         if data is None:
             return Config()
         return parse(data, str(path(root)))

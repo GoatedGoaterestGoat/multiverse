@@ -23,7 +23,7 @@ from . import effects
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from ..harnesses.types import ObservedBinding, normalize_session_id
-from ..store import lock, now, read
+from ..store import exists_replaced, lock, now, read
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
 from ..universe import agents, records
@@ -385,13 +385,16 @@ def _observed(adapter, session):
     return observed
 
 
-def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False, observed_missing=()):
     """Follow session lineage and completed command receipts before exposing the saved settings."""
     from .navigation import require_settled
     require_settled(facts)
+    if launch_locked:
+        observed_missing = ()  # A diagnostic absence cannot survive an authority recheck.
     properties, facts = _session_snapshot(root, directory, properties, facts, adapter=adapter,
-                                          launch_locked=launch_locked)
-    if not (directory / 'slash' / 'pending.json').exists():
+                                          launch_locked=launch_locked, observed_missing=observed_missing)
+    pending = directory / 'slash' / 'pending.json'
+    if pending in observed_missing or not exists_replaced(pending):
         return properties, facts
     if not launch_locked:
         with _snapshot_lock(directory):
@@ -400,23 +403,26 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
     return slash.reconcile(root, directory, properties, facts, adapter=adapter), facts
 
 
-def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False, observed_missing=()):
     """Reconcile adapter evidence before using a native ID. No native probes.
 
     A provider owns the evidence checks. Core owns launch fencing, the CAS,
     storage scope, ownership and the durable transition.
     """
     effects.require('observed_binding', properties.get('id', 'agent'))
+    if launch_locked:
+        observed_missing = ()
     if not properties.get('harness') or not properties.get('workspace'):
         # Legacy/minimal records have no observation contract. Resume supplies
         # its normal workspace fallback before opting into this path.
         return properties, facts
     adapter = adapter or harnesses.load(root, properties['harness'])
-    if adapter_hook(adapter, 'observed_binding') is None and not (directory / 'sessions.jsonl').exists():
+    journal = directory / 'sessions.jsonl'
+    if adapter_hook(adapter, 'observed_binding') is None and (journal in observed_missing or not exists_replaced(journal)):
         return properties, facts
     session = SessionHandle.from_records(properties, facts, directory)
     observed = _observed(adapter, session)
-    effective, _ = agents.sessions.effective(directory, properties)
+    effective, _ = agents.sessions.effective(directory, properties, observed_missing=observed_missing)
     changed = observed is not None and normalize_session_id(observed.native_id) != session.native_id
     if effective == properties and not changed and not (observed and facts.get('binding_conflict')):
         return properties, facts

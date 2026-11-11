@@ -21,7 +21,7 @@ import math
 from pathlib import Path
 import re
 
-from ..store import lock, write
+from ..store import exists_replaced, is_file_replaced, lock, retry_missing, write
 
 DIRECTORY = "plugin-settings"
 DELETE = object()  # an edit value that removes the key
@@ -46,9 +46,10 @@ def path(root, name):
     return Path(root) / DIRECTORY / f"{name}.json"
 
 
-def _json(file):
+def _json(file, *, replaced=False):
     try:
-        data = json.loads(Path(file).read_text())
+        read = Path(file).read_text
+        data = json.loads(retry_missing(read) if replaced else read())
     except OSError as error:
         raise ValueError(f"{file}: {error.strerror or error}") from None
     except ValueError as error:
@@ -250,16 +251,16 @@ def read(root, manifest, check=None):
     if manifest.settings is None:
         return Settings({}, file, "none")
     try:
-        if file.is_file():
-            data, source, where = _json(file), "file", str(file)
+        if is_file_replaced(file):
+            data, source, where = _json(file, replaced=True), "file", str(file)
         else:
             data, source, where = defaults_of(manifest), "defaults", f"{manifest.name} default settings"
         notes = _accept(manifest, data, check, where, root)
         return Settings(data, file, source, notes=notes)
     except ValueError as error:
-        return Settings({}, file, "file" if file.is_file() else "defaults", str(error))
+        return Settings({}, file, "file" if is_file_replaced(file) else "defaults", str(error))
     except Exception as error:  # a plugin's own check must not break its caller
-        return Settings({}, file, "file" if file.is_file() else "defaults",
+        return Settings({}, file, "file" if is_file_replaced(file) else "defaults",
                         f"{manifest.name}: its settings check failed: {type(error).__name__}: {error}")
 
 
@@ -269,7 +270,7 @@ def install_defaults(root, manifest):
         return False
     file = path(root, manifest.name)
     legacy = Path(root) / manifest.settings.legacy if manifest.settings.legacy else None
-    if file.exists() or (legacy is not None and legacy.exists()):
+    if exists_replaced(file) or (legacy is not None and legacy.exists()):
         return False  # defaults here would stand in front of a pre-plugin file waiting to be converted
     write(file, defaults_of(manifest))
     return True
@@ -286,12 +287,12 @@ def edit(root, manifest, changes, check=None):
         raise ValueError(f"{manifest.name} has no settings")
     file = path(root, manifest.name)
     legacy = manifest.settings.legacy
-    if legacy and not file.exists() and (Path(root) / legacy).is_file():
+    if legacy and not exists_replaced(file) and (Path(root) / legacy).is_file():
         # Built from defaults, the new file would stand in front of the real settings for good.
         raise ValueError(f"{legacy} is still here and not converted: run mv2 plugins migrate --apply first, "
                          f"so its settings are kept")
     with lock(Path(root) / "state" / ".plugins.lock"):
-        data = _json(file) if file.is_file() else defaults_of(manifest)
+        data = _json(file, replaced=True) if is_file_replaced(file) else defaults_of(manifest)
         for key, value in changes.items():
             keys = tuple(key.split(".")) if isinstance(key, str) else tuple(key)
             if not keys or keys[0] == "schema":

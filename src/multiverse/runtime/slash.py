@@ -9,7 +9,7 @@ from .. import harnesses, universe
 from ..harnesses.types import (AttachmentSpec, CommandResult, NativeEndpoint, NativeResult,
                                NativeServiceHandle, SessionHandle, SlashCommand, SlashRequest)
 from ..plugins import agent_files
-from ..store import lock, now, write
+from ..store import exists_replaced, lock, now, write
 from ..universe import agents, focus, records
 from . import agent_identity, delivery_evidence, effects, native
 
@@ -99,9 +99,10 @@ def _outcome(record):
 
 def _pending(directory):
     path = directory / 'slash' / 'pending.json'
-    if not path.exists():
+    record = records._object(path, missing_ok=True)
+    if record is None:
         return []
-    pending = records._object(path).get('ids')
+    pending = record.get('ids')
     try:
         valid = (isinstance(pending, list) and len(pending) <= MAX_PENDING
                  and all(isinstance(id, str) and str(UUID(id)) == id for id in pending)
@@ -251,7 +252,7 @@ def _result(root, directory, id, adapter=None):
 
 def reconcile(root, directory, properties, facts, *, adapter=None):
     """Settle bounded receipts under the caller's launch lock; no native probe or history scan."""
-    if not (directory / 'slash' / 'pending.json').exists():
+    if not exists_replaced(directory / 'slash' / 'pending.json'):
         return properties
     with lock(directory / '.slash.lock', create_parent=False):
         if agents.runtime(directory).get('launch_id') != facts.get('launch_id'):
@@ -263,7 +264,7 @@ def reconcile(root, directory, properties, facts, *, adapter=None):
 
 def require_settled(directory, properties, facts, *, model=None, effort=None):
     """A new launch cannot silently undo a setting whose command outcome is still unknown."""
-    if not (directory / 'slash' / 'pending.json').exists():
+    if not exists_replaced(directory / 'slash' / 'pending.json'):
         return
     with lock(directory / '.slash.lock', create_parent=False):
         for id in _pending(directory):

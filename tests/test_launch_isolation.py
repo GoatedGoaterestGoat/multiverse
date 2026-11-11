@@ -662,7 +662,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         return incomplete
                     original_lstat = Path.lstat
                     original_read = Path.read_bytes
-                    original_open = records.open_regular
+                    original_open = records.open_replaced
                     def open_regular(path):
                         if evidence == 'older-unreadable-request' and path == old_request:
                             raise PermissionError('unreadable older request')
@@ -675,7 +675,7 @@ class LaunchIsolationTest(unittest.TestCase):
                             patch('multiverse.runtime.missing_runtime.Tmux', side_effect=terminal), \
                             patch.object(lifecycle, 'observe', return_value={'live': 'alive' if evidence == 'live' else 'dormant'}), \
                             patch.object(Path, 'lstat', lstat), \
-                            patch.object(records, 'open_regular', open_regular), \
+                            patch.object(records, 'open_replaced', open_regular), \
                             patch.object(storage_adoption, 'adapter_hook', side_effect=evidence_hook), \
                             patch.dict(os.environ, {key: str(caller), **({'HOME': str(caller)} if unknown_server else {})}):
                         if unknown_server:

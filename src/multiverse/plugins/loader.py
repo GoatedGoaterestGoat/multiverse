@@ -31,7 +31,7 @@ import time
 import traceback
 import types
 
-from ..store import now
+from ..store import now, retry_missing, is_file_replaced
 from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
 API_VERSION = (1, 18)
@@ -278,7 +278,7 @@ def _installed_remembered():
     from ..store import read
     path, key, signature = trust.user_directory() / INSTALLED, sys.executable, _environment_signature()
     try:
-        data = read(path)
+        data = retry_missing(lambda: read(path))
         entry = data.get("environments", {}).get(key)
     except (OSError, ValueError, AttributeError):
         data, entry = {}, None
@@ -393,6 +393,21 @@ class Declared:
 _declared = {}  # root -> (signature, [Declared])
 
 
+def manifest_records(root):
+    """Readable manifests from every copy, without importing code or reading enablement/grants."""
+    for _, directory in _source_directories(root):
+        try:
+            yield manifests.load(directory)
+        except manifests.ManifestError:
+            continue
+
+
+def legacy_files(root):
+    """Legacy filenames from manifests alone, regardless of enablement, grants or load state."""
+    return {manifest.settings.legacy for manifest in manifest_records(root)
+            if manifest.settings is not None and manifest.settings.legacy}
+
+
 def declared(root):
     """Every plugin manifest this universe can see, every copy, whatever its trust or state, with whether it is on.
 
@@ -412,7 +427,7 @@ def declared(root):
         cached = _declared.get(root)
     if cached and cached[0] == signature:
         return list(cached[1])
-    settings = config.load(root) if root is not None else config.Config()
+    settings = config.load(root, observed=True) if root is not None else config.Config()
     result = []
     for source, directory in found:
         try:
@@ -453,7 +468,7 @@ def entries(root):
 
 
 def _entries_uncached(root, checks=True):
-    settings = config.load(root) if root is not None else config.Config()
+    settings = config.load(root, observed=True) if root is not None else config.Config()
     chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
     for source, directory in _source_directories(root):
         try:
@@ -559,7 +574,7 @@ def entry(root, name):
     raise PluginError(f"No plugin named {name} here. Run mv2 plugins to see the plugins this universe can use.")
 
 
-def access_level(root, found):
+def access_level(root, found, *, observed=False):
     """The access level plugin `found` has in universe `root`: None where it is off; else the level granted there
     (none recorded: what it requests), never above its request, capped by the universe's access_ceiling and by
     MV2_EFFECTS for this process.
@@ -569,7 +584,7 @@ def access_level(root, found):
     missing file means the defaults)."""
     if found is None or not found.on or found.manifest is None:
         return None
-    settings = config.load(root) if root is not None else config.Config()
+    settings = config.load(root, observed=observed) if root is not None else config.Config()
     if not settings.is_on(found.name, found.manifest.default if found.source == "bundled" else "off"):
         return None
     request = found.manifest.access.request
@@ -585,7 +600,7 @@ def limits(root, found):
     if found is None or not found.on or found.manifest is None:
         return []
     request = found.manifest.access.request
-    settings = config.load(root) if root is not None else config.Config()
+    settings = config.load(root, observed=True) if root is not None else config.Config()
     found_limits = [("MV2_EFFECTS", levels.process_ceiling()), ("access_ceiling", settings.ceiling),
                     ("grant", settings.access.get(found.name))]
     return [(what, level) for what, level in found_limits
@@ -816,13 +831,13 @@ def _remember_slow(directory, files, home=None):
     try:
         if files is None:  # forgetting: nothing is written (not even the lock) unless the plugin is there
             try:
-                if str(directory) not in (read(path).get("plugins") or {}):
+                if str(directory) not in (retry_missing(lambda: read(path)).get("plugins") or {}):
                     return
             except (OSError, ValueError, AttributeError):
                 return
         with lock(path.with_name(f".{LOAD_TIMEOUTS}.lock")):
             try:
-                plugins = read(path).get("plugins") or {}
+                plugins = retry_missing(lambda: read(path)).get("plugins") or {}
             except (OSError, ValueError, AttributeError):
                 plugins = {}
             if files is None:
@@ -840,7 +855,7 @@ def _known_slow(found):
     """Whether this plugin's load ran past the limit before, with these same files."""
     from ..store import read
     try:
-        recorded = (read(trust.user_directory() / LOAD_TIMEOUTS).get("plugins") or {})
+        recorded = (retry_missing(lambda: read(trust.user_directory() / LOAD_TIMEOUTS), observed=True).get("plugins") or {})
     except (OSError, ValueError, AttributeError):
         return False
     directory = Path(found.manifest.directory).resolve()
@@ -855,7 +870,7 @@ def _keep_bytecode_out(directory):
     writes __pycache__ there, which would change what was trusted: this process's bytecode goes to
     ~/.multiverse/pycache instead. Python reads the prefix at every import, lazy ones included."""
     if sys.pycache_prefix is None and directory.parent.name == "plugins" \
-            and (directory.parent.parent / "universe.json").is_file():
+            and is_file_replaced(directory.parent.parent / "universe.json"):
         sys.pycache_prefix = str(trust.user_directory() / "pycache")
 
 

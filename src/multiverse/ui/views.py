@@ -4,7 +4,7 @@ import re
 
 from .. import universe
 from ..plugins.loader import CORE_COLUMN_ALIASES
-from ..store import read
+from ..store import is_file_replaced, read, retry_missing
 from . import theme
 from .columns import COLUMNS, MARKS
 from .panels import error_widget, normalize_widgets
@@ -28,14 +28,17 @@ def view(root):
 def _read_view(root):
     path = root / "views" / "default.json"
     try:
-        config = read(path) if path.is_file() else {}
+        try:
+            config = retry_missing(lambda: read(path)) if is_file_replaced(path) else {}
+        except FileNotFoundError:
+            config = {}
         if not isinstance(config, dict):
             raise ValueError("View must be a JSON object")
     except (OSError, ValueError) as error:
         config = {"widgets": [error_widget("View configuration error", error)]}
     accent = config.get("accent", "auto")
     if accent == "auto":
-        identity = read(root / "universe.json")["id"]
+        identity = retry_missing(lambda: read(root / "universe.json"))["id"]
         index = 1 + int(sha256(identity.encode()).hexdigest()[:8], 16) % (len(theme.ACCENTS) - 1)
         accent = theme.ACCENTS[index] if universe.parent(root) else theme.ACCENTS[0]
     if not isinstance(accent, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", accent):

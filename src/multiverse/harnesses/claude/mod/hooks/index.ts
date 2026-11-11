@@ -4,6 +4,7 @@ import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
 import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
 import { pythonEnv } from './python'
+import { retryMissing } from './records'
 import { registerUsage } from './usage'
 import { closeAll, closeKeys, form, hold as holdPrompt, sweep } from './prompts'
 import { publishQueue, reloaded } from './queue'
@@ -122,10 +123,10 @@ let statusRunning = false
 let shown: string | undefined
 
 // True when the file differs from the last time it was looked at (or is new).
-async function changed($: EngineInterface, path: string): Promise<boolean> {
+async function changed($: EngineInterface, path: string, replaced = true): Promise<boolean> {
   let key = "missing"
   try {
-    const stat = await $.fs.stat(path)
+    const stat = await (replaced ? retryMissing($, () => $.fs.stat(path)) : $.fs.stat(path))
     key = `${stat.mtimeMs}:${stat.size}`
   } catch { /* no such file */ }
   if (watched.get(path) === key) return false
@@ -135,7 +136,7 @@ async function changed($: EngineInterface, path: string): Promise<boolean> {
 
 async function readFile($: EngineInterface, path: string): Promise<string | undefined> {
   try {
-    return await $.fs.read(path)
+    return await retryMissing($, () => $.fs.read(path))
   } catch {
     return undefined
   }
@@ -157,7 +158,7 @@ async function refreshStatus($: EngineInterface) {
     const properties = `${directory}/properties.json`
     const [configChanged, propertiesChanged, inboxChanged, cursorChanged, ledgerChanged, marksChanged, runtimeChanged] =
       await Promise.all([
-        changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
+        changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`, false), changed($, `${directory}/inbox.cursor`),
         changed($, `${directory}/inbox-state.json`), changed($, `${directory}/inbox-read.json`), changed($, `${directory}/runtime.json`)])
     let itemsChanged = false
     if (runtimeChanged) {

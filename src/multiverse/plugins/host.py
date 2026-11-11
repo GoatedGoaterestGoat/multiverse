@@ -44,7 +44,7 @@ import time
 
 from .. import universe as universes
 from ..runtime import process as processes
-from ..store import now, write, lock
+from ..store import now, write, lock, retry_missing, is_file_replaced
 from . import api, events, loader, trust
 
 HEARTBEAT_SECONDS = 15.0  # a supervisor whose status is older than this is not running
@@ -110,7 +110,7 @@ def _recorded(root):
     or not a JSON object leaves the status unknown, with the reason. The host rewrites it when it starts."""
     path = host_directory(root) / "status.json"
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(retry_missing(path.read_text, observed=True))
     except FileNotFoundError:
         return {}, None
     except (OSError, ValueError) as error:
@@ -351,7 +351,7 @@ def _restart_requested(root, started):
     one for an earlier supervisor (left by a host that ended, or already acted on) never restarts a later one."""
     path = host_directory(root) / RESTART
     try:
-        request = json.loads(path.read_text())
+        request = json.loads(retry_missing(path.read_text))
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
@@ -458,7 +458,7 @@ def _beat(root, stopping):
     while not stopping.wait(HEARTBEAT_SECONDS / 3):
         try:
             with _status_lock(root):
-                recorded = json.loads(path.read_text())
+                recorded = json.loads(retry_missing(path.read_text))
                 if (isinstance(recorded, dict) and recorded.get("state") == "running"
                         and recorded.get("pid") == os.getpid()):
                     write(path, {**recorded, "updated_at": now()})
@@ -673,7 +673,7 @@ def _read_cursor(scope, name, journal=None):
     path = _cursor_path(scope, name)
     journal = events.journal_id(scope) if journal is None else journal
     try:
-        parts = path.read_text().split()
+        parts = retry_missing(path.read_text).split()
         sequence = int(parts[0])
     except (OSError, ValueError, IndexError):
         found = events.segments(scope)
@@ -681,7 +681,7 @@ def _read_cursor(scope, name, journal=None):
         _write_cursor(scope, name, last, journal)
         return last
     try:
-        stored = _cursor_journal_path(scope, name).read_text().strip() or None
+        stored = retry_missing(_cursor_journal_path(scope, name).read_text).strip() or None
     except OSError:
         stored = parts[1] if len(parts) > 1 else None  # the one release that kept it in the cursor itself
     if stored is not None and journal is not None and stored != journal:
@@ -693,7 +693,7 @@ def _read_cursor(scope, name, journal=None):
 
 
 def _write_cursor(scope, name, sequence, journal=None):
-    if not (Path(scope) / "universe.json").is_file():
+    if not is_file_replaced(Path(scope) / "universe.json"):
         return  # removed or moved meanwhile: a cursor must never bring its directories back
     path = _cursor_path(scope, name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -704,7 +704,7 @@ def _write_cursor(scope, name, sequence, journal=None):
     temporary.write_text(f"{sequence}\n")
     temporary.replace(path)
     mark = _cursor_journal_path(scope, name)
-    if journal and (_cursor_journals.get(str(path)) != journal or not mark.is_file()):
+    if journal and (_cursor_journals.get(str(path)) != journal or not is_file_replaced(mark)):
         temporary = mark.with_name(".events.cursor.journal.tmp")
         temporary.write_text(f"{journal}\n")
         temporary.replace(mark)
@@ -871,7 +871,7 @@ def _deliver(loaded, mv, scope, name, stopping=None):
     even another handler's of the same event: the one in flight finishes and is kept, the rest wait in the journal
     for the next worker."""
     scope = Path(scope)
-    if not (scope / "universe.json").is_file():
+    if not is_file_replaced(scope / "universe.json"):
         return
     journal, place = events.journal_id(scope), (loaded.name, str(scope))
     after = _read_cursor(scope, name, journal)
@@ -889,6 +889,10 @@ def _deliver(loaded, mv, scope, name, stopping=None):
     handlers = range(len(loaded.registrations.handlers))
     for page in range(PAGES_PER_POLL):
         found, gap = events.read(scope, page_after, limit=READ_LIMIT)
+        if (found or gap is not None) and events.journal_id(scope) != journal:
+            # A new/replaced journal appeared after the cursor and progress reads. Never dispatch that
+            # batch under the earlier generation; keep earlier pages' progress and try again next poll.
+            break
         if page == 0 and gap is not None:
             found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
         if not found:
@@ -921,7 +925,7 @@ def _restore_progress(loaded, scope, name, journal):
     if journal is None:
         return
     try:
-        recorded = json.loads((Path(scope) / "state" / "plugins" / name / HANDLERS).read_text())
+        recorded = json.loads(retry_missing((Path(scope) / "state" / "plugins" / name / HANDLERS).read_text))
     except (OSError, ValueError):
         return
     if not isinstance(recorded, dict) or recorded.get("journal") != journal:
@@ -938,7 +942,7 @@ def _restore_progress(loaded, scope, name, journal):
 def _save_progress(loaded, scope, name, journal):
     """Keep what each handler finished next to the cursor, when it changed, so a fresh worker (after a restart)
     never gives a handler an event it finished. Never recreates a removed universe; never raises."""
-    if journal is None or not (Path(scope) / "universe.json").is_file():
+    if journal is None or not is_file_replaced(Path(scope) / "universe.json"):
         return
     finished = {_handler_id(index, pattern, handler): _finished[(loaded.name, str(scope), index)]
                 for index, (pattern, handler) in enumerate(loaded.registrations.handlers)
@@ -1021,7 +1025,7 @@ def _gave_up(scope, name, seq, kind, handler, why):
     try:
         with lock(path.with_name(".delivery.lock")):
             try:
-                recorded = json.loads(path.read_text())
+                recorded = json.loads(retry_missing(path.read_text))
             except (OSError, ValueError):
                 recorded = {}
             entries = [item for item in recorded.get("gave_up", []) if isinstance(item, dict)][-19:]
@@ -1034,7 +1038,7 @@ def _gave_up(scope, name, seq, kind, handler, why):
 def gave_up(scope, name):
     """Sentences for the give-ups of plugin NAME in `scope` within the last GIVE_UPS_SHOWN seconds."""
     try:
-        recorded = json.loads((Path(scope) / "state" / "plugins" / name / DELIVERY).read_text())
+        recorded = json.loads(retry_missing((Path(scope) / "state" / "plugins" / name / DELIVERY).read_text))
     except (OSError, ValueError):
         return []
     found = []

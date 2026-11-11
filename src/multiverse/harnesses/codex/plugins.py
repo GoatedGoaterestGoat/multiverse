@@ -18,6 +18,7 @@ import tomllib
 from urllib.parse import parse_qsl, urlsplit
 
 from ...plugins import harness, manifest, trust
+from ...store import is_file_replaced
 
 
 CHECKED_VERSION = (0, 167, 1)  # native layouts and unmanaged side-thread protocol
@@ -313,7 +314,7 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
     directory = Path(context.values.get('agent_dir', ''))
     root = directory.parents[2] if len(directory.parents) > 2 else None
     bootstrap = json.loads(context.values['bootstrap_json'])
-    if root is None or not (root / 'universe.json').is_file():
+    if root is None or not is_file_replaced(root / 'universe.json'):
         return Prepared(harness.LaunchPlan(environment=dict(command.environment)), bootstrap)
     cli, version_read = None, False
     def selected_version():

@@ -9,6 +9,8 @@ that text appears in a surviving record. Repair the named damaged file. If `prop
 
 If `runtime.json` is readable but damaged, repair or restore it from a verified backup. The advice mentions restoring read access only when mv2 cannot read the file.
 
+On a network filesystem, a record can briefly appear missing while another process replaces it. mv2 retries missing-file reads of its replace-written state before applying each reader’s normal absence policy. A callback whose runtime record stays missing refuses with a file diagnostic. Resume and wake still require independent terminal and process checks before replacing a launch with missing authority. Retrying a read never retries a message, command, or launch. Permission errors and malformed records need repair; they are not treated as temporary absence.
+
 Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
 
 ## Start here

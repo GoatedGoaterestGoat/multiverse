@@ -102,7 +102,9 @@ progress.release()
             self.clock += 1
             if advance:
                 advance()
-        with patch.object(registration.time, 'monotonic', side_effect=lambda: self.clock), \
+        # Registration polls advance this clock by whole seconds; file retries are covered separately.
+        with patch('multiverse.store.MISSING_ATTEMPTS', 1), \
+             patch.object(registration.time, 'monotonic', side_effect=lambda: self.clock), \
              patch.object(registration.time, 'sleep', side_effect=tick), \
              patch.object(registration, 'process_snapshot', return_value=(self.owner['parent_started'], 'S')):
             registration.wait_for_release(self.launch, **limits)

@@ -12,7 +12,7 @@ import os
 from . import exact, parent, trash, tree, workspace
 from .agents import directory, runtime, update_runtime, name_matches, record_paths, orphaned, properties_missing
 from . import records, sessions
-from ..store import lock, now, read, write
+from ..store import exists_replaced, is_file_replaced, lock, now, read, write
 from ..terminal.tmux import observe, owned
 
 
@@ -34,7 +34,7 @@ def _stopped(agent_dir):
     previous, malformed = missing_runtime.recovery_snapshot(agent_dir)
     # _hold owns the launch lock. Broken terminal/generation identity cannot
     # turn an unmatched pane into permission to rename its live records.
-    if malformed is not None or missing_runtime.damage(agent_dir, previous) or not (agent_dir / 'runtime.json').exists():
+    if malformed is not None or missing_runtime.damage(agent_dir, previous) or not exists_replaced(agent_dir / 'runtime.json'):
         missing_runtime.require_stopped(agent_dir, properties, facts=previous, operation='move or remove')
         missing_runtime._unchanged(agent_dir, previous, malformed)
         return  # Absence was independently proved; never rewrite damaged facts.
@@ -120,7 +120,7 @@ def move_agent(root, reference, destination):
     properties = records.properties(agent_dir / "properties.json")
     if destination == root:
         raise ValueError(f'{properties["name"]} is already in that universe')
-    if not (destination / "harnesses" / properties["harness"] / "harness.json").is_file():
+    if not is_file_replaced(destination / "harnesses" / properties["harness"] / "harness.json"):
         raise ValueError(f'The destination has no {properties["harness"]} harness configured')
     for path in record_paths(destination):
         if name_matches(path, properties["name"]):

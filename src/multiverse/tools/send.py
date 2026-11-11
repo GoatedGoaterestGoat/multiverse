@@ -6,7 +6,7 @@ from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime, queued_prompts
 from ..terminal.recovery import Unreachable
-from ..store import lock, read
+from ..store import lock, read, retry_missing
 from ..universe import agents, blocked, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
@@ -155,7 +155,8 @@ def _unread_senders(caller):
 def _running(directory):
     """Observe only for readable failure advice; uncertainty never changes delivery evidence."""
     try:
-        return native.observe(read(directory / 'properties.json'), agents.runtime(directory))['live'] == 'alive'
+        properties = retry_missing(lambda: read(directory / 'properties.json'))
+        return native.observe(properties, agents.runtime(directory))['live'] == 'alive'
     except (OSError, ValueError, KeyError, RuntimeError):
         return False
 

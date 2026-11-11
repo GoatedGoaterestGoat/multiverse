@@ -9,7 +9,7 @@ import time
 from .. import universe
 from ..harnesses.types import NativeResult, QueuedPrompt, QueueReport, SessionHandle
 from ..plugins import access
-from ..store import now, open_regular
+from ..store import now, open_regular, open_replaced
 from ..universe import agents, mailbox, records
 from . import effects, native
 
@@ -49,9 +49,9 @@ def _unique(pairs):
     return result
 
 
-def _bytes(path):
+def _bytes(path, *, replaced=False):
     try:
-        with open_regular(path) as stream:
+        with (open_replaced(path) if replaced else open_regular(path)) as stream:
             value = stream.read(HISTORY_LIMIT + 1)
     except FileNotFoundError:
         return b''
@@ -98,7 +98,7 @@ def _ledger(directory, session):
     raw = _bytes(directory / 'inbox.jsonl')
     if raw and not raw.endswith(b'\n'):
         raise ValueError('The message history is being written or is incomplete')
-    states = json.loads(_bytes(directory / 'inbox-state.json') or b'{}', object_pairs_hook=_unique)
+    states = json.loads(_bytes(directory / 'inbox-state.json', replaced=True) or b'{}', object_pairs_hook=_unique)
     if not isinstance(states, dict):
         raise ValueError('The delivery ledger is not an object')
     found, confirmed, unproven = {}, set(), set()

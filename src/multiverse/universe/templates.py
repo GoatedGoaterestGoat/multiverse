@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
-from ..store import now, read, uid, write
+from ..store import retry_missing, is_file_replaced, exists_replaced, now, read, uid, write
 from . import trash
 TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 # What each definition file looked like when it was installed or last refreshed,
@@ -90,7 +90,7 @@ def create(destination, name, template="base", workdir=None):
 
 def _parent(root):
     candidate = root.parent.parent
-    return candidate if root.parent.name == "subverses" and (candidate / "universe.json").is_file() else None
+    return candidate if root.parent.name == "subverses" and is_file_replaced(candidate / "universe.json") else None
 
 
 def _event(root, kind, data):
@@ -127,7 +127,7 @@ def refresh_plan(root, template=None, take=()):
     """
     root = Path(root)
     meta = read(root / "universe.json")
-    manifest = read(root / MANIFEST) if (root / MANIFEST).is_file() else None
+    manifest = retry_missing(lambda: read(root / MANIFEST)) if is_file_replaced(root / MANIFEST) else None
     name = template or (manifest or {}).get("template") or meta.get("template")
     if not name:
         raise ValueError(f"{root} records no template; pass --template")
@@ -199,7 +199,7 @@ def refresh_apply(root, plan):
     backup = None
     for change in writes:
         target, origin = root / change["path"], source / change["path"]
-        if target.exists():
+        if exists_replaced(target):
             if backup is None:
                 backup = trash.entry(root, "refresh")
             saved = backup / change["path"]
@@ -221,13 +221,13 @@ def refresh_apply(root, plan):
     # Files kept as they are count as local edits of the current template from
     # now on: later template changes show up as conflicts, never silent overwrites.
     kept = {c["path"] for c in plan["changes"] if c["action"] in ("unknown", "local", "conflict", "deleted")}
-    previous = read(root / MANIFEST).get("files", {}) if (root / MANIFEST).is_file() else {}
+    previous = retry_missing(lambda: read(root / MANIFEST)).get("files", {}) if is_file_replaced(root / MANIFEST) else {}
     upstream = definition_files(source)
     files = {}
     for path, origin in upstream.items():
         if path in kept:
             files[path] = previous.get(path) or fingerprint(origin)
-        elif (root / path).is_file():
+        elif is_file_replaced(root / path):
             files[path] = fingerprint(root / path)
     for change in plan["changes"]:
         if change["action"] == "removed" and change["path"] in previous:

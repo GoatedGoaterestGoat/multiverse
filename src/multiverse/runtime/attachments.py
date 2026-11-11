@@ -12,9 +12,14 @@ from contextlib import contextmanager
 from pathlib import Path
 import time
 
-from ..store import existing_lock, lock, now, read, uid, write
+from ..store import existing_lock, lock, now, read, retry_missing, uid, write
 from ..universe import agents
 from .process import START, LINUX_START, valid_start, boot_time, process_started, process_snapshot, process_command
+
+
+def _read_record(path):
+    """Cleanup and role records are replaced while their owner is still running."""
+    return retry_missing(lambda: read(path))
 
 
 def begin(launch, started):
@@ -24,12 +29,12 @@ def begin(launch, started):
 
 def record_child(launch, pid, started):
     """Future launches retain their sampled child identity if runtime.json is lost."""
-    record = read(launch / 'cleanup.json')
+    record = _read_record(launch / 'cleanup.json')
     write(launch / 'cleanup.json', {**record, 'child_pid': pid, 'child_started': started, 'child_at': now()})
 
 
 def finish(launch, errors=()):
-    record = read(launch / 'cleanup.json')
+    record = _read_record(launch / 'cleanup.json')
     write(launch / 'cleanup.json', {**record, 'state': 'failed' if errors else 'complete',
                                    'completed_at': now(), 'errors': list(errors)})
 
@@ -62,7 +67,7 @@ def _prune_connections(launch):
     closed = []
     for path in (launch / 'roles').glob('connection-*.json'):
         try:
-            value = read(path)
+            value = _read_record(path)
         except (OSError, ValueError):
             continue  # Unknown evidence must never be discarded as closed.
         if (isinstance(value, dict) and value.get('schema') == 1 and value.get('launch_id') == launch.name
@@ -90,7 +95,10 @@ def connection_logger(launch, *, started=_UNSET):
         path = launch / 'roles' / ('connection-' + identifier + '.json')
         try:
             with _connections_lock(launch):
-                previous = read(path) if path.exists() else {}
+                try:
+                    previous = _read_record(path)
+                except FileNotFoundError:
+                    previous = {}
                 write(path, {**previous, 'schema': 1, 'launch_id': launch.name, 'role': value['role'],
                              'endpoint': value['endpoint'], 'state': 'closed' if value['state'] == 'closed' else 'active',
                              'pid': os.getpid(), 'pid_started': started, 'at': previous.get('at') or now(),
@@ -125,14 +133,14 @@ class Role:
 
     def claimed(self, pid, started):
         with existing_lock(self.path.with_suffix('.lock')):
-            current = read(self.path)
+            current = _read_record(self.path)
             if current['state'] != 'closed':
                 write(self.path, {**current, 'state': 'active', 'pid': pid, 'pid_started': started, 'at': now()})
 
     def close(self):
         try:
             with existing_lock(self.path.with_suffix('.lock')):
-                current = read(self.path)
+                current = _read_record(self.path)
                 if current['state'] != 'closed':
                     write(self.path, {**current, 'state': 'closed', 'closed_at': now()})
         except FileNotFoundError:
@@ -142,7 +150,7 @@ class Role:
     def existing(cls, path):
         role = object.__new__(cls)
         role.path = Path(path)
-        role.record = read(role.path)
+        role.record = _read_record(role.path)
         return role
 
 
@@ -307,11 +315,13 @@ def problem(directory, facts):
     # stopped_at/observed exit postdate process creation; started_at does not.
     exited = isinstance(facts.get('exit_code'), int) and not isinstance(facts.get('exit_code'), bool)
     exit_at = facts.get('stopped_at') or facts.get('dormant_at') or (facts.get('observed_at') if exited else None)
-    if path.exists():
-        try:
-            record = read(path)
-        except (OSError, ValueError):
-            return f'The previous terminal cleanup record cannot be read: {path}; repair it before retrying'
+    try:
+        record = _read_record(path)
+    except FileNotFoundError:
+        record = _UNSET
+    except (OSError, ValueError):
+        return f'The previous terminal cleanup record cannot be read: {path}; repair it before retrying'
+    if record is not _UNSET:
         if not isinstance(record, dict) or record.get('launch_id') != launch_id or record.get('schema') != 1:
             return f'The previous terminal has an invalid cleanup record: {path}; repair it before retrying'
         complete = record.get('state') == 'complete'
@@ -332,7 +342,7 @@ def problem(directory, facts):
         with _connections_lock(launch, create=False):
             for path in (launch / 'roles').glob('*.json'):
                 try:
-                    role = read(path)
+                    role = _read_record(path)
                 except FileNotFoundError:
                     raise
                 except (OSError, ValueError):

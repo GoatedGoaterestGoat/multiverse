@@ -3,6 +3,7 @@ from itertools import chain
 from pathlib import Path
 
 from .. import universe
+from ..store import exists_replaced
 from . import agents, records
 
 
@@ -55,7 +56,7 @@ def _top(root):
 def _find(scope, identity):
     # Normally one record read. Also cover a legacy folder named differently from its saved ID.
     direct = scope / 'state' / 'agents' / identity / 'properties.json'
-    paths = [direct] if direct.exists() else agents.record_paths(scope)
+    paths = [direct] if exists_replaced(direct) else agents.record_paths(scope)
     for path in paths:
         try:
             value = records.properties(path)

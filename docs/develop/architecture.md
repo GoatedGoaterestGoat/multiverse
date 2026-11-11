@@ -115,6 +115,20 @@ An inbox-only send upgraded because of a blocked-on dependency also saves its or
 
 The recipient sees `Message from NAME:` followed by the message, as built by `native.framed_text`. The attempt is saved as `submitting` before the native call, so a crash can't turn an uncertain send into a resend. [Harness adapters](harness-adapters.md#delivery-results-and-receipts) lists the states.
 
+## Reading replaced records
+
+Readers of mv2's atomically replaced state explicitly use `store.retry_missing`, `open_replaced`, or a presence predicate that uses the same retry. An `ENOENT` from the filesystem gets at most five attempts, with 5 ms pauses and a 50 ms retry budget. Other errors and invalid content keep the reader's existing policy. The budget bounds retry delays, not an operating-system call that stalls. Generic `store.read` and write operations do not retry. Known-path readers can stop after a missing parent directory corroborates absence: replacing a file does not remove its containing directory. Directory relocation and filesystem outages are separate from this per-record retry.
+
+The final missing-file result stays local to the reader: absent focus is off, an absent cursor is zero, optional ledgers and indexes are empty, and required launch authority is an error. A missing runtime with launch history still enters the independent terminal/process checks before resume or wake; it is not proof of a never-launched agent. Inbox ledgers do not inherit runtime-only requirements. Exclusive reservations, answer pickup, locks, native operations, and filesystem mutations are never replayed by this helper.
+
+Listings and doctor check their optional records in shared retry rounds, then use that operation's absence snapshot for diagnostics. The list, doctor, inspect and plugin-summary CLI commands include universe discovery and optional metadata in the same batch. Diagnostic discovery follows only the requested universe topology, never agent launch or artifact directories. Each topology walk checks sibling universe markers together in fresh retry rounds, so abandoned subverse folders do not each add a delay. Cold plugin-load bookkeeping keeps its separate fresh read; it is not part of the diagnostic absence snapshot. First-use migration reads manifest filenames without loading unrelated plugin switches. Events with no subscribing manifest also need no switch read. Repeated diagnostic reads try the file again, but do not repeat the delay for an absence already observed in that operation. Fresh launch, delivery, permission and locked write reads never consult this snapshot. Universe discovery batches candidate markers in precedence order; a recovered nearer universe still wins. First-use migration returns the resolved root so the command does not repeat the discovery walk. Inbox readers batch those checks while holding their inbox lock. A file observed present still uses its normal reader; unreadable files retain their diagnostics. No absence snapshot carries into a launch, delivery, answer, or locked session reconciliation.
+
+The session lineage journal, `sessions.jsonl`, is appended and flushed, never atomically replaced. Its parser returns an empty journal immediately when the file is absent. Every later authority check opens it afresh, so a newly appended transition is visible without a negative cache. Replaced properties and runtime records keep their retries.
+
+One-shot run placement checks an ancestor's universe marker only when the destination falls within that ancestor's resolved `state`, `subverses`, or `trash` folder. Other ancestors cannot forbid that placement, so they need no marker read. Relevant markers retain their replacement retries, including when a protected folder is a symbolic link.
+
+Plugin event workers recheck the journal ID before dispatching a batch. If the journal was created or replaced during the read, the worker defers the batch to its next poll instead of recording progress under the wrong journal.
+
 ## How identity works
 
 | ID | Where it lives |

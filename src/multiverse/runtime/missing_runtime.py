@@ -13,7 +13,7 @@ import re
 from . import effects
 from .. import harnesses
 from ..harnesses.types import NativeResult
-from ..store import lock, now, read, write
+from ..store import exists_replaced, retry_missing, lock, now, read, write
 from ..terminal.tmux import Tmux, matches, observe
 from ..universe import agents, mailbox, records
 from . import attachments
@@ -24,7 +24,18 @@ NOTICE = 'runtime.json was missing; no running terminal was found, so this start
 
 
 def launches(directory):
-    return sorted(path for path in (directory / 'launches').glob('*') if path.is_dir())
+    path = directory / 'launches'
+    try:
+        try:
+            entries = retry_missing(lambda: os.scandir(path))
+        except FileNotFoundError:
+            return []
+        with entries:
+            return sorted(Path(entry.path) for entry in entries if entry.is_dir())
+    except OSError as error:
+        raise records.RecordError(directory / 'runtime.json',
+            f'cannot inspect launch history {path}: {error.strerror or type(error).__name__}; '
+            'restore read access before deciding whether this agent has launched') from None
 
 
 def _uuid(value):
@@ -57,7 +68,7 @@ def recovery_snapshot(directory):
         return records.runtime(path), None
     except records.RecordError:
         try:
-            with path.open('rb') as stream:
+            with retry_missing(lambda: path.open('rb')) as stream:
                 raw = stream.read(records.MAX_BYTES + 1)
         except FileNotFoundError:
             return {}, None
@@ -91,7 +102,7 @@ def damage(directory, facts):
     reason = None
     if not facts:
         if launches(directory):
-            reason = ('is missing' if not (directory / 'runtime.json').exists()
+            reason = ('is missing' if not exists_replaced(directory / 'runtime.json')
                       else 'launch_id is missing')
     elif not _uuid(facts.get('launch_id')):
         reason = 'launch_id must be a canonical UUID'
@@ -104,7 +115,7 @@ def damage(directory, facts):
         # is a real historical record, not missing terminal authority. Cleanup
         # ownership is still checked before its next launch.
         if (facts.get('state') in ('running', 'ending') or facts.get('pid') or facts.get('runner_pid')
-                or (launch / 'request.json').exists() or (launch / 'ready').exists()):
+                or exists_replaced(launch / 'request.json') or (launch / 'ready').exists()):
             reason = 'tmux terminal identity is missing'
     else:
         terminal = facts['tmux']
@@ -182,7 +193,7 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
             raise _problem(directory, f'cannot inspect invalid launch folder {launch}')
         path = launch / 'request.json'
         try:
-            path.stat()
+            retry_missing(path.stat)
         except FileNotFoundError:
             continue  # Preparation can fail before publishing a native request.
         except OSError as error:
@@ -258,7 +269,7 @@ def require_stopped(directory, properties, socket_path=None, *, facts=None, oper
     for launch in launches(directory):
         if reason := attachments.problem(directory, {'launch_id': launch.name}):
             raise _problem(directory, reason, recommend_kill=False)
-    if facts or (directory / 'runtime.json').exists():
+    if facts or exists_replaced(directory / 'runtime.json'):
         return ['runtime.json had damaged launch authority; no running terminal or recorded process was found, '
                 'so this starts a new launch']
     return [NOTICE] if launches(directory) else []
@@ -307,10 +318,10 @@ def kill(root, directory, *, attachment_only=False):
         properties = ({'id': directory.name, 'name': directory.name,
                        'universe_id': read(root / 'universe.json')['id']} if missing_properties
                       else records.properties(directory / 'properties.json'))
-        if (not missing_properties and malformed is None and (directory / 'runtime.json').exists() and damage(directory, previous) is None
+        if (not missing_properties and malformed is None and exists_replaced(directory / 'runtime.json') and damage(directory, previous) is None
                 and mismatch(directory, previous, observe(properties, previous)) is None):
             return None  # Caller retries its normal path; never replace fresh facts.
-        condition = ('was missing' if not (directory / 'runtime.json').exists()
+        condition = ('was missing' if not exists_replaced(directory / 'runtime.json')
                      else 'had damaged launch authority')
         found = discover(directory, properties, facts=previous, requestless=missing_properties)
         saved_launch = previous.get('launch_id')

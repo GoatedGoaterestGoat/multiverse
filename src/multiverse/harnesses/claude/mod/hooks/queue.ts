@@ -7,6 +7,7 @@
 // runs what it queued before it goes idle). A reload starts again from nothing and doesn't know what the code
 // before it handed over, so until then it is "unknown" with the reason.
 import type { EngineInterface } from 'claude-code'
+import { retryMissing } from './records'
 
 export const QUEUE_FILE = 'claude-queue.json'
 const SCHEMA = 1
@@ -52,11 +53,11 @@ export async function reloaded($: EngineInterface): Promise<boolean> {
   if (!directory || !launch) return true
   const names = async (file: string, field: string) => {
     try {
-      const data: unknown = JSON.parse(await $.fs.read(`${directory}/${file}`))
+      const data: unknown = JSON.parse(await retryMissing($, () => $.fs.read(`${directory}/${file}`)))
       const record = typeof data === 'object' && data !== null ? data as Record<string, unknown> : {}
       return record.launch_id === launch && (field === '' || (record[field] !== undefined && record[field] !== null))
     } catch {
-      return false  // no file yet, or one being written: says nothing about this launch
+      return false  // absent after the bounded retry, or unreadable: says nothing about this launch
     }
   }
   return (await names(QUEUE_FILE, '')) || (await names('runtime.json', 'native_bridge'))

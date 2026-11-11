@@ -13,13 +13,18 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime
-from multiverse.store import lock, now, read, write
+from multiverse.store import exists_replaced, lock, now, read, retry_missing, write
 from multiverse.runtime.process import process_started
 
 
 STARTUP_SECONDS = 2
 OUTPUT_LINES = 40
 OUTPUT_BYTES = 8192
+
+
+def _read_record(path):
+    """Read this runner's replace-published identity, runtime or launch request."""
+    return retry_missing(lambda: read(path))
 
 
 def bounded_output(text):
@@ -37,7 +42,7 @@ def launch_diagnostic(agent_dir, launch_id, reason):
         return {}
     output, unavailable = '', None
     try:
-        backend, pane = owned(read(agent_dir / 'properties.json'), facts, states=('alive', 'ending', 'stopped'))
+        backend, pane = owned(_read_record(agent_dir / 'properties.json'), facts, states=('alive', 'ending', 'stopped'))
         output = bounded_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane))
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
         unavailable = bounded_output(str(error))
@@ -59,14 +64,14 @@ def cleanup_wrapper(launch):
     """Run outside the pane so removing it cannot interrupt its own cleanup."""
     from multiverse.terminal.tmux import owned, observe
     agent_dir = launch.parent.parent
-    if not (agent_dir / 'properties.json').exists():
+    if not exists_replaced(agent_dir / 'properties.json'):
         return
     with lock(agent_dir / '.launch.lock'):
         facts = runtime(agent_dir)
         if facts.get('launch_id') != launch.name or 'exit_code' not in facts or facts.get('ending_at'):
             return  # A replacement or an explicit kill owns its own teardown.
         try:
-            properties = read(agent_dir / 'properties.json')
+            properties = _read_record(agent_dir / 'properties.json')
             try:
                 backend, pane = owned(properties, facts, states=('stopped',))
             except ValueError:
@@ -123,7 +128,7 @@ class UsagePublisher:
         try:
             def changes(facts):
                 from multiverse.runtime.navigation import pending
-                properties = read(self.agent_dir / 'properties.json')
+                properties = _read_record(self.agent_dir / 'properties.json')
                 if (facts.get('state') != 'running' or pending(facts)
                         or not usage.get('native_session_id')
                         or properties.get('native_session_id') != usage['native_session_id']):
@@ -144,7 +149,7 @@ class RelayPublisher:
 
     def __call__(self, detail):
         try:
-            bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+            bound = _read_record(self.agent_dir / 'properties.json').get('native_session_id')
         except FileNotFoundError:
             return  # Removed agents have no transport state to publish.
         recovery = ('Kill then resume the agent; native work may still be running.' if bound else
@@ -202,7 +207,7 @@ class StatusWatcher:
             def changes_for(facts):
                 from multiverse.runtime.navigation import pending
                 if (pending(facts) or native_id is not None and (
-                        read(self.agent_dir / 'properties.json').get('native_session_id') != native_id
+                        _read_record(self.agent_dir / 'properties.json').get('native_session_id') != native_id
                         or facts.get('session_generation', 0) != generation)):
                     return None
                 if facts.get('state') != 'running':
@@ -228,7 +233,7 @@ class StatusWatcher:
         from multiverse import harnesses
         from multiverse.runtime import rpc
         from multiverse.harnesses.types import SessionHandle
-        properties = read(self.agent_dir / 'properties.json')
+        properties = _read_record(self.agent_dir / 'properties.json')
         adapter = harnesses.load(self.root, properties['harness'])
         describe = getattr(adapter, 'status_watch', None)
         if describe is None:
@@ -238,8 +243,8 @@ class StatusWatcher:
         generation = None
         try:
             while not self.stopped.is_set():
-                facts = read(self.agent_dir / 'runtime.json')
-                properties = read(self.agent_dir / 'properties.json')
+                facts = _read_record(self.agent_dir / 'runtime.json')
+                properties = _read_record(self.agent_dir / 'properties.json')
                 if facts.get('launch_id') != self.launch_id or facts.get('state') not in ('starting', 'running'):
                     return
                 if facts.get('state') == 'starting':
@@ -299,7 +304,7 @@ class StartupDelivery:
         from multiverse.runtime import native
         error = 'Launch ended before startup delivery; use deliver AGENT --retry'
         try:
-            adapter = harnesses.load(self.root, read(self.agent_dir / 'properties.json')['harness'])
+            adapter = harnesses.load(self.root, _read_record(self.agent_dir / 'properties.json')['harness'])
             while not self.stopped.is_set():
                 result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5,
                                               include_delivery=False, settle_on_timeout=False)
@@ -387,7 +392,7 @@ class RefusalMonitor:
                             and facts.get('state') == 'running'
                             and (facts.get('native_relay') or {}).get('state') == 'ready'):
                         return  # Structured binding succeeded; later navigation is not a launch refusal.
-                    properties = read(self.agent_dir / 'properties.json')
+                    properties = _read_record(self.agent_dir / 'properties.json')
                     backend, pane = owned(properties, facts)
                     text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
                     cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}\t#{pane_width}').split('\t')
@@ -485,10 +490,10 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
     with lock(directory / '.launch.lock', create_parent=False):
         facts = runtime(directory)
         if (not eligible(facts)
-                or (launch / 'ready-event').exists() or read(launch / 'request.json') != request):
+                or (launch / 'ready-event').exists() or _read_record(launch / 'request.json') != request):
             return None
         try:
-            properties = read(directory / 'properties.json')
+            properties = _read_record(directory / 'properties.json')
             if properties.get('native_session_id') != native_id:
                 return None  # A newly bound conversation is already native startup evidence.
             backend, pane = owned(properties, facts, states=('alive', 'stopped'))
@@ -549,7 +554,7 @@ def _wake_evidence_inputs(launch, environment, message_id):
     from multiverse.runtime.wake import prompt_context
     from multiverse.universe.mailbox import message_record
     directory = launch.parent.parent
-    properties, facts = read(directory / 'properties.json'), runtime(directory)
+    properties, facts = _read_record(directory / 'properties.json'), runtime(directory)
     if facts.get('launch_id') != launch.name:
         return None
     adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
@@ -652,7 +657,7 @@ def main():
     try:
         registration.wait_for_release(launch, check_stop=check_stop)
         check_stop()
-        request = read(launch / "request.json")
+        request = _read_record(launch / "request.json")
         env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
             endpoint = Path(request['rpc_proxy']['socket_path'] if request.get('rpc_proxy') else request['control_endpoint']['address'])
@@ -674,7 +679,7 @@ def main():
         if request.get('rpc_proxy'):
             from multiverse import harnesses
             from multiverse.runtime import rpc
-            properties = read(agent_dir / 'properties.json')
+            properties = _read_record(agent_dir / 'properties.json')
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             def bound(native_id):
                 if runtime(agent_dir).get('native_refusal'):
@@ -740,7 +745,7 @@ def main():
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
                                    plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
                     with lock(agent_dir / '.properties.lock'):
-                        current_properties = read(agent_dir / 'properties.json')
+                        current_properties = _read_record(agent_dir / 'properties.json')
                         if request.get('previous_agent_identity') is None:
                             current_properties.pop('agent_identity', None)
                         else:
@@ -766,7 +771,7 @@ def main():
         adapter = None
         if request.get('observe_refusal') or request.get('startup_retry'):
             from multiverse import harnesses
-            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
+            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), _read_record(agent_dir / 'properties.json')['harness'])
         # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
         if request.get('observe_refusal') and attachment.get('readiness') == 'process':
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
@@ -783,7 +788,7 @@ def main():
             check_stop()
             return process
         child_at = time.monotonic()
-        initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
+        initial_native_id = _read_record(agent_dir / 'properties.json').get('native_session_id')
         spawn(request)
         if initial_native_id is None and not request.get('control_endpoint') and not request.get('rpc_proxy'):
             from multiverse.runtime.binding_requests import BindingRequests

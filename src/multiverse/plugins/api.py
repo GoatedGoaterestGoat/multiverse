@@ -33,6 +33,7 @@ import time
 
 from . import access as levels, agent_files, harness, loader, run_records, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
+from ..store import exists_replaced, retry_missing, is_file_replaced
 
 VERSION = loader.API_VERSION
 DELETE = settings_files.DELETE
@@ -667,7 +668,7 @@ def _agent_storage(agent, harness, family, keys):
         raise Error(f"{agent.name} runs harness {agent.harness!r}, not {harness!r}")
     from ..store import read
     try:
-        properties = read(agent.directory / "properties.json")
+        properties = retry_missing(lambda: read(agent.directory / "properties.json"))
     except (OSError, ValueError):
         return None, None
     if not isinstance(properties, dict):
@@ -726,9 +727,9 @@ def _never_launched(directory, properties):
     directory = Path(directory)
     try:
         runtime = directory / "runtime.json"
-        if runtime.exists() and read(runtime) != {}:
+        if exists_replaced(runtime) and retry_missing(lambda: read(runtime)) != {}:
             return False
-        if (directory / "sessions.jsonl").exists():
+        if exists_replaced(directory / "sessions.jsonl"):
             return False
         launches = directory / "launches"
         return not launches.exists() or (launches.is_dir() and not any(launches.iterdir()))
@@ -906,7 +907,7 @@ class Plugin:
         """The agent whose directory (state/agents/<id>) this is, in whichever universe holds it (needs agents.read)."""
         directory = Path(directory).resolve()
         root = directory.parent.parent.parent
-        if directory.parent.name != "agents" or not (root / "universe.json").is_file():
+        if directory.parent.name != "agents" or not is_file_replaced(root / "universe.json"):
             raise Error(f"{directory} is not an agent's directory")
         return self.universe(root).agent(directory.name)
 

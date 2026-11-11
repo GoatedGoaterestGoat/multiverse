@@ -39,7 +39,7 @@ from ..base import ConfiguredAdapter
 from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
-from ...store import read
+from ...store import read, retry_missing
 from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply, SlashCommand
 from . import models as model_table
 from . import pane
@@ -269,7 +269,7 @@ def had_conversation(session, environment):
 def _stored_message(directory, native_id):
     """A message core sent to this session whose row the mod confirmed was stored in the conversation."""
     try:
-        state = json.loads((directory / 'inbox-state.json').read_text())
+        state = retry_missing(lambda: read(directory / 'inbox-state.json'))
     except (OSError, ValueError):
         return False
     for message_id, record in state.items() if isinstance(state, dict) else ():
@@ -294,7 +294,7 @@ def _stored_message(directory, native_id):
 def _context_since_move(directory, native_id):
     """Context the mod reported during the last launch, after the agent last moved to this session (/clear)."""
     try:
-        usage = json.loads((directory / 'runtime.json').read_text()).get('usage')
+        usage = retry_missing(lambda: read(directory / 'runtime.json')).get('usage')
         tokens = usage['context']['tokens']
         reported = moment(usage['reported_at'])
     except (OSError, ValueError, AttributeError, KeyError, TypeError):
@@ -559,7 +559,8 @@ def command_table():
 
 def _agent_name(session):
     """The agent's name from its record beside the session file, for advice that names it; None when unreadable."""
-    record = _json_record(Path(session.session_file).parent / 'properties.json', 1 << 20) if session.session_file else None
+    record = (_json_record(Path(session.session_file).parent / 'properties.json', 1 << 20, replaced=True)
+              if session.session_file else None)
     name = record.get('name') if record else None
     return name if isinstance(name, str) and name.strip() and not any(c.isspace() for c in name) else None
 
@@ -611,12 +612,12 @@ RECEIPT_BYTES = 1 << 16  # a receipt is a few short fields; anything larger isn'
 ANSWER_BYTES = 1 << 22  # an ask answer holds the model's text
 
 
-def _json_record(path, limit=RECEIPT_BYTES):
+def _json_record(path, limit=RECEIPT_BYTES, *, replaced=False):
     """A small JSON object file: the dict, None when there is no file, False when it can't be read, isn't a regular
     file, is over `limit` bytes or isn't a JSON object. It is opened without waiting (open_regular): core reads
     receipts while holding the agent's launch and delivery locks, so a FIFO at its name must never block."""
     try:
-        with open_regular(path) as handle:
+        with (retry_missing(lambda: open_regular(path)) if replaced else open_regular(path)) as handle:
             data = handle.read(limit + 1)
     except FileNotFoundError:
         return None
@@ -1689,7 +1690,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         reported = {}
         try:
             # The agent's runtime record; a missing one leaves nothing reported.
-            facts = read(Path(session.session_file).parent / 'runtime.json')
+            facts = retry_missing(lambda: read(Path(session.session_file).parent / 'runtime.json'))
             mod = facts.get('usage')
             if isinstance(mod, dict) and session.launch_id and facts.get('launch_id') == session.launch_id:
                 reported = {key: mod[key] for key in ('context', 'cost_usd', 'rate_limits') if key in mod}
@@ -1932,7 +1933,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         if problem is not None:
             return problem
         read_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-        return NativeResult('ok', value=queue_report(_json_record(Path(session.session_file).parent / QUEUE_FILE), session,
+        return NativeResult('ok', value=queue_report(_json_record(Path(session.session_file).parent / QUEUE_FILE,
+                                                                replaced=True), session,
                                                      read_at))
 
     def waiting_prompts(self, session, executor=None):

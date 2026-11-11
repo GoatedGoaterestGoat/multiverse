@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 
 from . import universe
+from .store import observations
 from .universe import templates
 from .tools._common import add_universe, output
 
@@ -140,6 +141,21 @@ def first_use_migration(root):
             print(line, file=sys.stderr)
     except Exception as error:
         print(f"mv2: could not check for settings to convert: {error}", file=sys.stderr)
+    return resolved
+
+
+def _diagnostic_paths(root, *, recursive=False):
+    """Optional list/doctor inputs; authority reads do not use this snapshot."""
+    from .runtime.lifecycle import observation_paths
+    from .plugins import loader, trust
+    scopes = universe.tree(root) if recursive else (root,)
+    paths = [trust.user_directory() / loader.LOAD_TIMEOUTS]
+    for scope in scopes:
+        directories = [path for path in (scope / 'state' / 'agents').glob('*') if path.is_dir()]
+        paths.extend(observation_paths(directories))
+        paths.extend(scope / name for name in ('plugins.json', 'state/plugins/migrate-failed.json',
+                                               'state/plugins/host/status.json'))
+    return paths
 
 
 def main():
@@ -150,10 +166,23 @@ def main():
     except ValueError as error:  # a plugin's command that cannot load says why
         print(f"mv2: {error}", file=sys.stderr)
         sys.exit(1)
+    absent = frozenset()
+    diagnostic = (args.action in ('list', 'doctor', 'inspect') or
+                  args.action == 'plugins' and args.plugin_action in ('list', 'info'))
+    if diagnostic:
+        try:
+            recursive = args.action == 'doctor' or getattr(args, 'recursive', False)
+            args.root, absent = universe.resolution(
+                args.root, observe=lambda root: _diagnostic_paths(root, recursive=recursive))
+        except (OSError, ValueError):
+            pass  # The command reports its normal resolution error.
     if (args.action or 'tui') not in NO_FIRST_USE_MIGRATION:
-        first_use_migration(args.root)
+        resolved = first_use_migration(args.root)
+        if resolved is not None:
+            args.root = resolved
     render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
-    output(lambda: run(args, cli=True), render=render)
+    with observations(absent):
+        output(lambda: run(args, cli=True), render=render)
 
 
 if __name__ == "__main__":

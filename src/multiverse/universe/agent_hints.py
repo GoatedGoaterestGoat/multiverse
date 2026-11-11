@@ -7,7 +7,7 @@ import stat
 import time
 
 from ..display import clean
-from ..store import open_regular
+from ..store import open_replaced, retry_missing
 from . import records
 
 
@@ -50,11 +50,11 @@ class Search:
         if not self.ready():
             return None
         try:
-            info = path.lstat()
+            info = retry_missing(path.lstat, deadline=self.deadline)
             if not stat.S_ISREG(info.st_mode) or info.st_size > min(FILE_BYTES, self.bytes):
                 return None
             limit = min(FILE_BYTES, self.bytes)
-            with open_regular(path) as stream:
+            with open_replaced(path, deadline=self.deadline) as stream:
                 raw = stream.read(limit + 1)
             self.bytes -= len(raw)
             if len(raw) > limit:
@@ -100,7 +100,7 @@ def hint(root, reference, option='-u'):
         while top.parent.name == 'subverses' and search.ready():
             candidate = top.parent.parent
             try:
-                regular = stat.S_ISREG((candidate / 'universe.json').lstat().st_mode)
+                regular = stat.S_ISREG(retry_missing((candidate / 'universe.json').lstat, deadline=search.deadline).st_mode)
             except OSError:
                 break
             if not regular:

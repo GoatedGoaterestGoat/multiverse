@@ -14,7 +14,7 @@ from ..harnesses.types import (AttachmentSpec, Message, NativeEndpoint, NativeRe
                               PromptAnswer, PromptChoice, PromptInput, PromptList, PromptQuestion, PromptResult,
                               SessionHandle, WaitingPrompt)
 from ..plugins import access, agent_files
-from ..store import lock, now
+from ..store import lock, now, retry_missing
 from ..universe import agents, records
 from . import delivery_evidence, effects, native
 
@@ -162,7 +162,7 @@ def waiting(root, agent, *, caller=None):
                                                 if session.status == 'waiting' or not p.requires_waiting))
             found = replace(found, prompts=tuple(
                 replace(p, answerable=False, reason='An answer was already recorded; read --result. Do not answer again.')
-                if not p.requires_waiting and os.path.lexists(directory / 'prompts' / (p.id + '.json')) else p
+                if not p.requires_waiting and _record_present(directory / 'prompts' / (p.id + '.json')) else p
                 for p in found.prompts))
             if who['kind'] == 'plugin':
                 found = replace(found, prompts=tuple(replace(p, choices=tuple(c for c in p.choices if not c.saves_rule))
@@ -591,13 +591,18 @@ def result(root, agent, id, *, caller=None):
                      reason='The agent is busy changing state; read --result again. Nothing was resent.')
 
 
+def _record_present(path):
+    try:
+        retry_missing(path.lstat)  # A dangling link or unreadable record is damage, not an absent attempt.
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _record(directory, id, *, missing_ok=False):
     path = directory / 'prompts' / (id + '.json')
-    if missing_ok:
-        try:
-            path.lstat()  # A dangling link or unreadable record is damage, not an absent attempt.
-        except FileNotFoundError:
-            return None
+    if missing_ok and not _record_present(path):
+        return None
     record = records._object(path)
     try:
         value = PromptResult(**record['result'])
@@ -716,7 +721,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
                 lock(directory / '.delivery.lock', create_parent=False, blocking=False), \
                 lock(directory / '.prompts.lock', create_parent=False, blocking=False):
             path = directory / 'prompts' / (id + '.json')
-            if path.exists() or path.is_symlink():
+            if _record_present(path):
                 return _refused(id, 'An answer was already recorded for this prompt; read --result. Nothing was resent.', 'already_answered')
             try:
                 connected = _connect(root, directory)

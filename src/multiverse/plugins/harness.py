@@ -18,6 +18,7 @@ import subprocess
 
 from . import agent_files, loader
 from .manifest import LATER_CORE_ITEMS
+from ..store import is_file_replaced
 
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
@@ -337,7 +338,7 @@ def universe_of(agent_dir):
         return None
     directory = Path(agent_dir)
     root = directory.parent.parent.parent
-    if directory.parent.name != "agents" or not (root / "universe.json").is_file():
+    if directory.parent.name != "agents" or not is_file_replaced(root / "universe.json"):
         return None
     return root
 

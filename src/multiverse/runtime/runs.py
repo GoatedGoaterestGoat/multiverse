@@ -24,6 +24,7 @@ from ..harnesses.base import PARENT_CLAUDE
 from ..harnesses.types import (CommandSpec, ModelCheck, RunDirectory, RunFailure, RunFile, RunImage, RunLink,
                               RunMessage, RunOptions, RunOutcome, RunPlan, RunReply, RunRequest, RunRow, RunText)
 from ..plugins import access, agent_files
+from ..store import is_file_replaced
 from . import effects, run_files, run_supervisor
 from .process import process_started
 
@@ -195,12 +196,24 @@ def _run_parent(adapter, plugin, agent_directory, run_base):
 def _storage_problem(root, destination):
     """The final placement and protected namespaces must be compared through their links."""
     destination = Path(destination).resolve()
-    universes = {Path(root).resolve()}
-    universes.update(parent for parent in destination.parents if (parent / 'universe.json').is_file())
-    protected = ((universe / name).resolve() for universe in universes for name in ('state', 'subverses', 'trash'))
-    if (agent_files.agent_folder(destination) is not None
-            or any(destination == folder or folder in destination.parents for folder in protected)):
-        return "One-shot run storage must be outside agent folders and universes' state, subverses and trash"
+    root = Path(root).resolve()
+    problem = "One-shot run storage must be outside agent folders and universes' state, subverses and trash"
+    if agent_files.agent_folder(destination) is not None:
+        return problem
+    for universe in {root, *destination.parents}:
+        protected = ((universe / name).resolve() for name in ('state', 'subverses', 'trash'))
+        # A marker cannot forbid a destination outside these folders. Compare
+        # resolved paths first, retaining protected-directory symlink aliases.
+        try:
+            inside = any(destination == folder or folder in destination.parents for folder in protected)
+        except (OSError, RuntimeError):
+            # An unrelated ancestor's broken sibling is not a universe error.
+            # Prove its marker before preserving the original resolve failure.
+            if universe == root or is_file_replaced(universe / 'universe.json'):
+                raise
+            continue
+        if inside and (universe == root or is_file_replaced(universe / 'universe.json')):
+            return problem
     return None
 
 

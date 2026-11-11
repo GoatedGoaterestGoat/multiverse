@@ -1,7 +1,8 @@
 // Offline tests of the queue file the mod keeps for mv2 (hooks/queue.ts): `claude plugin test`. The test's hooks stand
 // in for Claude's core and the host: a file system the mod's files land in, and Claude taking, storing or refusing.
-import type { On } from 'claude-code'
+import type { EngineInterface, On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import { reloaded } from '../hooks/queue'
 
 const FILE = '/agent/claude-queue.json'
 const FOLLOW_UP = '7b2c0c1e-1111-4222-8333-944455556601'
@@ -136,6 +137,35 @@ describe('queue file', () => {
   // claim to list everything; a new launch's first load can, since Claude's queue starts empty.
   const thisLaunch = JSON.stringify({ launch_id: 'launch-1', native_bridge: 'claude-mod-v4' })
   const before = JSON.stringify({ schema: 1, launch_id: 'launch-1', coverage: 'complete', entries: [] })
+  // Brief replacement gaps in both records must not make a reload claim complete queue coverage.
+  const gaps: [string, Record<string, string>, number, string, boolean, number[]][] = [
+    ['queue briefly missing', { [FILE]: before }, 2, 'ENOENT', true, [3, 0]],
+    ['runtime briefly missing', { [FILE]: '{}', '/agent/runtime.json': thisLaunch }, 2, 'ENOENT', true, [3, 3]],
+    ['both permanently missing', {}, Infinity, 'ENOENT', false, [5, 5]],
+    ['permission refused', {}, Infinity, 'EACCES', false, [1, 1]],
+    ['malformed records', { [FILE]: '{', '/agent/runtime.json': '{' }, 0, 'ENOENT', false, [1, 1]],
+  ]
+  for (const [name, files, failures, code, expected, attempts] of gaps) {
+    test(`reload detection with ${name} preserves evidence and bounds absence`, async () => {
+      let now = 0
+      const reads = new Map<string, number>()
+      const delays: number[] = []
+      const engine = {
+        env: { get: async (key: string) => key === 'MV2_AGENT_DIR' ? '/agent' : 'launch-1' },
+        clock: { now: async () => now, sleep: async (delay: number) => { delays.push(delay); now += delay } },
+        fs: { read: async (path: string) => {
+          const count = (reads.get(path) ?? 0) + 1
+          reads.set(path, count)
+          if (count <= failures || files[path] === undefined) throw Object.assign(new Error(code), { code })
+          return files[path]
+        } },
+      } as unknown as EngineInterface
+      expect(await reloaded(engine)).toBe(expected)
+      expect([reads.get(FILE) ?? 0, reads.get('/agent/runtime.json') ?? 0]).toEqual(attempts)
+      expect(delays.every((delay) => delay === 5)).toBe(true)
+      expect(now <= 50).toBe(true)
+    })
+  }
   const loads: [string, Record<string, string>, string][] = [
     ['the queue file names this launch', { [FILE]: before }, 'unknown'],
     ['the bridge is registered for this launch', { '/agent/runtime.json': thisLaunch }, 'unknown'],

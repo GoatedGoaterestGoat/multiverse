@@ -1,6 +1,6 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
-from ..store import existing_lock, lock, now, read, write
+from ..store import exists_replaced, retry_missing, existing_lock, lock, now, read, write
 from . import focus, sessions, records
 import fcntl
 import re
@@ -24,7 +24,7 @@ def orphaned(directory):
     """
     for name in ('properties.json', 'runtime.json', 'sessions.jsonl'):
         try:
-            (directory / name).stat()
+            retry_missing((directory / name).stat)
         except FileNotFoundError:
             continue
         return False
@@ -53,7 +53,7 @@ def orphaned(directory):
 def properties_missing(directory):
     """Only proven absence permits removal using the folder's recovery identity."""
     try:
-        (directory / 'properties.json').stat()
+        retry_missing((directory / 'properties.json').stat)
     except FileNotFoundError:
         return True
     return False
@@ -152,9 +152,9 @@ def check_available_name(root, name, *, locked=False, exclude=None):
                              f"pick another name or resume it with mv2 resume {name}")
 
 
-def runtime(agent_dir):
+def runtime(agent_dir, *, required=False):
     path = agent_dir / "runtime.json"
-    return records.runtime(path)
+    return records.runtime(path, required=required)
 
 
 def preparing(facts):
@@ -169,7 +169,7 @@ def preparing(facts):
 
 def _child_evidence(agent_dir, facts):
     launch = agent_dir / 'launches' / facts['launch_id']
-    return any((launch / name).exists() for name in ('request.json', 'registration.json', 'cleanup.json'))
+    return any(exists_replaced(launch / name) for name in ('request.json', 'registration.json', 'cleanup.json'))
 
 
 def interrupted_preparation(facts, agent_dir):

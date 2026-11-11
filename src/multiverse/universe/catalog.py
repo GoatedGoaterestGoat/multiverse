@@ -1,7 +1,7 @@
 """What a universe offers its agents: skills, commands, workflows and harnesses, and the bootstrap text."""
 from pathlib import Path
 
-from ..store import read
+from ..store import read, exists_replaced
 from . import records
 KINDS = ("skills", "commands", "workflows", "harnesses")
 
@@ -10,7 +10,10 @@ def _own(root, on_error=None):
     result = []
     for kind in KINDS:
         filename = "harness.json" if kind == "harnesses" else "entry.json"
-        for path in sorted((root / kind).glob(f"*/{filename}")):
+        for folder in sorted((root / kind).glob("*")):
+            path = folder / filename
+            if not folder.is_dir() or not exists_replaced(path):
+                continue
             try:
                 meta = records.runtime(path)
                 if kind == 'harnesses':

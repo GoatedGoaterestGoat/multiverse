@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from ..types import NativeResult
-from ...store import read
+from ...store import read, retry_missing
 
 
 def counter(value):
@@ -57,7 +57,7 @@ def measured(session, *, bridge=True):
     if not session.native_id or not session.launch_id or not session.session_file:
         return NativeResult('unavailable', 'No bound Codex launch for context usage')
     try:
-        facts = read(Path(session.session_file).parent / 'runtime.json')
+        facts = retry_missing(lambda: read(Path(session.session_file).parent / 'runtime.json'))
         usage = last_measurement(facts, session.native_id)
         if usage is not None and facts.get('launch_id') == session.launch_id:
             relay = facts.get('native_relay')

@@ -79,6 +79,8 @@ This is the short text every agent gets at spawn and resume, alongside the harne
 
 These files record which plugins are on, their settings and their state. See [plugins](../use/plugins.md).
 
+mv2 briefly retries missing reads of its replaced plugin records, including settings, host status, event cursors, progress and caches. This avoids treating a network filesystem's replacement gap as defaults or a first subscription. After the retry budget, each record keeps its normal missing-file behavior. Other errors, malformed content, plugin source files and append-only journals are not retried.
+
 ### plugins.json
 
 This file says which plugins are on in this universe. A missing file, or a plugin it doesn't name, means the plugin's default. The default is off, except for bundled plugins marked on, such as typeahead.

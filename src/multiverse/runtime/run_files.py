@@ -11,6 +11,7 @@ import stat
 import time
 from uuid import UUID, uuid4
 
+from ..store import retry_missing
 from .process import process_snapshot, start_matches, valid_start
 
 JOURNAL_BYTES = 128 << 10
@@ -83,7 +84,8 @@ def _mkdir(path, made):
 def _read(path):
     parent = _open_directory(path.parent)
     try:
-        descriptor = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+        descriptor = retry_missing(lambda: os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                                                  dir_fd=parent))
     finally:
         os.close(parent)
     with os.fdopen(descriptor, 'rb') as stream:
