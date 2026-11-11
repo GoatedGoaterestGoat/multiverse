@@ -22,6 +22,8 @@ mv2 send reviewer,tester --text 'The fix is on branch fix-login.'
 
 Separate several recipients with commas. Each one gets the message and its own result line. A failure for one doesn't stop the others. The recipient sees the message as `Message from SENDER:` followed by your text.
 
+When a recipient is missing here but exists in a [related universe](agents.md#find-and-refer-to-agents), its error names the universe and suggests `-u PATH` before `send`. Several matches are listed without selecting one; nothing is sent to them until you choose the universe explicitly.
+
 If the sender's record is unreadable or damaged, the sender line keeps the message's saved name, or `user` if none was saved. An unreadable or damaged sender universe uses its saved path in that line. The message stays readable and deliverable.
 
 ## Choose a delivery
@@ -329,6 +331,8 @@ mv2 report --phase blocked --blocked-on self --summary 'Waiting for my backgroun
 ```
 
 An agent target accepts the same name, full ID or unique ID prefix as `send`. Use `--blocked-on-universe` for another universe or a subverse path; without it, the target is in the reporter's universe. `user` and `self` are special sources. To name an agent literally called user or self, use `agent:user` or `agent:self`, or its ID. An unknown or ambiguous target refuses the report without changing the previous status. Reporting blocked on your own agent is the same as `self`.
+
+If the target is missing here but found in a related universe, the error suggests `--blocked-on-universe PATH` for each match. This keeps your report in its own universe while naming the dependency elsewhere.
 
 The dependency follows the agent's ID, so renaming it or reusing its old name cannot redirect a follow-up. The display finds moves within the known universe trees; a target that cannot be found shows its saved name with `gone`. For a move outside those trees, report the target's new universe to update its displayed address. Incoming messages still match by ID. A new `--phase` report clears the previous dependency unless it also supplies `--blocked-on`, including another plain `--phase blocked`. Updating only the summary keeps it.
 

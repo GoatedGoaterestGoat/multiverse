@@ -46,6 +46,8 @@ Each line shows the agent's name, status, reported phase and summary. A `working
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
+If no local agent matches, the error also looks in related universes: parents, siblings and subverses in the same tree. It lists the matches with their paths and the `-u` option to reach them. Put that option before the command, as in `mv2 -u .multiverse/subverses/qa inspect worker`. The command never chooses another universe for you. This quick, read-only search skips damaged records and linked directories; if its search limit is reached, any matches shown may be incomplete. A name found nowhere keeps the usual error.
+
 ## Watch an agent
 
 ```sh

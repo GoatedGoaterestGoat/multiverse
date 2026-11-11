@@ -65,14 +65,15 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     for reference, directory, error in targets:
         if error is not None:
             damaged = isinstance(error, (records.RecordError, agents.AmbiguousAgent))
+            detailed = damaged or isinstance(error, agents.AgentNotFound) and bool(error.related_hint)
             if len(references) == 1:
-                if damaged:
-                    raise error  # The target is known; preserve its named record error.
+                if detailed:
+                    raise error  # Preserve record errors, ambiguity and related-universe advice.
                 raise ValueError('Could not find one matching agent. Run mv2 list and use its name.') from None
-            name = display.clean(reference) if damaged else failure_reason(reference)
-            reason = display.clean(str(error)) if damaged else 'Could not find one matching agent'
+            name = display.clean(reference) if detailed else failure_reason(reference)
+            reason = display.clean(str(error)) if detailed else 'Could not find one matching agent'
             result = {'ok': False, 'saved': False, 'reason': reason}
-            line = (f'Not sent to {name}: {reason}.' if damaged else
+            line = (f'Not sent to {name}: {reason.rstrip(".")}.' if detailed else
                     f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.')
         else:
             if directory in seen:

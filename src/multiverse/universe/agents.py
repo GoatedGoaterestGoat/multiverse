@@ -62,12 +62,16 @@ def properties_missing(directory):
 class AgentNotFound(ValueError):
     """No saved agent matches a reference; no launch was attempted."""
 
+    def __init__(self, message, *, hint=''):
+        self.related_hint = hint
+        super().__init__(message)
+
 
 class AmbiguousAgent(ValueError):
     """A reference names several agents; retain names and full IDs for selection."""
 
 
-def directory(root, reference, *, allow_damaged=False):
+def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
     matches, exact_names, exact_ids, damaged, names = [], [], [], [], {}
     for path in record_paths(root):
         usable = True
@@ -93,8 +97,13 @@ def directory(root, reference, *, allow_damaged=False):
     elif exact_names:
         matches = exact_names
     if not matches:
+        from ..display import clean
+        from .agent_hints import hint
+        related = hint(root, reference, universe_option)
         detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
-        raise AgentNotFound(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
+        advice = related or "Run mv2 list to see this universe's agents."
+        label = clean(reference) if related else reference
+        raise AgentNotFound(f"No agent named {label} here. {advice}" + detail, hint=related)
     if len(matches) != 1:
         detail = ", ".join(f"{names[path]} ({path.name})" for path in sorted(matches))
         raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. Use a full UUID")

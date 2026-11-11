@@ -16,7 +16,7 @@ def select(root, reporter, reference, target_universe=None):
     name = reference.removeprefix('agent:').strip()
     if not name or ',' in name:
         raise ValueError('--blocked-on names one agent, user, or self')
-    directory = agents.directory(scope, name)
+    directory = agents.directory(scope, name, universe_option='--blocked-on-universe')
     target = records.properties(directory / 'properties.json')
     if directory.resolve() == reporter.resolve():
         return {'kind': 'self'}
