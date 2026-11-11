@@ -39,7 +39,7 @@ from .stale import CodeWatch
 from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
-from .tree import group_key, rate_limits
+from .tree import group_key, header_counts
 from .widgets import AgentTable, Breadcrumb, DraftMenu, Fleet
 
 
@@ -314,23 +314,24 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.show_totals()
 
     def show_totals(self):
-        """The header counts: agents, the account's rate limits, plugin errors and a plugin host that is needed but off."""
+        """The header counts: agents, plugin errors and a plugin host that is needed but off."""
         if not self.snapshot:
             return
         totals = self.snapshot["counts"]
-        limits = rate_limits(self.snapshot["agents"])
         failures = self.plugin_service.error_count() + len((self.host or {}).get("stopped") or ())
-        line = Text((limits + " · " if limits else "")
-                    + f'{totals["alive"]} live · {totals["waiting"]} waiting · '
-                    + (f'{totals["focused"]} focused · ' if totals.get("focused") else '')
-                    + f'{totals["blocked"]} blocked · {totals["total"]} agents'
-                    + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
+        parts = [(header_counts(totals), None),
+                 (f'{failures} plugin error{"s" if failures != 1 else ""}' if failures else '', None)]
         if self.host and self.host.get("needed") and not self.host.get("running"):
-            line.append(" · host off", style=theme.PEACH)
+            parts.append(("host off", theme.PEACH))
         if self.snapshot.get("plugin_trouble"):  # the plugin system itself failed while reading; the agents are unaffected
-            line.append(" · plugins unreadable", style=theme.PEACH)
+            parts.append(("plugins unreadable", theme.PEACH))
         if self.code_watch.stale:  # what is running is no longer what is on disk
-            line.append(" · mv2 changed: reopen", style=theme.PEACH)
+            parts.append(("mv2 changed: reopen", theme.PEACH))
+        line = Text()
+        for text, style in (part for part in parts if part[0]):
+            line.append((" · " if line else "") + text)
+            if style:
+                line.stylize(style, len(line) - len(text))
         self.query_one("#totals", Static).update(line)
 
     @work(group="plugin-host", exclusive=True, exit_on_error=False)

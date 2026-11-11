@@ -15,6 +15,8 @@ from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
 from multiverse.ui.screens import ChoiceScreen, Details, Form
 from multiverse.ui.app import MultiverseApp
+from multiverse.ui import theme
+from textual.color import Color
 from isolation import isolate
 
 
@@ -74,6 +76,35 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
 
     def status(self):
         return str(self.app.query_one("#status", Static).render())
+
+    async def test_the_header_counts_only_kinds_with_agents_and_no_rate_limits(self):
+        """A '0 live', a dangling ' · ' or a returning Claude rate-limit window in the header is easy to miss."""
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            live = next(agent for agent in self.app.snapshot["agents"] if agent.get("live") == "alive")
+            live["usage"] = {"state": "ok", "value": {"rate_limits": [
+                {"window": "five_hour", "percent_used": 34}, {"window": "seven_day", "percent_used": 12}]}}
+            for counts, shown in (
+                    ({"total": 0, "alive": 0, "waiting": 0, "focused": 0, "blocked": 0}, ""),
+                    ({"total": 4, "alive": 0, "waiting": 0, "focused": 0, "blocked": 0}, "4 agents"),
+                    ({"total": 4, "alive": 2, "waiting": 0, "focused": 0, "blocked": 1},
+                     "2 live · 1 blocked · 4 agents"),
+                    ({"total": 4, "alive": 3, "waiting": 1, "focused": 1, "blocked": 2},
+                     "3 live · 1 waiting · 1 focused · 2 blocked · 4 agents")):
+                with self.subTest(shown):
+                    self.app.snapshot["counts"] = counts
+                    self.app.show_totals()
+                    self.assertEqual(str(self.app.query_one("#totals", Static).render()), shown)
+            errors = patch.object(self.app.plugin_service, "error_count", return_value=2)
+            with self.subTest("no agents, only notes"), errors:
+                self.app.snapshot.update(counts={"total": 0, "alive": 0, "waiting": 0, "focused": 0, "blocked": 0},
+                                         plugin_trouble=True)
+                self.app.show_totals()
+                line = self.app.query_one("#totals", Static).render()
+                self.assertEqual(str(line), "2 plugin errors · plugins unreadable")
+                self.assertEqual([str(line)[span.start:span.end] for span in line.spans
+                                  if getattr(span.style, "foreground", None) == Color.parse(theme.PEACH)],
+                                 ["plugins unreadable"])
 
     async def test_message_keeps_original_recipient_during_refresh(self):
         """A message goes to the agent selected when the form opened, even if a refresh reorders the rows before
