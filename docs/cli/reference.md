@@ -269,7 +269,7 @@ mv2 inspect [--lines LINES] [--json] agent
 Save and deliver a message to the exact native session.
 
 ```sh
-mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delivery {steer,follow-up,inbox-only}] agent
+mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delivery {steer,follow-up,inbox-only}] [--force] agent
 ```
 
 | Argument | Value | Description | Default |
@@ -281,6 +281,7 @@ mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delive
 | `--stdin` |  | Read stdin (automatic for piped or redirected input) |  |
 | `--queue-only` |  | Save inbox-only; becomes a follow-up if the recipient reports being blocked on you |  |
 | `--delivery` | `steer`, `follow-up`, `inbox-only` | Native timing: next safe boundary or the next turn | `steer` |
+| `--force` |  | Send even when the recipient's follow-ups are queued for you |  |
 
 Use at most one of `--text`, `--file`, `--stdin`.
 

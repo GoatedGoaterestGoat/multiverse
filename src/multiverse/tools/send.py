@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 from ..plugins import access
 from .. import universe, display
-from ..runtime import native, missing_runtime
+from ..runtime import native, missing_runtime, queued_prompts
 from ..terminal.recovery import Unreachable
 from ..store import lock, read
 from ..universe import agents, blocked, focus, records, mailbox
@@ -22,10 +22,12 @@ def configure(parser):
     parser.add_argument("--queue-only", action="store_true", help="Save inbox-only; becomes a follow-up if the recipient reports being blocked on you")
     parser.add_argument("--delivery", choices=("steer", "follow-up", "inbox-only"), default="steer",
                         help="Native timing: next safe boundary or the next turn")
+    parser.add_argument("--force", action="store_true",
+                        help="Send even when the recipient's follow-ups are queued for you")
 
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
-        json=False, _present=None, _present_error=None, _note_for=None):
+        force=False, json=False, _present=None, _present_error=None, _note_for=None):
     """`_note_for` is a focus id: mv2's own note about that focus's held messages, sent only while no newer
     focus has begun."""
     access.require('act', f'send to {agent}')
@@ -49,16 +51,23 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
-    unread_senders = _unread_senders(caller) if _present or _present_error else set()
-    results, seen = [], set()
+    targets = []
     for reference in references:
         try:
-            directory = agents.directory(root, reference)
+            targets.append((reference, agents.directory(root, reference), None))
         except ValueError as error:
+            targets.append((reference, None, error))
+    queue_check, queued_senders, unconfirmed_senders = None, frozenset(), None
+    if caller is not None and not force and not queue_only and delivery != 'inbox-only' and _note_for is None:
+        queue_check, queued_senders, unconfirmed_senders = queued_prompts.for_send(caller.root, caller.identity)
+    unread_senders = None
+    results, seen = [], set()
+    for reference, directory, error in targets:
+        if error is not None:
             damaged = isinstance(error, (records.RecordError, agents.AmbiguousAgent))
             if len(references) == 1:
                 if damaged:
-                    raise  # The target is known; preserve its named record error.
+                    raise error  # The target is known; preserve its named record error.
                 raise ValueError('Could not find one matching agent. Run mv2 list and use its name.') from None
             name = display.clean(reference) if damaged else failure_reason(reference)
             reason = display.clean(str(error)) if damaged else 'Could not find one matching agent'
@@ -71,6 +80,20 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             seen.add(directory)
             properties = read(directory / 'properties.json')
             name = properties['name']
+            if directory.name in queued_senders and not force:
+                clean_name = display.clean(name)
+                reason = (f'Your message to {clean_name} is not delivered because you have unread messages from '
+                          f'{clean_name} queued as follow-ups. You will see them once you end this turn. '
+                          'It is recommended that you read '
+                          f"{clean_name}'s messages first before messaging them. If you still want to message "
+                          f'{clean_name}, resend with --force.')
+                results.append({'agent': name, 'ok': False, 'saved': False, 'reason': reason,
+                                'blocked_recipients': [clean_name]})
+                if _present_error or _present:
+                    (_present_error or _present)(reason)
+                continue
+            if unread_senders is None:
+                unread_senders = _unread_senders(caller) if _present or _present_error else set()
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and _running(directory))
@@ -106,13 +129,21 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 line = (f"{name} is blocked on you, but cannot take a follow-up in its current session. " + line)
             if properties.get('id', directory.name) in unread_senders:
                 line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
+            if (queue_check is not None and (queue_check.state != 'ok' or queue_check.coverage != 'complete')
+                    and (unconfirmed_senders is None or directory.name in unconfirmed_senders)):
+                reason = display.clean(queue_check.reason or 'The harness queue is unknown').rstrip('.')
+                note = f"mv2 couldn't check whether {name}'s follow-ups to you are still queued: {reason}."
+                result['queue_check_note'] = note
+                line += '\n' + note
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
             present(line)
     if len(references) == 1:
         return {key: value for key, value in results[0].items() if key != 'agent'}
-    return {'recipients': results, 'ok': all(result.get('ok', True) for result in results)}
+    blocked_names = [name for result in results for name in result.get('blocked_recipients', [])]
+    return {'recipients': results, 'ok': all(result.get('ok', True) for result in results),
+            **({'blocked_recipients': blocked_names} if blocked_names else {})}
 
 
 def _unread_senders(caller):

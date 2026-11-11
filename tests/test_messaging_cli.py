@@ -93,12 +93,20 @@ class MessagingCliTest(BaseTest):
             stream.write(b'{"id":')  # An unfinished append does not hide the complete rows before it.
         def snapshot():
             return {p.name: p.read_bytes() for p in directory.glob('inbox*') if p.is_file()}
+        def checked_notes(output, names):
+            # This fixture's incomplete history leaves the queue check unknown, without hiding inbox reminders.
+            lines = output.splitlines()
+            notes = [line for line in lines if line.startswith("mv2 couldn't check whether ")]
+            self.assertEqual(notes, [f"mv2 couldn't check whether {name}'s follow-ups to you are still queued: "
+                                     'The queue or its delivery evidence could not be verified.' for name in names])
+            return '\n'.join(line for line in lines if line not in notes) + '\n'
         before = snapshot()
         with patch.dict(os.environ, environment):
             for delivery in ('steer', 'follow-up', 'inbox-only'):
                 with self.subTest(delivery=delivery), patch.object(mailbox, 'inbox', wraps=mailbox.inbox) as peek:
                     output = self.output('send', f"first,{self.directories['first'].name},second",
                                          '--delivery', delivery, '--text', 'reply')
+                    output = checked_notes(output, [] if delivery == 'inbox-only' else ['first', 'second'])
                     self.assertEqual(len(output.splitlines()), 2)
                     self.assertTrue(output.splitlines()[0].endswith('Reminder: you have unread messages from first.'))
                     self.assertNotIn('Reminder:', output.splitlines()[1])
@@ -106,12 +114,14 @@ class MessagingCliTest(BaseTest):
                     self.assertEqual(snapshot(), before)
             self.behavior = NativeResult('error', 'fixture refusal')
             self.output('send', 'first', '--text', 'failed reply', code=1)
-            self.assertTrue(self.stderr.strip().endswith('Reminder: you have unread messages from first.'))
+            self.assertTrue(checked_notes(self.stderr, ['first']).strip().endswith(
+                'Reminder: you have unread messages from first.'))
             self.assertEqual(snapshot(), before)
             with self.subTest('a launch notice and the reminder stay separate'), \
                     patch.object(native, 'send_or_wake', return_value={'state': 'native_queued',
                                  'notices': ['Note: this launch starts it fresh under the same session ID']}):
                 output = self.output('send', 'first', '--text', 'with a launch notice')
+                output = checked_notes(output, ['first'])
                 self.assertTrue(output.endswith('same session ID\nReminder: you have unread messages from first.\n'), output)
             with patch.object(mailbox, 'inbox', side_effect=AssertionError('JSON and plugin sends do not peek')) as peek:
                 result = json.loads(self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'json', '--json'))

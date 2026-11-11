@@ -766,6 +766,43 @@ def prompt_recorded(native_id, prompt, since, environment):
 
 PROMPTS_FOLDER = 'claude-prompts'
 PROMPT_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+QUEUE_FILE = 'claude-queue.json'  # mv2's messages Claude holds now, written by the mod (queue.ts)
+QUEUE_ENTRIES = 512               # far more than an agent's queue holds; a file with more isn't the mod's
+
+
+def queue_report(record, session, read_at):
+    """The mod's queue file as queued_prompts' value: only for this launch and conversation, and complete only when
+    the mod said so and every entry reads. Entries name a delivery attempt by its ID (delivery_attempt_ids), as
+    receipts do; anything else in the file about the queue (the person's prompts) isn't there to read. The report's
+    time is the mod's for a view of this launch, else `read_at`, when the file was found not to say."""
+    def unknown(reason, entries=(), observed=None):
+        return {'entries': list(entries), 'coverage': 'unknown', 'reason': reason, 'observed_at': observed or read_at}
+    if record is None:
+        return unknown("This launch's mv2 plugin hasn't written its queue report yet; a plugin from before this mv2 "
+                       "writes none until the agent's next start")
+    # An exact integer version: JSON true equals 1 in Python.
+    if (record is False or type(record.get('schema')) is not int or record['schema'] != 1
+            or not isinstance(record.get('entries'), list)):
+        return unknown("The agent's queue report can't be read")
+    if record.get('launch_id') != session.launch_id:
+        return unknown("The agent's queue report is from another launch")
+    if record.get('session_id') != session.native_id:
+        return unknown("The agent's queue report is for another conversation")
+    observed = _short(record.get('observed_at'), 64)
+    entries, unread = [], len(record['entries']) > QUEUE_ENTRIES
+    for item in record['entries'][:QUEUE_ENTRIES]:
+        ident = item.get('message_id') if isinstance(item, dict) else None
+        if (not isinstance(ident, str) or PROMPT_ID.fullmatch(ident) is None or item.get('mode') not in ('follow-up', 'steer')
+                or item.get('since') is not None and _short(item.get('since'), 64) is None):
+            unread = True
+            continue
+        entries.append({'message_id': ident, 'mode': item['mode'], 'since': item.get('since'), 'native_id': None})
+    if unread:
+        return unknown("The agent's queue report has entries mv2 can't read", entries, observed)
+    if record.get('coverage') != 'complete':
+        reason = _short(record.get('reason'), 400) or "The agent's mv2 plugin can't tell everything Claude holds"
+        return unknown(reason, entries, observed)
+    return {'entries': entries, 'coverage': 'complete', 'reason': None, 'observed_at': observed or read_at}
 PROMPT_FILE = re.compile(rf'({PROMPT_ID.pattern})\.json')
 PROMPT_BYTES = 1 << 20  # a published prompt keeps its call's input to 64 KiB, JSON-escaped
 PROMPT_KINDS = ('permission', 'question', 'plan', 'form')
@@ -1452,6 +1489,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         problem = self._prompt_bridge(session)
         result['answer'] = (Capability('supported', mechanism='claude-mod-prompts') if problem is None
                             else Capability('unavailable', problem.reason))
+        problem = self._queue_bridge(session)
+        result['queued'] = (Capability('supported', mechanism='claude-mod-queue') if problem is None
+                            else Capability('unavailable', problem.reason))
         return result
 
     def _would_support(self, executor):
@@ -1470,7 +1510,7 @@ class ClaudeAdapter(ConfiguredAdapter):
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
                       'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt', 'slash': 'claude-mod-command',
-                      'answer': 'claude-mod-prompts'}
+                      'answer': 'claude-mod-prompts', 'queued': 'claude-mod-queue'}
         result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
                          else Capability('unavailable', why, required=name.startswith('send_')))
                   for name, mechanism in mechanisms.items()}
@@ -1873,6 +1913,27 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         return None
+
+    def _queue_bridge(self, session):
+        """None when this launch has a mod to report Claude's queue, else the NativeResult why not. A mod too old to
+        write the file is the file's to say (queue_report), so any registered bridge passes here."""
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return (NativeResult('unavailable', "This agent runs without mv2's Claude plugin (launch-only), so mv2 can't "
+                                 'see what Claude has queued for it') if bridge.final else unavailable(bridge))
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        return None
+
+    def queued_prompts(self, session, executor=None):
+        """mv2's messages Claude holds for this agent now, taken and not yet in its conversation, oldest first. Only
+        reads the mod's file: it never waits, starts, resumes or changes anything."""
+        problem = self._queue_bridge(session)
+        if problem is not None:
+            return problem
+        read_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        return NativeResult('ok', value=queue_report(_json_record(Path(session.session_file).parent / QUEUE_FILE), session,
+                                                     read_at))
 
     def waiting_prompts(self, session, executor=None):
         """Every prompt this launch's mod has open now, for this conversation, oldest first."""

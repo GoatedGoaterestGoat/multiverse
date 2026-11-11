@@ -92,6 +92,9 @@ A selected command may describe one argv-only startup retry. The runner consider
 
 ```text
 mv2 send AGENT                                      tools/send.py, under .send.lock
+  0. agent sender: inspect its queued follow-ups before any recipient is saved
+       matching recipient -> refuse only that recipient, unless --force
+       unknown queue      -> continue with an advisory note
   1. mailbox.append_message -> inbox.jsonl          saved and fsynced first
   2. inbox-only: stop; the agent reads it with mv2 inbox
   3. native.send_or_wake

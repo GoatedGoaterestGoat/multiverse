@@ -1567,6 +1567,19 @@ and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
 the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
 form are listed, never held.
 
+The mod also writes `claude-queue.json`: the mv2 messages Claude holds now
+(`waitingRows`: taken, neither stored nor refused), each by its delivery attempt's
+ID, with its mode and when it was taken. It is rewritten whenever one is taken,
+stored or refused, beside its name and moved over it so a reader never sees half
+of one. The adapter's `queued_prompts` reads it only for the current launch and
+conversation. Its coverage is complete from a launch's first load, or once the
+session has been idle since a reload: a reload empties the mod's memory while
+Claude may still hold what the code before it handed over. A load is a reload
+when the file or `runtime.json` already names this launch with its bridge. A
+message Claude took but didn't store in time (unsure) isn't listed, since it may
+never come, but it keeps coverage unknown until the session has settled idle
+after a turn end, because `/compact` or a dialog may still hold it.
+
 The mod also registers the bridge (`BRIDGE`, `claude-mod-v4`; the ID changes
 when the mod gains something an older one can't do: v2 reads a tag's send time,
 v3 runs `mv2 slash` commands and v4 publishes the prompts the agent waits on. A

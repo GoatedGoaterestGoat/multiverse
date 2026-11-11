@@ -20,7 +20,7 @@ EFFECTS: Mapping[str, Effect] = {
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
         'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
-        'waiting_prompts', 'prompt_outcome',
+        'waiting_prompts', 'prompt_outcome', 'queued_prompts',
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
@@ -247,7 +247,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash', 'answer')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash', 'answer', 'queued')
 
 
 @dataclass(frozen=True)
@@ -463,6 +463,30 @@ class PromptResult:
     saved_rule: bool = False
     person_answer: Mapping[str, Any] | None = None
     cause: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class QueuedPrompt:
+    """One mv2 input present in the harness queue when observed; no message text."""
+    message_id: str
+    mode: str
+    since: str | None = None
+    native_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class QueueReport:
+    """Coverage concerns mv2 inputs only; absence says nothing about delivery."""
+    state: str
+    coverage: str = 'unknown'
+    reason: str | None = None
+    observed_at: str | None = None
+    entries: tuple[QueuedPrompt, ...] = ()
+
+
+class QueueProvider(Protocol):
+    """Read the current launch's queued mv2 inputs without changing their delivery."""
+    def queued_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
 
 
 class PromptProvider(Protocol):
