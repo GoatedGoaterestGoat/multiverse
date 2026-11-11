@@ -78,8 +78,15 @@ never written.
 
 ### Codex
 
-Not available yet: the report is `unavailable`, so sends go ahead, with the note only where the rule above calls for
-it (an unconfirmed follow-up from the recipient, or records mv2 can't read).
+On a verified bridge with a matching checked CLI and daemon (0.166.0, 0.167.0 or 0.167.1), the adapter reads the
+bound conversation's after-turn queue (`thread/queue/list`, one page of up to 100) after confirming the daemon's
+version and the exact thread and workspace, within the two-second bound, and calls nothing else. It reports each
+entry's client message ID and queue ID, never its text; Codex gives no mode or time, so core takes the mode from its
+records and the time stays empty. The report is complete only when the whole queue came back in one valid page;
+otherwise it is `unknown`, keeping the entries it could read. Steers inside a running turn, the terminal's local
+input and other clients' entries aren't enumerable or aren't mv2's, so they're outside it. Codex's queue belongs to
+the conversation and outlives a resume, which is why an earlier launch's proven message still counts. A plain,
+unverified or unchecked launch is `unavailable`.
 
 ### Pi
 

@@ -367,6 +367,9 @@ class CodexAdapter(ConfiguredAdapter):
         from .prompts import supported
         result['answer'] = (Capability('supported', mechanism='codex-terminal-relay') if supported(session) else
                             Capability('unavailable', 'Waiting prompts need a live prompt relay on matching checked Codex CLI and daemon releases; resume with it'))
+        from .queued import available
+        result['queued'] = (Capability('supported', mechanism='codex-after-turn-queue') if available(session) else
+                            Capability('unavailable', 'No verified Codex queue on matching checked CLI and daemon releases'))
         result['ask'] = (Capability('supported', mechanism='private-codex-copy')
                          if session.native_id and session.home and session.session_file else
                          Capability('unavailable', 'No recorded Codex conversation and home'))
@@ -421,6 +424,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .prompts import catalog
         executor.check_session()
         return catalog(session)
+
+    def queued_prompts(self, session, executor):
+        from .queued import report
+        return report(session, executor)
 
     def answer_prompt(self, session, answer, executor):
         from .prompts import submit
