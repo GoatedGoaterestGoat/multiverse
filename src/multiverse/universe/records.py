@@ -35,16 +35,18 @@ def _kind(value):
             float: "a number", type(None): "null"}.get(type(value), type(value).__name__)
 
 
-def _object(path, *, missing_ok=False):
+def _object(path, *, missing_ok=False, growing=False):
     """A JSON object, or None for exhausted ENOENT with missing_ok; other failures are RecordError."""
     path = Path(path)
+    max_bytes = None if growing else MAX_BYTES
     try:
         with open_replaced(path) as stream:
-            if os.fstat(stream.fileno()).st_size > MAX_BYTES:
-                raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
-            raw = stream.read(MAX_BYTES + 1)
-        if len(raw) > MAX_BYTES:
-            raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
+            size = os.fstat(stream.fileno()).st_size
+            if max_bytes is not None and size > max_bytes:
+                raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
+            raw = stream.read(size if max_bytes is None else max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
     except RecordError:
         raise
     except OSError as error:
@@ -64,6 +66,11 @@ def _object(path, *, missing_ok=False):
     if not isinstance(data, dict):
         raise RecordError(path, f"must be a JSON object, not {_kind(data)}")
     return data
+
+
+def ledger(path):
+    """An optional growing inbox ledger; size alone is not damage, unlike a launch/identity record."""
+    return _object(path, missing_ok=True, growing=True) or {}
 
 
 def properties(path, *, harness_optional=False):

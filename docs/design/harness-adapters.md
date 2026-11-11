@@ -1689,26 +1689,31 @@ possible. Text has terminal control sequences removed and tmux formats escaped.
 `focus` shows `focused` while the agent is focused (`focused 18m` with the time
 left of a timed focus, `focused (turn)` until its next turn ends), read from the
 agent's `focus.json`; an expired or unreadable record shows nothing.
-`inbox` counts unread inbox-only messages without marking them read, capped at
-`50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
-steer/follow-up messages do not count. Optional `context` shows measured latest
-request tokens/window (for example `ctx 82k/200k`), only when available for the
+`inbox` uses `tools.inbox.unread(blocking=False)`, the dashboard's non-consuming
+peek, and shows the exact unread count with no byte or count cap. At zero the
+item is hidden. Ordinary native-delivered steer/follow-up messages do not count;
+unconfirmed blocked-on upgrades do, including copies behind the cursor.
+Optional `context` shows measured latest request tokens/window (for example `ctx 82k/200k`), only when available for the
 current running launch and, for Codex, its exact thread. No compaction item is
 provided in tmux; Claude's mod supplies that information.
 
 The row uses tmux's asynchronous `#()` pull mechanism at `status-interval`, only
-while attached. Each refresh starts one Python process with site loading
-disabled, reads four small JSON files plus a bounded unread inbox tail if
-enabled, and exits. It imports only the standard library, takes no locks,
-performs no writes, and contacts neither mv2 nor the native app-server. This
-avoids a push publisher in each lifecycle/report/inbox path and also picks up
-file edits. Item choices and state changes appear on the next refresh; the
-interval itself takes effect on spawn/resume.
+while attached. Each refresh starts a Python renderer with site loading
+disabled. It reads the display metadata with the standard library. When inbox
+is enabled, a second isolated Python process imports the same installation's
+core and returns only the shared unread count. Its inbox lock is nonblocking,
+and it never advances cursors or read marks. A one-second timeout kills and
+reaps the helper; a busy, unreadable or timed-out inbox shows `inbox ?`. There
+is no native query or push publisher. Item choices, file edits and state changes
+appear on the next refresh; the interval itself takes effect on spawn/resume.
+Detached wrappers do not poll; increasing the interval reduces the attached cost.
 
-A local 40-refresh measurement took a median 49 ms wall time and mean 35 ms CPU
-per refresh while the test suite was running (about 1.7% of one CPU core for an
-attached agent at two seconds). Detached wrappers do not poll; increasing the
-interval reduces the attached cost.
+In a local QA measurement, an empty-inbox refresh took about 262 ms wall time
+and 147 ms CPU, compared with 89 ms and 37 ms for the earlier independent
+counter. A 9.2 MiB ledger took about 491 ms wall time and 371 ms CPU. These are
+machine-specific costs, about 7% and 19% of one core at a two-second interval;
+the shared peek trades the old size cutoff for exact counts and the same inbox
+rules as the dashboard.
 
 Codex 0.160.x can separately opt into its built-in native footer without editing
 `~/.codex/config.toml`. Add these two entries to the Codex harness's existing

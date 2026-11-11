@@ -67,7 +67,7 @@ def inbox_stamp(directory):
         records = sorted((directory / UNSUBMITTED).glob("*.json"))
     except FileNotFoundError:
         records = []
-    return (tuple(_file_stamp(directory / name) for name in INBOX_FILES),
+    return (tuple(_file_stamp(directory / name) for name in (*INBOX_FILES, UNSUBMITTED)),
             tuple((path.name, _file_stamp(path)) for path in records))
 
 
@@ -109,9 +109,6 @@ class LocalBackend:
         except Exception:
             self._unread.pop(key, None)
             return None
-        if stamp[0][0] is None:
-            self._unread[key] = (stamp, 0)
-            return 0  # no message ever sent to it: nothing to read, and no lock taken
         if cached is not None and cached[0] == stamp:
             return cached[1]
         try:

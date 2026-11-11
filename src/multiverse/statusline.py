@@ -1,7 +1,8 @@
 """Former path of the tmux status line script (now multiverse.terminal.statusline).
 
 tmux sessions launched before the package restructure run this file by path, so it
-stays until no such agent remains. tmux runs it with `python -S`: standard library only.
+stays until no such agent remains. tmux runs it with `python -S`; the renderer
+uses a separate, time-limited core helper for its inbox count.
 """
 import sys
 from pathlib import Path

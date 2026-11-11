@@ -318,7 +318,7 @@ Each agent's tmux bar shows a short live line instead of tmux's session list and
 
 While an agent is focused, its bar also shows `focused`, with the time left of a timed focus, such as `focused 18m`.
 
-The bar's unread count includes unconfirmed blocked-on upgrades. Its scan is limited to 1 MiB of inbox history, including already-read messages, and 1 MiB per ledger. `inbox ?` means it could not establish a count within those limits or because files were unreadable. Use `mv2 inbox --peek` for the authoritative unread messages; it does not mark them read.
+The bar uses the dashboard's unread inbox peek, including unconfirmed blocked-on upgrades. It shows the exact count and hides the item at zero, without a history or ledger size cap. The peek never marks messages read or waits for an inbox lock. A helper has one second to return a count; `inbox ?` means the inbox is busy, unreadable or could not be read in time. Missing history with saved inbox evidence also shows `?`; `mv2 inbox --peek` reports the missing history and names that evidence. Use `mv2 inbox --peek` to read the messages without marking them read.
 
 The `tmux` block of `statusline.json` chooses the items: `agent`, `harness`, `focus`, `status`, `phase`, `summary`, `inbox` and `context`. List them in `tmux.items` in the order you want. Items you leave out follow in their default order.
 

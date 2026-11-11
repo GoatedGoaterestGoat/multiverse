@@ -78,7 +78,11 @@ def _validate_cursor(data, cursor):
 
 def _messages(agent_dir, *, observed_missing=()):
     path = agent_dir / 'inbox.jsonl'
-    data = _bytes(path) if path.exists() else b''
+    try:
+        data = _bytes(path)
+    except FileNotFoundError:
+        _empty_history(agent_dir, observed_missing=observed_missing)
+        data = b''
     cursor = _cursor(agent_dir, observed_missing=observed_missing)
     _validate_cursor(data, cursor)
     offset = 0
@@ -91,6 +95,41 @@ def _messages(agent_dir, *, observed_missing=()):
     return data, cursor, messages
 
 
+# These files can attest earlier messages even when their parsed value is empty.
+INBOX_EVIDENCE = ('inbox.cursor', 'inbox-read.json', 'inbox-state.json', 'native-delivery.json')
+
+
+def _empty_history(agent_dir, *, observed_missing=()):
+    """Missing append-only history is empty only when no saved inbox evidence remains."""
+    evidence = tuple(agent_dir / name for name in INBOX_EVIDENCE)
+    remaining = tuple(path for path in evidence if path not in observed_missing)
+    absent = missing_records(remaining)
+    present = [path.name for path in remaining if path not in absent]
+    # This directory is created, never atomically replaced; absence needs no per-record retry.
+    try:
+        (agent_dir / 'inbox-unsubmitted').lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        present.append('inbox-unsubmitted')
+    if present:
+        raise ValueError(f"{agent_dir / 'inbox.jsonl'}: inbox history is missing while saved inbox evidence remains "
+                         f"({', '.join(present)}); restore the history before reading unread messages")
+    if not agent_dir.is_dir():
+        raise ValueError(f"{agent_dir}: inbox directory is missing")
+
+
+def unread(agent_dir, *, blocking=True):
+    """Shared non-consuming peek; a never-messaged inbox needs no lock or directory write."""
+    agent_dir = Path(agent_dir)
+    try:
+        (agent_dir / 'inbox.jsonl').stat()
+    except FileNotFoundError:
+        _empty_history(agent_dir)
+        return []
+    return inbox(agent_dir, limit=None, peek=True, blocking=blocking)['messages']
+
+
 def _ledger_damage(path, reason):
     return ValueError(f'{path}: {reason}; back up and repair or reset the file, '
                       'then check delivery before retrying')
@@ -100,7 +139,7 @@ def _ledger(path, *, observed_missing=()):
     if path in observed_missing:
         return {}
     try:
-        return records.runtime(path)
+        return records.ledger(path)
     except records.RecordError as error:
         raise _ledger_damage(error.file, error.reason) from error
 

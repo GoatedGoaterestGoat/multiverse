@@ -107,7 +107,7 @@ def unread(root, agent, *, blocking=True):
     access.require('observe', 'read inbox')
     directory = agents.directory(universe.resolve(root), agent, allow_damaged=True)
     return [{key: message[key] for key in FIELDS if key in message}
-            for message in mailbox.inbox(directory, limit=None, peek=True, blocking=blocking)['messages']]
+            for message in mailbox.unread(directory, blocking=blocking)]
 
 
 def timeout_seconds(value):

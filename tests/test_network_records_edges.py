@@ -46,6 +46,16 @@ class NetworkEdgeRecordsTest(BaseTest):
         self.native = str(uuid4())
         self.session = SessionHandle('agent', 'claude', str(self.work), native_id=self.native, launch_id='launch',
                                      session_file=str(self.directory / 'session.jsonl'))
+        # Inject filesystem gaps inside the shared reader; subprocess boundaries are covered by test_tmux_statusline.
+        def peek(directory):
+            try:
+                return statusline._read_unread(directory)
+            except (OSError, ValueError, TypeError):
+                return None
+        self.peek_patch = patch.object(statusline, 'unread', side_effect=peek)
+        self.peek_patch.start()
+        self.addCleanup(self.peek_patch.stop)
+
 
     def assert_gaps(self, path, reader, present, absent, *, probe=True):
         self.assertEqual(reader(), present)
@@ -70,22 +80,23 @@ class NetworkEdgeRecordsTest(BaseTest):
         path.write_text('Cost: 7\n')
         self.assert_gaps(path, lambda: statusline.plugin_item(self.directory, 'cost'), 'Cost: 7', '')
 
+        directory, _ = self.status_fixture(0)
         manual = {'id': 'manual', 'schema': 2, 'delivery': 'inbox-only'}
         line = (json.dumps(manual) + '\n').encode()
-        (self.directory / 'inbox.jsonl').write_bytes(line)
-        path = self.directory / 'inbox.cursor'
+        (directory / 'inbox.jsonl').write_bytes(line)
+        path = directory / 'inbox.cursor'
         path.write_text(str(len(line)))
-        self.assert_gaps(path, lambda: statusline.unread(self.directory), 0, 1)
+        self.assert_gaps(path, lambda: statusline.unread(directory), 0, 1)
         path.write_text('0')
-        path = self.directory / 'inbox-read.json'
+        path = directory / 'inbox-read.json'
         store.write(path, {'manual': '2026-11-10T12:00:00Z'})
-        self.assert_gaps(path, lambda: statusline.unread(self.directory), 0, 1)
+        self.assert_gaps(path, lambda: statusline.unread(directory), 0, 1)
         store.write(path, {})
         follow_up = {'id': 'copy', 'schema': 2, 'delivery': 'follow-up', 'inbox_only_text': 'Please review'}
-        (self.directory / 'inbox.jsonl').write_text(json.dumps(follow_up) + '\n')
-        path = self.directory / 'inbox-state.json'
+        (directory / 'inbox.jsonl').write_text(json.dumps(follow_up) + '\n')
+        path = directory / 'inbox-state.json'
         store.write(path, {'copy': {'inbox_copy_read_at': '2026-11-10T12:00:00Z'}})
-        self.assert_gaps(path, lambda: statusline.unread(self.directory), 0, 1)
+        self.assert_gaps(path, lambda: statusline.unread(directory), 0, 1)
 
         socket = self.work / 'tmux.sock'
         path = recovery.registry(socket)
@@ -154,7 +165,7 @@ class NetworkEdgeRecordsTest(BaseTest):
                 with patch.object(statusline.time, 'monotonic', side_effect=lambda: now[0]), \
                         patch.object(statusline.time, 'sleep', side_effect=delay):
                     self.assertEqual(render(), 'reader · inbox 1')
-                self.assertEqual(delays, [.005] * 4)
+                self.assertEqual(delays, [.005] * 8)
                 self.assertLessEqual(sum(delays), .05)
                 self.assertFalse((directory / 'inbox.cursor').exists())
 
@@ -185,7 +196,7 @@ class NetworkEdgeRecordsTest(BaseTest):
         for error in (errno.EACCES, errno.EIO):
             with self.subTest(error=error), missing(path, None, error) as calls:
                 self.assertEqual(render(), 'reader · inbox ?')
-                self.assertEqual(len(calls), 2)  # One probe, then the reader's existing error policy.
+                self.assertEqual(len(calls), 2)  # Core's batch probe, then its existing error policy.
         for contents in ('[]', '{', ' ' * (statusline.READ_LIMIT + 1)):
             with self.subTest(contents=contents[:10]):
                 path.write_text(contents)
