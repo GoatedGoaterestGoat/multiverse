@@ -54,6 +54,9 @@ class BlockedOnPhaseTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         agents.report(self.root, "working", "working")  # any other phase clears it
         properties = read(lead / "properties.json")
         write(lead / "properties.json", {**properties, "name": "lead-renamed"})
+        for directory in waiting.values():  # how long ago each reported has its own test (test_tui_report_age)
+            write(directory / "properties.json",
+                  {k: v for k, v in read(directory / "properties.json").items() if k != "reported_at"})
         expected = {"on-lead": "blocked (lead-renamed)", "on-user": "blocked (user)", "on-self": "blocked (self)",
                     "on-agent-user": "blocked (agent user)", "on-far": "blocked (tester in qa)",
                     "on-gone": "blocked (ada: gone)", "working": "working"}

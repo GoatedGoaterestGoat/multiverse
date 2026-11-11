@@ -18,7 +18,7 @@ import threading
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from ..display import clean, live_label, model_label, phase_label
+from ..display import clean, live_label, model_label, phase_label, phase_parts
 from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
@@ -172,16 +172,25 @@ class ModelColumn(Column):
 
 
 class PhaseColumn(Column):
-    """The reported phase; a blocked agent's says what it waits on where the view lists `blocked_on`.
+    """The reported phase and how long ago it was reported; a blocked agent's also says what it waits on where the
+    view lists `blocked_on`: `blocked (user, 50m)`.
 
-    Given the cell's `width`, a long name is shortened inside the parentheses, so the cell still reads as blocked
-    on someone; a cell too narrow for even that says only `blocked`."""
+    Given the cell's `width`, a long name is shortened inside the parentheses and the time since the last report
+    kept whole; narrower, the name goes, then the time."""
     def render(self, row, width=None):
         if row["kind"] == "group":
             return self.group(row)
         value = clean(phase_label(row) or "—")
-        if width is not None and cell_len(value) > width and value.startswith("blocked ("):
-            value = "blocked (" + set_cell_size(value[9:-1], width - 11).rstrip() + "…)" if width >= 12 else "blocked"
+        if width is not None and cell_len(value) > width:
+            phase, target, age = (clean(part) if part else part for part in phase_parts(row))
+            head, tail = f"{phase} (", (f", {age})" if age else ")")
+            room = width - cell_len(head) - cell_len(tail)
+            if target and room >= 2:
+                value = head + set_cell_size(target, room - 1).rstrip() + "…" + tail
+            elif age and cell_len(f"{phase} ({age})") <= width:
+                value = f"{phase} ({age})"
+            else:
+                value = phase or "—"
         return Text(value, style=STATE_COLORS.get(value.partition(" ")[0], theme.SUBTEXT0))
 
 

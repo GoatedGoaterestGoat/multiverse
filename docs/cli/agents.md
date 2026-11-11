@@ -38,7 +38,7 @@ mv2 list --columns name,phase   # only these columns, in this order
 mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, status, reported phase and summary. A blocked agent's phase says what it's blocked on when it reported that, such as `blocked (lifecycle)` or `blocked (user)`; `--json` gives it as `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. A `working` or `blocked` phase also says how long ago the agent last reported, such as `working (10m)`. A blocked agent's phase first names what it's blocked on, if it said, such as `blocked (user, 50m)`; `--json` gives them as `reported_at` and `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
 `--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `model`, `universe` and `id`. `model` shows the agent's model by its display name with its effort, such as `Opus 5.5 (xhigh)` ([the dashboard's Model column](../reference/dashboard.md) explains the names). With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
 

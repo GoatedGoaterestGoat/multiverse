@@ -28,14 +28,14 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `status` | `working`, `waiting`, `idle` or `disconnected`, from the harness over a live connection |
 | `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90%. It shows `…` until the agent's usage has been read, which can take a few seconds after the dashboard opens; the agents are listed before then. An agent whose conversation can't be confirmed shows `N/A`, never an earlier reading |
 | `cost` | The session's cost so far (off by default), or `…` until it has been read |
-| `phase`, `summary` | What the agent last reported with `mv2 report` |
+| `phase`, `summary` | What the agent last reported with `mv2 report`. A `working` or `blocked` phase also says how long ago it was reported, so how current the summary is, such as `working (10m)` or `blocked (2h)` |
 | `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |
 | `model` | The agent's model by its display name, such as `Opus 5.5` or `GPT 6.1 Sol`: the universe's own name for it from its harness settings, else the one mv2 ships in its model tables (which follow new releases, so an alias such as `opus` can later name a newer model). A model neither names shows as recorded, and an agent spawned without one shows `-` (off by default) |
 | `effort` | Not a column of its own: with `model` also listed, the agent's effort in parentheses in the Model cell, such as `Opus 5.5 (xhigh)`; nothing when none was chosen. Without `model` it shows nowhere (off by default) |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
-| `blocked_on` | Not a column of its own: a blocked agent's Phase says what it's blocked on, such as `blocked (lifecycle)`, `blocked (tester in qa)`, `blocked (user)` or `blocked (self)` (off by default). An agent mv2 can no longer find reads `: gone`, and one named `user` or `self` reads `agent user`. A view without `phase` (or `core:phase`) shows it nowhere, the inspector included; a plugin column standing in for Phase shows its own value, and the plain phase where it has none |
+| `blocked_on` | Not a column of its own: a blocked agent's Phase says what it's blocked on, such as `blocked (lifecycle, 50m)`, `blocked (tester in qa, 2h)`, `blocked (user, 5m)` or `blocked (self, 32s)` (on in both bundled templates). An agent mv2 can no longer find reads `: gone`, and one named `user` or `self` reads `agent user`. A view without `phase` (or `core:phase`) shows it nowhere, the inspector included; a plugin column standing in for Phase shows its own value, and the plain phase where it has none |
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
@@ -132,7 +132,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | --- | --- |
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
-| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its Phase, and `effort` an agent's effort to its Model cell, instead of a column each. The `Silicon23` template turns these and `model` on, in place of `harness`, and leaves `context` out; `base` leaves them off and shows `context` |
+| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its Phase, and `effort` an agent's effort to its Model cell, instead of a column each. Both bundled templates turn `blocked_on` on. `Silicon23` also turns on `unread`, `model` and `effort`, in place of `harness`, and leaves `context` out; `base` leaves those off and shows `context` |
 | `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 

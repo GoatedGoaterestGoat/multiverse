@@ -3,6 +3,7 @@
 The tmux status line keeps its own copies of a few of these: tmux runs it with
 `python -S`, outside this package's imports.
 """
+from datetime import datetime, timezone
 
 
 def clean(value):
@@ -90,11 +91,41 @@ def blocked_label(value):
     return name + (": gone" if value.get("gone") else "")
 
 
-def phase_label(row):
-    """An agent's reported phase, with what it is blocked on when it says: `blocked (lifecycle)`."""
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def report_age(row):
+    """How long ago a working or blocked agent last reported, so how stale its summary is: `32s`, `10m`, `2h`,
+    `3d`. None for any other phase, or a record whose report time isn't a readable timestamp with its time zone
+    (core writes UTC; a naive or date-only one is damaged, not guessed at)."""
+    if row.get("phase") not in ("working", "blocked") or not isinstance(row.get("reported_at"), str):
+        return None
+    try:
+        at = datetime.fromisoformat(row["reported_at"])
+        if at.tzinfo is None:
+            return None
+        seconds = int(max(0, (_now() - at).total_seconds()))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def phase_parts(row):
+    """The reported phase, what a blocked agent waits on (or None), and how long ago it reported (or None)."""
     phase = row.get("phase")
-    target = blocked_label(row.get("blocked_on")) if phase == "blocked" else None
-    return f"blocked ({target})" if target else phase
+    return phase, (blocked_label(row.get("blocked_on")) if phase == "blocked" else None), report_age(row)
+
+
+def phase_label(row):
+    """An agent's reported phase, with what it is blocked on and how long ago it reported:
+    `blocked (lifecycle, 50m)`, `working (10m)`."""
+    phase, target, age = phase_parts(row)
+    inside = ", ".join(part for part in (target, age) if part)
+    return f"{phase} ({inside})" if phase and inside else phase
 
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
