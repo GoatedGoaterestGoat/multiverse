@@ -149,15 +149,6 @@ def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None
 
 
 
-def _upgraded_text(text, sender, *, held=False):
-    name = display.clean(sender.get('name') or 'the sending agent')
-    note = (f'This message was sent as a follow-up because your status is blocked on {name}; '
-            'it was held in your inbox while you were focused.' if held else
-            f'This message was delivered as a follow-up because your status is blocked on {name}.')
-    return f'{note}\n\n{text}'
-
-
-
 def _upgrade_unavailable(root, directory, properties):
     """A read-only, optional classification under the launch lock; failure keeps manual input safe."""
     try:
@@ -181,8 +172,7 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=
     # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
     if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
         return _skipped(sender, text, delivery, 'a newer focus began')
-    held_text = _upgraded_text(text, sender, held=True) if upgraded else text
-    held = focus.hold(directory, lambda focus_id: append_message(directory, held_text, sender, 'inbox-only', intended=delivery,
+    held = focus.hold(directory, lambda focus_id: append_message(directory, text, sender, 'inbox-only', intended=delivery,
                                                                  focus=focus_id)) if delivery != 'inbox-only' and note_for is None else None
     if held:
         # Saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
@@ -207,8 +197,6 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=
                 # launch-only agent with a supported wake still takes the normal follow-up path.
                 delivery = 'inbox-only'
                 upgrade_unavailable = True
-            else:
-                text = _upgraded_text(text, sender)
         if delivery != 'inbox-only':
             try:
                 facts = agents.runtime(directory)

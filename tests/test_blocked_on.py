@@ -215,16 +215,14 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(store.read(directory / 'properties.json')['reported_at'], stamp)
 
     def test_only_the_named_agents_inbox_messages_upgrade_and_focus_still_holds_them(self):
-        """A targeted wake must happen once, keep both notices, and take the normal held-message path during focus."""
+        """An upgrade must preserve the recipient's text, explain itself to the sender, and keep the focus hold."""
         self.report()
         with patch.dict(os.environ, self.environment('helper')):
             output = self.output('send', 'asker,other,asker', '--delivery', 'inbox-only', '--text', 'reply')
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0], self.directories['asker'].name)
         self.assertEqual(self.calls[0][2], 'follow-up')
-        note = 'This message was delivered as a follow-up because your status is blocked on helper.'
-        self.assertIn(note + '\n\nreply', self.calls[0][1])
-        self.assertEqual(self.calls[0][1].count(note), 1)
+        self.assertEqual(self.calls[0][1], 'reply')
         self.assertTrue(output.startswith("Your message was delivered as a follow-up instead because asker's"))
         self.assertIn("Saved to other's inbox", output)
         for source in ({'name': 'helper'}, {'agent_id': self.directories['other'].name, 'name': 'helper'},
@@ -254,8 +252,7 @@ class BlockedOnTest(BaseTest):
         self.assertTrue(output.startswith("Tried a follow-up because"), output)
         self.assertIn("Saved to asker's inbox", output)
         self.assertEqual(self.calls[-1][2], 'follow-up')
-        self.assertIn('blocked on renamed.', self.calls[-1][1])
-        note = 'This message was delivered as a follow-up because your status is blocked on renamed.'
+        self.assertEqual(self.calls[-1][1], 'failed but saved')
         directory = self.directories['asker']
         focused = focus.start(directory)
         before = len(self.calls)
@@ -267,9 +264,7 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(len(waiting), 1)
         self.assertEqual(waiting[0]['delivery'], 'inbox-only')
         self.assertEqual(waiting[0]['intended'], 'follow-up')
-        self.assertEqual(waiting[0]['text'],
-                         'This message was sent as a follow-up because your status is blocked on renamed; '
-                         'it was held in your inbox while you were focused.\n\nduring focus')
+        self.assertEqual(waiting[0]['text'], 'during focus')
         self.assertEqual(focus.last(directory)['held'], 1)
         focus.end(directory)
         with patch.dict(os.environ, self.environment('asker')):
