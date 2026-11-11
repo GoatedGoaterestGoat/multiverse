@@ -554,8 +554,10 @@ class History:
     """The conversation's rows (indexes into the entries), oldest first, from `tip` back across every compaction;
     a row without a ref is on it when the nearest row with a ref before it is.
 
-    `gap` is a parent Claude never stored (its writes failed for a while); behind Claude's own compaction a gap
-    doesn't matter, and the history starts at Claude's summary. `tip` is the ref the walk started from.
+    `gap` is a parent Claude never stored (its writes failed for a while), or a link back into rows the walk already
+    passed: an automatic compaction's boundary links to a row Claude stored after its summary. Behind Claude's own
+    compaction a gap doesn't matter, and the history starts at Claude's summary. `tip` is the ref the walk started
+    from.
     """
     rows: tuple
     tip: str | None
@@ -563,25 +565,41 @@ class History:
     summary: str | None = None
 
 
+def _summaries(by_ref, order):
+    """{boundary ref: the summary Claude wrote for it}. Claude stores its summary under the boundary, or, for a
+    compaction run as a turn starts, under the turn's attachment rows (instructions, session context, the date)
+    stored between them; a summary reached only through a message row is not that boundary's."""
+    found = {}
+    for ref in sorted((ref for ref, item in by_ref.items() if item.summary), key=order.get):
+        link, passed = by_ref[ref].parent, set()
+        while link in by_ref and by_ref[link].kind == 'attachment' and link not in passed:
+            passed.add(link)
+            link = by_ref[link].parent
+        if link in by_ref and by_ref[link].kind == 'system/compact_boundary':
+            found.setdefault(link, ref)
+    return found
+
+
 def walk(entries, tip=None, labelled=None):
-    """The history: from `tip` when stored, else the newest leaf of the parent graph,
-    back through parent links and across a boundary by its logical parent, plus every block of each response it
+    """The history: from `tip` when stored, else the newest leaf of the parent graph (the last stored: a batch of
+    rows, such as a compaction's install, can carry older timestamps than a row before it), back through parent links and across a boundary by its logical parent, plus every block of each response it
     passes and every result answering one of their calls (parallel tool results branch off their own call), and
     the typed /compact row a boundary answers (the boundary's logical parent is the row before it)."""
     labelled = labelled if labelled is not None else labels(entries)
-    by_ref, parented, order = {}, set(), {}
+    by_ref, order = {}, {}
     for index, item in enumerate(entries):
         if not item.ref or item.sidechain:
             continue
         by_ref[item.ref], order[item.ref] = item, index
-        for link in (item.parent, item.logical):
-            if link:
-                parented.add(link)
+    # An automatic compaction's boundary links forward, to a row Claude stores after its summary: until a later row
+    # hangs off that one, it is the newest row, so the link must not take it off the leaves.
+    parented = {item.parent for item in by_ref.values() if item.parent}
+    parented |= {item.logical for ref, item in by_ref.items() if item.logical and order.get(item.logical, -1) < order[ref]}
     leaves = [ref for ref in by_ref if ref not in parented]
     if not leaves:
         return History((), None)
-    summaries = {item.parent: item.ref for item in by_ref.values() if item.summary and item.parent}
-    current = tip if tip in by_ref else max(leaves, key=lambda ref: (by_ref[ref].at or '', order[ref]))
+    summaries = _summaries(by_ref, order)
+    current = tip if tip in by_ref else max(leaves, key=order.get)
     start, walked, seen, claude, boundaries = current, [], set(), None, []
     while current in by_ref and current not in seen:
         seen.add(current)
@@ -594,7 +612,7 @@ def walk(entries, tip=None, labelled=None):
             current = item.logical
         else:
             current = item.parent
-    gap = current or None
+    gap = current or None  # never stored, or already walked: the walk can't go on either way
     position = {ref: float(index) for ref, index in order.items()}
     summary = None
     if gap and claude is not None:

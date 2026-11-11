@@ -161,13 +161,18 @@ own call). A row off the history is **abandoned**.
   takes an optional **tip**, a row ref. Right after a rewind,
   before the next prompt, only the live session knows which branch is
   current. Without a stored tip, the history starts at the newest leaf.
-- A **gap** is a parent the history needs that Claude never stored (its
-  writes failed for a while). It is reported on the read. When a Claude
-  compaction lies between the tip and the gap, the history starts at Claude's
-  summary instead, with the boundary's `preservedMessages` rows right after
-  it in their order, as Claude itself resumes the session, and no gap is
-  reported. The read names that summary instead (`summary`, 1.14): it is then
-  the only record of what came before.
+- A **gap** is a parent the history needs that Claude never stored (its writes
+  failed for a while), or a link back into rows the history already holds, as
+  when an automatic compaction's boundary links to a row Claude stored after
+  its summary. It is reported on the read. When a Claude compaction lies
+  between the tip and the gap, the history starts at Claude's summary instead,
+  with the boundary's `preservedMessages` rows right after it in their order,
+  as Claude itself resumes the session, and no gap is reported. A compaction
+  here is a boundary with Claude's summary under it: directly, for a manual
+  `/compact`, or under the attachment rows (the turn's instructions, session
+  context and date) that a compaction run as a turn starts stores between
+  them, never under a message row. The read names that summary instead
+  (`summary`, 1.14): it is then the only record of what came before.
 - The typed `/compact` row stays on the history, although the boundary's link
   skips it.
 - A row without a ref (Claude's API request records, queue and title rows)

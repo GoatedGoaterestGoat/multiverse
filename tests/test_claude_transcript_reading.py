@@ -101,7 +101,8 @@ class ClaudeTranscriptReadingTest(BaseTest):
     def test_the_history_follows_claudes_links(self):
         """The history decides which rows a plugin reads as the conversation; fragile because Claude's links are
         loose: a rewind leaves a branch behind, parallel results branch off their own calls, a boundary links past the
-        typed /compact row, and a gap behind Claude's own compaction must start at its summary, not be reported."""
+        typed /compact row, and a gap behind Claude's own compaction must start at its summary, not be reported: its
+        summary may sit under the turn's attachment rows, and an automatic compaction's boundary links forward."""
         def user(uuid, parent, text, **more):
             return {'type': 'user', 'uuid': uuid, 'parentUuid': parent, 'message': {'role': 'user', 'content': text}, **more}
         call = lambda uuid, parent, ids, mid: {'type': 'assistant', 'uuid': uuid, 'parentUuid': parent, 'message': {
@@ -129,16 +130,56 @@ class ClaudeTranscriptReadingTest(BaseTest):
         # A tip names the branch only the live session knows is current, right after a rewind.
         _, tipped = self.read(tip='old')
         self.assertEqual([index.entries[i].kind for i in tipped.history.rows][-2:], ['user', 'api-request'])  # 'old', then its row
-        with self.subTest('a gap behind Claude own compaction'):
-            rows = [user('kept', 'missing', 'Kept verbatim'),
-                    {'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'b2', 'logicalParentUuid': 'kept',
-                     'compactMetadata': {'preservedMessages': {'uuids': ['kept']}}},
-                    user('summary', 'b2', 'Summary of earlier work', isCompactSummary=True),
-                    user('later', 'summary', 'Go on', origin={'kind': 'human'}, promptId='p9')]
-            self.write(rows)
+        # Claude's own compaction (GitHub issue #40): its summary is under the boundary, or under the attachment
+        # rows a compaction run as a turn starts stores between them (seen on 2.1.319 and 2.1.322), never under a
+        # message row; an automatic compaction's boundary links to a row stored after its summary, which a read can
+        # catch as the newest row (the reviewer's prefix of a real 2.1.322 transcript).
+        boundary = lambda logical: {'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'b2', 'logicalParentUuid': logical,
+                                    'compactMetadata': {'preservedMessages': {'uuids': ['kept']}}}
+        attach = lambda uuid, parent, kind: {'type': 'attachment', 'uuid': uuid, 'parentUuid': parent, 'attachment': {'type': kind}}
+        between = [attach('i1', 'b2', 'instructions'), attach('i2', 'i1', 'session_context'), attach('i3', 'i2', 'date')]
+        summary = lambda parent: user('summary', parent, 'Summary of earlier work', isCompactSummary=True)
+        later = lambda parent: user('later', parent, 'Go on', origin={'kind': 'human'}, promptId='p9')
+        cases = [  # (case, rows, the history's refs, gap, summary)
+            ('a gap behind it, the summary under the boundary',
+             [user('kept', 'missing', 'Kept verbatim'), boundary('kept'), summary('b2'), later('summary')],
+             ['b2', 'summary', 'kept', 'later'], None, 'summary'),
+            ('a gap behind it, attachment rows between',
+             [user('kept', 'missing', 'Kept verbatim'), boundary('kept'), *between, summary('i3'), later('summary')],
+             ['b2', 'i1', 'i2', 'i3', 'summary', 'kept', 'later'], None, 'summary'),
+            ('no gap: the boundary links to a row after its summary',
+             [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'), user('kept', 'start', 'Kept verbatim'),
+              boundary('tail'), *between, summary('i3'), attach('tail', 'summary', 'total_tokens_reminder'), later('tail')],
+             ['b2', 'i1', 'i2', 'i3', 'summary', 'kept', 'tail', 'later'], None, 'summary'),
+            ('read before a row hangs off the one the boundary links to: still the newest',
+             [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'), user('kept', 'start', 'Kept verbatim'),
+              boundary('tail'), *between, summary('i3'), attach('tail', 'summary', 'total_tokens_reminder')],
+             ['b2', 'i1', 'i2', 'i3', 'summary', 'kept', 'tail'], None, 'summary'),
+            ('no gap: the history goes on across it',
+             [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'), boundary('start'), *between,
+              summary('i3'), later('summary')],
+             ['start', 'b2', 'i1', 'i2', 'i3', 'summary', 'later'], None, None),
+            ('a message row between: not its summary, the gap is reported',
+             [user('kept', 'missing', 'Kept verbatim'), boundary('kept'),
+              user('typed', 'b2', 'Something else', origin={'kind': 'human'}, promptId='p2'), summary('typed'), later('summary')],
+             ['kept', 'b2', 'typed', 'summary', 'later'], 'missing', None)]
+        for case, rows, refs, gap, named in cases:
+            with self.subTest(case):
+                self.write(rows)
+                index, analysis = self.read()
+                self.assertEqual([index.entries[i].ref for i in analysis.history.rows], refs)
+                self.assertEqual((analysis.history.gap, analysis.history.summary), (gap, named))
+        with self.subTest("the newest leaf is the last stored, though an install's rows carry older timestamps"):
+            # Read right after a tree compaction installed its rows, before Claude stores the next one: Claude's own
+            # note from just before the boundary is a dead branch with a newer timestamp.
+            self.write([user('start', None, 'Start', origin={'kind': 'human'}, promptId='p1', timestamp='2026-11-11T10:00:00Z'),
+                        {'type': 'system', 'subtype': 'informational', 'uuid': 'note', 'parentUuid': 'start',
+                         'timestamp': '2026-11-11T10:00:05Z'},
+                        {'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'b3', 'logicalParentUuid': 'start',
+                         'timestamp': '2026-11-11T10:00:05Z'},
+                        user('installed', 'b3', 'Installed turn', timestamp='2026-11-11T10:00:04Z')])
             index, analysis = self.read()
-            self.assertEqual([index.entries[i].ref for i in analysis.history.rows], ['b2', 'summary', 'kept', 'later'])
-            self.assertEqual((analysis.history.gap, analysis.history.summary), (None, 'summary'))
+            self.assertEqual([index.entries[i].ref for i in analysis.history.rows], ['start', 'b3', 'installed'])
         with self.subTest('a gap with no compaction is reported'):
             self.write([user('orphan', 'never-stored', 'After a failed write', origin={'kind': 'human'}, promptId='p1')])
             _, analysis = self.read()
