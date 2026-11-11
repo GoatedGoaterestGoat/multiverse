@@ -40,7 +40,7 @@ from .plugin_service import PluginService, error_text, in_daemon, plugin_of, uni
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, rate_limits
-from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
+from .widgets import AgentTable, Breadcrumb, DraftMenu, Fleet
 
 
 HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
@@ -137,7 +137,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.inspector = None
         self.draft = None
         self.moving = None  # The row being moved while a destination is chosen.
-        self._harness_options = None
+        self._menu_options = None
         self.scan_count = 0
         self.usage_reading = False  # a usage read is running in its daemon thread
         self.prompt_outcomes = {}  # agent id -> (what the last answer sent from here came to, whether it took)
@@ -163,7 +163,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         yield Static("", id="selection", markup=False)
         yield Static("", id="status", markup=False)
         yield Footer()
-        yield HarnessMenu(id="harness-menu")
+        yield DraftMenu(id="draft-menu")
 
     def get_default_screen(self):
         return MainScreen(id="_default")
@@ -361,14 +361,43 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.query_one("#agents", DataTable).scroll_to(x=scroll[0], y=scroll[1], animate=False)
         self.query_one("#local-view", LocalView).scroll_to(y=scroll[2], animate=False)
 
-    @on(OptionList.OptionSelected, "#harness-menu")
-    def choose_harness(self, event):
+    @on(OptionList.OptionSelected, "#draft-menu")
+    def choose_option(self, event):
+        """A click in the draft's menu picks that harness, model or effort; a harness moves on to the model."""
         event.stop()
-        if self.draft and not self.operating and event.option_index < len(self.draft.harnesses):
-            self.draft.values["harness"] = self.draft.harnesses[event.option_index]
-            self.draft.focus("model")
+        options = self.draft.options() if self.draft and not self.operating else None
+        if options and event.option_index < len(options):
+            field = self.draft.active
+            self.draft.choose(field, options[event.option_index])
+            if field == "harness":
+                self.draft.focus("model")
             self.populate_table()
             self.query_one("#agents", DataTable).focus()
+
+    def models_if_needed(self):
+        """Read the draft's harness's model list off the event loop, once per harness; a backend without lists types."""
+        draft = self.draft
+        harness = draft.values.get("harness") if draft is not None and hasattr(draft, "choices") else None
+        if not harness or harness in draft.choices or harness in draft.asking:
+            return
+        if not callable(getattr(self.backend, "model_choices", None)):
+            draft.choices[harness] = None
+            return
+        draft.asking.add(harness)
+        self.read_models(draft, harness)
+
+    @work(group="model-choices", exit_on_error=False)
+    async def read_models(self, draft, harness):
+        try:
+            found = await asyncio.to_thread(self.backend.model_choices, draft.scope, harness)
+        except Exception as error:  # the dashboard stays up; the model is typed and spawn checks it
+            found = {"error": str(error) or type(error).__name__}
+        finally:
+            draft.asking.discard(harness)
+        if self.draft is draft:
+            draft.choices[harness] = found
+            draft.settle()
+            self.populate_table()
 
     @on(DataTable.RowHighlighted, "#agents")
     def highlight(self, event):

@@ -26,7 +26,7 @@ DataTable:focus > .datatable--cursor { background: $mv-cursor-focus; color: $mv-
 #status.error { color: $mv-red; }
 Footer { background: $mv-mantle; }
 .drafting Footer { display: none; }
-#harness-menu {
+#draft-menu {
     display: none;
     position: absolute;
     overlay: screen;
@@ -37,8 +37,8 @@ Footer { background: $mv-mantle; }
     color: $mv-text;
     scrollbar-size: 1 1;
 }
-#harness-menu > .option-list--option { padding: 0 1; }
-#harness-menu > .option-list--option-highlighted { background: $mv-cursor-focus; color: $mv-teal; text-style: bold; }
+#draft-menu > .option-list--option { padding: 0 1; }
+#draft-menu > .option-list--option-highlighted { background: $mv-cursor-focus; color: $mv-teal; text-style: bold; }
 #inspector { display: none; width: 40%; max-width: 64; height: 1fr; padding: 0 1; border-left: solid $mv-surface1; background: $mv-mantle; }
 .inspecting #inspector { display: block; }
 #inspect-name { height: 1; }

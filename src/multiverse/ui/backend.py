@@ -213,7 +213,20 @@ class LocalBackend:
 
     def spawn(self, root, values):
         return spawn.run(root, name=values["name"], task=values.get("task", ""),
-                         harness=values.get("harness") or "codex", model=values.get("model") or None)
+                         harness=values.get("harness") or "codex", model=values.get("model") or None,
+                         effort=values.get("effort") or None)
+
+    def model_choices(self, root, harness):
+        """The models (and each one's efforts) spawn takes for `harness` here, narrowed by the universe's harness
+        settings, for the new-agent picker; None when the harness has no list, so the model is typed."""
+        found = lifecycle.model_choices(root, harness)
+        if found is None:
+            return None
+        return {"models": [{"id": m["id"], "name": m.get("name") or m["id"], "efforts": list(m.get("efforts") or ()),
+                            "effort_unset": m["effort_unset"]} for m in found["models"]],
+                "free_form": found["free_form"], "narrowed": found["narrowed"], "unset": found["unset"],
+                "default_model": found["default_model"],
+                "problems": list(found["problems"])}
 
     def send(self, root, reference, text, delivery='steer', queue_only=False):
         return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None},

@@ -74,7 +74,7 @@ In forms, `Tab` and `Shift-Tab` move between fields, `Ctrl+Enter` submits and `E
 
 ## Create agents and subverses
 
-Press `n` to add a draft row in the selected folder. Type the name, then press `Tab` to choose a harness with `↑`/`↓`. Press `Tab` again to set an optional model.
+Press `n` to add a draft row in the selected folder. Type the name, then press `Tab` to choose a harness with `↑`/`↓`. Press `Tab` again for the model. A harness with a model list (Claude and Codex) offers it to choose from with `↑`/`↓`. Without a narrowed list in the universe's harness settings you can also type any model ID; with one, only its models are offered. `default` leaves the choice to the harness, and is offered only where the settings allow that. Where the harness settings name the model (`settings.model`), `default` says which, such as `default (Sonnet 5.5)`, and its efforts are offered as for that model. Where the chosen model takes an effort, `Tab` again chooses one the same way. For a harness without a list, type the model, or leave it empty for the harness's default. `mv2 spawn` checks the choice, and its reason shows on the status line if it refuses.
 
 `Enter` creates the agent, and `Esc` discards the draft. The draft has no field for a first prompt, so the new agent goes `idle` once it has started. Send it a message with `m`. An agent created with a prompt (`mv2 spawn --task`) is `working` until it finishes that prompt, then `idle`.
 

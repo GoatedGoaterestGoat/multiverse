@@ -4,8 +4,9 @@ from textual.containers import Vertical
 from textual.widgets import DataTable, OptionList, Static
 
 
-class HarnessMenu(OptionList, can_focus=False):
-    """Mouse-selectable menu; keyboard input stays with the inline draft."""
+class DraftMenu(OptionList, can_focus=False):
+    """The new-agent draft's choices for its active field (harness, model or effort), selectable with the mouse;
+    keyboard input stays with the inline draft."""
 
 
 class AgentTable(DataTable):

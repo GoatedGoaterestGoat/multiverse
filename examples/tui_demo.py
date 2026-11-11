@@ -70,9 +70,20 @@ class DemoBackend:
         with self.lock:
             row = {"id": uid(), "name": values["name"], "universe": str(root), "harness": values.get("harness", "codex"),
                    "live": "alive", "status": "idle", "phase": "starting", "summary": values.get("task", ""),
-                   "task": values.get("task", ""), "model": values.get("model") or None, "runtime": {}}
+                   "task": values.get("task", ""), "model": values.get("model") or None,
+                   "effort": values.get("effort") or None, "runtime": {}}
             self.agents.append(row)
             return deepcopy(row)
+
+    def model_choices(self, root, harness):
+        """Claude's list here; the other demo harnesses take a typed model."""
+        if harness != "claude":
+            return None
+        return {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5", "efforts": ["low", "medium", "high", "xhigh"],
+                            "default": True, "effort_unset": True},
+                           {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "efforts": [], "default": False,
+                            "effort_unset": True}],
+                "free_form": False, "narrowed": False, "unset": True, "default_model": None, "problems": []}
 
     def send(self, root, reference, text, delivery="steer", queue_only=False):
         with self.lock:
