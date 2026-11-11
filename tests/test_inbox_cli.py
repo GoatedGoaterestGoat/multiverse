@@ -201,7 +201,11 @@ class InboxCliTest(BaseTest):
             unchanged('invalid options')
             for phase in ('starting', 'working', 'blocked'):
                 with self.subTest(phase=phase), patch.object(report, 'unread') as counted:
-                    self.assertEqual(report.cli_run(self.root, agent=self.agent, phase=phase), f'Reported {phase}.')
+                    line = report.cli_run(self.root, agent=self.agent, phase=phase)
+                    expected = f'Reported {phase}.'
+                    if phase == 'blocked':
+                        expected += ' Name what you are blocked on with --blocked-on: an agent, user, or self.'
+                    self.assertEqual(line, expected)
                 counted.assert_not_called()
                 unchanged(f'report {phase}')
             with patch('subprocess.Popen') as spawned, patch('subprocess.run') as ran:

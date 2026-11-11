@@ -351,7 +351,7 @@ def report(root, reference, phase=None, summary=None, *, blocked_on=None):
             data["blocked_on"] = blocked_on
         if summary is not None:
             data["summary"] = summary
-        data["updated_at"] = now()
+        data["reported_at"] = data["updated_at"] = now()
         write(agent_dir / "properties.json", data)
     _reported(agent_dir, data)
     return data

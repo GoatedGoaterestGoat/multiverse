@@ -1,7 +1,8 @@
 """Report agent phase and current work."""
 import os
+import re
 
-from ..universe import agents, blocked
+from ..universe import agents, blocked, focus
 from ..universe import mailbox
 from ..store import lock
 from .. import display
@@ -56,6 +57,14 @@ def cli_run(root=None, *, agent=None, phase=None, summary=None, blocked_on=None,
     if (os.environ.get('MV2_AGENT_ID') and dependency and dependency['kind'] == 'agent'
             and dependency['id'] in mailbox.unread_senders(directory)):
         line += f" Reminder: you have unread messages from {display.clean(target['name'])}."
+    if record.get('phase') == 'blocked':
+        if dependency is None:
+            line += ' Name what you are blocked on with --blocked-on: an agent, user, or self.'
+        elif dependency['kind'] == 'user' and focus.current(directory) is None:
+            line += (" Consider enabling focus mode if you want to wait for the user's decision before addressing "
+                     "further messages from other agents.")
+        elif dependency['kind'] == 'self' and not re.search(r'\bETA\b', record.get('summary') or '', re.IGNORECASE):
+            line += ' You are encouraged, if possible, to report the ETA of the process you are blocked on.'
     return line
 
 

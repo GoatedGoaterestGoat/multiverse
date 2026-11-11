@@ -13,7 +13,7 @@ from multiverse import cli, harnesses, store
 from multiverse.harnesses.types import Capability, NativeResult
 from multiverse.runtime import lifecycle, native, process
 from multiverse.terminal import tmux
-from multiverse.tools import deliver, held, report, send
+from multiverse.tools import deliver, held, list_agents, report, send
 from multiverse.universe import agents, blocked, focus, mailbox, relocate, templates
 
 
@@ -135,8 +135,9 @@ class BlockedOnTest(BaseTest):
                 self.assertEqual(operator.strip(), 'Reported blocked on helper.')
             self.assertEqual(files(), before)
             for source_kind in ('user', 'self'):
-                self.assertEqual(self.output('report', '--phase', 'blocked', '--blocked-on', source_kind).strip(),
-                                 f'Reported blocked on {source_kind}.')
+                line = self.output('report', '--phase', 'blocked', '--blocked-on', source_kind)
+                self.assertTrue(line.startswith(f'Reported blocked on {source_kind}.'))
+                self.assertNotIn('Reminder: you have unread messages', line)
             with store.lock(directory / '.inbox.lock'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
                 self.assertNotIn('Reminder:', line)
@@ -146,6 +147,72 @@ class BlockedOnTest(BaseTest):
             os.mkfifo(directory / 'inbox.cursor')
             self.assertNotIn('Reminder:', self.output('report', '--phase', 'blocked', '--blocked-on', 'helper'))
             (directory / 'inbox.cursor').unlink()
+
+    def test_blocked_guidance_uses_the_current_dependency_focus_and_summary(self):
+        """Blocked guidance must not urge focus while focused or hide a missing ETA because another word contains eta."""
+        directory = self.directories['asker']
+        focus_note = ("Consider enabling focus mode if you want to wait for the user's decision before addressing "
+                      "further messages from other agents.")
+        eta_note = 'You are encouraged, if possible, to report the ETA of the process you are blocked on.'
+        target_note = 'Name what you are blocked on with --blocked-on: an agent, user, or self.'
+        cases = (
+            ('user', 'Waiting for a decision', False, focus_note),
+            ('user', 'Waiting for a decision', True, ''),
+            ('self', 'Waiting for a background shell', False, eta_note),
+            ('self', 'Waiting for the beta build', False, eta_note),
+            ('self', 'Waiting for the shell', True, eta_note),
+            ('self', 'ETA: 5m', False, ''),
+            ('self', 'eta 5m', False, ''),
+            ('self', 'Build (EtA: 5m)', False, ''),
+            (None, 'Waiting', False, target_note),
+            ('agent:user', 'Waiting', False, ''),
+            ('agent:self', 'Waiting', False, ''),
+        )
+        with patch.dict(os.environ, self.environment('asker')):
+            for target, summary, focused, expected in cases:
+                with self.subTest(target=target, summary=summary, focused=focused):
+                    if focused:
+                        focus.start(directory)
+                    else:
+                        focus.end(directory)
+                    flags = ['--phase', 'blocked', '--summary', summary]
+                    if target is not None:
+                        flags += ['--blocked-on', target]
+                    line = self.output('report', *flags).strip()
+                    prefix = ('Reported blocked.' if target is None else
+                              f'Reported blocked on {"agent " + target[6:] if target.startswith("agent:") else target}.')
+                    self.assertEqual(line, prefix + (' ' + expected if expected else ''))
+            # Summary-only updates retain the dependency and use the newly reported ETA.
+            self.report('self', summary='Waiting')
+            self.assertEqual(self.output('report', '--summary', 'eta: 2m').strip(), 'Reported blocked on self.')
+            self.assertTrue(self.output('report', '--summary', 'Still waiting').strip().endswith(eta_note))
+            # An expired or damaged focus does not suppress advice.
+            self.report('user')
+            for value in ({'by': 'user', 'since': '2020-01-01T00:00:00+00:00',
+                           'until': '2020-01-01T00:01:00+00:00'}, {'since': []}):
+                store.write(directory / focus.FILE, value)
+                self.assertTrue(self.output('report', '--summary', 'Waiting').strip().endswith(focus_note))
+
+    def test_report_time_refreshes_without_phase_changes_and_is_a_listing_field(self):
+        """Summary age must restart on every report, not on unrelated runtime updates or only on phase changes."""
+        directory = self.directories['asker']
+        changes = ({'phase': 'working', 'summary': 'First'}, {'phase': 'working', 'summary': 'Second'},
+                   {'summary': 'Third'}, {}, {'phase': 'blocked', 'blocked_on': 'self', 'summary': 'Waiting'},
+                   {'summary': 'ETA 2m'}, {'phase': 'done'}, {'phase': 'starting'})
+        for index, options in enumerate(changes):
+            with self.subTest(options=options):
+                stamp = f'2026-11-10T01:00:{index:02d}+00:00'
+                with patch.object(agents, 'now', return_value=stamp):
+                    found = report.run(self.root, agent='asker', **options)
+                self.assertEqual(found.get('reported_at'), stamp)
+                self.assertEqual(store.read(directory / 'properties.json').get('reported_at'), stamp)
+        self.assertIn('reported_at', lifecycle.ROW_FIELDS)
+        with patch.object(lifecycle, '_listing_observation', side_effect=lambda p, f, s: (f, {'live': 'dormant'})):
+            rows = list_agents.cli_run(self.root, json=True, columns='name,reported_at')
+        self.assertEqual(next(row for row in rows if row['name'] == 'asker')['reported_at'], stamp)
+        launch = store.read(directory / 'runtime.json')['launch_id']
+        agents.update_runtime(directory, launch, status='working')
+        self.assertEqual(store.read(directory / 'properties.json')['reported_at'], stamp)
 
     def test_only_the_named_agents_inbox_messages_upgrade_and_focus_still_holds_them(self):
         """A targeted wake must happen once, keep both notices, and take the normal held-message path during focus."""

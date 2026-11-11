@@ -311,7 +311,9 @@ mv2 report --phase working --summary 'Checking the launch permissions'
 mv2 report --phase done --summary 'Fix on branch fix-login, tests pass'
 ```
 
-The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. Only a report whose phase is `done` includes the unread inbox count, for example `Reported done. You have 2 unread inbox messages.` Other reports say only the phase, such as `Reported working.` or `Reported blocked on helper.`, plus the targeted reminder below when it applies. Counting never marks messages read.
+The phases are `starting`, `working`, `blocked` and `done`. The phase and summary show in `mv2 list` and in the dashboard. Only a report whose phase is `done` includes the unread inbox count, for example `Reported done. You have 2 unread inbox messages.` Other reports say the phase, such as `Reported working.` or `Reported blocked on helper.`, with the guidance below when it applies. Counting never marks messages read.
+
+Every accepted report records its time in `reported_at`, including a report of the same phase or one that updates only the summary. It measures how current the reported work is, rather than how long the agent has been in that phase. Unrelated record changes do not reset it. Older agents gain the timestamp with their next report; `mv2 list --json --columns name,reported_at` reads it.
 
 Name one dependency when reporting blocked:
 
@@ -327,6 +329,12 @@ An agent target accepts the same name, full ID or unique ID prefix as `send`. Us
 The dependency follows the agent's ID, so renaming it or reusing its old name cannot redirect a follow-up. The display finds moves within the known universe trees; a target that cannot be found shows its saved name with `gone`. For a move outside those trees, report the target's new universe to update its displayed address. Incoming messages still match by ID. A new `--phase` report clears the previous dependency unless it also supplies `--blocked-on`, including another plain `--phase blocked`. Updating only the summary keeps it.
 
 When an agent reports and has unread inbox messages from its blocked-on agent, its output ends with `Reminder: you have unread messages from NAME.` This is the same nonblocking peek as send's reminder: it never marks anything read, and a busy or damaged inbox skips it.
+
+A blocked report also gives guidance for its dependency:
+
+- With `--blocked-on user`, an agent that is not focused is encouraged to enable focus while waiting for the user's decision. A current focus suppresses this note.
+- With `--blocked-on self`, a summary without the word `ETA` is encouraged to give the process's ETA. Matching is case-insensitive, so `eta: 5m` counts and `beta build` does not. Updating only the summary uses the new text for this check.
+- Without a dependency, the report encourages naming one with `--blocked-on`: an agent, `user`, or `self`.
 
 Text `mv2 list` always includes the dependency in Phase, such as `blocked (reviewer)`; `--json` includes `blocked_on` as a field. In the dashboard, the `blocked_on` view option adds the dependency inside Phase without adding a column. It has no effect when Phase is hidden. The option is off by default except in the Silicon23 template.
 

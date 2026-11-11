@@ -112,7 +112,7 @@ def _listing_runtime(directory, facts, *, prepare=False):
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
     'id', 'universe_id', 'name', 'harness', 'model', 'model_name', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
-    'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
+    'workspace', 'created_at', 'updated_at', 'reported_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
