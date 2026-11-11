@@ -362,6 +362,10 @@ def _signature(root):
     if root is not None:
         parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
         parts.append(tuple((path.name, _stat(path)) for path in sorted((Path(root) / settings_files.DIRECTORY).glob("*.json"))))
+        # A harness's settings hold the person's model choices, which a plugin's settings check may judge by
+        # (harness.check): a change there must run those checks again.
+        harness_files = sorted((Path(root) / "harnesses").glob("*/harness.json"))
+        parts.append(tuple((path.parent.name, _stat(path)) for path in harness_files))
     with _lock:
         failed = {directory: known.files for directory, known in _loaded.items() if isinstance(known, Failed)}
     for source, directory in _source_directories(root):

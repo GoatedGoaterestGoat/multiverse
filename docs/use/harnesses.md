@@ -182,6 +182,7 @@ Every setting is optional. A change applies at the next spawn or resume:
 | Setting | Use |
 | --- | --- |
 | `model` | Default model for new agents |
+| `models` | Optional subset of model IDs or aliases and their allowed efforts, described below |
 | `args` | Extra flags on spawn and resume; `spawn_args` and `resume_args` for one of them |
 | `env` | Variables set for the agent, as strings |
 | `inbox_bridge` | The live connection, described above |
@@ -218,6 +219,33 @@ For a model you use often, add a harness profile. A profile is a second director
 
 Then run `mv2 spawn --name planner --harness claude-opus`. The dashboard's harness selector lists every profile.
 
+### Narrow the available choices
+
+In this universe's `harnesses/NAME/harness.json`, add `settings.models` to allow only part of the harness's catalog:
+
+```json
+{
+  "schema": 2,
+  "adapter": "claude",
+  "settings": {
+    "models": {
+      "sonnet": {"efforts": ["low", "medium"]},
+      "haiku": {}
+    }
+  }
+}
+```
+
+Each key is an ID or alias from that harness's model table. `{}` allows all of the model's efforts and lets the native harness choose effort. An `efforts` list must contain at least one offered level; it requires an explicit effort. The list follows table order, regardless of the order in the settings file. Aliases are resolved for the launch environment and passed as canonical IDs when a subset is set.
+
+Spawn, resume and plugin runs all check this setting, including plugins such as GOAT that select a builder model. A recorded model or effort outside the subset refuses resume; supply an allowed `--model` or `--effort` to replace it. If a configured entry is no longer in the table, mv2 names it and the settings file. Fix or remove the entry before launching or running another model call. Entries are never silently discarded.
+
+With a subset, an omitted model needs an allowed harness `model` setting or a recorded model on resume. The bundled table's default cannot prove what native account or session settings would select. Likewise, `--effort default` is refused where an explicit effort list requires a choice. In the dashboard, `n` offers only the permitted choices and leaves required fields unselected. An allowed configured model can stay at `default` while you choose its required effort separately.
+
+Without `models`, the built-in tables remain unchanged, native defaults remain available, and unlisted IDs can still be typed. Known models are checked for supported efforts. A harness without a catalog still accepts a typed model, but cannot have a model subset. Remove `models` to restore this behavior; an empty object is a configuration error. `mv2 doctor` reports invalid subsets and a configured `model` outside its subset.
+
+The subset limits choices mv2 submits. Native account policies, model remapping, environment overrides and effort clamps can still affect the settings actually served; it does not police later in-terminal changes. Claude's literal `--model default` is a native computed choice, distinct from omitting `--model`, and cannot be verified against a subset.
+
 ### Claude's models
 
 Claude Code has no command that lists its models, so mv2 keeps a table of them, `harnesses/claude/models.json`. It comes from the two model catalogs built into Claude Code, of the version in the [compatibility table](../reference/compatibility.md): the full list, and the release copy its `/model` picker shows, which gives the default model and some default efforts. It is updated with each Claude Code version check. Plugins read it through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)).
@@ -237,6 +265,8 @@ A plugin can ask Claude for one reply to a conversation it gives (`harness.run_o
 ### Codex's models and transcripts
 
 Plugins read Codex's models through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)). The table comes from the checked release's bundled model catalog and is regenerated at each version check. It includes efforts, defaults, input types, context windows and hidden models. A known model's unsupported effort fails the check; an unknown ID passes as unverified.
+
+Use `mv2 spawn --harness codex --model gpt-5.4 --effort high` or `mv2 resume NAME --model gpt-5.4 --effort high` to request effort for that agent. The choice overrides configured and plugin effort defaults, without saving a native default. `--effort default` clears mv2's saved effort and leaves the choice to Codex. A loaded shared conversation can keep its current model and effort despite the request; check the active settings in Codex when resuming it.
 
 The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
 

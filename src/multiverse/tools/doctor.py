@@ -2,8 +2,9 @@
 import sys
 from pathlib import Path
 
-from ..runtime import lifecycle
-from .. import universe
+from ..runtime import lifecycle, model_choices
+from ..runtime.run_environment import launch as launch_environment
+from .. import harnesses, universe
 from ..universe import agents, catalog
 from ..universe.mailbox import inbox_problem
 
@@ -22,7 +23,15 @@ def check(root, notes=None):
         try:
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
-            catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
+            entries = catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
+            for entry in entries:
+                if entry['kind'] == 'harnesses' and not entry.get('plugin'):
+                    try:
+                        adapter = harnesses.load(scope, entry['name'])
+                        model_choices.validate_settings(scope, adapter, environment=launch_environment(adapter))
+                    except (OSError, ValueError, TypeError) as error:
+                        problem = str(error)
+                        found.append((problem, problem))
             for item in lifecycle.listing(scope):
                 damage = item.get('damaged')
                 if damage:

@@ -142,8 +142,8 @@ mv2 spawn --name NAME [--harness HARNESS] [--task TASK | --task-file TASK_FILE] 
 | `--harness` | `HARNESS` | Configured harness name | `codex` |
 | `--task`, `--prompt` | `TASK` | Initial prompt sent to the new agent |  |
 | `--task-file` | `TASK_FILE` |  |  |
-| `--model` | `MODEL` |  |  |
-| `--effort` | `EFFORT` | Effort for this agent only; requires harness support and a known --model; default uses the harness default |  |
+| `--model` | `MODEL` | Model ID or alias; passed to the harness unless a subset or effort requires validation |  |
+| `--effort` | `EFFORT` | Effort for this agent only, from its model's allowed levels; default leaves it unset when permitted |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
 | `--json` |  | Print the full launch record as JSON |  |
@@ -161,8 +161,8 @@ mv2 resume [--model MODEL] [--effort EFFORT] [--start-fresh] [--wait] [--wait-ti
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
-| `--model` | `MODEL` |  |  |
-| `--effort` | `EFFORT` | Effort for this agent only; retained on later resumes; default clears it and uses the harness default |  |
+| `--model` | `MODEL` | Allowed model ID or alias; overrides the recorded choice |  |
+| `--effort` | `EFFORT` | Allowed effort for this agent, retained on later resumes; default clears it when permitted |  |
 | `--start-fresh` |  | Recover a missing conversation with a new one, only after every candidate storage proves it absent |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |

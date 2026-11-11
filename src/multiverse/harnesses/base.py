@@ -68,7 +68,7 @@ class ConfiguredAdapter:
     @classmethod
     def configured(cls, name, settings):
         unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'env',
-                                   'inbox_bridge'}
+                                   'inbox_bridge', 'models'}
         if unknown:
             raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
         bridge = settings.get('inbox_bridge', False)

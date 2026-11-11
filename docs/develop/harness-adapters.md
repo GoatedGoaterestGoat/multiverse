@@ -82,7 +82,15 @@ For legacy storage adoption, `LaunchContext.storage_keys` lists proven harness s
 
 ### Rules
 
-An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude supports it; Codex and Pi currently refuse it.
+`runtime.model_choices.catalog` and `check` apply `settings.models` to the existing `ModelProvider` catalog and checker. Launch, resume and one-shot runs share the same policy; plugin catalog reads use it too. A subset resolves each key through `check_model` and requires a verified ID present in the catalog. It narrows efforts in table order and refuses stale entries. A restricted launch or run passes the canonical ID, not the alias. Launch validates against the prepared command's environment, including its automatic fallback, and checks final native preparation again before releasing the runner. Omitted native effort is never inferred from `ModelInfo.default_effort`; an explicit effort list requires a choice. The public catalog/check types are unchanged, and the dashboard's private projection adds unset eligibility.
+
+One-shot runs also recheck the exact prepared payload environment, after command additions and removals. A restricted run must keep its admitted canonical model and effort; it is refused before publication or execution if preparation changes that choice.
+
+The dashboard projection's `default_model` is the verified canonical configured model in the offered list, or `None`; it is never the table's default. Model omission is independent of effort omission: an allowed configured model permits `unset`, while its `effort_unset` can still require an explicit effort.
+
+An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude and Codex support it; Pi refuses it.
+
+Codex encodes the validated effort as `-c` and `model_reasoning_effort="LEVEL"`, before the literal argument separator and before plain/bridge selection. The same per-launch value wins over configured and plugin defaults in the bridge request merge. Core pairs a nonempty effort with a requested, recorded or configured model; it never infers that model from the release table's default. An omitted effort adds no override. These are requested settings: a loaded native thread can retain its existing settings, and only its owning `thread/start` or `thread/resume` reply reports the observed `model` and `reasoningEffort`. Launch success alone does not verify that they changed.
 
 - **Only describe.** Return specs and results. Core starts processes, owns tmux, writes `runtime.json` and holds the locks. Reach the native side only through the executor: `executor.request`, `executor.rpc` or `executor.write_lines`.
 - **No shell.** `argv` runs as given, so prompts and IDs stay literal.

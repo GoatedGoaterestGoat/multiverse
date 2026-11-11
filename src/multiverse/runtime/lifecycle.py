@@ -21,8 +21,13 @@ from ..universe import agents, blocked, catalog, focus, mailbox, records, storag
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import model_choices as model_policy
 
 TEARDOWN_TIMEOUT = 10
+
+
+def model_choices(root, harness):
+    return model_policy.for_launch(root, harness)
 
 def damaged_row(scope, error, properties=None):
     """The row of an agent whose record cannot be used: always well formed, never raising.
@@ -507,6 +512,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices, ignored_settings, effort_notices, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
+        resolved_model = None
         while True:
             command = (effects.call(adapter, 'resume', session, context) if resume and not fresh
                        else effects.call(adapter, 'spawn', context))
@@ -531,20 +537,32 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     raise _effort_problem(f'Harness {harness} does not support --effort for an individual launch', properties, effort)
                 if native.adapter_hook(adapter, 'check_model') is None:
                     raise _effort_problem(f'Harness {harness} cannot validate the model and effort for this launch', properties, effort)
+            # Unrestricted launches without effort keep the native harness's model acceptance policy.
+            if model_policy.restricted(adapter) or properties.get('effort') is not None:
                 check_environment = {**environment, **dict.fromkeys(command.unset_env, None), **command.environment}
-                checked = effects.call(adapter, 'check_model', model, effort=properties['effort'],
-                                       environment=check_environment)
-                if not isinstance(checked, ModelCheck) or checked.ok is not True:
-                    if model_changed and effort is None and isinstance(checked, ModelCheck) and checked.ok is False:
-                        default = effects.call(adapter, 'check_model', model, environment=check_environment)
-                        if isinstance(default, ModelCheck) and default.ok is True:
-                            notices.append(f"Dropped recorded effort {properties['effort']!r}: model {model!r} does not take it. "
-                                           'Using the harness default.')
-                            properties['effort'] = None
-                            context = replace(context, effort=None)
-                            continue  # Reprepare once without the inherited flag; nothing has launched or been saved.
-                    raise _effort_problem((checked.reason if isinstance(checked, ModelCheck) else None)
-                                          or 'The harness refused this model and effort', properties, effort)
+                checked = model_policy.check(root, adapter, model, effort=properties.get('effort'), environment=check_environment)
+                if checked.ok is not True:
+                    if model_policy.restricted(adapter):
+                        # The policy already names the allowed choices. A native default may itself be forbidden.
+                        raise ValueError(checked.reason or 'The model and effort are not allowed by the harness settings')
+                    if properties.get('effort') is not None:
+                        if model_changed and effort is None and not model_policy.restricted(adapter):
+                            default = effects.call(adapter, 'check_model', model, environment=check_environment)
+                            if isinstance(default, ModelCheck) and default.ok is True:
+                                notices.append(f"Dropped recorded effort {properties['effort']!r}: model {model!r} does not take it. "
+                                               'Using the harness default.')
+                                properties['effort'] = None
+                                context = replace(context, effort=None)
+                                continue  # Reprepare once without the inherited flag; nothing has launched or been saved.
+                        raise _effort_problem(checked.reason or 'The harness refused this model and effort', properties, effort)
+                    raise ValueError(checked.reason or 'The harness refused this model')
+                if model_policy.restricted(adapter) and checked.model != model:
+                    if resolved_model is not None:
+                        raise ValueError('The launch environment changed model resolution during preparation; try again')
+                    resolved_model = model = checked.model
+                    context = replace(context, model=model, values={**context.values, 'model': model})
+                    continue  # Canonical ID bypasses native alias remaps; validate the final command's environment too.
+            model_policy.require_command(root, adapter, model, properties.get('effort'), environment, command)
             storage = selected_storage
             break
         properties['native_storage_environment'] = storage
@@ -694,6 +712,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
+            model_policy.require_command(root, adapter, model, properties.get('effort'),
+                                         {**environment, **context.environment}, command)
             service = native.service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
             if service and asdict(service.identity) != properties.get('native_service_identity'):
                 raise ValueError('Native service scope changed during launch preparation')

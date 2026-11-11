@@ -1476,9 +1476,11 @@ class Harness:
                            duration=round(getattr(outcome, "duration", 0.0) or 0.0, 3), outcome=kind)
 
     def _ask(self, method, *args, **kwargs):
+        """models() or check_model(), through core's model choices: the person's subset of a harness's models
+        (harness.json's settings.models), which spawn, resume and run_once use too, limits what a plugin sees."""
         from .. import harnesses
         from ..harnesses import types
-        from ..runtime import effects
+        from ..runtime import effects, model_choices
         plugin, root = self._universe._plugin, self._universe.path
         with _acting(plugin._loaded, "observe", self._universe, f"reading {self.name}'s models"):
             adapter = _call(harnesses.load, root, self.name)
@@ -1487,8 +1489,15 @@ class Harness:
                          if getattr(adapter, "family", "") in ("codex", "pi") else "")
                 raise ModelsUnavailable(f"{self.name} does not provide its models{later}")
             _call(effects.require, method, self.name)
+            environment = _launch_environment(adapter)
             try:  # an adapter's failure never reaches the plugin as text with a file's content in it
-                result = getattr(adapter, method)(*args, environment=_launch_environment(adapter), **kwargs)
+                if method == "models":
+                    result = model_choices.catalog(root, adapter, environment=environment)
+                else:
+                    result = model_choices.check(root, adapter, *args, environment=environment, **kwargs)
+            except model_choices.ModelChoicesError as error:  # the person's own setting, its file named: shown
+                reason = str(error).strip().splitlines()[0][:500] if str(error).strip() else ""
+                raise ModelsUnavailable(reason or f"{self.name}'s model choices can't be used") from None
             except Exception:
                 raise ModelsUnavailable(f"{self.name}'s models could not be read") from None
         if not isinstance(result, types.ModelCatalog if method == "models" else types.ModelCheck):

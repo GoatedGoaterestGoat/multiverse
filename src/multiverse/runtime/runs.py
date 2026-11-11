@@ -401,13 +401,24 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
         request = _request(request, supported)
         if not callable(getattr(adapter, 'check_model', None)):
             raise RunFailure('unavailable', 'The harness cannot check a run model')
-        checked = effects.call(adapter, 'check_model', request.model, effort=request.effort, environment=environment)
+        from . import model_choices
+        checked = model_choices.check(root, adapter, request.model, effort=request.effort, environment=environment)
         executor.check()
         if not isinstance(checked, ModelCheck) or checked.ok is not True:
             raise RunFailure('invalid_request', checked.reason if isinstance(checked, ModelCheck) else 'Invalid model check')
+        if model_choices.restricted(adapter):
+            request = replace(request, model=checked.model)
         plan = effects.call(adapter, 'run_plan', request, environment=environment, run=directory)
         executor.check()
         payload = _plan(plan, directory, environment, adapter)
+        if model_choices.restricted(adapter):
+            final = model_choices.check(root, adapter, request.model, effort=request.effort,
+                                        environment=payload['environment'])
+            if final.ok is not True:
+                raise RunFailure('invalid_request', final.reason or 'The prepared run is outside the model subset')
+            if final.model != request.model:
+                raise RunFailure('invalid_request', 'The prepared run changes the resolved model; '
+                                 'choose its allowed canonical ID')
         executor.check()
         # Bounded, metadata-only; never restores process authority or deletes an uncertain target.
         run_files.leftovers(run_base, sweep=True, deadline=min(executor.deadline, time.monotonic() + 1))

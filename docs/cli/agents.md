@@ -14,9 +14,11 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 | `--name` | Must be unique in the universe, counting stopped and failed agents, and cannot look like a UUID |
 | `--harness` | A harness configured in this universe. The default is `codex` |
 | `--task` / `--prompt`, `--task-file` | The first prompt. Leave it out to start the agent idle |
-| `--model` | Override the harness's default model for this agent |
-| `--effort` | Set effort for this agent only; currently supported by Claude, with a refusal for unsupported harnesses or levels. Give `--model` too when the launch has no recorded or configured model. `default` uses the harness default |
+| `--model` | Model ID or alias; passed to the harness unless a subset or effort requires validation |
+| `--effort` | Set effort for this agent only; supported by Claude and Codex, with a refusal for unsupported harnesses or levels. Give `--model` too when the launch has no recorded or configured model. `default` leaves effort unset when the subset permits it |
 | `--wait`, `--wait-timeout SECONDS` | Return only once the agent can receive messages or has failed. The timeout defaults to 60 s |
+
+A harness can [narrow its model and effort choices](../use/harnesses.md#narrow-the-available-choices). Those choices apply to both spawn and resume. Without a subset or a recorded or requested effort, spawn, resume and wake pass the model spelling unchanged to the harness, including choices saved by older mv2 versions. The harness decides whether it can use that model. A subset or effort choice still requires model validation.
 
 Without `--wait`, `spawn` returns as soon as the launch is registered. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
 
@@ -70,7 +72,7 @@ mv2 resume worker --effort default
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
-`--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other Claude sessions. `--effort default` clears the saved effort and uses the harness default. Changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer Claude's effective default from the person's settings, account and provider.
+`--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other sessions. `--effort default` clears the saved effort when permitted. Without a model subset, changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. With a [model subset](../use/harnesses.md#narrow-the-available-choices), an excluded recorded choice refuses resume until you explicitly replace it with an allowed one. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer the native effective default from the person's settings, account and saved conversation.
 
 If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
 agent's folder, name and inbox and starts a new conversation in the calling

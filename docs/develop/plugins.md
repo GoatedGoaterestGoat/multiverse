@@ -226,9 +226,10 @@ if not check.ok:
 ```
 
 - **The answer is for a launch from this process**: its provider (`catalog.provider`: first-party, Bedrock, Vertex, ...) decides the aliases and IDs.
-- **`check()`** gives the resolved ID as `model`, and as `effort` what a run would use: the one given, or the model's default. An effort the model doesn't take is not ok, since Claude Code would silently use another.
+- **`check()`** gives the resolved ID as `model`, and as `effort` the one given; with none given and no model choices (below), the model's default from mv2's table, which is not proof of the effort the harness will use. An effort the model doesn't take is not ok, since Claude Code would silently use another.
 - **`verified` false** means the model isn't in mv2's table (`catalog.free_form` is true for Claude and Codex) and is taken unchecked; `reason` says so.
-- **`api.ModelsUnavailable`** comes from a harness without models (Pi for now), or whose models can't be read. Catch it to offer a free-form model field.
+- **The person's model choices:** where a harness's `harness.json` lists `settings.models`, `models()` gives only those models (and only their listed efforts), with `free_form` false, and `check()` refuses any other with a `reason`; an alias the list allows resolves to its table ID. A model listed with `efforts` needs one of them named; a check that passes without one gives `effort` as `None`. `spawn`, `resume` and `run_once` keep to the same list, so check a model your settings name with `check()` and say so in your settings check rather than failing later.
+- **`api.ModelsUnavailable`** comes from a harness without models (Pi for now), whose models can't be read, or whose `settings.models` can't be used. For a harness without models, catch it to offer a free-form model field. For unusable model choices, show its reason, which names the file to fix, rather than a way around it: a later `check()` or run still refuses.
 - **Codex** uses its release's bundled model table, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
 - Treat a `source`, `provider`, input or effort you don't know as an opaque name: later minors may add them.
 
