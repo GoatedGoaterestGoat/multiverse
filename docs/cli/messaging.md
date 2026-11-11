@@ -336,7 +336,7 @@ A blocked report also gives guidance for its dependency:
 - With `--blocked-on self`, a summary without the word `ETA` is encouraged to give the process's ETA. Matching is case-insensitive, so `eta: 5m` counts and `beta build` does not. Updating only the summary uses the new text for this check.
 - Without a dependency, the report encourages naming one with `--blocked-on`: an agent, `user`, or `self`.
 
-Text `mv2 list` always includes the dependency in Phase, such as `blocked (reviewer, 50m)`, after which it shows how long ago the agent last reported; `--json` includes `blocked_on` and `reported_at` as fields. A `working` agent shows its report age the same way, such as `working (10m)`. In the dashboard, Phase shows the age, and the `blocked_on` view option adds the dependency inside Phase without adding a column. Neither shows when Phase is hidden. Both bundled templates turn `blocked_on` on.
+Text `mv2 list` always starts a blocked agent's summary with what it's waiting for, such as `Waiting for reviewer: needs the API diff`, and its Phase says how long ago it last reported, such as `blocked (50m)` or `working (10m)`; `--json` includes `blocked_on` and `reported_at` as fields. In the dashboard, Phase shows the age, and the `blocked_on` view option adds the dependency to the summary, in its own colour, without adding a column. It doesn't show when Summary is hidden. Both bundled templates turn `blocked_on` on.
 
 ## Inside Claude and Pi sessions
 

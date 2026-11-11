@@ -41,9 +41,9 @@ class ReportAgeTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             properties.update({"blocked_on": target} if target else {})
             write(directory / "properties.json", properties)
         expected = {"fresh": "working (32s)", "busy": "working (10m)", "stuck": "blocked (2h)",
-                    "asking": "blocked (user, 50m)", "old": "working (4d)", "finished": "done", "legacy": "working",
+                    "asking": "blocked (50m)", "old": "working (4d)", "finished": "done", "legacy": "working",
                     "garbled": "working", "naive": "working", "dated": "working", "broken-z": "working",
-                    "waits": "blocked (a-dependency-with-a-long-name, 50m)"}
+                    "waits": "blocked (50m)"}
         self.enterContext(mock.patch.object(display, "_now", lambda: NOW))
 
         with self.subTest("mv2 list's Phase says it the same way"):
@@ -62,12 +62,8 @@ class ReportAgeTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
         write(self.root / "views" / "default.json", {"columns": ["name", "phase", "blocked_on"]})
         async with self.dashboard(size=(140, 30)) as d:
-            with self.subTest("the dashboard's Phase: the target first, then the age"):
-                found = phases(d)
-                self.assertEqual({k: v for k, v in found.items() if k != "waits"},
-                                 {k: v for k, v in expected.items() if k != "waits"})
-                self.assertRegex(found["waits"], r"^blocked \(a-dep[^,]*…, 50m\)$")  # Phase grows to at most 24
-                # cells: the name gives way, not the age
+            with self.subTest("the dashboard's Phase: the age, the target staying in the summary"):
+                self.assertEqual(phases(d), expected)
         write(self.root / "views" / "default.json", {"columns": ["name", "phase"]})
         async with self.dashboard(size=(140, 30)) as d:
             with self.subTest("without blocked_on, the age alone"):

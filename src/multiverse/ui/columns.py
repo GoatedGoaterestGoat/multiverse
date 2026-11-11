@@ -18,7 +18,7 @@ import threading
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from ..display import clean, live_label, model_label, phase_label, phase_parts
+from ..display import clean, live_label, model_label, phase_label, summary_parts
 from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
@@ -28,8 +28,8 @@ COMPACT_WIDTH = 110
 # A view key that is not a column of its own: listed in a view's `columns`, it adds the agent's unread inbox count
 # to the name cell (the backend reads it only then).
 UNREAD = "unread"
-# Another such key: listed in a view, a blocked agent's Phase cell says what it is blocked on, `blocked (lifecycle)`.
-# A view without the Phase column shows neither.
+# Another such key: listed in a view, a blocked agent's summary says what it waits on, `Waiting for user: …`.
+# A view without the Summary column shows neither.
 BLOCKED_ON = "blocked_on"
 # Another: listed with "model", an agent's Model cell adds its effort, `Opus 5.5 (xhigh)`. Without "model" it shows
 # nowhere.
@@ -172,25 +172,15 @@ class ModelColumn(Column):
 
 
 class PhaseColumn(Column):
-    """The reported phase and how long ago it was reported; a blocked agent's also says what it waits on where the
-    view lists `blocked_on`: `blocked (user, 50m)`.
+    """The reported phase and how long ago it was reported: `working (10m)`, `blocked (50m)`.
 
-    Given the cell's `width`, a long name is shortened inside the parentheses and the time since the last report
-    kept whole; narrower, the name goes, then the time."""
+    Given the cell's `width`, a cell too narrow for the time since the last report says only the phase."""
     def render(self, row, width=None):
         if row["kind"] == "group":
             return self.group(row)
         value = clean(phase_label(row) or "—")
         if width is not None and cell_len(value) > width:
-            phase, target, age = (clean(part) if part else part for part in phase_parts(row))
-            head, tail = f"{phase} (", (f", {age})" if age else ")")
-            room = width - cell_len(head) - cell_len(tail)
-            if target and room >= 2:
-                value = head + set_cell_size(target, room - 1).rstrip() + "…" + tail
-            elif age and cell_len(f"{phase} ({age})") <= width:
-                value = f"{phase} ({age})"
-            else:
-                value = phase or "—"
+            value = clean(row.get("phase") or "—")
         return Text(value, style=STATE_COLORS.get(value.partition(" ")[0], theme.SUBTEXT0))
 
 
@@ -204,7 +194,24 @@ class ContextColumn(Column):
         return text
 
 
+def summary_text(row, empty="—"):
+    """The summary as drawn: what a blocked agent waits on in its own colour, so it stands out from the rest."""
+    lead, summary = (clean(part) if part else part for part in summary_parts(row))
+    text = Text(style=theme.SUBTEXT0)
+    if lead:
+        text.append(lead, style=f"bold {theme.YELLOW}")
+        if summary:
+            text.append(": ")
+    text.append(summary or ("" if lead else empty))
+    return text
+
+
 class SummaryColumn(Column):
+    """What the agent last reported working on, led by what a blocked one waits on where the view lists
+    `blocked_on`: `Waiting for user: decide the model list`."""
+    def agent(self, row):
+        return summary_text(row)
+
     def group_value(self, row):
         return ((f'{row["waiting"]} waiting · ' if row["waiting"] else "")
                 + (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]))

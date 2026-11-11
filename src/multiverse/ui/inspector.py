@@ -8,7 +8,8 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean, live_label, phase_label
+from ..display import clean, live_label, phase_label, summary_label
+from .columns import summary_text
 from . import theme
 from .plugin_service import in_daemon
 from .prompt_screen import prompt_line
@@ -78,8 +79,10 @@ class Inspector(Vertical):
         self.query_one("#inspect-hint", Static).update(
             ("r resume · " if dormant else "") + "v full details · p / Esc close")
         self.query_one("#inspect-label", Static).update("PURPOSE" if group else "CURRENT WORK")
-        self.query_one("#inspect-work", Static).update(clean(
-            row.get("description", "No description yet.") if group else row.get("summary") or row.get("task") or "No work reported yet."))
+        self.query_one("#inspect-work", Static).update(
+            Text(clean(row.get("description", "No description yet."))) if group
+            else summary_text(row, empty="") if summary_label(row)
+            else Text(clean(row.get("task") or "No work reported yet.")))
         self.query_one("#inspect-group").display = group
         self.query_one("#pane-scroll").display = not group and not dormant
         if group:
@@ -267,7 +270,11 @@ def active_work(members, accent):
     work = Text("ACTIVE WORK\n", style=theme.OVERLAY1)
     for agent in members[:4]:
         work.append("\n" + clean(agent["name"]) + "\n", style=accent)
-        work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
+        if summary_label(agent):
+            work.append_text(summary_text(agent, empty=""))
+            work.append("\n")
+        else:
+            work.append(clean(agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
     if not members:
         work.append("\nNo agents yet. Select this group and press n.")
     return work

@@ -68,18 +68,16 @@ def model_label(row, effort=True):
     return label
 
 
-def blocked_label(value):
-    """What a blocked agent waits on, as its reported phase shows it: `lifecycle`, `qa-claude in qa`, `user`, `self`.
-
-    `value` is a listing row's `blocked_on`. An agent named like one of the two other sources reads `agent user`,
-    so it is never taken for the person; one the listing can no longer find adds `: gone`. Anything else is None."""
+def _target(value):
+    """The name of what a blocked agent waits on, and whether the listing could still find it; (None, False) for
+    anything that isn't a readable `blocked_on`."""
     if not isinstance(value, dict):
-        return None
+        return None, False
     if value.get("kind") in ("user", "self"):
-        return value["kind"]
+        return value["kind"], False
     name = clean(value.get("name")).strip() if value.get("kind") == "agent" and isinstance(value.get("name"), str) else ""
     if not name:
-        return None
+        return None, False
     if name in ("user", "self"):
         name = f"agent {name}"
     place = value.get("universe")
@@ -88,7 +86,31 @@ def blocked_label(value):
             parts = place.rstrip("/").split("/")
             place = parts[-2] if parts[-1] == ".multiverse" and len(parts) > 1 else parts[-1]
         name += f" in {clean(place)}"
-    return name + (": gone" if value.get("gone") else "")
+    return name, bool(value.get("gone"))
+
+
+def blocked_label(value):
+    """What a blocked agent waits on: `lifecycle`, `qa-claude in qa`, `user`, `self`.
+
+    `value` is a listing row's `blocked_on`. An agent named like one of the two other sources reads `agent user`,
+    so it is never taken for the person; one the listing can no longer find adds `: gone`. Anything else is None."""
+    name, gone = _target(value)
+    return name and name + (": gone" if gone else "")
+
+
+def summary_parts(row):
+    """What a blocked agent waits on, where the row carries it (`Waiting for user`, `Waiting for ada (gone)` for
+    one the listing can no longer find), else None; and its summary on one line."""
+    summary = " ".join(str(row.get("summary") or "").split())
+    name, gone = _target(row.get("blocked_on")) if row.get("phase") == "blocked" else (None, False)
+    return (f"Waiting for {name}" + (" (gone)" if gone else "") if name else None), summary
+
+
+def summary_label(row):
+    """An agent's summary, led by what a blocked one waits on where the row carries it:
+    `Waiting for user: decide the model list`, or `Waiting for user` with no summary."""
+    lead, summary = summary_parts(row)
+    return f"{lead}: {summary}" if lead and summary else lead or summary
 
 
 def _now():
@@ -114,18 +136,11 @@ def report_age(row):
     return f"{seconds}s"
 
 
-def phase_parts(row):
-    """The reported phase, what a blocked agent waits on (or None), and how long ago it reported (or None)."""
-    phase = row.get("phase")
-    return phase, (blocked_label(row.get("blocked_on")) if phase == "blocked" else None), report_age(row)
-
-
 def phase_label(row):
-    """An agent's reported phase, with what it is blocked on and how long ago it reported:
-    `blocked (lifecycle, 50m)`, `working (10m)`."""
-    phase, target, age = phase_parts(row)
-    inside = ", ".join(part for part in (target, age) if part)
-    return f"{phase} ({inside})" if phase and inside else phase
+    """An agent's reported phase, with how long ago it reported: `working (10m)`, `blocked (50m)`. What a blocked
+    agent waits on is in its summary (`summary_label`)."""
+    phase, age = row.get("phase"), report_age(row)
+    return f"{phase} ({age})" if phase and age else phase
 
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}

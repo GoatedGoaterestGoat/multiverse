@@ -154,9 +154,9 @@ class LocalBackend:
             effort = EFFORT in config["columns"]  # effort shows only inside the Model cell
             for member in members:
                 member["model_label"] = display.model_label(member, effort=effort)
-        if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "phase" or key == "phase"
+        if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "summary" or key == "summary"
                                                            for key in config["columns"]):
-            # Shown only where the view lists both: otherwise a blocked agent is plainly blocked everywhere, the
+            # Shown only where the view lists both: otherwise a blocked agent's summary is its own everywhere, the
             # inspector and details included.
             for member in members:
                 member.pop(BLOCKED_ON, None)

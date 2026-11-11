@@ -35,7 +35,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `effort` | Not a column of its own: with `model` also listed, the agent's effort in parentheses in the Model cell, such as `Opus 5.5 (xhigh)`; nothing when none was chosen. Without `model` it shows nowhere (off by default) |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
-| `blocked_on` | Not a column of its own: a blocked agent's Phase says what it's blocked on, such as `blocked (lifecycle, 50m)`, `blocked (tester in qa, 2h)`, `blocked (user, 5m)` or `blocked (self, 32s)` (on in both bundled templates). An agent mv2 can no longer find reads `: gone`, and one named `user` or `self` reads `agent user`. A view without `phase` (or `core:phase`) shows it nowhere, the inspector included; a plugin column standing in for Phase shows its own value, and the plain phase where it has none |
+| `blocked_on` | Not a column of its own: a blocked agent's summary starts with what it's waiting for, in its own colour, such as `Waiting for user: decide the model list`, `Waiting for tester in qa: …` or `Waiting for self: tests running, ETA 5 min`, or just `Waiting for lifecycle` with no summary (on in both bundled templates). An agent mv2 can no longer find reads `Waiting for ada (gone)`, and one named `user` or `self` reads `agent user`. A view without `summary` (or `core:summary`) shows it nowhere, the inspector included; a plugin column standing in for Summary shows its own value, and core's summary where it has none |
 
 Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
@@ -132,7 +132,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | --- | --- |
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
-| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its Phase, and `effort` an agent's effort to its Model cell, instead of a column each. Both bundled templates turn `blocked_on` on. `Silicon23` also turns on `unread`, `model` and `effort`, in place of `harness`, and leaves `context` out; `base` leaves those off and shows `context` |
+| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its summary, and `effort` an agent's effort to its Model cell, instead of a column each. Both bundled templates turn `blocked_on` on. `Silicon23` also turns on `unread`, `model` and `effort`, in place of `harness`, and leaves `context` out; `base` leaves those off and shows `context` |
 | `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 
