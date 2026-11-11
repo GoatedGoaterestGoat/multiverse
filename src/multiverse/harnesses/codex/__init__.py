@@ -41,6 +41,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .models import catalog
         return catalog(environment)
 
+    def model_names(self, *, environment):
+        from .models import names
+        return names(environment)
+
     def check_model(self, model, *, effort=None, environment):
         from .models import check
         return check(model, effort, environment)

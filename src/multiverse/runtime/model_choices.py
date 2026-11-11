@@ -154,6 +154,42 @@ def for_launch(root, harness):
             'default_model': default_model, 'problems': []}
 
 
+def display_names(root, harness):
+    """Labels for recorded choices, independent of the allowed subset and native running settings."""
+    from .. import harnesses
+    from .run_environment import launch
+    adapter = harnesses.load(root, harness)
+    environment = launch(adapter)
+    names = {}
+    try:
+        found = _catalog(adapter, environment)
+        names.update({key: item.name for item in found.models for key in (item.id, *item.aliases)} if found else {})
+        if callable(getattr(adapter, 'model_names', None)):
+            names.update(effects.call(adapter, 'model_names', environment=environment))
+    except (OSError, ValueError, TypeError, KeyError):
+        pass  # Explicit display settings remain usable when table metadata cannot be read.
+    def labels(values):
+        return {key: value for key, value in values.items() if isinstance(key, str) and isinstance(value, str)
+                and value.strip() and not any(char in value for char in ('\0', '\n', '\r'))}
+
+    return labels(names), labels((getattr(adapter, 'settings', None) or {}).get('model_names', {}))
+
+
+def recorded_name(root, properties, cache):
+    """Read metadata once per scope/harness in this listing; a broken table never damages an agent row."""
+    model, harness = properties.get('model'), properties.get('harness')
+    if not isinstance(model, str) or not model or not isinstance(harness, str) or not harness:
+        return None
+    key = (root, harness)
+    if key not in cache:
+        try:
+            cache[key] = display_names(root, harness)
+        except Exception:
+            cache[key] = ({}, {})
+    names, overrides = cache[key]
+    return overrides.get(model, names.get(model.strip()))
+
+
 def require_command(root, adapter, model, effort, environment, command):
     """Final preparation and automatic fallback must keep the admitted canonical choice."""
     if not restricted(adapter):

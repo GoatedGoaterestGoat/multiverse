@@ -173,6 +173,7 @@ Schema 2 points at a built-in adapter and adjusts it:
 | --- | --- |
 | `executable` | Command to run instead of `codex`, `claude` or `pi`. |
 | `model` | Default model for agents spawned without `--model`. |
+| `model_names` | Optional map from exact recorded model spellings to nonempty, single-line display names. It changes labels only; see [display names](../use/harnesses.md#model-display-names). |
 | `models` | Optional nonempty object from a catalog model ID or alias to `{}` or `{"efforts": ["low", "high"]}`. An effort list is nonempty, distinct and limited to offered levels. Unknown entries refuse launches and runs; see [model choices](../use/harnesses.md#narrow-the-available-choices). |
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |

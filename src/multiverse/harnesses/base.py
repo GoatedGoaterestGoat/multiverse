@@ -68,9 +68,14 @@ class ConfiguredAdapter:
     @classmethod
     def configured(cls, name, settings):
         unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'env',
-                                   'inbox_bridge', 'models'}
+                                   'inbox_bridge', 'models', 'model_names'}
         if unknown:
             raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
+        names = settings.get('model_names', {})
+        if (not isinstance(names, dict) or any(
+                not isinstance(text, str) or not text.strip() or any(char in text for char in ('\0', '\n', '\r'))
+                for pair in names.items() for text in pair)):
+            raise ValueError('settings.model_names must map model spellings to nonempty single-line display names')
         bridge = settings.get('inbox_bridge', False)
         if not isinstance(bridge, bool):
             raise ValueError('inbox_bridge must be true or false')

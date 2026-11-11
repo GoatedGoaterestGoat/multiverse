@@ -11,18 +11,22 @@ from multiverse.harnesses.claude import models as m
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def model(ident, efforts=(), default_effort=None, long=None, default=False, picker=('first_party', 'bedrock'), **ids):
-    return {'id': ident, 'name': ident, 'family': 'sonnet', 'efforts': list(efforts), 'default_effort': default_effort,
+def model(ident, efforts=(), default_effort=None, long=None, default=False, picker=('first_party', 'bedrock'), name=None,
+          **ids):
+    return {'id': ident, 'name': name or ident, 'family': 'sonnet', 'efforts': list(efforts), 'default_effort': default_effort,
             'inputs': ['text', 'image'], 'context_window': 200000, 'long_context_window': long,
             'max_output_tokens': 64000, 'default': default, 'picker': list(picker),
             'provider_ids': {'first_party': ident, **ids}}
 
 
 TABLE = {'schema': 1, 'claude_code': '9.9.9', 'models': [
-    model('claude-new', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium', default=True, bedrock='us.claude-new'),
-    model('claude-old', ['low', 'medium', 'high', 'max'], long=1000000, picker=('bedrock',), bedrock='us.claude-old'),
-    model('claude-plain', bedrock='us.claude-plain'),
-    model('claude-direct', ['low', 'medium', 'high']),  # not offered on Bedrock
+    model('claude-new', ['low', 'medium', 'high', 'xhigh', 'max'], 'medium', default=True, bedrock='us.claude-new',
+          name='New'),
+    model('claude-old', ['low', 'medium', 'high', 'max'], long=1000000, picker=('bedrock',), bedrock='us.claude-old',
+          name='Old'),
+    model('claude-plain', bedrock='us.claude-plain', name='Plain'),
+    model('claude-direct', ['low', 'medium', 'high'], name='Direct'),  # not offered on Bedrock
+    model('claude-opus-4-1', name='Opus 4.1'),  # an ID Claude remaps to the current Opus; its label stays the table's
 ], 'aliases': {'sonnet': {'default': 'claude-new', 'per_provider': {'bedrock': 'claude-plain'}},
                'direct': {'default': 'claude-direct', 'per_provider': {}}}}
 
@@ -43,7 +47,8 @@ class ClaudeModelsTest(unittest.TestCase):
 
     def test_names_resolve_for_the_launchs_provider(self):
         """An alias means another model on each provider; a Bedrock launch checked as first-party would pass
-        efforts its model ignores, and nothing would show it."""
+        efforts its model ignores, and nothing would show it. A recorded full ID keeps its label whatever the
+        provider is now, so a launch moved to Bedrock still names its first-party choice."""
         bedrock = {'CLAUDE_CODE_USE_BEDROCK': 'Yes', 'CLAUDE_CODE_USE_VERTEX': '1'}  # Claude's order: Bedrock first
         for name, effort, environment, expected in [
             ('first party', None, {}, (True, 'claude-new', 'medium')),  # no effort given: the model's default
@@ -68,6 +73,22 @@ class ClaudeModelsTest(unittest.TestCase):
                           ('us.claude-plain', ('sonnet',), False, False)])
         # Hidden where that provider's picker doesn't list it.
         self.assertEqual([item.id for item in m.catalog({}).models if item.hidden], ['claude-old'])
+        for spelling, environment, expected in [
+            ('claude-new', bedrock, 'New'),              # a table ID, on another provider
+            ('us.claude-old', {}, 'Old'),                # a Bedrock ID, on first party
+            ('claude-direct', bedrock, 'Direct'),        # not offered on Bedrock, still the recorded choice's label
+            ('sonnet', {}, 'New'),                       # an alias, as this provider means it
+            ('sonnet', bedrock, 'Plain'),
+            ('direct', bedrock, None),                   # an alias not offered here names nothing
+            ('claude-opus-4-1', {}, 'Opus 4.1'),         # a remapped ID keeps the table's label
+            ('claude-old[1m]', bedrock, 'Old [1m]'),
+            ('us.claude-old[1m]', {}, 'Old [1m]'),
+            ('claude-new[1m]', {}, None),                # [1m] only where the model takes it
+            ('sonnet[1m]', {}, None),
+            ('claude-next', {}, None),                   # not in the table
+        ]:
+            with self.subTest(names=spelling, provider=m.provider(environment)):
+                self.assertEqual(m.names(environment).get(spelling), expected)
 
     def test_the_check_refuses_what_claude_code_would_quietly_change(self):
         """Claude Code never refuses an effort or a suffix itself (it falls back), so a wrong one in a setting would

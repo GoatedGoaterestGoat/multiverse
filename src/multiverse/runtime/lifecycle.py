@@ -111,7 +111,7 @@ def _listing_runtime(directory, facts, *, prepare=False):
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
-    'id', 'universe_id', 'name', 'harness', 'model', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
+    'id', 'universe_id', 'name', 'harness', 'model', 'model_name', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
     'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
@@ -144,7 +144,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
-    rows, snapshots, dependencies = [], {}, {}
+    rows, snapshots, dependencies, model_names = [], {}, {}, {}
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
         paths = [agents_dir / only / "properties.json"] if only is not None else agents.record_paths(scope)
@@ -206,6 +206,7 @@ def listing(root, recursive=False, only=None, *, usage=True):
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
                              "focus": focus.current(path.parent), "runtime": facts,
+                             "model_name": model_policy.recorded_name(scope, properties, model_names),
                              "blocked_on": blocked.display(scope, properties, dependencies)}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))

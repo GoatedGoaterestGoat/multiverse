@@ -12,7 +12,7 @@ from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox
 from .. import display, plugins
 from ..runtime import lifecycle, prompts
 from . import columns, plugin_panels, theme
-from .columns import BLOCKED_ON, COLUMNS, MARKS, UNREAD
+from .columns import BLOCKED_ON, COLUMNS, EFFORT, MARKS, UNREAD
 from .panels import error_widget
 from .tree import counts, within
 from .views import view
@@ -150,6 +150,10 @@ class LocalBackend:
             for member in members:
                 if not isinstance(member.get("damaged"), dict):
                     member[UNREAD] = self.unread_count(member)
+        if any(columns.core_key(key) == "model" or key == "model" for key in config["columns"]):
+            effort = EFFORT in config["columns"]  # effort shows only inside the Model cell
+            for member in members:
+                member["model_label"] = display.model_label(member, effort=effort)
         if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "phase" or key == "phase"
                                                            for key in config["columns"]):
             # Shown only where the view lists both: otherwise a blocked agent is plainly blocked everywhere, the

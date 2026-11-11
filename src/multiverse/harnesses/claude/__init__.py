@@ -1556,6 +1556,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         """The models offered on the provider a launch with `environment` uses, from mv2's table (models.py)."""
         return model_table.catalog(environment)
 
+    def model_names(self, *, environment):
+        """Display labels for recorded model spellings, from mv2's table (models.py)."""
+        return model_table.names(environment)
+
     def check_model(self, model, *, effort=None, environment):
         """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
         return model_table.check(model, effort, environment)

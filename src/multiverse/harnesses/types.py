@@ -19,7 +19,7 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
-        'models', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
+        'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
         'waiting_prompts', 'prompt_outcome',
     ), 'observe'),
     'ask': 'spend',
@@ -598,6 +598,15 @@ class ModelProvider(Protocol):
     def models(self, *, environment: Mapping[str, str | None]) -> ModelCatalog: ...
     def check_model(self, model: str, *, effort: str | None = None,
                     environment: Mapping[str, str | None]) -> ModelCheck: ...
+
+
+class ModelNameProvider(Protocol):
+    """Optional table labels beyond the catalog's IDs/aliases (observe), never live model observations.
+
+    Include provider-specific spellings when their names are known. The environment selects current table
+    aliases, as for ModelProvider; core applies universe display overrides after these names.
+    """
+    def model_names(self, *, environment: Mapping[str, str | None]) -> Mapping[str, str]: ...
 
 
 @dataclass(frozen=True, kw_only=True)

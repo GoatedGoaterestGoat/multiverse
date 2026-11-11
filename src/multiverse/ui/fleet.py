@@ -8,7 +8,7 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean, phase_label
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, MARKS, PHASE_WIDE, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, MODEL_WIDE, PHASE_WIDE, PluginColumn, lookup
 from .drafts import HINT
 from .tree import group_key, hierarchy
 from .widgets import DraftMenu
@@ -41,13 +41,17 @@ class FleetView:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
         flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
                     or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
-        for key in [key for key in widths if lookup(key) is COLUMNS["phase"]]:  # `phase` or `core:phase`, not a
-            # plugin column standing in for it: a blocked agent's phase may say what it waits on, so it grows to fit,
-            # but only into the room the other columns leave, the flexible one keeping its least width
-            room = (available - 2 * len(fields) - (6 if flexible else 0)
-                    - sum(w for k, w in widths.items() if k not in (key, flexible)))
-            widths[key] = max(widths[key], min(PHASE_WIDE, room, max(
-                (cell_len(clean(phase_label(row) or "")) for row in projected if row["kind"] == "agent"), default=0)))
+        # Core's Phase and Model (not a plugin column standing in for one) grow to fit what they show, a blocked
+        # agent's dependency or a long model name and its effort, but only into the room the other columns leave,
+        # the flexible one keeping its least width; what still doesn't fit is shortened by the column itself.
+        growing = ((COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or "")),
+                   (COLUMNS["model"], MODEL_WIDE, COLUMNS["model"].label))
+        for column, bound, shown in growing:
+            for key in [key for key in widths if lookup(key) is column]:
+                room = (available - 2 * len(fields) - (6 if flexible else 0)
+                        - sum(w for k, w in widths.items() if k not in (key, flexible)))
+                widths[key] = max(widths[key], min(bound, room, max(
+                    (cell_len(shown(row)) for row in projected if row["kind"] == "agent"), default=0)))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -80,7 +84,7 @@ class FleetView:
                 return COLUMNS["name"].render(row, widths["name"],
                                               moving if self.moving and row["key"] == self.moving["key"] else ())
             column = lookup(field)
-            if column is COLUMNS["phase"]:
+            if column is COLUMNS["phase"] or column is COLUMNS["model"] or isinstance(column, PluginColumn):
                 return column.render(row, widths[field])
             return column.render(row)
 

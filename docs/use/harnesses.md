@@ -183,6 +183,7 @@ Every setting is optional. A change applies at the next spawn or resume:
 | --- | --- |
 | `model` | Default model for new agents |
 | `models` | Optional subset of model IDs or aliases and their allowed efforts, described below |
+| `model_names` | Optional display names keyed by the agent's recorded model spelling, described below |
 | `args` | Extra flags on spawn and resume; `spawn_args` and `resume_args` for one of them |
 | `env` | Variables set for the agent, as strings |
 | `inbox_bridge` | The live connection, described above |
@@ -246,6 +247,18 @@ Without `models`, the built-in tables remain unchanged, native defaults remain a
 
 The subset limits choices mv2 submits. Native account policies, model remapping, environment overrides and effort clamps can still affect the settings actually served; it does not police later in-terminal changes. Claude's literal `--model default` is a native computed choice, distinct from omitting `--model`, and cannot be verified against a subset.
 
+### Model display names
+
+Set `settings.model_names` in `harnesses/NAME/harness.json` to override names in the Model column:
+
+```json
+{"schema": 2, "adapter": "claude", "settings": {"model_names": {"opus": "Planning model", "claude-sonnet-5-5": "Builder"}}}
+```
+
+Each key matches the recorded spelling exactly. Without an exact override, mv2 ignores surrounding whitespace and uses the table's name for that ID or alias, including known provider IDs. Custom override keys are never normalized. Table aliases follow the universe's current harness environment. These are labels for the recorded choice, not observations of the model serving a session. Names can change when the bundled tables or harness settings change. They do not change which models are allowed.
+
+A recorded model with no known name shows its raw ID. An agent with no recorded model shows `-`. See [dashboard columns](../reference/dashboard.md) for the Model column and its optional effort suffix.
+
 ### Claude's models
 
 Claude Code has no command that lists its models, so mv2 keeps a table of them, `harnesses/claude/models.json`. It comes from the two model catalogs built into Claude Code, of the version in the [compatibility table](../reference/compatibility.md): the full list, and the release copy its `/model` picker shows, which gives the default model and some default efforts. It is updated with each Claude Code version check. Plugins read it through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)).
@@ -253,6 +266,7 @@ Claude Code has no command that lists its models, so mv2 keeps a table of them, 
 - **Provider.** An alias names a different model on each provider: `sonnet` is Sonnet 5.5 on the Anthropic API and Sonnet 4.5 on Amazon Bedrock. mv2 picks the provider as Claude Code does, from the first of `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE` and `_VERTEX` that is set to `1`, `true`, `yes` or `on`, else the Anthropic API. It reads them as a launch from mv2 would see them: the harness's settings `env` over the environment mv2 runs in.
 - **Efforts.** Claude Code never refuses an effort: it uses the model's default instead. `harness.check()` refuses an effort the model doesn't take, such as `xhigh` for Sonnet 4.6, and the `[1m]` suffix on a model that doesn't take it.
 - **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
+- **Names.** Where mv2 shows a model's name, it takes it from this table: for a full ID from any provider, whatever the provider is now, and for an alias as the current harness environment resolves it, with `[1m]` shown as "NAME [1m]". The name labels the choice mv2 recorded, not the model Claude served: Claude runs the old Opus 4 and 4.1 IDs as the current Opus, and your settings or an organization's policy can swap a model.
 - **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
 
 ### Claude's one-shot runs

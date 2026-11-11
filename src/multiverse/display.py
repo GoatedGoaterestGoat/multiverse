@@ -51,6 +51,22 @@ def state(row):
     return live_label(row)
 
 
+def model_label(row, effort=True):
+    """An agent's model as people name it: `Opus 5.5`, with its effort when asked, `Opus 5.5 (xhigh)`.
+
+    The name is the listing's `model_name` (the universe's custom name, else the model table's); a model neither
+    names reads as recorded, and an agent with no recorded model reads `-`. No recorded effort adds nothing."""
+    model = row.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return "-"
+    name = row.get("model_name")
+    label = clean(name if isinstance(name, str) and name.strip() else model).strip()
+    chosen = row.get("effort")
+    if effort and isinstance(chosen, str) and chosen.strip():
+        label += f" ({clean(chosen).strip()})"
+    return label
+
+
 def blocked_label(value):
     """What a blocked agent waits on, as its reported phase shows it: `lifecycle`, `qa-claude in qa`, `user`, `self`.
 

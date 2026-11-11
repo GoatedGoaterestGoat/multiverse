@@ -1,6 +1,6 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import error_text, phase_label, shorten, state, live_label
+from ..display import error_text, model_label, phase_label, shorten, state, live_label
 from ..runtime import lifecycle
 from ..universe import focus
 from .. import universe
@@ -13,6 +13,7 @@ COLUMNS = {
     "phase": lambda row, root, wide: phase_label(row) or "?",  # a blocked agent's says on what: `blocked (user)`
     "summary": lambda row, root, wide: " ".join((row.get("summary") or "").split()) if wide else shorten(row.get("summary", "")),
     "harness": lambda row, root, wide: row.get("harness") or "?",
+    "model": lambda row, root, wide: model_label(row),  # its display name and effort: `Opus 5.5 (xhigh)`
     "universe": lambda row, root, wide: place(row, root) or ".",
     "id": lambda row, root, wide: row.get("id") or "",
 }
