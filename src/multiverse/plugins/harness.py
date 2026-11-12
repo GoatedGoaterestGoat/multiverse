@@ -193,15 +193,6 @@ def _launch_plan(info, plan):
         record = plan.plugins.setdefault(loaded.name, {"version": manifest.version, "state": "loaded"})
         added, unfit = [], []
         try:
-            # Launch contributions and harness extensions act (1.13): a plugin granted less here is left out,
-            # visibly, as one that broke.
-            try:
-                level = loader.access_level(info.universe, loader.entry(info.universe, loaded.name))
-            except loader.PluginError:
-                level = None
-            if level != "act":
-                raise _Skip(f"it has {level or 'no'} access here; launch contributions need act"
-                            + (f" ({loader.raise_hint(info.universe, loaded.name, 'act')})" if level else ""))
             for entry in entries:
                 # Each entry fits this launch or not on its own: a plugin may ship one per version or mode.
                 reason = entry.fits(info.version)
@@ -220,6 +211,15 @@ def _launch_plan(info, plan):
                 # Nothing of it fits this launch: its contributions stay out too, so a guard never
                 # comes without the hook it guards.
                 raise _Skip("; ".join(dict.fromkeys(unfit)), failure=False)
+            # Launch contributions and harness extensions act (1.13): a plugin granted less here is left out,
+            # visibly, as one that broke.
+            try:
+                level = loader.access_level(info.universe, loader.entry(info.universe, loaded.name))
+            except loader.PluginError:
+                level = None
+            if level != "act":
+                raise _Skip(f"it has {level or 'no'} access here; launch contributions need act"
+                            + (f" ({loader.raise_hint(info.universe, loaded.name, 'act')})" if level else ""))
             contributions = []
             for function in contributors:
                 result = loader.guard(loaded, f"launch {info.family}", function, info, root=info.universe,

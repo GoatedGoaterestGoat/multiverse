@@ -176,16 +176,38 @@ class ReplacedRecordsTest(BaseTest):
         journal = self.directory / 'sessions.jsonl'
         row = {'schema': 1, 'id': store.uid(), 'at': store.now(), 'harness': 'codex', 'launch': self.launch,
                'reason': 'switch', 'home': str(self.work), 'from': store.uid(), 'to': store.uid()}
+        from multiverse.plugins import api
+        store.write(self.directory / 'runtime.json', {})
         with patch.object(store.time, 'sleep', side_effect=AssertionError('append-only absence must not wait')):
             for _ in range(100):
                 self.assertEqual(sessions.journal(self.directory), [])
+                self.assertTrue(api._never_launched(self.directory, self.properties))
+                self.assertEqual(native._session_snapshot(self.root, self.directory, self.properties, {},
+                                                           adapter=SimpleNamespace(name='codex')), (self.properties, {}))
             sessions._append(self.directory, row)
             self.assertEqual(sessions.journal(self.directory), [row])
+            self.assertFalse(api._never_launched(self.directory, self.properties))
             journal.write_text('damaged\n')
             with self.assertRaises(sessions.JournalError):
                 sessions.journal(self.directory)
             journal.unlink()
             self.assertEqual(sessions.journal(self.directory), [])
+            self.assertTrue(api._never_launched(self.directory, self.properties))
+        original_stat = os.stat
+
+        def unreadable(path, *args, **kwargs):
+            if not isinstance(path, int) and Path(path) == journal:
+                raise OSError(number, 'cannot inspect journal', str(path))
+            return original_stat(path, *args, **kwargs)
+
+        journal.write_text('stored lineage\n')
+        for number in (errno.EACCES, errno.EIO):
+            with self.subTest(errno=number), patch.object(os, 'stat', unreadable):
+                self.assertFalse(api._never_launched(self.directory, self.properties))
+                with self.assertRaises(OSError) as error:
+                    native._session_snapshot(self.root, self.directory, self.properties, {},
+                                             adapter=SimpleNamespace(name='codex'))
+                self.assertEqual(error.exception.errno, number)
         with patch.object(Path, 'open', side_effect=PermissionError('denied')), \
                 self.assertRaisesRegex(sessions.JournalError, 'cannot read'):
             sessions.journal(self.directory)

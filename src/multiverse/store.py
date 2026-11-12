@@ -95,7 +95,7 @@ def _missing_parent(path):
     return False
 
 
-def missing_records(paths, *, observed=False):
+def missing_records(paths, *, observed=False, follow_symlinks=True):
     """Observe optional records together; only repeated ENOENT becomes diagnostic absence.
 
     This operation-local snapshot is for observation, never a substitute for a
@@ -106,7 +106,7 @@ def missing_records(paths, *, observed=False):
         pending = []
         for path in candidates:
             try:
-                path.stat()
+                path.stat() if follow_symlinks else path.lstat()
             except OSError as error:
                 if error.errno == errno.ENOENT:
                     pending.append(path)

@@ -44,10 +44,11 @@ def registry(socket):
 
 
 @contextmanager
-def _regular(path, *, create=False):
+def _regular(path, *, create=False, retry=True):
     flags = os.O_NONBLOCK | os.O_NOFOLLOW | (os.O_RDWR | os.O_CREAT if create else os.O_RDONLY)
     # Only the replaced identity record can be retried; lock creation is a mutation.
-    fd = os.open(path, flags, 0o600) if create else retry_missing(lambda: os.open(path, flags, 0o600))
+    fd = (os.open(path, flags, 0o600) if create or not retry
+          else retry_missing(lambda: os.open(path, flags, 0o600)))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
@@ -100,12 +101,15 @@ def _same_lock(stream, path):
 def _prune(socket, stream, path):
     """Prune only a touched, proven-gone entry after its owner has finished."""
     try:
-        saved = _saved(socket)
+        saved = _saved(socket, retry=False)
         if saved is not None and _state(saved) != 'gone':
             return
         if not _same_lock(stream, path):
             return
-        registry(socket).unlink(missing_ok=True)
+        if saved is not None:
+            # A single missing read is not proof the identity record is absent.
+            # Only a positively read, proven-gone identity permits removing it.
+            registry(socket).unlink(missing_ok=True)
         path.unlink(missing_ok=True)
         # A waiter holding this old inode must reopen and lock the path before
         # entering. Nothing in this section can publish after we unlink it.
@@ -189,10 +193,10 @@ def runner_server(facts):
     return proof
 
 
-def _saved(socket):
+def _saved(socket, *, retry=True):
     path = registry(socket)
     try:
-        with _regular(path) as stream:
+        with _regular(path, retry=retry) as stream:
             raw = stream.read(65537)
         if len(raw) > 65536:
             raise ValueError('server identity is too large')
@@ -334,7 +338,8 @@ def healthy(backend, *, facts=None):
     socket = address(backend)
     recorded = _recorded(socket, facts)
     try:
-        saved = _saved(socket)
+        # A missed fast-path read only falls through to fresh locked recovery.
+        saved = _saved(socket, retry=False)
     except Unreachable:
         return None  # The locked path can repair this from a fresh process proof.
     answer = _probe(backend, socket)

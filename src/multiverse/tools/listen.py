@@ -86,7 +86,8 @@ def _wait(directory, launch_id, deadline, started, registration, present):
     while True:
         facts = _current(directory, launch_id)
         registration.register()
-        focused = focus.current(directory) is not None
+        # Only a polling hint: the focus lock below always takes a fresh retrying read before output.
+        focused = focus.hint(directory) is not None
         owed = owed or focused
         # Nothing is read during a focus, so `previous` keeps the last read from before it: whatever arrived
         # or was read during the focus counts as a change once it ends.

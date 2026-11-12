@@ -90,12 +90,13 @@ def active(record, at=None):
         return False
 
 
-def _read(agent_dir, name=FILE):
+def _read(agent_dir, name=FILE, *, retry=True):
     """The focus record, or None for anything but a small JSON object in a regular file."""
     try:
         # Non-blocking, so a FIFO in its place never hangs a reader. The descriptor is closed here: wrapping
         # a directory's would fail and leak it.
-        descriptor = retry_missing(lambda: os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK))
+        open_record = lambda: os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = retry_missing(open_record) if retry else open_record()
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return None
@@ -114,6 +115,12 @@ def current(agent_dir, *, observed_missing=()):
     if agent_dir / FILE in observed_missing:
         return None
     record = _read(agent_dir)
+    return record if active(record) else None
+
+
+def hint(agent_dir):
+    """One optimistic polling read; never authorizes output or a focus mutation."""
+    record = _read(agent_dir, retry=False)
     return record if active(record) else None
 
 

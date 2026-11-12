@@ -418,8 +418,13 @@ def _session_snapshot(root, directory, properties, facts, *, adapter=None, launc
         return properties, facts
     adapter = adapter or harnesses.load(root, properties['harness'])
     journal = directory / 'sessions.jsonl'
-    if adapter_hook(adapter, 'observed_binding') is None and (journal in observed_missing or not exists_replaced(journal)):
-        return properties, facts
+    if adapter_hook(adapter, 'observed_binding') is None:
+        if journal in observed_missing:
+            return properties, facts
+        try:
+            journal.stat()  # Append-only: absence needs no replacement retry; other errors remain errors.
+        except FileNotFoundError:
+            return properties, facts
     session = SessionHandle.from_records(properties, facts, directory)
     observed = _observed(adapter, session)
     effective, _ = agents.sessions.effective(directory, properties, observed_missing=observed_missing)

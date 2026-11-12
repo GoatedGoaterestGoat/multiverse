@@ -167,8 +167,8 @@ class RecoveryMonitor:
                         continue
                     version = facts.get('native_status_version', 0)
                     started_at = now()
-                    if in_flight(self.directory, facts, properties['native_session_id'], since=started_at):
-                        continue
+                # This RPC observes only. The fresh, locked post-RPC inbox read below is the
+                # admission gate for the published proof, including input accepted during the RPC.
                 result = check(properties, facts, self.directory)
                 if result.state == 'pending':
                     # Native restoration is not an activity observation. Keep

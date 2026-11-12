@@ -729,7 +729,11 @@ def _never_launched(directory, properties):
         runtime = directory / "runtime.json"
         if exists_replaced(runtime) and retry_missing(lambda: read(runtime)) != {}:
             return False
-        if exists_replaced(directory / "sessions.jsonl"):
+        try:
+            (directory / "sessions.jsonl").stat()
+        except FileNotFoundError:
+            pass  # Append-only: a missing journal was never replaced.
+        else:
             return False
         launches = directory / "launches"
         return not launches.exists() or (launches.is_dir() and not any(launches.iterdir()))

@@ -144,7 +144,10 @@ def _ledger(path, *, observed_missing=()):
         raise _ledger_damage(error.file, error.reason) from error
 
 
-def _states(agent_dir, *, observed_missing=()):
+def _states(agent_dir, *, observed_missing=None):
+    # All callers hold the inbox lock; independent acquisitions take a fresh snapshot.
+    if observed_missing is None:
+        observed_missing = missing_records(agent_dir / name for name in ('inbox-state.json', 'native-delivery.json'))
     path = agent_dir / 'inbox-state.json'
     states = _ledger(path, observed_missing=observed_missing)
     for identifier, state in states.items():
@@ -409,8 +412,14 @@ def held(agent_dir, focus_id, *, peek=False, present=None):
     """The unread messages focus `focus_id` held; unless peeking, marks only those read, after `present`."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
-        _, cursor, records = _messages(agent_dir)
-        marks = _read_marks(agent_dir)
+        names = ('inbox.cursor', 'inbox-read.json')
+        try:
+            (agent_dir / 'inbox.jsonl').stat()
+        except FileNotFoundError:
+            names = INBOX_EVIDENCE
+        observed_missing = missing_records(agent_dir / name for name in names)
+        _, cursor, records = _messages(agent_dir, observed_missing=observed_missing)
+        marks = _read_marks(agent_dir, observed_missing=observed_missing)
         messages = [message for offset, message in records
                     if offset > cursor and focus_id and message.get('focus') == focus_id and message.get('intended')
                     and _manual(message) and message['id'] not in marks]
@@ -445,11 +454,13 @@ def focus_note(agent_dir, focus_id, *, blocking=True):
 def message_record(agent_dir, message_id):
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
-        _, _, records = _messages(agent_dir)
+        observed_missing = missing_records(agent_dir / name for name in
+                                           ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
+        _, _, records = _messages(agent_dir, observed_missing=observed_missing)
         message = next((m for _, m in records if m['id'] == message_id), None)
         if message is None:
             raise ValueError('Message does not belong to this recipient inbox')
-        return message, _states(agent_dir).get(message_id, {})
+        return message, _states(agent_dir, observed_missing=observed_missing).get(message_id, {})
 
 
 def acceptance_contexts(agent_dir, native_id, home, body, *, current_launch):
@@ -457,9 +468,11 @@ def acceptance_contexts(agent_dir, native_id, home, body, *, current_launch):
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
         cohort, receipts, active = [], {}, []
-        _, _, messages = _messages(agent_dir)
+        observed_missing = missing_records(agent_dir / name for name in
+                                           ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
+        _, _, messages = _messages(agent_dir, observed_missing=observed_missing)
         bodies = {message['id']: message.get('text') for _, message in messages}
-        states = _states(agent_dir)
+        states = _states(agent_dir, observed_missing=observed_missing)
 
         def add(identifier, logical, saved, target, receipt, launch):
             if target is not None and target != native_id:
@@ -510,11 +523,13 @@ def update_message(agent_dir, message_id, **changes):
     """Merge delivery evidence under the recipient inbox lock."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
-        _, _, records = _messages(agent_dir)
+        observed_missing = missing_records(agent_dir / name for name in
+                                           ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
+        _, _, records = _messages(agent_dir, observed_missing=observed_missing)
         message = next((m for _, m in records if m['id'] == message_id), None)
         if message is None:
             raise ValueError('Message does not belong to this recipient inbox')
-        states = _states(agent_dir)
+        states = _states(agent_dir, observed_missing=observed_missing)
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
         if (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
@@ -581,8 +596,10 @@ def dismiss_messages(agent_dir, message_ids):
     """Caller holds send, launch and delivery locks; close failures and uncertainty without changing evidence."""
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock'):
-        _, _, messages = _messages(agent_dir)
-        states = _states(agent_dir)
+        observed_missing = missing_records(agent_dir / name for name in
+                                           ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
+        _, _, messages = _messages(agent_dir, observed_missing=observed_missing)
+        states = _states(agent_dir, observed_missing=observed_missing)
         dismissed = {'failures': [], 'unconfirmed': []}
         for _, message in messages:
             state = states.get(message['id'], {})
