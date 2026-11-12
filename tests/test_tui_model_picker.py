@@ -282,15 +282,29 @@ class NarrowedSettingsTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertEqual({k: created[-1][k] for k in ("harness", "model", "effort")},
                                  {"harness": "claude", "model": "claude-sonnet-5-5", "effort": "medium"})
             with self.subTest("settings.model in the subset: default leaves it unset, its effort still chosen"):
-                write(settings, {**base, "settings": {"model": "sonnet", "models": {"sonnet": {"efforts": ["low"]}}}})
-                await draft()
-                self.assertEqual(menu(), ["default (Sonnet 5.5)", "Sonnet 5.5 (claude-sonnet-5-5)"])
+                write(settings, {**base, "settings": {"model": "sonnet", "models": {"sonnet": {"efforts": ["low"]}},
+                                                      "model_names": {"claude-sonnet-5-5": "Sonnet (team)"}}})
+                await draft()  # named as the Model column names it: the universe's own name, else mv2's
+                self.assertEqual(menu(), ["default (Sonnet (team))", "Sonnet (team) (claude-sonnet-5-5)"])
                 await d.press("tab")
                 await d.settle()
                 self.assertEqual(menu(), ["low"])
                 await d.press("down", "enter")
                 await d.settle()
                 self.assertEqual({k: created[-1][k] for k in ("model", "effort")}, {"model": "", "effort": "low"})
+            with self.subTest("unnarrowed, default names the spelling a launch records, as the Model column will"):
+                write(settings, {**base, "settings": {"model": "sonnet",
+                                                      "model_names": {"claude-sonnet-5-5": "Sonnet (team)"}}})
+                await draft()  # records 'sonnet', which only the ID's custom name doesn't cover
+                found = menu()
+                self.assertEqual(found[0], "default (Sonnet 5.5)")
+                self.assertIn("Sonnet (team) (claude-sonnet-5-5)", found)
+                # The same lookup as the Model column: the exact spelling's own name, else mv2's for it trimmed.
+                for spelling, names, expected in ((" sonnet ", {"claude-sonnet-5-5": "Sonnet (team)"}, "Sonnet 5.5"),
+                                                  (" sonnet ", {" sonnet ": "Spaced"}, "Spaced")):
+                    write(settings, {**base, "settings": {"model": spelling, "model_names": names}})
+                    await draft()
+                    self.assertEqual(menu()[0], f"default ({expected})", (spelling, names))
             with self.subTest("a stale entry: no list, and the line names the settings file"):
                 write(settings, {**base, "settings": {"models": {"no-such-model": {}}}})
                 await draft()

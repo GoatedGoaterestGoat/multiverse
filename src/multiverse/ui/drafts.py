@@ -185,7 +185,8 @@ class AgentDraft(Draft):
         if not value and not self.unset_allowed(field):
             return f"choose a{'n' if field == 'effort' else ''} {field}"
         if field == "model" and not value and (configured := self.configured()):
-            return f"default ({clean(configured.get('name') or configured['id'])})"
+            label = self.listed().get("default_label") or configured.get("name") or configured["id"]
+            return f"default ({clean(label)})"
         if field == "model" and value:
             model = next((m for m in self.listed()["models"] if m["id"] == value), None)
             name = clean(model.get("name") or value) if model else clean(value)
