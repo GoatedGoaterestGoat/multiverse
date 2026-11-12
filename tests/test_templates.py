@@ -91,6 +91,33 @@ class BaseTemplateTest(unittest.TestCase):
                 self.assertEqual([key for key in overrides if key not in names], [])
                 self.assertEqual([key for key in overrides if overrides[key] == names[key]], [])
 
+    def test_bundled_default_models_are_ones_their_subsets_allow(self):
+        """A bundled template's default model outside its subset would get every launch from that template refused."""
+        import os
+        from multiverse import harnesses
+        environment = dict(os.environ)
+        allowed = {"claude": ({"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"},
+                              ("fable", "opus", "sonnet", "haiku"), "claude-opus-4-7"),
+                   "codex": ({"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"}, (), "gpt-6-sol")}
+        for template in ("base", "Silicon23"):
+            root = templates.create(self.work / template, template, template, self.work)
+            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.1-sol")):
+                with self.subTest(f"{template} {harness}"):
+                    adapter = harnesses.load(root, harness)
+                    self.assertEqual(adapter.default_model, default)
+                    model_choices.validate_settings(root, adapter, environment=environment)
+                    self.assertTrue(model_choices.check(root, adapter, default, environment=environment).ok)
+                    self.assertEqual(model_choices.for_launch(root, harness)["default_model"], default)
+                    if template == "base":
+                        self.assertFalse(model_choices.restricted(adapter))
+                        continue
+                    ids, aliases, outside = allowed[harness]
+                    found = model_choices.catalog(root, adapter, environment=environment)
+                    self.assertEqual({item.id for item in found.models}, ids)
+                    for name in aliases:
+                        self.assertTrue(model_choices.check(root, adapter, name, environment=environment).ok, name)
+                    self.assertFalse(model_choices.check(root, adapter, outside, environment=environment).ok)
+
 
 if __name__ == "__main__":
     unittest.main()
