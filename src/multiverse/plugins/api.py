@@ -1108,6 +1108,7 @@ class TranscriptInfo:
     unchanged."""
     state: str                     # "supported", "unavailable" or "error"; the rest is empty unless supported
     reason: str = ""
+    retry: bool = False            # unavailable only for now (a conversation switch in progress): try again soon (1.19)
     format: str | None = None      # "claude-jsonl"
     version: str | None = None     # the harness version that wrote the newest row, where stored
     native_id: str | None = None
@@ -1939,8 +1940,10 @@ class Agent:
         TranscriptChanged("replaced") with `resume` at the current start. With `generation` (a readable token
         from `earlier`), a read is of that generation only, and another's cursor is an api.Error. For an unknown
         or unreadable generation, this method returns state "unavailable" (or "error" for a provider error)
-        and reason; row and turn reads raise TranscriptUnavailable (retry false). Malformed generation syntax
-        raises api.Error, including in this method."""
+        and reason; row and turn reads raise TranscriptUnavailable (retry false). `retry` (1.19) is true when
+        the transcript is unavailable only for now, for the same reasons a row or turn read raises
+        TranscriptUnavailable with retry true (a conversation switch in progress): try again soon rather than
+        taking it as empty. Malformed generation syntax raises api.Error, including in this method."""
         return _from_core(TranscriptInfo, self._transcript("info", "reading the transcript", generation=generation,
                                                            tip=tip))
 

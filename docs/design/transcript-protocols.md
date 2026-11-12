@@ -65,12 +65,12 @@ turn reads raise `TranscriptUnavailable` with `retry=False` instead. This lets
 a plugin check availability before asking for data, while keeping invalid
 arguments distinct from unavailable storage.
 
-Core's own info result also says whether an `unavailable` state is passing:
+The info result also says whether an `unavailable` state is passing (1.19):
 `retry` is true for the same refusals for which a row or turn read raises
-`Retry`, such as a conversation switch still in progress, so a core caller can
-try again shortly instead of taking the empty result as the agent's history.
-A lasting refusal or a provider error has `retry` false. The plugin API's
-`TranscriptInfo` doesn't carry this field.
+`TranscriptUnavailable` with `retry=True`, such as a conversation switch still
+in progress, so a caller can try again shortly instead of taking the empty
+result as the agent's history. A lasting refusal or a provider error has
+`retry` false.
 
 When history changed under a cursor, the read raises
 `api.TranscriptChanged` with a reason and a place to resume:

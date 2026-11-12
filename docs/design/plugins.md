@@ -626,7 +626,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 18)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 19)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,

@@ -192,7 +192,7 @@ class TranscriptApiTest(PluginTestCase):
                 with self.subTest(case, read=name):
                     if expected is api.TranscriptUnavailable and name == "info":
                         info = call(generation=generation)
-                        self.assertEqual(info.state, "unavailable")
+                        self.assertEqual((info.state, info.retry), ("unavailable", False))  # a lasting refusal
                         self.assertIn("Unknown transcript generation", info.reason)
                         self.assertIsNone(info.start)
                         continue
@@ -201,6 +201,21 @@ class TranscriptApiTest(PluginTestCase):
                     self.assertIs(type(caught.exception), expected)
                     if expected is api.TranscriptUnavailable:
                         self.assertFalse(caught.exception.retry)
+        with self.subTest("a conversation switch in progress"):
+            # info says it's passing without raising (1.19), as row reads do by raising with retry true.
+            runtime_path = self.worker / "runtime.json"
+            saved_runtime = json.loads(runtime_path.read_text())
+            runtime_path.write_text(json.dumps({**saved_runtime, "navigation": {"state": "checking"}}))
+            try:
+                info = self.agent_.transcript()
+                self.assertEqual((info.state, info.retry, info.start), ("unavailable", True, None), info)
+                with self.assertRaises(api.TranscriptUnavailable) as caught:
+                    self.agent_.transcript_rows()
+                self.assertTrue(caught.exception.retry)
+            finally:  # settled again, so a failure here leaves the subtests after it alone
+                runtime_path.write_text(json.dumps(saved_runtime))
+            info = self.agent_.transcript()
+            self.assertEqual((info.state, info.retry), ("supported", False))
         with self.subTest("an unreadable store"):
             self.fake.unreadable()
             with self.assertRaises(api.TranscriptUnavailable) as caught:
