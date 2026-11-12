@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import universe
+from multiverse.runtime import model_choices
 from multiverse.tools import init
 from multiverse.ui.backend import LocalBackend
 from multiverse.universe import catalog
@@ -78,6 +79,17 @@ class BaseTemplateTest(unittest.TestCase):
                 self.assertIn("REVIEW_BODY_SENTINEL", catalog.command(root, "review"))
                 self.assertIn("SENTINEL_LONG_CAPABILITY", catalog.command(root, "coordination"))
                 self.assertIn("review", [entry["name"] for entry in catalog.catalog(root)])
+
+    def test_silicon23_display_names_name_models_mv2_knows(self):
+        """Silicon23 names its models briefly; a key that's misspelled or no longer in mv2's tables silently stops
+        applying, and the Model column shows the long name again with nothing to say why."""
+        root = templates.create(self.work / "team", "Silicon23", "Silicon23", self.work)
+        for harness in ("claude", "codex"):
+            with self.subTest(harness):
+                names, overrides = model_choices.display_names(root, harness)
+                self.assertTrue(overrides)
+                self.assertEqual([key for key in overrides if key not in names], [])
+                self.assertEqual([key for key in overrides if overrides[key] == names[key]], [])
 
 
 if __name__ == "__main__":

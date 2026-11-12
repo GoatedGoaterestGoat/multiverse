@@ -5,6 +5,12 @@
   "settings": {
     "args": [
       "--dangerously-bypass-approvals-and-sandbox"
-    ]
+    ],
+    "model_names": {
+      "gpt-6-astra": "Astra",
+      "gpt-6.1-sol": "Sol",
+      "gpt-6.1-terra": "Terra",
+      "gpt-6-luna": "Luna"
+    }
   }
 }

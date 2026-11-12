@@ -5,6 +5,14 @@
   "settings": {
     "args": [
       "--dangerously-skip-permissions"
-    ]
+    ],
+    "model_names": {
+      "claude-opus-5-5": "Opus",
+      "opus": "Opus",
+      "claude-sonnet-5-5": "Sonnet",
+      "sonnet": "Sonnet",
+      "claude-haiku-5-5": "Haiku",
+      "haiku": "Haiku"
+    }
   }
 }

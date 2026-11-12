@@ -109,8 +109,9 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             with self.subTest("with room, the whole name and effort"):
                 line, width = drawn(d)
                 self.assertIn(f"{long_name} (xhigh)", line)
-        write(self.root / "views" / "default.json",
-              {"columns": ["name", "harness", "live", "status", "context", "model", "effort", "phase", "summary"]})
+        write(self.root / "views" / "default.json",  # enough columns that the long name can't have its room
+              {"columns": ["name", "harness", "live", "status", "context", "cost", "id", "model", "effort", "phase",
+                           "summary"]})
         async with self.dashboard(size=(112, 30)) as d:
             with self.subTest("without, the name is shortened and the effort kept whole"):
                 line, width = drawn(d)
@@ -131,6 +132,24 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 lines = [table.render_line(y).text for y in range(table.size.height)]
                 line = next(line for line in lines if "thinker" in line)
                 self.assertIn("… (xhigh)", line)
+
+    async def test_name_and_model_fit_their_widest_cell(self):
+        """Name and Model shrink to their widest cell, so short names and models leave no gap before the next column;
+        fragile because a column that only ever widens looks right in the data and shows only as space on screen."""
+        self.agent("ada", model="opus", effort="xhigh")
+        self.agent("long-named-agent-x")  # wider than the Name header, narrower than the column's usual width
+        write(self.root / "views" / "default.json", {"columns": ["name", "model", "effort", "summary"]})
+        async with self.dashboard(size=(140, 30)) as d:
+            table = d.app.query_one("#agents", DataTable)
+            widths = {column.key.value: column.width for column in table.columns.values()}
+            cells = {field: [table.get_cell(row, field) for row in table.rows] for field in ("name", "model")}
+            for field, usual in (("name", 26), ("model", 18)):
+                with self.subTest(field):
+                    widest = max(max(cell.cell_len for cell in cells[field]), len(table.columns[field].label.plain))
+                    self.assertLess(widest, usual)  # the fixture's names and models are short
+                    self.assertGreater(widest, len(table.columns[field].label.plain))  # set by a cell, not the header
+                    self.assertEqual(widths[field], widest)
+                    self.assertFalse([cell.plain for cell in cells[field] if "…" in cell.plain])
 
 
 if __name__ == "__main__":
