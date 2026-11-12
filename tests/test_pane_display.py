@@ -26,6 +26,7 @@ SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("claude", FIXT
            ("codex", FIXTURES / "codex/upstream-screens-0.167.0.json"),
            ("codex", FIXTURES / "codex/screens-0.167.0.json"),
            ("codex", FIXTURES / "codex/refusal-0.167.1.json"),
+           ("codex", FIXTURES / "codex/refusal-0.167.2.json"),
            ("codex", FIXTURES / "codex/screens-0.166.0.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.

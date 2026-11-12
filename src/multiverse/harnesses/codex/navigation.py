@@ -11,8 +11,8 @@ from .launch import LaunchProtocol
 from .protocol import object_field, result
 from .side import local_error
 
-VERSION = (0, 167, 1)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), VERSION))
+VERSION = (0, 167, 2)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), VERSION))
 # Pinned app-server-protocol common.rs reads. New thread-scoped methods fail
 # closed instead of accidentally granting stale-widget mutation authority.
 READ_ONLY = frozenset(('thread/goal/get', 'thread/queue/list', 'thread/attachment/list',

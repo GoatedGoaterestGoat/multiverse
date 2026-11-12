@@ -105,13 +105,16 @@ class QueueReadTest(unittest.TestCase):
                 {'native_versions': None}, {'native_versions': ['bad']},
                 {'native_versions': {'cli': [], 'daemon': []}},
                 {'native_versions': {'cli': '0.168.0', 'daemon': '0.168.0'}},
-                {'native_versions': {'cli': '0.166.0', 'daemon': '0.167.1'}}):
+                {'native_versions': {'cli': '0.166.0', 'daemon': '0.167.1'}},
+                {'native_versions': {'cli': '0.167.1', 'daemon': '0.167.2'}},
+                {'native_versions': {'cli': '0.167.2', 'daemon': '0.167.1'}},
+                {'native_versions': {'cli': '0.167.3', 'daemon': '0.167.3'}}):
             with self.subTest(changes=changes):
                 self.specs.clear()
                 observed = self.read(session=replace(self.session, **changes))
                 self.assertEqual(observed.state, 'unavailable')
                 self.assertEqual(self.specs, [])
-        for version in ('0.166.0', '0.167.0', '0.167.1'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2'):
             with self.subTest(version=version):
                 observed = self.read(session=replace(self.session, native_versions={'cli': version, 'daemon': version}),
                     overrides={'initialize': {'result': {'userAgent': 'origin/' + version}}})

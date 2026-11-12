@@ -1,0 +1,11 @@
+[
+  {
+    "name": "ownership refusal command center",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__rendering__tests__external_writer_command_center_100.snap at rust-v0.167.2 (ce21072c90d3), sha256 cab3767923d81c9c5f7b0cb7b11339eca9faf33361bfdaa5cfdaf1004c1ad3bf; not a tmux capture",
+    "text": "  🔒   This conversation is open in another app                                          r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t transcript\n",
+    "shown": "  🔒   This conversation is open in another app                                          r to retry\n      Close it there and press R to continue here.\n\n   r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t transcript\n",
+    "cli_version": "0.167.2",
+    "cursor_visible": false,
+    "width": 100
+  }
+]

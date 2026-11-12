@@ -9,7 +9,7 @@ from .protocol import _read_thread, result
 
 # Independently qualified queue processor/storage/schema; never widen implicitly
 # when a different feature's checked release changes.
-VERSIONS = frozenset({'0.166.0', '0.167.0', '0.167.1'})
+VERSIONS = frozenset({'0.166.0', '0.167.0', '0.167.1', '0.167.2'})
 LIMIT = 100
 RESPONSE_BYTES = 64 << 20
 SCOPE = ('Codex after-turn queue only; active-turn steers and terminal-local input '
@@ -82,7 +82,7 @@ def read(session):
 def report(session, executor):
     if not available(session):
         return NativeResult('unavailable', 'Queued prompts need a live verified Codex bridge on matching checked '
-                            '0.166.0, 0.167.0 or 0.167.1 CLI and daemon releases')
+                            '0.166.0, 0.167.0, 0.167.1 or 0.167.2 CLI and daemon releases')
     try:
         # Do not call capabilities(executor): its separate control probe has a
         # five-second budget. Initialization, identity and list share this one.

@@ -771,6 +771,16 @@ The patch retains hosted web search in the top-level tool list during incrementa
 
 The TUI renderer and rollout reader inputs retain the 0.167.0 contracts. The startup gate uses the same command-center footer matcher for both patch releases. The checked release's refusal fixture comes from its upstream renderer snapshot. The existing pane, plain and compressed rollout, navigation and waiting-prompt tests cover those contracts. Each version gate names 0.167.1 explicitly, and navigation and prompt answering still require a matching CLI and daemon pair.
 
+### Codex 0.167.2 compatibility audit
+
+This compares official tags `rust-v0.167.1` (`0a94398fa60c4fac0e7659e4213a0a36e613dd46`) and `rust-v0.167.2` (`ce21072c90d32c40af7a55b60b2fb35c84a43a6a`). All 470 installed experimental protocol schemas and five CLI help outputs match the previous checked release. Protocol, app-server, TUI, rollout and model-catalog source files are byte-identical. The existing plugin configuration fields keep their schemas and allowlist. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.167.2).
+
+The patch enables incremental declarations for regular GCP Responses through a new GCP-only feature flag. mv2's private runs select OpenAI and keep their existing tool-free recipe. Both regenerated catalogs retain identical model data and shape, changing only their version stamps.
+
+Startup-screen checks, private ask and one-shot runs, native side conversations, navigation, waiting prompts and queued-prompt reporting each name this release explicitly. Older qualified versions remain supported; navigation, prompts and queue reports still require matching checked CLI and daemon releases. The refusal fixture retains its pinned upstream-renderer provenance rather than claiming a terminal capture.
+
+The user-authorized native suite used isolated homes and daemons with scripted localhost providers. Seventeen checks passed in the initial run. A shared-daemon stop check hit a terminal/runner ownership error; the same module passed on clean main and on an unchanged targeted repeat. Ask and tool-free runs, navigation and restored grants, refusals, side conversations, queue continuation, permissions, identity and recovery were covered. The private captured rollout produced identical facts and body reads in plain and compressed form. Prompt and queue version routing also passed their offline fake-peer tests. Linux validation was unavailable because Docker was not running.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
