@@ -59,6 +59,32 @@ def catalog(environment):
         free_form=True, source='table', version=data['claude_code'], provider=key.replace('_', '-'))
 
 
+def names(environment):
+    """Display labels for the model spellings mv2 may have recorded: each model's table ID and every provider's ID,
+    whatever the provider is now, and this launch's provider's aliases, plus each spelling with "[1m]" where the
+    model takes it, labelled "NAME [1m]". A label names the recorded choice, not the model Claude served: Claude
+    runs the old Opus 4 and 4.1 IDs as the current Opus, and settings or policy can swap a model, none of which is
+    read here. Keys are the table's spellings, lower case; Claude matches a spelling trimmed and in any case."""
+    data, key = table(), provider(environment)
+    labels = {}
+
+    def add(spelling, item):
+        labels[spelling] = item['name']
+        if item['long_context_window']:
+            labels[spelling + SUFFIX] = f"{item['name']} {SUFFIX}"
+
+    for item in data['models']:
+        for spelling in (item['id'], *item['provider_ids'].values()):
+            if spelling:
+                add(spelling, item)
+    known = {item['id']: item for item in data['models']}
+    for alias, target in _aliases(data, key).items():
+        item = known.get(target)
+        if item is not None and item['provider_ids'].get(key):  # as check(): an alias not offered here names nothing
+            add(alias, item)
+    return labels
+
+
 def takes_effort(model, effort):
     """Whether `model`, by any provider's ID and with or without the long-context suffix, takes `effort` by the
     table: Claude saves an /effort level even for a model that doesn't use it, so that alone proves nothing."""

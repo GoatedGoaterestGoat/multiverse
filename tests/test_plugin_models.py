@@ -9,8 +9,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.harnesses import types
 from multiverse.harnesses.claude import ClaudeAdapter
 from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
+from multiverse import plugins
 from multiverse.plugins import api, loader
 from multiverse.plugins.testing import PluginTestCase
+
+BUILDER = """
+def register(mv):
+    def check(values, root):
+        found = mv.universe(root).harness("claude").check(values.get("model", "sonnet"))
+        if not found.ok:
+            raise ValueError(found.reason)
+    mv.settings.check(check)
+"""
 
 class HarnessModelsTest(PluginTestCase):
     def picker(self):
@@ -87,3 +97,58 @@ class HarnessModelsTest(PluginTestCase):
                     self.assertNotIn("transcript row", str(caught.exception))
                     if raised is not api.ModelsUnavailable:
                         self.assertNotIsInstance(caught.exception, api.ModelsUnavailable)
+
+    def test_a_persons_model_choices_limit_what_a_plugin_sees_and_judges(self):
+        """models() and check() keep to the models harness.json's settings.models lists, a list that can't be used
+        reaches the plugin as ModelsUnavailable naming its file, and changing the list runs plugins' settings checks
+        again; fragile because the API reads models apart from spawn and run_once, so a break lets a plugin offer or
+        run a model the person excluded, or keeps its settings judged by the old list, unnoticed."""
+        mv = self.picker()
+        path = self.root / "harnesses" / "claude" / "harness.json"
+
+        def choose(models):
+            harness = json.loads(path.read_text())
+            harness.setdefault("settings", {}).pop("models", None)
+            if models is not None:
+                harness["settings"]["models"] = models
+            path.write_text(json.dumps(harness))
+
+        claude = mv.universe(self.root).harness("claude")
+        everything = claude.models()
+        with self.subTest("a list"):
+            choose({"haiku": {"efforts": ["low"]}, "claude-sonnet-5-5": {}})
+            catalog = claude.models()
+            self.assertEqual(({item.id for item in catalog.models}, catalog.free_form),
+                             ({"claude-haiku-5-5", "claude-sonnet-5-5"}, False))
+            self.assertEqual(next(item.efforts for item in catalog.models if item.id == "claude-haiku-5-5"), ("low",))
+            self.assertEqual((claude.check("haiku", effort="low").ok, claude.check("haiku", effort="low").model),
+                             (True, "claude-haiku-5-5"))
+            for model, effort in (("haiku", "high"), ("haiku", None), ("claude-opus-5-5", None)):
+                refused = claude.check(model, effort=effort)
+                self.assertFalse(refused.ok, (model, effort))
+                self.assertTrue(refused.reason, (model, effort))
+        with self.subTest("a list that can't be used"):
+            choose({"claude-nothing-0": {}})
+            with self.assertRaises(api.ModelsUnavailable) as caught:
+                claude.models()
+            self.assertIn("harness.json", str(caught.exception))
+            refused = claude.check("haiku")  # nothing is allowed by a list that can't be used
+            self.assertEqual((refused.ok, "harness.json" in (refused.reason or "")), (False, True))
+        with self.subTest("no list"):
+            choose(None)
+            self.assertEqual(claude.models(), everything)
+        with self.subTest("a settings check judged by the list"):
+            self.write_plugin("builder", {"api": "1.13", "module": "plugin", "settings": {
+                "version": 1, "schema": "settings.schema.json", "defaults": "defaults/settings.json"}}, {
+                "plugin.py": BUILDER, "settings.schema.json": json.dumps(
+                    {"type": "object", "properties": {"schema": {"type": "integer"}, "model": {"type": "string"}}}),
+                "defaults/settings.json": json.dumps({"schema": 1, "model": "sonnet"})})
+            self.enable("builder")
+
+            def state():  # no loader.reset(): what a running dashboard or host would see
+                return next(item for item in plugins.listing(self.root) if item["name"] == "builder")["state"]
+            self.assertNotEqual(state(), "unusable")
+            choose({"haiku": {}})
+            self.assertEqual(state(), "unusable")
+            choose(None)
+            self.assertNotEqual(state(), "unusable")

@@ -303,7 +303,7 @@ class CodexSideTest(unittest.TestCase):
                     with self.assertRaises(LocalProtocolError):
                         view.outgoing(input)
 
-        for version in ('0.166.0', '0.167.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2'):
             with self.subTest(navigation_version=version):
                 root, view = self.navigation_bound(navigation_cli=list(map(int, version.split('.'))))
                 self.initialize(view, 'codex/' + version)
@@ -319,7 +319,9 @@ class CodexSideTest(unittest.TestCase):
         for owner, cli, daemon, side in ((False, [0, 166, 0], '0.166.0', False),
                 (True, [0, 164, 0], '0.166.0', False), (True, [0, 166, 0], '0.164.0', False),
                 (True, [0, 166, 0], '0.167.0', False), (True, [0, 167, 0], '0.166.0', False),
-                (True, [0, 168, 0], '0.168.0', False),
+                (True, [0, 167, 0], '0.167.1', False), (True, [0, 167, 1], '0.167.0', False),
+                (True, [0, 167, 1], '0.167.2', False), (True, [0, 167, 2], '0.167.1', False),
+                (True, [0, 167, 3], '0.167.3', False),
                 (True, [0, 166, 0], '0.166.0', True)):
             with self.subTest(owner=owner, cli=cli, daemon=daemon, side=side):
                 root, view = self.navigation_bound(navigation_cli=cli)
@@ -689,7 +691,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0'):
+        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2'):
             with self.subTest(supported=version):
                 view = self.connection('checked-' + version, lambda: True)
                 self.initialize(view, 'codex/' + version)

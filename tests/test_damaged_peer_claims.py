@@ -139,13 +139,19 @@ class DamagedPeerClaimsTest(BaseTest):
         blocked, opened_original = unreadable / 'sessions.jsonl', Path.open
         reads = []
 
-        def opened(path, *args, **kwargs):
-            if path == blocked:
-                reads.append(path)
-                raise PermissionError('permission denied')
-            return opened_original(path, *args, **kwargs)
+        def guarded(opening):
+            def opened(path, *args, **kwargs):
+                if path == blocked:
+                    reads.append(path)
+                    raise PermissionError('permission denied')
+                return opening(path, *args, **kwargs)
+            return opened
+        # Both parsed lineage and the damaged-record fallback see the same filesystem denial.
+        opened = guarded(opened_original)
+        raw_opened = guarded(records.open_replaced)
         for requested in (str(uuid4()), read(unreadable / 'properties.json')['native_session_id']):
             with self.subTest(unreadable_peer_journal=requested), patch.object(Path, 'open', opened), \
+                    patch.object(records, 'open_replaced', raw_opened), \
                     self.assertRaisesRegex(ValueError, 'permission-peer.*sessions.jsonl.*read'):
                 agents.rebind_session(self.root, agent.name, healthy, requested, 'clear', 'launch', home=self.home)
         data = read(unreadable / 'properties.json')
@@ -164,7 +170,7 @@ class DamagedPeerClaimsTest(BaseTest):
                     value.pop('harness', None)  # Truly unknown provider, not an alias resolved by config.
                 write(unreadable / 'properties.json', value)
                 reads.clear()
-                with patch.object(Path, 'open', opened):
+                with patch.object(Path, 'open', opened), patch.object(records, 'open_replaced', raw_opened):
                     target = str(uuid4())
                     if allowed:
                         with sessions.namespace(self.root):

@@ -763,6 +763,24 @@ This audit compares official tags `rust-v0.166.0` (`6ff1e1ca3b30fc8b914720681fcf
 
 Native checks used private homes and daemons, disabled updaters and scripted localhost providers, with no user home, shared daemon, login or paid model call. They also cover plain permissions, read-only retry, subscribed versus exclusive resume, plugin configuration, side conversations, queue restart, concurrent daemon startup and recovery. A changed refusal footer was the sole native compatibility failure and is corrected here. Waiting-prompt routing is checked from pinned source and fake peers, without claiming a live approval test. Historical captures retain their original version filenames and provenance. General checked-version metadata does not automatically enable separately gated features on future releases.
 
+### Codex 0.167.1 compatibility audit
+
+This compares official tags `rust-v0.167.0` (`086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a`) and `rust-v0.167.1` (`0a94398fa60c4fac0e7659e4213a0a36e613dd46`). The protocol export and installed CLI's 470 generated schema files match 0.167.0. CLI help, release asset names after version normalization, the plugin config allowlist and its resolved schemas also match. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.167.1).
+
+The patch retains hosted web search in the top-level tool list during incremental tool declaration and compaction. Its new incremental mode for regular Bedrock Responses defaults off. mv2's private runs select OpenAI, disable web search and use the trimmed model catalog. Both regenerated catalogs have the same model data and shape.
+
+The TUI renderer and rollout reader inputs retain the 0.167.0 contracts. The startup gate uses the same command-center footer matcher for both patch releases. The checked release's refusal fixture comes from its upstream renderer snapshot. The existing pane, plain and compressed rollout, navigation and waiting-prompt tests cover those contracts. Each version gate names 0.167.1 explicitly, and navigation and prompt answering still require a matching CLI and daemon pair.
+
+### Codex 0.167.2 compatibility audit
+
+This compares official tags `rust-v0.167.1` (`0a94398fa60c4fac0e7659e4213a0a36e613dd46`) and `rust-v0.167.2` (`ce21072c90d32c40af7a55b60b2fb35c84a43a6a`). All 470 installed experimental protocol schemas and five CLI help outputs match the previous checked release. Protocol, app-server, TUI, rollout and model-catalog source files are byte-identical. The existing plugin configuration fields keep their schemas and allowlist. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.167.2).
+
+The patch enables incremental declarations for regular GCP Responses through a new GCP-only feature flag. mv2's private runs select OpenAI and keep their existing tool-free recipe. Both regenerated catalogs retain identical model data and shape, changing only their version stamps.
+
+Startup-screen checks, private ask and one-shot runs, native side conversations, navigation, waiting prompts and queued-prompt reporting each name this release explicitly. Older qualified versions remain supported; navigation, prompts and queue reports still require matching checked CLI and daemon releases. The refusal fixture retains its pinned upstream-renderer provenance rather than claiming a terminal capture.
+
+The user-authorized native suite used isolated homes and daemons with scripted localhost providers. Seventeen checks passed in the initial run. A shared-daemon stop check hit a terminal/runner ownership error; the same module passed on clean main and on an unchanged targeted repeat. Ask and tool-free runs, navigation and restored grants, refusals, side conversations, queue continuation, permissions, identity and recovery were covered. The private captured rollout produced identical facts and body reads in plain and compressed form. Prompt and queue version routing also passed their offline fake-peer tests. Linux validation was unavailable because Docker was not running.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -1559,6 +1577,19 @@ and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
 the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
 form are listed, never held.
 
+The mod also writes `claude-queue.json`: the mv2 messages Claude holds now
+(`waitingRows`: taken, neither stored nor refused), each by its delivery attempt's
+ID, with its mode and when it was taken. It is rewritten whenever one is taken,
+stored or refused, beside its name and moved over it so a reader never sees half
+of one. The adapter's `queued_prompts` reads it only for the current launch and
+conversation. Its coverage is complete from a launch's first load, or once the
+session has been idle since a reload: a reload empties the mod's memory while
+Claude may still hold what the code before it handed over. A load is a reload
+when the file or `runtime.json` already names this launch with its bridge. A
+message Claude took but didn't store in time (unsure) isn't listed, since it may
+never come, but it keeps coverage unknown until the session has settled idle
+after a turn end, because `/compact` or a dialog may still hold it.
+
 The mod also registers the bridge (`BRIDGE`, `claude-mod-v4`; the ID changes
 when the mod gains something an older one can't do: v2 reads a tag's send time,
 v3 runs `mv2 slash` commands and v4 publishes the prompts the agent waits on. A
@@ -1599,7 +1630,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.319; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.322; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude
@@ -1668,26 +1699,31 @@ possible. Text has terminal control sequences removed and tmux formats escaped.
 `focus` shows `focused` while the agent is focused (`focused 18m` with the time
 left of a timed focus, `focused (turn)` until its next turn ends), read from the
 agent's `focus.json`; an expired or unreadable record shows nothing.
-`inbox` counts unread inbox-only messages without marking them read, capped at
-`50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
-steer/follow-up messages do not count. Optional `context` shows measured latest
-request tokens/window (for example `ctx 82k/200k`), only when available for the
+`inbox` uses `tools.inbox.unread(blocking=False)`, the dashboard's non-consuming
+peek, and shows the exact unread count with no byte or count cap. At zero the
+item is hidden. Ordinary native-delivered steer/follow-up messages do not count;
+unconfirmed blocked-on upgrades do, including copies behind the cursor.
+Optional `context` shows measured latest request tokens/window (for example `ctx 82k/200k`), only when available for the
 current running launch and, for Codex, its exact thread. No compaction item is
 provided in tmux; Claude's mod supplies that information.
 
 The row uses tmux's asynchronous `#()` pull mechanism at `status-interval`, only
-while attached. Each refresh starts one Python process with site loading
-disabled, reads four small JSON files plus a bounded unread inbox tail if
-enabled, and exits. It imports only the standard library, takes no locks,
-performs no writes, and contacts neither mv2 nor the native app-server. This
-avoids a push publisher in each lifecycle/report/inbox path and also picks up
-file edits. Item choices and state changes appear on the next refresh; the
-interval itself takes effect on spawn/resume.
+while attached. Each refresh starts a Python renderer with site loading
+disabled. It reads the display metadata with the standard library. When inbox
+is enabled, a second isolated Python process imports the same installation's
+core and returns only the shared unread count. Its inbox lock is nonblocking,
+and it never advances cursors or read marks. A one-second timeout kills and
+reaps the helper; a busy, unreadable or timed-out inbox shows `inbox ?`. There
+is no native query or push publisher. Item choices, file edits and state changes
+appear on the next refresh; the interval itself takes effect on spawn/resume.
+Detached wrappers do not poll; increasing the interval reduces the attached cost.
 
-A local 40-refresh measurement took a median 49 ms wall time and mean 35 ms CPU
-per refresh while the test suite was running (about 1.7% of one CPU core for an
-attached agent at two seconds). Detached wrappers do not poll; increasing the
-interval reduces the attached cost.
+In a local QA measurement, an empty-inbox refresh took about 262 ms wall time
+and 147 ms CPU, compared with 89 ms and 37 ms for the earlier independent
+counter. A 9.2 MiB ledger took about 491 ms wall time and 371 ms CPU. These are
+machine-specific costs, about 7% and 19% of one core at a two-second interval;
+the shared peek trades the old size cutoff for exact counts and the same inbox
+rules as the dashboard.
 
 Codex 0.160.x can separately opt into its built-in native footer without editing
 `~/.codex/config.toml`. Add these two entries to the Codex harness's existing

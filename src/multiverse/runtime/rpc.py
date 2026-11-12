@@ -346,6 +346,14 @@ class LaunchProxy:
                             value = protocol.outgoing(value)
                             if value is None:
                                 return
+                            before_send = getattr(protocol, 'relay_before_send', None)
+                            if before_send is not None:
+                                try:
+                                    await before_send(value)
+                                except OSError as error:
+                                    raise LocalProtocolError(
+                                        'Native prompt state could not be saved; input was not forwarded',
+                                        request_id=value.get('id')) from error
                             resolved_navigation = await navigate('outgoing', value)
                         except LocalProtocolError as error:
                             await local_error(error, value, True)

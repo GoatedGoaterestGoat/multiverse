@@ -1,5 +1,4 @@
 """The dashboard's rows: a snapshot projected to folder rows, their keys and counts."""
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import display
@@ -20,22 +19,11 @@ def with_usage(agent):
             "focus_line": ("Focused " + focus.ends(held) + ": messages to it wait in its inbox") if held else "Not focused"}
 
 
-def rate_limits(items):
-    """Account-wide windows from the newest reading among live agents, unexpired: '5h 34% · 7d 12%'."""
-    now = datetime.now(timezone.utc)
-    best = {}
-    for agent in items:
-        if agent.get("live") != "alive" or not isinstance(agent.get("usage"), dict):
-            continue
-        for label, percent, resets, reported in display.rate_limit_windows(agent["usage"]):
-            try:
-                if resets and datetime.fromisoformat(resets.replace("Z", "+00:00")) <= now:
-                    continue
-            except ValueError:
-                pass
-            if label not in best or str(reported or "") >= best[label][1]:
-                best[label] = (percent, str(reported or ""))
-    return " · ".join(f"{label} {best[label][0]:.0f}%" for label in ("5h", "7d") if label in best)
+def header_counts(totals):
+    """The header's counts, each only when there are some: '2 live · 1 blocked · 4 agents', or '' for none."""
+    return " · ".join(f"{totals[key]} {word}" for key, word in
+                      (("alive", "live"), ("waiting", "waiting"), ("focused", "focused"), ("blocked", "blocked"),
+                       ("total", "agents")) if totals.get(key))
 
 
 def within(item, root):

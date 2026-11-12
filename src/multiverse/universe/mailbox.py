@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from ..store import lock, now, open_regular, read, uid, write
+from ..store import lock, now, open_regular, open_replaced, exists_replaced, missing_records, read, uid, write
 from . import records
 
 
@@ -60,9 +60,15 @@ def _bytes(path):
         return stream.read(os.fstat(stream.fileno()).st_size)
 
 
-def _cursor(agent_dir):
+def _cursor(agent_dir, *, observed_missing=()):
     path = agent_dir / "inbox.cursor"
-    return int(_bytes(path).decode()) if path.exists() else 0
+    if path in observed_missing:
+        return 0
+    try:
+        with open_replaced(path) as stream:
+            return int(stream.read(os.fstat(stream.fileno()).st_size).decode())
+    except FileNotFoundError:
+        return 0
 
 
 def _validate_cursor(data, cursor):
@@ -70,10 +76,14 @@ def _validate_cursor(data, cursor):
         raise ValueError("Invalid inbox cursor; refusing to skip messages")
 
 
-def _messages(agent_dir):
+def _messages(agent_dir, *, observed_missing=()):
     path = agent_dir / 'inbox.jsonl'
-    data = _bytes(path) if path.exists() else b''
-    cursor = _cursor(agent_dir)
+    try:
+        data = _bytes(path)
+    except FileNotFoundError:
+        _empty_history(agent_dir, observed_missing=observed_missing)
+        data = b''
+    cursor = _cursor(agent_dir, observed_missing=observed_missing)
     _validate_cursor(data, cursor)
     offset = 0
     messages = []
@@ -85,21 +95,58 @@ def _messages(agent_dir):
     return data, cursor, messages
 
 
+# These files can attest earlier messages even when their parsed value is empty.
+INBOX_EVIDENCE = ('inbox.cursor', 'inbox-read.json', 'inbox-state.json', 'native-delivery.json')
+
+
+def _empty_history(agent_dir, *, observed_missing=()):
+    """Missing append-only history is empty only when no saved inbox evidence remains."""
+    evidence = tuple(agent_dir / name for name in INBOX_EVIDENCE)
+    remaining = tuple(path for path in evidence if path not in observed_missing)
+    absent = missing_records(remaining)
+    present = [path.name for path in remaining if path not in absent]
+    # This directory is created, never atomically replaced; absence needs no per-record retry.
+    try:
+        (agent_dir / 'inbox-unsubmitted').lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        present.append('inbox-unsubmitted')
+    if present:
+        raise ValueError(f"{agent_dir / 'inbox.jsonl'}: inbox history is missing while saved inbox evidence remains "
+                         f"({', '.join(present)}); restore the history before reading unread messages")
+    if not agent_dir.is_dir():
+        raise ValueError(f"{agent_dir}: inbox directory is missing")
+
+
+def unread(agent_dir, *, blocking=True):
+    """Shared non-consuming peek; a never-messaged inbox needs no lock or directory write."""
+    agent_dir = Path(agent_dir)
+    try:
+        (agent_dir / 'inbox.jsonl').stat()
+    except FileNotFoundError:
+        _empty_history(agent_dir)
+        return []
+    return inbox(agent_dir, limit=None, peek=True, blocking=blocking)['messages']
+
+
 def _ledger_damage(path, reason):
     return ValueError(f'{path}: {reason}; back up and repair or reset the file, '
                       'then check delivery before retrying')
 
 
-def _ledger(path):
+def _ledger(path, *, observed_missing=()):
+    if path in observed_missing:
+        return {}
     try:
-        return records.runtime(path)
+        return records.ledger(path)
     except records.RecordError as error:
         raise _ledger_damage(error.file, error.reason) from error
 
 
-def _states(agent_dir):
+def _states(agent_dir, *, observed_missing=()):
     path = agent_dir / 'inbox-state.json'
-    states = _ledger(path)
+    states = _ledger(path, observed_missing=observed_missing)
     for identifier, state in states.items():
         if (not isinstance(state, dict)
                 or ('submission_state' in state and (not isinstance(state['submission_state'], str)
@@ -114,16 +161,15 @@ def _states(agent_dir):
               for identifier, state in states.items()}
     states = {identifier: state for identifier, state in states.items() if state}
     legacy = agent_dir / 'native-delivery.json'
-    if legacy.exists():
-        for identifier, attempts in _ledger(legacy).items():
-            if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
-                    or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
-                           for attempt in attempts)):
-                raise _ledger_damage(legacy, f'invalid delivery attempts for {identifier!r}')
-            if identifier not in states and attempts:
-                last = attempts[-1]
-                states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
-                    'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
+    for identifier, attempts in _ledger(legacy, observed_missing=observed_missing).items():
+        if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
+                or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
+                       for attempt in attempts)):
+            raise _ledger_damage(legacy, f'invalid delivery attempts for {identifier!r}')
+        if identifier not in states and attempts:
+            last = attempts[-1]
+            states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
+                'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
     for state in states.values():
         last = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
         value = last.get('value') if isinstance(last, dict) else None
@@ -150,16 +196,20 @@ def _states(agent_dir):
     return states
 
 
-def delivery_problem(agent_dir, name, *, is_final=None):
+def delivery_problem(agent_dir, name, *, is_final=None, observed_missing=None):
     """Count reported failures in real inbox messages, without native queries.
 
     Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
     rather than making the agent's identity or terminal record unusable.
     """
-    if not any((agent_dir / entry).exists() for entry in ('inbox-state.json', 'native-delivery.json', 'inbox-unsubmitted')):
+    ledgers = tuple(agent_dir / entry for entry in ('inbox-state.json', 'native-delivery.json'))
+    if observed_missing is None:
+        observed_missing = missing_records(ledgers)
+    if (not any(path not in observed_missing and exists_replaced(path) for path in ledgers)
+            and not (agent_dir / 'inbox-unsubmitted').exists()):
         return None
     with lock(agent_dir / '.inbox.lock'):
-        states = _states(agent_dir)
+        states = _states(agent_dir, observed_missing=observed_missing)
         failed = {identifier for identifier, state in states.items()
                   if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at') and not state.get('dismissed_at')}
         if not failed:
@@ -192,13 +242,16 @@ def record_unsubmitted(agent_dir, message_id, reason):
               {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason})
 
 
-def inbox_problem(agent_dir):
+def inbox_problem(agent_dir, *, observed_missing=None):
     """Doctor reports damage without consuming or rewriting the message log."""
     try:
         with lock(agent_dir / '.inbox.lock'):
-            data, _, _ = _messages(agent_dir)
-            _states(agent_dir)
-            _read_marks(agent_dir)
+            if observed_missing is None:
+                observed_missing = missing_records(agent_dir / name for name in
+                    ('inbox.cursor', 'inbox-state.json', 'native-delivery.json', 'inbox-read.json'))
+            data, _, _ = _messages(agent_dir, observed_missing=observed_missing)
+            _states(agent_dir, observed_missing=observed_missing)
+            _read_marks(agent_dir, observed_missing=observed_missing)
             if data and not data.endswith(b'\n'):
                 return (f"{agent_dir / 'inbox.jsonl'}: incomplete final line; sends cannot append. "
                         "Back up the file, then repair or remove only the incomplete tail; keep complete messages")
@@ -207,10 +260,10 @@ def inbox_problem(agent_dir):
     return None
 
 
-def _read_marks(agent_dir):
+def _read_marks(agent_dir, *, observed_missing=()):
     """Messages read ahead of the read position, by `mv2 held`: {message id: when}."""
     path = agent_dir / 'inbox-read.json'
-    marks = _ledger(path)
+    marks = _ledger(path, observed_missing=observed_missing)
     if any(not isinstance(identifier, str) or not isinstance(stamp, str) for identifier, stamp in marks.items()):
         raise _ledger_damage(path, 'invalid read marks')
     return marks
@@ -276,9 +329,12 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
     with lock(agent_dir / '.inbox.lock', blocking=blocking, create_parent=not peek):
-        data, read_cursor, records = _messages(agent_dir)
-        states = _states(agent_dir)
-        marks = _read_marks(agent_dir)
+        # These optional records share the inbox lock, so one absence snapshot covers this read/consume.
+        observed_missing = missing_records(agent_dir / name for name in
+            ('inbox.cursor', 'inbox-state.json', 'native-delivery.json', 'inbox-read.json'))
+        data, read_cursor, records = _messages(agent_dir, observed_missing=observed_missing)
+        states = _states(agent_dir, observed_missing=observed_missing)
+        marks = _read_marks(agent_dir, observed_missing=observed_missing)
         if after is not None:
             _validate_cursor(data, after)
             if not all_messages and after > read_cursor:
@@ -471,7 +527,7 @@ def update_message(agent_dir, message_id, **changes):
         write(agent_dir / 'inbox-state.json', states)
         if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled', 'launch-only'):
             proof = agent_dir / 'inbox-unsubmitted' / (message_id + '.json')
-            if proof.exists():
+            if exists_replaced(proof):
                 proof.unlink()
                 # Do not let a crash resurrect a negative proof after submission.
                 descriptor = os.open(proof.parent, os.O_RDONLY)

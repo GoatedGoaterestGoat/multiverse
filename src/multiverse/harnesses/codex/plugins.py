@@ -18,9 +18,10 @@ import tomllib
 from urllib.parse import parse_qsl, urlsplit
 
 from ...plugins import harness, manifest, trust
+from ...store import is_file_replaced
 
 
-CHECKED_VERSION = (0, 167, 0)  # native layouts and unmanaged side-thread protocol
+CHECKED_VERSION = (0, 167, 2)  # native layouts and unmanaged side-thread protocol
 CONFIG_VERSION = (0, 159, 3)  # checked versioned config schema
 MCP_VERSION = (0, 162, 1)     # isolated native spawn verified on this release
 _versions = {}
@@ -313,7 +314,7 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
     directory = Path(context.values.get('agent_dir', ''))
     root = directory.parents[2] if len(directory.parents) > 2 else None
     bootstrap = json.loads(context.values['bootstrap_json'])
-    if root is None or not (root / 'universe.json').is_file():
+    if root is None or not is_file_replaced(root / 'universe.json'):
         return Prepared(harness.LaunchPlan(environment=dict(command.environment)), bootstrap)
     cli, version_read = None, False
     def selected_version():

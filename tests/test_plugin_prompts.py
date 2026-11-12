@@ -28,6 +28,15 @@ ASK = api.WaitingPrompt(id="ask-1", kind="question", tool="AskUserQuestion", sum
                                                       takes_note=True)))
 
 
+LATER = api.WaitingPrompt(id="later-1", kind="question", tool="request_user_input_async", summary="Which branch?",
+                          requires_waiting=False, questions=(api.PromptQuestion(id="0", question="Which branch?",
+                                                                                options=(("main", ""), ("next", "")),
+                                                                                free_text=False),))
+NOW = api.WaitingPrompt(id="now-1", kind="question", tool="requestUserInput", summary="Proceed?",
+                        questions=(api.PromptQuestion(id="0", question="Proceed?", options=(("yes", ""), ("no", "")),
+                                                      free_text=False),))
+
+
 class PromptApiTest(PluginTestCase):
     def setUp(self):
         super().setUp()
@@ -95,7 +104,8 @@ class PromptApiTest(PluginTestCase):
         with self.subTest("an agent that isn't waiting"):
             runtime = read(self.directory / "runtime.json")
             write(self.directory / "runtime.json", {**runtime, "status": "idle"})
-            self.assertEqual(self.worker.waiting_prompts().state, "refused")
+            listed = self.worker.waiting_prompts()  # only prompts that don't need it waiting: none here
+            self.assertEqual((listed.state, listed.prompts), ("ok", ()))
             self.assertNotEqual(self.worker.answer_prompt("perm-2", choice="allow").state, "answered")
             self.assertEqual(len(fake.answers), 2)
         with self.subTest("observe access reads but never answers"):
@@ -117,6 +127,46 @@ class PromptApiTest(PluginTestCase):
     def from_agent(self, call):
         with mock.patch.dict(os.environ, {"MV2_AGENT_ID": "someone"}):
             return call()
+
+
+    def test_a_question_that_does_not_stop_the_agent_is_answered_once_as_its_input(self):
+        """Async questions are answered while the agent runs, sent once, text kept nowhere; a lost gate is unseen."""
+        write(self.directory / "runtime.json", {**read(self.directory / "runtime.json"), "status": "running"})
+        later2 = api.WaitingPrompt(**{**LATER.__dict__, "id": "later-2"})
+        later3 = api.WaitingPrompt(**{**LATER.__dict__, "id": "later-3"})
+        later4 = api.WaitingPrompt(**{**LATER.__dict__, "id": "later-4"})
+        fake = self.fake_prompts([LATER, NOW, later2, later3, later4], {"state": "answered"}, "pending",
+                                 {"state": "unknown"}, {"state": "refused"})
+        listed = self.worker.waiting_prompts()
+        self.assertEqual((listed.state, [prompt.id for prompt in listed.prompts]),
+                         ("ok", ["later-1", "later-2", "later-3", "later-4"]))  # not now-1: it needs waiting
+        self.assertIs(listed.prompts[0].requires_waiting, False)
+        refused = self.worker.answer_prompt("now-1", answers={"0": "yes"})
+        self.assertEqual((refused.state, refused.cause, len(fake.answers)), ("refused", "not_waiting", 0))
+        cases = (("later-1", "answered", "answered"), ("later-2", "submitted", "answered"),
+                 ("later-3", "unknown", "unknown"), ("later-4", "refused", "refused"))
+        for prompt, first, settled in cases:
+            with self.subTest(prompt):
+                result = self.worker.answer_prompt(prompt, answers={"0": "next"}, timeout=0)
+                self.assertEqual(result.state, first, result)
+                self.assertEqual(result.cause, "not_delivered" if first == "refused" else result.cause)
+                self.assertEqual(fake.answers[-1]["input"], "0: next")
+                if first == "submitted":
+                    self.assertEqual(self.worker.prompt_result(prompt).state, "submitted")
+                    fake.settle(prompt, {"state": "answered"})
+                self.assertEqual(self.worker.prompt_result(prompt).state, settled)
+                self.assertNotIn(fake.answers[-1]["input"], (self.directory / "prompts" / f"{prompt}.json").read_text())
+                again = self.worker.answer_prompt(prompt, answers={"0": "main"})
+                self.assertEqual(again.state, "refused")
+        self.assertEqual(len(fake.answers), 4)  # one delivery each, never a second
+        with self.subTest("a secret answer is delivered, never shown back or kept"):
+            token = api.WaitingPrompt(id="later-5", kind="question", tool="request_user_input_async",
+                                      summary="Token?", requires_waiting=False,
+                                      questions=(api.PromptQuestion(id="0", question="Token?", secret=True),))
+            fake = self.fake_prompts([token], {"state": "answered"})
+            self.assertEqual(self.worker.answer_prompt("later-5", answers={"0": "s3cret"}).state, "answered")
+            self.assertEqual(fake.answers[-1]["input"], "0: ***")
+            self.assertNotIn("s3cret", (self.directory / "prompts" / "later-5.json").read_text())
 
 
 if __name__ == "__main__":

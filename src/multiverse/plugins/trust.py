@@ -21,7 +21,7 @@ import shutil
 import tempfile
 import time
 
-from ..store import lock, now, read, write
+from ..store import lock, now, read, retry_missing, write
 
 FILE = "trusted-plugins.json"
 CACHE = "plugin-cache"
@@ -118,7 +118,7 @@ def current(directory):
 
 def _fingerprints():
     try:
-        data = read(user_directory() / FINGERPRINTS)
+        data = retry_missing(lambda: read(user_directory() / FINGERPRINTS))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -223,7 +223,7 @@ def prune_cache():
 def _records():
     path = user_directory() / FILE
     try:
-        data = read(path)
+        data = retry_missing(lambda: read(path))
     except (OSError, ValueError):
         return {}
     plugins = data.get("plugins") if isinstance(data, dict) else None

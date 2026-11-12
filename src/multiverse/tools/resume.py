@@ -7,8 +7,8 @@ from ..display import cause, outcome
 
 def configure(parser):
     parser.add_argument("agent")
-    parser.add_argument("--model")
-    parser.add_argument("--effort", help="Effort for this agent only; retained on later resumes; default clears it and uses the harness default")
+    parser.add_argument("--model", help="Allowed model ID or alias; overrides the recorded choice")
+    parser.add_argument("--effort", help="Allowed effort for this agent, retained on later resumes; default clears it when permitted")
     parser.add_argument('--start-fresh', action='store_true',
                         help='Recover a missing conversation with a new one, only after every candidate storage proves it absent')
     add_wait(parser)

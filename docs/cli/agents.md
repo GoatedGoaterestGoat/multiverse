@@ -14,9 +14,11 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 | `--name` | Must be unique in the universe, counting stopped and failed agents, and cannot look like a UUID |
 | `--harness` | A harness configured in this universe. The default is `codex` |
 | `--task` / `--prompt`, `--task-file` | The first prompt. Leave it out to start the agent idle |
-| `--model` | Override the harness's default model for this agent |
-| `--effort` | Set effort for this agent only; currently supported by Claude, with a refusal for unsupported harnesses or levels. Give `--model` too when the launch has no recorded or configured model. `default` uses the harness default |
+| `--model` | Model ID or alias; passed to the harness unless a subset or effort requires validation |
+| `--effort` | Set effort for this agent only; supported by Claude and Codex, with a refusal for unsupported harnesses or levels. Give `--model` too when the launch has no recorded or configured model. `default` leaves effort unset when the subset permits it |
 | `--wait`, `--wait-timeout SECONDS` | Return only once the agent can receive messages or has failed. The timeout defaults to 60 s |
+
+A harness can [narrow its model and effort choices](../use/harnesses.md#narrow-the-available-choices). Those choices apply to both spawn and resume. Without a subset or a recorded or requested effort, spawn, resume and wake pass the model spelling unchanged to the harness, including choices saved by older mv2 versions. The harness decides whether it can use that model. A subset or effort choice still requires model validation.
 
 Without `--wait`, `spawn` returns as soon as the launch is registered. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
 
@@ -36,13 +38,15 @@ mv2 list --columns name,phase   # only these columns, in this order
 mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, status, reported phase and summary. A blocked agent's phase says what it's blocked on when it reported that, such as `blocked (lifecycle)` or `blocked (user)`; `--json` gives it as `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. A `working` or `blocked` phase also says how long ago the agent last reported, such as `working (10m)`. A blocked agent's summary starts with what it's waiting for, if it said, such as `Waiting for user: decide the model list`; `--json` gives them as `reported_at` and `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
 
-`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `universe` and `id`. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
+`--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `model`, `universe` and `id`. `model` shows the agent's model by its display name with its effort, such as `Opus 5.5 (xhigh)` ([the dashboard's Model column](../reference/dashboard.md) explains the names). With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
 
 `--json` gives every field of each agent. With `--columns`, it gives only the fields named, in that order, such as `mv2 list --json --columns id,name,live,status`. Their values are the same as in the full `--json` output, and a field an agent doesn't have is left out of its entry. Reading each agent's token usage is the slow part of a listing, so mv2 reads it only for plain `--json`, or when `--columns` names `usage`, `tokens` or `usage_detail`. The text listing never reads it.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
+
+If no local agent matches, the error also looks in related universes: parents, siblings and subverses in the same tree. It lists the matches with their paths and the `-u` option to reach them. Put that option before the command, as in `mv2 -u .multiverse/subverses/qa inspect worker`. The command never chooses another universe for you. This quick, read-only search skips damaged records and linked directories; if its search limit is reached, any matches shown may be incomplete. A name found nowhere keeps the usual error.
 
 ## Watch an agent
 
@@ -70,7 +74,7 @@ mv2 resume worker --effort default
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
-`--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other Claude sessions. `--effort default` clears the saved effort and uses the harness default. Changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer Claude's effective default from the person's settings, account and provider.
+`--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other sessions. `--effort default` clears the saved effort when permitted. Without a model subset, changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. With a [model subset](../use/harnesses.md#narrow-the-available-choices), an excluded recorded choice refuses resume until you explicitly replace it with an allowed one. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer the native effective default from the person's settings, account and saved conversation.
 
 If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
 agent's folder, name and inbox and starts a new conversation in the calling

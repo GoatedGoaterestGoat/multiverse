@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .. import plugins, universe
 from ..plugins import access as levels, loader, manifest as manifests, settings as settings_files, trust
+from ..store import is_file_replaced
 
 ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
            "install", "migrate", "new")
@@ -266,7 +267,7 @@ def scaffold(name, parent):
 
 def _universe_plugin(directory):
     """Whether `directory` is a plugin in some universe's own plugins/ (which runs only once trusted)."""
-    return directory.parent.name == "plugins" and (directory.parent.parent / "universe.json").is_file()
+    return directory.parent.name == "plugins" and is_file_replaced(directory.parent.parent / "universe.json")
 
 
 def check(directory, load=False):

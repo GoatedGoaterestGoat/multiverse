@@ -2,7 +2,7 @@
 import os
 import time
 
-from ..store import now, read, write
+from ..store import now, read, retry_missing, write
 from .process import process_started, process_snapshot, valid_start, LINUX_START
 
 TOTAL_TIMEOUT = 180
@@ -77,7 +77,7 @@ def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL
         check_stop()
         observed = time.monotonic()
         try:
-            record = read(launch / 'registration.json')
+            record = retry_missing(lambda: read(launch / 'registration.json'))
         except FileNotFoundError:
             record = missing
         if record is missing:

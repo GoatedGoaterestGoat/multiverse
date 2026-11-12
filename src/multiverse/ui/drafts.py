@@ -102,45 +102,164 @@ class Draft:
 
 
 class AgentDraft(Draft):
-    fields = ("name", "harness", "model")
-    labels = {"name": "Name", "harness": "Harness", "model": "Model"}
+    """Name, harness, model and, where the picked model takes one, effort.
+
+    A harness with a model list (core's, narrowed by the universe's harness settings) offers it as a picker, with
+    `default` (leave it unset, for the harness to decide) only where core allows that; where the harness settings
+    configure the model that leaves it unset (core's `default_model`), the effort follows that model. Where core also takes IDs it
+    doesn't list (no subset is set), a model can be typed beside the list; a harness without a list takes a typed
+    model. The list is read off the event
+    loop and kept in `choices`, per harness: absent while it is being read, None when the harness has none."""
+    labels = {"name": "Name", "harness": "Harness", "model": "Model", "effort": "Effort"}
     columns = ("name", "harness", "summary")
     operation, verb = "spawn", "Spawn agent"
 
     def __init__(self, scope, previous_key, values, harnesses=()):
-        super().__init__(scope, previous_key, values)
+        super().__init__(scope, previous_key, {"model": "", "effort": "", **values})
         self.harnesses = tuple(harnesses)
+        self.choices = {}
+        self.asking = set()  # harnesses whose list is being read
+
+    @property
+    def fields(self):
+        return ("name", "harness", "model", "effort") if self.efforts() else ("name", "harness", "model")
 
     @property
     def key(self):
         return agent_key({"universe": str(self.scope), "id": "__draft__"})
 
+    def listed(self):
+        """The chosen harness's model list, or None while it is being read, or when it has none."""
+        found = self.choices.get(self.values["harness"])
+        return found if isinstance(found, dict) and found.get("models") else None
+
+    def typed(self):
+        """Whether a model may also be typed beside the list: core takes IDs it doesn't list."""
+        return bool((self.listed() or {}).get("free_form"))
+
+    def reading(self):
+        return self.values["harness"] not in self.choices
+
+    def model(self):
+        listed = self.listed()
+        return next((m for m in listed["models"] if m["id"] == self.values["model"]), None) if listed else None
+
+    def configured(self):
+        """The listed model leaving the model unset launches (core's default_model), whatever is picked now."""
+        listed = self.listed()
+        wanted = (listed or {}).get("default_model")
+        return next((m for m in listed["models"] if m["id"] == wanted), None) if wanted else None
+
+    def effective(self):
+        """The listed model the effort follows: the one picked, or with `default` the one the harness settings
+        configure (core's default_model, never the table's), which leaving the model unset launches."""
+        listed = self.listed()
+        if not self.values["model"]:
+            return self.configured()
+        return next((m for m in listed["models"] if m["id"] == self.values["model"]), None) if listed else None
+
+    def efforts(self):
+        model = self.effective()
+        return tuple(model.get("efforts") or ()) if model else ()
+
+    def unset_allowed(self, field):
+        """Whether core lets this field be left to the harness: a narrowed list may not, since the harness's own
+        choice could fall outside it."""
+        if field == "model":
+            return (self.listed() or {}).get("unset", True) is not False
+        return (self.effective() or {}).get("effort_unset", True) is not False
+
+    def options(self, field=None):
+        """What the picker for `field` (the active one) offers, `""` meaning the harness default; None to type."""
+        field = field or self.active
+        if field == "harness":
+            return self.harnesses
+        if field == "model" and (listed := self.listed()):
+            ids = tuple(m["id"] for m in listed["models"])
+            return ("", *ids) if self.unset_allowed("model") else ids
+        if field == "effort" and (efforts := self.efforts()):
+            return ("", *efforts) if self.unset_allowed("effort") else efforts
+        return None
+
+    def option_label(self, field, value):
+        if not value and not self.unset_allowed(field):
+            return f"choose a{'n' if field == 'effort' else ''} {field}"
+        if field == "model" and not value and (configured := self.configured()):
+            return f"default ({clean(configured.get('name') or configured['id'])})"
+        if field == "model" and value:
+            model = next((m for m in self.listed()["models"] if m["id"] == value), None)
+            name = clean(model.get("name") or value) if model else clean(value)
+            return name if name == clean(value) else f"{name} ({clean(value)})"
+        return clean(value) or "default"
+
+    def choose(self, field, value):
+        self.values[field] = value
+        if field == "harness":
+            self.values["model"] = self.values["effort"] = ""
+        if field == self.active:  # typing next replaces the pick
+            self.cursor, self.select_all = len(value), True
+        self.settle()
+
+    def settle(self):
+        """Keep the model and effort among what the lists now offer, and focus off a field that went away."""
+        if ((listed := self.listed()) and not self.typed()
+                and self.values["model"] not in {m["id"] for m in listed["models"]}):
+            self.values["model"] = ""
+        if self.values["effort"] not in self.efforts():
+            self.values["effort"] = ""
+        if self.active not in self.fields:
+            self.focus("model")
+
     def focus_column(self, column):
         super().focus_column("model" if column == "summary" else column)
 
     def insert(self, text):
-        if self.active != "harness":
+        if self.active == "name" or (self.active == "model" and not self.reading()
+                                     and (self.options() is None or self.typed())):
             super().insert(text)
+            self.settle()
 
     def edit(self, event):
         key = event.key
-        if self.active != "harness" or key in ("tab", "shift+tab"):
+        if key in ("tab", "shift+tab"):
             return super().edit(event)
-        if self.harnesses and key in ("left", "up", "right", "down", "space", "home", "end"):
-            current = self.values["harness"]
-            index = self.harnesses.index(current) if current in self.harnesses else -1
-            index = (index + (-1 if key in ("left", "up") else 1)) % len(self.harnesses)
+        if self.active == "model" and self.reading():
+            return  # nothing to edit until the harness's list is read
+        options = self.options()
+        if options is None or (self.active == "model" and self.typed() and key not in ("up", "down")):
+            super().edit(event)  # typing, or editing a typed model; ↑↓ still choose from the list
+            return self.settle()
+        if options and key in ("left", "up", "right", "down", "space", "home", "end"):
+            current = self.values[self.active]
+            backward = key in ("left", "up")
+            # Nothing chosen yet: the first step forward is the first choice, the first step back the last.
+            index = options.index(current) if current in options else (len(options) if backward else -1)
+            index = (index + (-1 if backward else 1)) % len(options)
             if key in ("home", "end"):
-                index = 0 if key == "home" else len(self.harnesses) - 1
-            self.values["harness"] = self.harnesses[index]
+                index = 0 if key == "home" else len(options) - 1
+            self.choose(self.active, options[index])
 
     def cell(self, name):
         if name == "harness":
             return Text(clean(self.values[name]) + " ▾", style="reverse" if name == self.active else theme.SUBTEXT0)
+        if name == "model" and self.reading():
+            return Text("reading models…", style="reverse" if name == self.active else HINT)
+        if (name == "model" and self.typed() and self.values[name]
+                and (self.model() is None or (name == self.active and not self.select_all))):
+            return super().cell(name)  # a typed ID, or one being typed
+        if name in ("model", "effort") and self.options(name) is not None:
+            model = self.model() if name == "model" else None
+            label = clean(model.get("name") or self.values[name]) if model else self.option_label(name, self.values[name])
+            return Text(label + " ▾", style="reverse" if name == self.active else theme.SUBTEXT0)
         return super().cell(name)
 
     def column_cell(self, column):
-        return Text("Model: ", style=HINT) + self.cell("model") if column == "summary" else self.cell(column)
+        if column != "summary":
+            return self.cell(column)
+        text = Text("Model: ", style=HINT) + self.cell("model")
+        if self.efforts():
+            text += Text(" · Effort: ", style=HINT) + self.cell("effort")
+        return text
 
     def add_to(self, snapshot):
         # Harnesses are read from each snapshot so a removed one needs a new choice.
@@ -163,6 +282,11 @@ class AgentDraft(Draft):
             if key == "name" and any(a["name"] == values["name"] and Path(a["universe"]) == self.scope
                                      for a in snapshot["agents"]):
                 return key, "That name is already used in this group."
+        if self.reading():
+            return "model", "Still reading this harness's models; try again in a moment."
+        for key in ("model", "effort"):
+            if key in self.fields and self.options(key) is not None and not values[key] and not self.unset_allowed(key):
+                return key, f"Choose a{'n' if key == 'effort' else ''} {key}: this harness's settings allow only those listed."
         return None
 
     def created_key(self, agent):

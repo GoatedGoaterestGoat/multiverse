@@ -4,7 +4,7 @@ from pathlib import Path
 from uuid import UUID
 
 from ..harnesses.types import NativeResult
-from ..store import read
+from ..store import read, retry_missing
 from ..universe import mailbox, storage
 from . import attachments
 
@@ -15,7 +15,7 @@ def launch_ended(directory, launch_id):
     A malformed record or a process that may still run is False; an unreadable
     record raises, so a caller can tell damage from a launch that still runs.
     """
-    cleanup = read(directory / 'launches' / launch_id / 'cleanup.json')
+    cleanup = retry_missing(lambda: read(directory / 'launches' / launch_id / 'cleanup.json'))
     if (not isinstance(cleanup, dict) or cleanup.get('schema') != 1 or cleanup.get('launch_id') != launch_id
             or any(type(cleanup.get(key)) is not int or cleanup[key] <= 0 for key in ('pid', 'child_pid'))):
         return False

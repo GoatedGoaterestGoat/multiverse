@@ -554,13 +554,21 @@ class FakePrompts:
     `prompts` are the api.WaitingPrompt the harness shows, until each is answered and settled. Each answer takes the
     next outcome: a dict of what the harness reports (state, default "answered"; saved_rule, person_answer, cause) or
     "pending" (submitted, with no outcome until settle(id, outcome)). `answers` holds each answer the harness
-    received, oldest first: {id, choice, message, answers, notes}, a secret question's answer and note masked."""
+    received, oldest first: {id, choice, message, answers, notes}, a secret question's answer and note masked.
+
+    A prompt with requires_waiting False (1.18) is answered as core answers one: the harness returns the input, and
+    core delivers it once through native.submit_input, which this fake replaces. Its outcome is then the delivery's:
+    {"state": "answered"} the input is confirmed in the conversation, "pending" it is queued until
+    settle(id, {"state": "answered"}) or settle(id, {"state": "unknown"}), {"state": "unknown"} the connection
+    is lost while sending, {"state": "refused"} the delivery definitely failed before anything was submitted. Its
+    answer also records "input", the text delivered, a secret question's answer masked there too."""
 
     def __init__(self, test, prompts, outcomes):
         from dataclasses import asdict
         from ..harnesses import types
         self.open = {item.id: asdict(item) for item in prompts}  # the API's dataclass, as the dict core reads
         self.outcomes, self.answers, self._settled, self._ended = list(outcomes), [], {}, set()
+        self._inputs = {}  # an input's id ("prompt-" + the prompt's) -> the outcome its delivery takes
         fake = self
 
         class Scripted:
@@ -578,6 +586,13 @@ class FakePrompts:
                 if not fake.outcomes:
                     return types.NativeResult("error", "the test's script has no outcome left for this answer")
                 outcome = fake.outcomes.pop(0)
+                if (fake.open.get(answer.id) or {}).get("requires_waiting") is False:  # answered by ordinary input
+                    text = "\n".join(f"{key}: {', '.join(values)}" for key, values in sorted(answer.answers.items()))
+                    fake.answers[-1]["input"] = "\n".join(  # what was delivered, a secret question's answer masked
+                        f"{key}: {'***' if key in secret else ', '.join(values)}"
+                        for key, values in sorted(answer.answers.items()))
+                    fake._inputs["prompt-" + answer.id] = outcome
+                    return types.NativeResult("ok", value=types.PromptInput(id="prompt-" + answer.id, text=text))
                 written = executor.write_prompt_answer(session, answer)  # core's own exclusive answer file
                 if outcome == "pending":
                     return written
@@ -591,12 +606,46 @@ class FakePrompts:
                     return types.NativeResult("ok", value=dict(fake._settled[answer.id]))
                 return types.NativeResult("ok", value={"state": "submitted"})
 
+            def get_delivery(self, session, message_id, executor):
+                if message_id not in fake._inputs:
+                    return super().get_delivery(session, message_id, executor)
+                return fake._receipt(message_id)
+
         _script_harness(test, Scripted, self._ended)
+        from ..runtime import native
+        submit_input = native.submit_input
+
+        def scripted_submit(directory, adapter, session, message, executor, **keywords):
+            if message.id not in self._inputs:
+                return submit_input(directory, adapter, session, message, executor, **keywords)
+            self.open.pop(message.id[len("prompt-"):], None)  # submitted: the harness closes the question
+            if self._inputs[message.id] == "pending":
+                return types.NativeResult("native_queued", value={})
+            if self._inputs[message.id].get("state") == "unknown":
+                raise ConnectionError("the test's connection was lost while sending")
+            if self._inputs[message.id].get("state") == "refused":  # definitely not submitted
+                return types.NativeResult("error", "the test's delivery failed", value={"definite_failure": True})
+            return self._receipt(message.id)
+
+        patcher = mock.patch.object(native, "submit_input", scripted_submit)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+    def _receipt(self, message_id):
+        from ..harnesses import types
+        outcome = self._inputs[message_id]
+        if outcome == "pending":
+            return types.NativeResult("native_queued", value={})
+        if outcome.get("state") == "answered":
+            return types.NativeResult("ok", value={"transcript_confirmed": True})
+        return types.NativeResult("unknown", "the test's receipt is unknown")
 
     def settle(self, id, outcome=None):
         """The harness settled a pending answer: prompt_result(id) reads `outcome` (a dict, as for the script) from
         now, and the prompt is no longer shown."""
         self._settled[id] = {"state": "answered", **(outcome or {})}
+        if "prompt-" + id in self._inputs:  # an input's delivery: its receipt reads this from now
+            self._inputs["prompt-" + id] = dict(self._settled[id])
         self.open.pop(id, None)
 
 

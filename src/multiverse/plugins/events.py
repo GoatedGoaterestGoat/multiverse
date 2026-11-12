@@ -35,7 +35,7 @@ import re
 import time
 import uuid
 
-from ..store import lock, now
+from ..store import lock, now, retry_missing, is_file_replaced
 from . import config, loader
 from .manifest import CORE_EVENTS
 
@@ -67,7 +67,7 @@ def journal_id(root):
     them: such a journal gets one at its next event)."""
     for name in (ID, ID_COPY):
         try:
-            value = (directory(root) / name).read_text().strip()
+            value = retry_missing((directory(root) / name).read_text).strip()
         except OSError:
             continue
         if _ID_FORMAT.fullmatch(value):
@@ -81,7 +81,7 @@ _ID_FORMAT = re.compile(r"[0-9a-f]{32}")
 def _counter(base):
     """The next sequence number, from the counter file `seq`; None when it is not there or cannot be read."""
     try:
-        parts = (Path(base) / "seq").read_text().split()
+        parts = retry_missing((Path(base) / "seq").read_text).split()
     except OSError:
         return None
     return int(parts[0]) if parts and parts[0].isdigit() else None
@@ -105,6 +105,9 @@ def subscribers(root, kind):
     delivers anything."""
     if loader.safe_mode():
         return []
+    if not any(fnmatch.fnmatchcase(kind, pattern)
+               for manifest in loader.manifest_records(root) for pattern in manifest.events):
+        return []  # With no subscribing manifest, plugins.json cannot change the answer.
     return sorted({found.name for found in loader.declared(root)
                    if found.on and any(fnmatch.fnmatchcase(kind, pattern) for pattern in found.manifest.events)})
 
@@ -169,7 +172,7 @@ def _append(root, event):
     known = journal_id(root) or uuid.uuid4().hex
     for name in (ID, ID_COPY):  # a new journal, or one of its two id files lost: written again from the other
         try:
-            stored = (base / name).read_text().strip()
+            stored = retry_missing((base / name).read_text).strip()
         except OSError:
             stored = ""
         if stored != known:
@@ -334,7 +337,7 @@ def summary(root):
     cursors = {}
     for path in sorted((Path(root) / "state" / "plugins").glob("*/events.cursor")):
         try:
-            cursors[path.parent.name] = int(path.read_text().strip())
+            cursors[path.parent.name] = int(retry_missing(path.read_text).strip())
         except (OSError, ValueError):
             continue
     days, megabytes = retention(root)
@@ -353,7 +356,7 @@ def _log(root, text):
 def agent_of(agent_dir):
     """{"id", "name"} of an agent directory, or None."""
     try:
-        properties = json.loads((Path(agent_dir) / "properties.json").read_text())
+        properties = json.loads(retry_missing((Path(agent_dir) / "properties.json").read_text))
         return {"id": properties.get("id"), "name": properties.get("name")}
     except (OSError, ValueError, AttributeError):
         return None
@@ -376,5 +379,5 @@ def root_of(agent_dir):
     """The universe an agent directory belongs to (state/agents/<id>), or None."""
     directory_ = Path(agent_dir)
     root = directory_.parent.parent.parent
-    return root if directory_.parent.name == "agents" and (root / "universe.json").is_file() else None
+    return root if directory_.parent.name == "agents" and is_file_replaced(root / "universe.json") else None
 

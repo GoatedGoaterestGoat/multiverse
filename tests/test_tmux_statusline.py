@@ -1,5 +1,6 @@
 """Agent-local status rendering and real isolated tmux wrappers; no native daemon."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -7,10 +8,12 @@ import select
 import shutil
 import struct
 import subprocess
+import signal
 import sys
 import termios
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.universe import agents
@@ -18,7 +21,9 @@ from multiverse.runtime import lifecycle
 from multiverse.universe import templates
 from multiverse.terminal import statusline
 from multiverse.universe.mailbox import append_message, inbox, update_message
-from multiverse.store import read, write, now as store_now
+from multiverse.store import lock, read, write, now as store_now
+from multiverse.universe import records
+from multiverse.tools import inbox as inbox_tool
 from test_multiverse import BaseTest, TerminalBase
 
 
@@ -66,9 +71,7 @@ class StatusRendererTest(BaseTest):
         self.assertEqual(statusline.clean('hello ' + 'world ' * 20, 20), 'hello world world…')
 
     def test_the_status_script_only_reads(self):
-        """The script tmux runs every few seconds, run as python -S, imports no cli, harness or textual module, writes
-        no agent file (inbox.cursor included) and counts unread exactly like inbox(peek=True); fragile because its
-        unread count is a stdlib-only copy of inbox reading that drifts, and a write silently consumes messages."""
+        """The standalone renderer must share core's unread result without consuming messages or importing UI/native code."""
         append_message(self.directory, 'already read', {})
         inbox(self.directory)
         append_message(self.directory, 'steer', {}, 'steer')
@@ -89,7 +92,7 @@ class StatusRendererTest(BaseTest):
         self.assertEqual(paths, {path: path.read_bytes() for path in self.directory.iterdir() if path.is_file()})
 
     def test_upgrade_copy_count_follows_confirmation_and_consumption_even_behind_cursor(self):
-        """The independent bounded status counter must match the new inbox view without consuming it."""
+        """The shared status peek must preserve upgrade copies and their confirmation/read marks behind the cursor."""
         message = append_message(self.directory, 'native notice', {}, 'follow-up', inbox_only_text='original')
         self.assertEqual(statusline.unread(self.directory), 1)
         write(self.directory / 'inbox.cursor', (self.directory / 'inbox.jsonl').stat().st_size)
@@ -111,10 +114,142 @@ class StatusRendererTest(BaseTest):
                              field: damaged}
                     write(self.directory / 'inbox-state.json', {message['id']: state})
                     self.assertEqual(statusline.unread(self.directory), 1)
-        # A damaged or oversized ledger cannot be mistaken for no confirmation/read marker.
-        for data in ('not json', '[]', '{"' + 'x' * statusline.READ_LIMIT + '": {}}'):
+        # A damaged ledger cannot be mistaken for no confirmation/read marker.
+        for data in ('not json', '[]'):
             (self.directory / 'inbox-state.json').write_text(data)
             self.assertIsNone(statusline.unread(self.directory))
+
+    def test_large_inboxes_share_the_dashboard_count_without_a_byte_or_count_cap(self):
+        """Healthy history and ledgers beyond both former caps must still show zero or the exact unread count."""
+        from multiverse.ui.backend import LocalBackend
+        log, ledger = self.directory / 'inbox.jsonl', self.directory / 'inbox-state.json'
+        history = {'id': 'consumed', 'schema': 2, 'delivery': 'inbox-only', 'text': 'x' * (1024 * 1024 + 1)}
+        data = (json.dumps(history) + '\n').encode()
+        for ledger_mebibytes in (2, 9):
+            with self.subTest(ledger_mebibytes=ledger_mebibytes):
+                log.write_bytes(data)
+                write(self.directory / 'inbox.cursor', len(data))
+                # Inbox ledgers grow with messages and attempts; they must not inherit the runtime's 8 MiB record cap.
+                write(ledger, {'consumed': {'reason': 'x' * (ledger_mebibytes * 1024 * 1024)}})
+                (self.directory / '.inbox.lock').touch()
+                backend, row = LocalBackend(), {'universe': str(self.root), 'id': self.agent}
+                self.assertGreater(log.stat().st_size, 1024 * 1024)
+                self.assertGreater(ledger.stat().st_size, 1024 * 1024)
+                before = {path.name: path.read_bytes() for path in self.directory.iterdir() if path.is_file()}
+                self.assertEqual(backend.unread_count(row), 0)
+                self.assertNotIn('inbox', self.render())
+                self.assertEqual(before, {path.name: path.read_bytes() for path in self.directory.iterdir() if path.is_file()})
+                with log.open('ab') as stream:
+                    for index in range(73):
+                        stream.write((json.dumps({'id': str(index), 'schema': 2, 'delivery': 'inbox-only',
+                                                 'text': 'unread'}) + '\n').encode())
+                self.assertEqual(backend.unread_count(row), 73)
+                self.assertIn('inbox 73', self.render())
+                self.assertNotIn('inbox 73+', self.render())
+                self.assertEqual(len(inbox_tool.unread(self.root, self.agent, blocking=False)), 73)
+                # Identity and runtime still have their own small-record bound.
+                if ledger_mebibytes == 9:
+                    with self.assertRaises(records.RecordError):
+                        records.runtime(ledger)
+                from multiverse.universe import mailbox
+                with patch.object(mailbox, 'unread', wraps=mailbox.unread) as shared:
+                    self.assertEqual(statusline._read_unread(self.directory), 73)
+                shared.assert_called_once_with(self.directory, blocking=False)
+
+    def test_missing_history_is_unknown_with_saved_evidence_but_a_fresh_inbox_needs_no_lock(self):
+        """A lost message log must not hide unread damage, while an inbox with no saved data stays zero without a write."""
+        self.assertEqual(statusline.unread(self.directory), 0)
+        self.assertFalse((self.directory / '.inbox.lock').exists())
+        from multiverse import store
+        from multiverse.universe import mailbox
+        observed = store.missing_records(self.directory / name for name in mailbox.INBOX_EVIDENCE)
+        with patch.object(store.time, 'sleep', side_effect=AssertionError('directory absence must not wait')):
+            self.assertIsNone(mailbox.inbox_problem(self.directory, observed_missing=observed))
+        # A lock alone can come from doctor or a peek, and is not message/read-state evidence.
+        (self.directory / '.inbox.lock').touch()
+        self.assertEqual(statusline.unread(self.directory), 0)
+        append_message(self.directory, 'consumed', {})
+        inbox(self.directory)
+        log = self.directory / 'inbox.jsonl'
+        saved = log.read_bytes()
+        log.unlink()
+        with self.assertRaises(ValueError):
+            inbox_tool.unread(self.root, self.agent, blocking=False)
+        self.assertIsNone(statusline.unread(self.directory))
+        self.assertIn('inbox ?', self.render())
+        log.write_bytes(saved)
+        self.assertEqual(statusline.unread(self.directory), 0)
+        log.unlink()
+        (self.directory / 'inbox.cursor').unlink()
+        for name, value in (('inbox.cursor', 0), ('inbox.cursor', 1), ('inbox-read.json', {'one': store_now()}),
+                            ('inbox-state.json', {'one': {}}), ('native-delivery.json', {'one': []})):
+            with self.subTest(evidence=name):
+                write(self.directory / name, value)
+                self.assertIsNone(statusline.unread(self.directory))
+                with self.assertRaisesRegex(ValueError, 'inbox history is missing'):
+                    inbox_tool.run(self.root, agent=self.agent, peek=True)
+                from multiverse.ui.backend import LocalBackend
+                self.assertIsNone(LocalBackend().unread_count({'universe': str(self.root), 'id': self.agent}))
+                (self.directory / name).unlink()
+        from multiverse.ui.backend import LocalBackend
+        backend = LocalBackend()
+        row = {'universe': str(self.root), 'id': self.agent}
+        self.assertEqual(backend.unread_count(row), 0)
+        (self.directory / 'inbox-unsubmitted').mkdir()
+        self.assertIsNone(backend.unread_count(row))
+        self.assertIsNone(statusline.unread(self.directory))
+        with self.assertRaisesRegex(ValueError, 'inbox history is missing'):
+            inbox_tool.run(self.root, agent=self.agent, peek=True)
+
+    def test_unread_never_waits_for_a_lock_and_stops_a_slow_helper(self):
+        """A held inbox lock or slow reader must not stall tmux or leave a reader process behind."""
+        append_message(self.directory, 'pending', {})
+        started = time.monotonic()
+        with lock(self.directory / '.inbox.lock'):
+            self.assertIsNone(statusline.unread(self.directory))
+        self.assertLess(time.monotonic() - started, statusline.INBOX_TIMEOUT)
+        self.assertEqual(statusline.unread(self.directory), 1)
+        self.enterContext(patch.object(statusline.threading, 'active_count', return_value=1))
+        children, original = [], os.fork
+        def fork():
+            child = original()
+            if child:
+                children.append(child)
+            return child
+        started = time.monotonic()
+        with patch.object(statusline, '_read_unread', side_effect=lambda path: time.sleep(10)), \
+                patch.object(statusline, 'INBOX_TIMEOUT', .08), patch.object(os, 'fork', side_effect=fork):
+            self.assertIsNone(statusline.unread(self.directory))
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual(len(children), 1)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(children[0], os.WNOHANG)
+        self.assertEqual(len(inbox(self.directory, peek=True)['messages']), 1)
+        for reaper in (signal.SIG_IGN, lambda *_: None):
+            with self.subTest(reaper=reaper), patch.object(signal, 'getsignal', return_value=reaper), \
+                    patch.object(os, 'fork', side_effect=AssertionError('incompatible child reaper')):
+                self.assertIsNone(statusline.unread(self.directory))
+        with patch.object(statusline.threading, 'active_count', return_value=2), \
+                patch.object(os, 'fork', side_effect=AssertionError('fork from a threaded caller')):
+            self.assertEqual(statusline.unread(self.directory), 1)
+        opened, closed = [], []
+        real_pipe, real_close = os.pipe, os.close
+        def pipe():
+            pair = real_pipe()
+            opened.extend(pair)
+            return pair
+        def close(descriptor):
+            closed.append(descriptor)
+            real_close(descriptor)
+        with patch.object(os, 'pipe', side_effect=pipe), patch.object(os, 'close', side_effect=close), \
+                patch.object(os, 'fork', return_value=12345), \
+                patch.object(statusline.select, 'select', return_value=([], [], [])), \
+                patch.object(os, 'waitpid', side_effect=ChildProcessError('ownership lost')), \
+                patch.object(os, 'kill', side_effect=AssertionError('no signal without child ownership')):
+            self.assertIsNone(statusline.unread(self.directory))
+        self.assertCountEqual(opened, closed)
+
+
 
 
 

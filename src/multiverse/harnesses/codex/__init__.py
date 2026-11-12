@@ -19,6 +19,7 @@ from ..types import BridgeUnavailable
 class CodexAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
+    supports_launch_effort = True
     family = 'codex'
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
@@ -39,6 +40,10 @@ class CodexAdapter(ConfiguredAdapter):
     def models(self, *, environment):
         from .models import catalog
         return catalog(environment)
+
+    def model_names(self, *, environment):
+        from .models import names
+        return names(environment)
 
     def check_model(self, model, *, effort=None, environment):
         from .models import check
@@ -156,6 +161,11 @@ class CodexAdapter(ConfiguredAdapter):
 
     def _launch_command(self, context):
         command = super()._launch_command(context)
+        if context.effort is not None:
+            argv = list(command.argv)
+            position = argv.index('--') if '--' in argv else len(argv)
+            argv[position:position] = ['-c', 'model_reasoning_effort=' + json.dumps(context.effort)]
+            command = replace(command, argv=tuple(argv))
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
         from .refusal import SCREEN_VERSIONS
@@ -304,7 +314,8 @@ class CodexAdapter(ConfiguredAdapter):
                                 'agent_environment': stable,
                                 'storage_keys': context.storage_keys,
                                 'plugin_mcp_environment': additions.mcp_environment,
-                                'plugin_user_config': additions.user_config,
+                                'plugin_user_config': merge_config(additions.user_config,
+                                    {'model_reasoning_effort': context.effort} if context.effort is not None else {}),
                                 'navigation_cli': cli_version,
                                 'navigation_home': storage['CODEX_HOME'],
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
@@ -356,6 +367,9 @@ class CodexAdapter(ConfiguredAdapter):
         from .prompts import supported
         result['answer'] = (Capability('supported', mechanism='codex-terminal-relay') if supported(session) else
                             Capability('unavailable', 'Waiting prompts need a live prompt relay on matching checked Codex CLI and daemon releases; resume with it'))
+        from .queued import available
+        result['queued'] = (Capability('supported', mechanism='codex-after-turn-queue') if available(session) else
+                            Capability('unavailable', 'No verified Codex queue on matching checked CLI and daemon releases'))
         result['ask'] = (Capability('supported', mechanism='private-codex-copy')
                          if session.native_id and session.home and session.session_file else
                          Capability('unavailable', 'No recorded Codex conversation and home'))
@@ -410,6 +424,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .prompts import catalog
         executor.check_session()
         return catalog(session)
+
+    def queued_prompts(self, session, executor):
+        from .queued import report
+        return report(session, executor)
 
     def answer_prompt(self, session, answer, executor):
         from .prompts import submit

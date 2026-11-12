@@ -56,7 +56,7 @@ mv2 applies the setting at every start and resume. A running agent keeps the mod
 {"schema": 2, "adapter": "claude", "settings": {}}
 ```
 
-With a live connection, mv2 loads its `multiverse` mod into Claude Code and gives the session a private inbox. `steer` merges a message into the current turn at the next tool result, or starts a turn when Claude is idle. `follow-up` waits for the turn to end. A message that starts its own turn adds a `Prompt dropped by a hook` line to Claude's transcript. Claude Code writes it when the mod replaces its own framing of the message; it is not an error, and mv2 can't remove it. The mod also reports status, delivery receipts, context use, cost and rate limits, and it answers `mv2 ask`. The dashboard header shows the account's rate-limit windows, such as `5h 34% · 7d 12%`.
+With a live connection, mv2 loads its `multiverse` mod into Claude Code and gives the session a private inbox. `steer` merges a message into the current turn at the next tool result, or starts a turn when Claude is idle. `follow-up` waits for the turn to end. A message that starts its own turn adds a `Prompt dropped by a hook` line to Claude's transcript. Claude Code writes it when the mod replaces its own framing of the message; it is not an error, and mv2 can't remove it. The mod also reports status, delivery receipts, context use, cost and rate limits, and it answers `mv2 ask`. The dashboard's `v` details list the account's rate-limit windows under native session usage.
 
 If the installed Claude Code is too old for the mod and `inbox_bridge` is unset, the agent starts launch-only. `mv2 inspect NAME` then shows the reason on its `Note:` line. With `inbox_bridge` set to `false`, mv2 loads no mod, plugin or hook. Minimum versions are in [compatibility](../reference/compatibility.md#bridge-feature-minimums).
 
@@ -85,6 +85,8 @@ Claude Code draws every plugin's status line in yellow, with `⚠` and the plugi
 **Permissions.** Claude's permission prompts, login and workspace trust stay native. The agent shows `waiting`, and you attach to answer. To run without prompts in a sandbox, pass Claude's own flags in `args`, for example `"args": ["--dangerously-skip-permissions"]`.
 
 **Answering prompts from mv2.** You can also read and answer what a waiting agent asks without attaching, with [`mv2 answer`](../cli/waiting-prompts.md): its permission prompts, its own questions (several at once, multi-select and typed answers included) and plan approval. Claude shows its dialog at the same time, and whichever answer comes first wins, so you can still answer in the terminal. The choices are mv2's own words for what Claude can take: allow once; allow and apply one of Claude's suggestions for the session; allow and save a rule to your settings (only you can choose that one, never a plugin); or deny with a message. A denial from mv2 lets the agent carry on with your message, which it reads as your answer given through mv2 (or as the plugin's, naming it), where your No in the terminal stops its turn, and the terminal shows "Allowed by PermissionRequest hook" or "Denied by PermissionRequest hook". The outcome comes from what Claude stored: whether mv2's answer took, or that you answered first and what you chose. Claude stores Esc on its dialog as your refusal, so it reads as that too. An MCP server's form and a subagent's prompt are listed, but you answer them in the terminal: Claude asks plugins before it draws a form, and a background subagent's prompt has no dialog to wait in. An agent launched before this mv2 lists none until its next start, and a Claude Code version newer than the last checked one lists its prompts without offering to answer them.
+
+**Queued messages.** mv2's Claude plugin keeps a list of mv2's messages Claude holds for the agent: taken from its inbox, waiting for the agent's turn to end, not yet in its conversation. mv2 reads it when this agent sends another agent a steer or follow-up, to tell it that agent's follow-ups are still waiting for it (see [queued prompts](../design/queued-prompts.md)). It lists only mv2's messages, never what you type. After the plugin reloads, as when mv2 updates, it can't be sure what Claude took before, so mv2 says it couldn't check until the agent has next been idle. The same goes for a message Claude took but didn't store in time, which `/compact` or a dialog may still hold.
 
 ## Codex
 
@@ -120,13 +122,17 @@ Codex's public events report every aborted turn as interrupted, without its orig
 
 **Message age.** When mv2 prepares a steer or follow-up more than 10 minutes after it was saved, its header includes the delay, for example `Message from reviewer (sent 25 min ago):`. This also applies to messages held for startup or retried after a definite failure. The age is computed when mv2 prepares the submission; a wake prompt is framed when its resume is prepared. A follow-up already accepted into Codex's queue keeps that text while it waits; checking its receipt or restarting the queue does not refresh the header or submit another copy.
 
+**Queued follow-ups.** On a verified bridge with matching Codex 0.166.0, 0.167.0 or 0.167.1 CLI and daemon releases, mv2 can check its own messages in the current conversation's after-turn queue before an agent sends a reply. It matches exact client message IDs to mv2's delivery records; an idle steer stays a steer. Active-turn steers, the terminal's local input and other clients' messages are outside this report. A missing entry does not prove it was read or consumed. The read has a total budget of 2 seconds and never starts, resumes or changes the queue. Plain, unverified or unchecked launches and incomplete or failed reads leave coverage unknown. Sends continue with a note only when mv2's records hold an unconfirmed follow-up from the recipient, or those records cannot be read.
+
 **Session binding.** With a live connection, mv2 records Codex's session ID automatically. A launch-only agent is asked to run `mv2 session-bind` at startup. If it never did, take the ID from Codex's `/status` and bind it with `mv2 session-bind --agent NAME --session-id UUID` before resuming.
 
 **Conversation switches.** A verified Codex bridge on [matching checked releases](../reference/compatibility.md#checked-harness-versions) follows terminal `/new`, `/clear` and `/resume` within this agent's own history, subject to the [switch limits](../design/session-lineage.md). New conversations preserve the launch's validated grants and changes mv2 observes. Another client can narrow runtime roots without a notification; a later `/new` or `/clear` may restore those roots up to the launch ceiling. Use an ordinary `mv2 resume` to re-read current grants before navigating after such a change.
 
 **Waiting prompts.** On a verified bridge with [matching checked CLI and daemon releases](../reference/compatibility.md#checked-harness-versions), `mv2 answer` lists the current conversation's permission prompts, questions and supported MCP forms. Resume an older launch to enable its prompt relay. Recognized `/btw` and review prompts are listed for answering in the terminal. A relay joining mid-turn can also leave a prompt terminal-only when it cannot establish the conversation's mode. Approvals that require a fresh human decision stay in the terminal. URL and device verification, numeric or multi-select forms, and prompts whose complete detail cannot be checked are not answerable through mv2.
 
-An answer uses the terminal's existing connection. If the person replies first, the result is `person`, with their choice and nonsecret question answers when available. It records the terminal's reply, without separate confirmation that Codex accepted it. Codex reports `sent_first` when mv2 sent first and observed the matching resolution without a contradiction. This is a successful submission, but Codex does not confirm it took mv2's choice or its session or policy scope: a client attached directly to the shared daemon can answer first without mv2 knowing. A later contradictory native effect can change an explicit result read to `unknown`. An interruption, turn end, conversation switch or relay loss before a corresponding item effect does so too; an unrelated later event does not erase an observed effect. Nonsecret question answers are compared in full even when the public preview is truncated; secret values are excluded. Missing resolution stays uncertain. Never resend an answer whose outcome is uncertain.
+**Asynchronous questions.** Codex's `request_user_input_async` questions are listed separately by prompt ID while the agent works or is idle. Their answers use normal native message delivery, tagged with the original question's ID. Skipping a question in the terminal does not stop mv2 answering it: the agent can still receive that answer as conversation input. Once the relay observes the terminal submit an exact question's answer, mv2 stops offering that question, even while Codex holds the input until its next step. A confirmed receipt means the input reached the conversation, not that the question card was still open. Several questions, including ones with identical text, keep separate identities. Permissions and blocking question requests still require `waiting`; they use the terminal's native response path described below.
+
+A waiting prompt's answer uses the terminal's existing connection. If the terminal replies first, the result is `person`, with the choice and nonsecret question answers it sent when available. A Codex question dialog can submit an empty answer when its countdown ends while the agent waits; an empty reply does not prove the person chose it. This reports the terminal's reply, without separate confirmation that Codex accepted it. Codex reports `sent_first` when mv2 sent first and observed the matching resolution without a contradiction. This is a successful submission, but Codex does not confirm it took mv2's choice or its session or policy scope: a client attached directly to the shared daemon can answer first without mv2 knowing. A later contradictory native effect can change an explicit result read to `unknown`. An interruption, turn end, conversation switch or relay loss before a corresponding item effect does so too; an unrelated later event does not erase an observed effect. Nonsecret question answers are compared in full even when the public preview is truncated; secret values are excluded. Missing resolution stays uncertain. Never resend an answer whose outcome is uncertain.
 
 Choices that save command, network or MCP approval rules are for the person only; plugins can choose session grants. Use standard input for secret answers. mv2 removes their answer file when it takes it and keeps secret values out of its results, audit records, events and diagnostics; Codex can retain its native tool output. See [waiting prompts](../cli/waiting-prompts.md) for answering and reading an earlier result.
 
@@ -182,6 +188,8 @@ Every setting is optional. A change applies at the next spawn or resume:
 | Setting | Use |
 | --- | --- |
 | `model` | Default model for new agents |
+| `models` | Optional subset of model IDs or aliases and their allowed efforts, described below |
+| `model_names` | Optional display names keyed by the agent's recorded model spelling, described below |
 | `args` | Extra flags on spawn and resume; `spawn_args` and `resume_args` for one of them |
 | `env` | Variables set for the agent, as strings |
 | `inbox_bridge` | The live connection, described above |
@@ -218,6 +226,45 @@ For a model you use often, add a harness profile. A profile is a second director
 
 Then run `mv2 spawn --name planner --harness claude-opus`. The dashboard's harness selector lists every profile.
 
+### Narrow the available choices
+
+In this universe's `harnesses/NAME/harness.json`, add `settings.models` to allow only part of the harness's catalog:
+
+```json
+{
+  "schema": 2,
+  "adapter": "claude",
+  "settings": {
+    "models": {
+      "sonnet": {"efforts": ["low", "medium"]},
+      "haiku": {}
+    }
+  }
+}
+```
+
+Each key is an ID or alias from that harness's model table. `{}` allows all of the model's efforts and lets the native harness choose effort. An `efforts` list must contain at least one offered level; it requires an explicit effort. The list follows table order, regardless of the order in the settings file. Aliases are resolved for the launch environment and passed as canonical IDs when a subset is set.
+
+Spawn, resume and plugin runs all check this setting, including plugins such as GOAT that select a builder model. A recorded model or effort outside the subset refuses resume; supply an allowed `--model` or `--effort` to replace it. If a configured entry is no longer in the table, mv2 names it and the settings file. Fix or remove the entry before launching or running another model call. Entries are never silently discarded.
+
+With a subset, an omitted model needs an allowed harness `model` setting or a recorded model on resume. The bundled table's default cannot prove what native account or session settings would select. Likewise, `--effort default` is refused where an explicit effort list requires a choice. In the dashboard, `n` offers only the permitted choices and leaves required fields unselected. An allowed configured model can stay at `default` while you choose its required effort separately.
+
+Without `models`, the built-in tables remain unchanged, native defaults remain available, and unlisted IDs can still be typed. Known models are checked for supported efforts. A harness without a catalog still accepts a typed model, but cannot have a model subset. Remove `models` to restore this behavior; an empty object is a configuration error. `mv2 doctor` reports invalid subsets and a configured `model` outside its subset.
+
+The subset limits choices mv2 submits. Native account policies, model remapping, environment overrides and effort clamps can still affect the settings actually served; it does not police later in-terminal changes. Claude's literal `--model default` is a native computed choice, distinct from omitting `--model`, and cannot be verified against a subset.
+
+### Model display names
+
+Set `settings.model_names` in `harnesses/NAME/harness.json` to override names in the Model column:
+
+```json
+{"schema": 2, "adapter": "claude", "settings": {"model_names": {"opus": "Planning model", "claude-sonnet-5-5": "Builder"}}}
+```
+
+Each key matches the recorded spelling exactly. Without an exact override, mv2 ignores surrounding whitespace and uses the table's name for that ID or alias, including known provider IDs. Custom override keys are never normalized. Table aliases follow the universe's current harness environment. These are labels for the recorded choice, not observations of the model serving a session. Names can change when the bundled tables or harness settings change. They do not change which models are allowed.
+
+A recorded model with no known name shows its raw ID. An agent with no recorded model shows `-`. See [dashboard columns](../reference/dashboard.md) for the Model column and its optional effort suffix.
+
 ### Claude's models
 
 Claude Code has no command that lists its models, so mv2 keeps a table of them, `harnesses/claude/models.json`. It comes from the two model catalogs built into Claude Code, of the version in the [compatibility table](../reference/compatibility.md): the full list, and the release copy its `/model` picker shows, which gives the default model and some default efforts. It is updated with each Claude Code version check. Plugins read it through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)).
@@ -225,6 +272,7 @@ Claude Code has no command that lists its models, so mv2 keeps a table of them, 
 - **Provider.** An alias names a different model on each provider: `sonnet` is Sonnet 5.5 on the Anthropic API and Sonnet 4.5 on Amazon Bedrock. mv2 picks the provider as Claude Code does, from the first of `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE` and `_VERTEX` that is set to `1`, `true`, `yes` or `on`, else the Anthropic API. It reads them as a launch from mv2 would see them: the harness's settings `env` over the environment mv2 runs in.
 - **Efforts.** Claude Code never refuses an effort: it uses the model's default instead. `harness.check()` refuses an effort the model doesn't take, such as `xhigh` for Sonnet 4.6, and the `[1m]` suffix on a model that doesn't take it.
 - **Your account.** These are Claude Code's built-in catalogs, so your account may not offer every model, and your plan may have another default. A model the picker doesn't list on your provider is marked hidden. Claude also takes models the table doesn't list, such as ones only your account has, and the alias `default`, which Claude resolves for your account: `harness.check()` lets those through, marked as unverified.
+- **Names.** Where mv2 shows a model's name, it takes it from this table: for a full ID from any provider, whatever the provider is now, and for an alias as the current harness environment resolves it, with `[1m]` shown as "NAME [1m]". The name labels the choice mv2 recorded, not the model Claude served: Claude runs the old Opus 4 and 4.1 IDs as the current Opus, and your settings or an organization's policy can swap a model.
 - **Limit.** Claude Code can also use a cloud gateway, which it picks from its login rather than a variable. mv2 can't see that, so it treats such a launch as the Anthropic API, where aliases name newer models than the gateway's.
 
 ### Claude's one-shot runs
@@ -237,6 +285,8 @@ A plugin can ask Claude for one reply to a conversation it gives (`harness.run_o
 ### Codex's models and transcripts
 
 Plugins read Codex's models through `harness.models()` and `harness.check()` ([plugin API](../develop/plugins.md)). The table comes from the checked release's bundled model catalog and is regenerated at each version check. It includes efforts, defaults, input types, context windows and hidden models. A known model's unsupported effort fails the check; an unknown ID passes as unverified.
+
+Use `mv2 spawn --harness codex --model gpt-5.4 --effort high` or `mv2 resume NAME --model gpt-5.4 --effort high` to request effort for that agent. The choice overrides configured and plugin effort defaults, without saving a native default. `--effort default` clears mv2's saved effort and leaves the choice to Codex. A loaded shared conversation can keep its current model and effort despite the request; check the active settings in Codex when resuming it.
 
 The table describes the release, so account availability, account defaults and custom providers can differ. Its provider is unspecified. mv2 never reads login state, account caches or a running daemon to build this list.
 
@@ -268,7 +318,7 @@ Each agent's tmux bar shows a short live line instead of tmux's session list and
 
 While an agent is focused, its bar also shows `focused`, with the time left of a timed focus, such as `focused 18m`.
 
-The bar's unread count includes unconfirmed blocked-on upgrades. Its scan is limited to 1 MiB of inbox history, including already-read messages, and 1 MiB per ledger. `inbox ?` means it could not establish a count within those limits or because files were unreadable. Use `mv2 inbox --peek` for the authoritative unread messages; it does not mark them read.
+The bar uses the dashboard's unread inbox peek, including unconfirmed blocked-on upgrades. It shows the exact count and hides the item at zero, without a history or ledger size cap. The peek never marks messages read or waits for an inbox lock. A helper has one second to return a count; `inbox ?` means the inbox is busy, unreadable or could not be read in time. Missing history with saved inbox evidence also shows `?`; `mv2 inbox --peek` reports the missing history and names that evidence. Use `mv2 inbox --peek` to read the messages without marking them read.
 
 The `tmux` block of `statusline.json` chooses the items: `agent`, `harness`, `focus`, `status`, `phase`, `summary`, `inbox` and `context`. List them in `tmux.items` in the order you want. Items you leave out follow in their default order.
 

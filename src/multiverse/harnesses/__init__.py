@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+from ..store import retry_missing
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .legacy import LegacyAdapter, arguments
@@ -18,7 +19,7 @@ def load(root: Path, name: str) -> HarnessAdapter:
         raise ValueError('Invalid harness name')
     path = root / 'harnesses' / name / 'harness.json'
     try:
-        config = json.loads(path.read_text())
+        config = json.loads(retry_missing(path.read_text))
     except FileNotFoundError as error:
         raise ValueError(f'Unknown harness {name!r}; configuration not found: {path}') from None
     except (OSError, ValueError, RecursionError) as error:

@@ -70,9 +70,20 @@ class DemoBackend:
         with self.lock:
             row = {"id": uid(), "name": values["name"], "universe": str(root), "harness": values.get("harness", "codex"),
                    "live": "alive", "status": "idle", "phase": "starting", "summary": values.get("task", ""),
-                   "task": values.get("task", ""), "model": values.get("model") or None, "runtime": {}}
+                   "task": values.get("task", ""), "model": values.get("model") or None,
+                   "effort": values.get("effort") or None, "runtime": {}}
             self.agents.append(row)
             return deepcopy(row)
+
+    def model_choices(self, root, harness):
+        """Claude's list here; the other demo harnesses take a typed model."""
+        if harness != "claude":
+            return None
+        return {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5", "efforts": ["low", "medium", "high", "xhigh"],
+                            "default": True, "effort_unset": True},
+                           {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "efforts": [], "default": False,
+                            "effort_unset": True}],
+                "free_form": False, "narrowed": False, "unset": True, "default_model": None, "problems": []}
 
     def send(self, root, reference, text, delivery="steer", queue_only=False):
         with self.lock:
@@ -120,22 +131,25 @@ class DemoBackend:
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
 
     def waiting_prompts(self, root, reference):
-        """The prompts a waiting demo agent is stopped at, in core's listing shape."""
+        """The prompts a demo agent can be answered on, in core's listing shape: while it works, only those that
+        don't require waiting (Codex's async questions); every other prompt needs the agent waiting."""
         with self.lock:
             agent = self.find(root, reference)
-            prompts = deepcopy(self.prompts.get(reference, [])) if agent.get("status") == "waiting" else []
+            prompts = [item for item in deepcopy(self.prompts.get(reference, []))
+                       if agent.get("status") == "waiting" or item.get("requires_waiting", True) is False]
             return {"state": "ok", "coverage": "complete", "reason": None, "prompts": prompts}
 
     def answer_prompt(self, root, reference, prompt_id, values):
         """Take the answer as the harness would: the prompt closes, and with none left the agent goes back to work."""
         with self.lock:
             agent, waiting = self.find(root, reference), self.prompts.get(reference, [])
-            if agent.get("status") != "waiting" or not any(item["id"] == prompt_id for item in waiting):
+            item = next((item for item in waiting if item["id"] == prompt_id), None)
+            if item is None or (agent.get("status") != "waiting" and item.get("requires_waiting", True) is not False):
                 return {"id": prompt_id, "state": "refused", "reason": "The agent isn't waiting on that prompt.",
                         "cause": "not_waiting", "saved_rule": False, "person_answer": None}
             self.answers.append((reference, prompt_id, deepcopy(values)))
             self.prompts[reference] = [item for item in waiting if item["id"] != prompt_id]
-            if not self.prompts[reference]:
+            if not self.prompts[reference] and agent.get("status") == "waiting":
                 agent["status"] = "working"
             return {"id": prompt_id, "state": "answered", "reason": None, "cause": None, "saved_rule": False,
                     "person_answer": None}

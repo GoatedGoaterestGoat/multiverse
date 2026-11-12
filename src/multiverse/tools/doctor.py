@@ -2,8 +2,10 @@
 import sys
 from pathlib import Path
 
-from ..runtime import lifecycle
-from .. import universe
+from ..runtime import lifecycle, model_choices
+from ..runtime.run_environment import launch as launch_environment
+from .. import harnesses, universe
+from ..store import missing_records
 from ..universe import agents, catalog
 from ..universe.mailbox import inbox_problem
 
@@ -18,12 +20,28 @@ def one_line(text):
 def check(root, notes=None):
     """Each problem twice: as recorded (what --json and callers get) and as a sentence."""
     found = []
-    for scope in universe.tree(root):
+    scopes = list(universe.tree(root))
+    directories = []
+    for scope in scopes:
+        try:
+            directories.extend(path.parent for path in agents.record_paths(scope))
+        except OSError:
+            pass  # The normal per-scope listing reports unreadable agent directories below.
+    observed_missing = missing_records(lifecycle.observation_paths(directories), observed=True)
+    for scope in scopes:
         try:
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
-            catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
-            for item in lifecycle.listing(scope):
+            entries = catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
+            for entry in entries:
+                if entry['kind'] == 'harnesses' and not entry.get('plugin'):
+                    try:
+                        adapter = harnesses.load(scope, entry['name'])
+                        model_choices.validate_settings(scope, adapter, environment=launch_environment(adapter))
+                    except (OSError, ValueError, TypeError) as error:
+                        problem = str(error)
+                        found.append((problem, problem))
+            for item in lifecycle.listing(scope, observed_missing=observed_missing):
                 damage = item.get('damaged')
                 if damage:
                     directory = scope / 'state/agents' / item['id']
@@ -57,7 +75,7 @@ def check(root, notes=None):
                                    else "state is unknown: ") + one_line(reason) + "."))
                 elif item.get('recovery_note') and notes is not None:
                     notes.append(f"{item['name']} reconnected automatically.")
-                if problem := inbox_problem(scope / "state" / "agents" / item["id"]):
+                if problem := inbox_problem(scope / "state" / "agents" / item["id"], observed_missing=observed_missing):
                     found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))

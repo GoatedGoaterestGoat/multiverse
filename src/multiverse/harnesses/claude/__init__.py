@@ -39,7 +39,7 @@ from ..base import ConfiguredAdapter
 from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
-from ...store import read
+from ...store import read, retry_missing
 from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply, SlashCommand
 from . import models as model_table
 from . import pane
@@ -269,7 +269,7 @@ def had_conversation(session, environment):
 def _stored_message(directory, native_id):
     """A message core sent to this session whose row the mod confirmed was stored in the conversation."""
     try:
-        state = json.loads((directory / 'inbox-state.json').read_text())
+        state = retry_missing(lambda: read(directory / 'inbox-state.json'))
     except (OSError, ValueError):
         return False
     for message_id, record in state.items() if isinstance(state, dict) else ():
@@ -294,7 +294,7 @@ def _stored_message(directory, native_id):
 def _context_since_move(directory, native_id):
     """Context the mod reported during the last launch, after the agent last moved to this session (/clear)."""
     try:
-        usage = json.loads((directory / 'runtime.json').read_text()).get('usage')
+        usage = retry_missing(lambda: read(directory / 'runtime.json')).get('usage')
         tokens = usage['context']['tokens']
         reported = moment(usage['reported_at'])
     except (OSError, ValueError, AttributeError, KeyError, TypeError):
@@ -559,7 +559,8 @@ def command_table():
 
 def _agent_name(session):
     """The agent's name from its record beside the session file, for advice that names it; None when unreadable."""
-    record = _json_record(Path(session.session_file).parent / 'properties.json', 1 << 20) if session.session_file else None
+    record = (_json_record(Path(session.session_file).parent / 'properties.json', 1 << 20, replaced=True)
+              if session.session_file else None)
     name = record.get('name') if record else None
     return name if isinstance(name, str) and name.strip() and not any(c.isspace() for c in name) else None
 
@@ -611,12 +612,12 @@ RECEIPT_BYTES = 1 << 16  # a receipt is a few short fields; anything larger isn'
 ANSWER_BYTES = 1 << 22  # an ask answer holds the model's text
 
 
-def _json_record(path, limit=RECEIPT_BYTES):
+def _json_record(path, limit=RECEIPT_BYTES, *, replaced=False):
     """A small JSON object file: the dict, None when there is no file, False when it can't be read, isn't a regular
     file, is over `limit` bytes or isn't a JSON object. It is opened without waiting (open_regular): core reads
     receipts while holding the agent's launch and delivery locks, so a FIFO at its name must never block."""
     try:
-        with open_regular(path) as handle:
+        with (retry_missing(lambda: open_regular(path)) if replaced else open_regular(path)) as handle:
             data = handle.read(limit + 1)
     except FileNotFoundError:
         return None
@@ -766,6 +767,43 @@ def prompt_recorded(native_id, prompt, since, environment):
 
 PROMPTS_FOLDER = 'claude-prompts'
 PROMPT_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+QUEUE_FILE = 'claude-queue.json'  # mv2's messages Claude holds now, written by the mod (queue.ts)
+QUEUE_ENTRIES = 512               # far more than an agent's queue holds; a file with more isn't the mod's
+
+
+def queue_report(record, session, read_at):
+    """The mod's queue file as queued_prompts' value: only for this launch and conversation, and complete only when
+    the mod said so and every entry reads. Entries name a delivery attempt by its ID (delivery_attempt_ids), as
+    receipts do; anything else in the file about the queue (the person's prompts) isn't there to read. The report's
+    time is the mod's for a view of this launch, else `read_at`, when the file was found not to say."""
+    def unknown(reason, entries=(), observed=None):
+        return {'entries': list(entries), 'coverage': 'unknown', 'reason': reason, 'observed_at': observed or read_at}
+    if record is None:
+        return unknown("This launch's mv2 plugin hasn't written its queue report yet; a plugin from before this mv2 "
+                       "writes none until the agent's next start")
+    # An exact integer version: JSON true equals 1 in Python.
+    if (record is False or type(record.get('schema')) is not int or record['schema'] != 1
+            or not isinstance(record.get('entries'), list)):
+        return unknown("The agent's queue report can't be read")
+    if record.get('launch_id') != session.launch_id:
+        return unknown("The agent's queue report is from another launch")
+    if record.get('session_id') != session.native_id:
+        return unknown("The agent's queue report is for another conversation")
+    observed = _short(record.get('observed_at'), 64)
+    entries, unread = [], len(record['entries']) > QUEUE_ENTRIES
+    for item in record['entries'][:QUEUE_ENTRIES]:
+        ident = item.get('message_id') if isinstance(item, dict) else None
+        if (not isinstance(ident, str) or PROMPT_ID.fullmatch(ident) is None or item.get('mode') not in ('follow-up', 'steer')
+                or item.get('since') is not None and _short(item.get('since'), 64) is None):
+            unread = True
+            continue
+        entries.append({'message_id': ident, 'mode': item['mode'], 'since': item.get('since'), 'native_id': None})
+    if unread:
+        return unknown("The agent's queue report has entries mv2 can't read", entries, observed)
+    if record.get('coverage') != 'complete':
+        reason = _short(record.get('reason'), 400) or "The agent's mv2 plugin can't tell everything Claude holds"
+        return unknown(reason, entries, observed)
+    return {'entries': entries, 'coverage': 'complete', 'reason': None, 'observed_at': observed or read_at}
 PROMPT_FILE = re.compile(rf'({PROMPT_ID.pattern})\.json')
 PROMPT_BYTES = 1 << 20  # a published prompt keeps its call's input to 64 KiB, JSON-escaped
 PROMPT_KINDS = ('permission', 'question', 'plan', 'form')
@@ -1452,6 +1490,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         problem = self._prompt_bridge(session)
         result['answer'] = (Capability('supported', mechanism='claude-mod-prompts') if problem is None
                             else Capability('unavailable', problem.reason))
+        problem = self._queue_bridge(session)
+        result['queued'] = (Capability('supported', mechanism='claude-mod-queue') if problem is None
+                            else Capability('unavailable', problem.reason))
         return result
 
     def _would_support(self, executor):
@@ -1470,7 +1511,7 @@ class ClaudeAdapter(ConfiguredAdapter):
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
                       'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt', 'slash': 'claude-mod-command',
-                      'answer': 'claude-mod-prompts'}
+                      'answer': 'claude-mod-prompts', 'queued': 'claude-mod-queue'}
         result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
                          else Capability('unavailable', why, required=name.startswith('send_')))
                   for name, mechanism in mechanisms.items()}
@@ -1555,6 +1596,10 @@ class ClaudeAdapter(ConfiguredAdapter):
     def models(self, *, environment):
         """The models offered on the provider a launch with `environment` uses, from mv2's table (models.py)."""
         return model_table.catalog(environment)
+
+    def model_names(self, *, environment):
+        """Display labels for recorded model spellings, from mv2's table (models.py)."""
+        return model_table.names(environment)
 
     def check_model(self, model, *, effort=None, environment):
         """Whether a launch with `environment` can use `model` at `effort` (models.py)."""
@@ -1645,7 +1690,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         reported = {}
         try:
             # The agent's runtime record; a missing one leaves nothing reported.
-            facts = read(Path(session.session_file).parent / 'runtime.json')
+            facts = retry_missing(lambda: read(Path(session.session_file).parent / 'runtime.json'))
             mod = facts.get('usage')
             if isinstance(mod, dict) and session.launch_id and facts.get('launch_id') == session.launch_id:
                 reported = {key: mod[key] for key in ('context', 'cost_usd', 'rate_limits') if key in mod}
@@ -1869,6 +1914,28 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
         return None
+
+    def _queue_bridge(self, session):
+        """None when this launch has a mod to report Claude's queue, else the NativeResult why not. A mod too old to
+        write the file is the file's to say (queue_report), so any registered bridge passes here."""
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return (NativeResult('unavailable', "This agent runs without mv2's Claude plugin (launch-only), so mv2 can't "
+                                 'see what Claude has queued for it') if bridge.final else unavailable(bridge))
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        return None
+
+    def queued_prompts(self, session, executor=None):
+        """mv2's messages Claude holds for this agent now, taken and not yet in its conversation, oldest first. Only
+        reads the mod's file: it never waits, starts, resumes or changes anything."""
+        problem = self._queue_bridge(session)
+        if problem is not None:
+            return problem
+        read_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        return NativeResult('ok', value=queue_report(_json_record(Path(session.session_file).parent / QUEUE_FILE,
+                                                                replaced=True), session,
+                                                     read_at))
 
     def waiting_prompts(self, session, executor=None):
         """Every prompt this launch's mod has open now, for this conversation, oldest first."""

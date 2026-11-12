@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -14,7 +15,7 @@ import time
 
 from .. import harnesses, source_environment
 from ..harnesses.types import NativeActivity, NativeResult, RpcSpec, SessionHandle
-from ..store import existing_lock, now, read
+from ..store import existing_lock, now, read, retry_missing
 from ..terminal.tmux import owned, matches
 from ..universe import agents
 from ..universe.mailbox import inbox
@@ -29,6 +30,11 @@ RESTORE_TIMEOUT = 60
 RESTORE_POLL = 2
 RESTART_WINDOW = 300
 RESTART_LIMIT = 2
+
+
+def _properties(directory):
+    """A missing replacement must not end or disqualify an exact recovery worker."""
+    return retry_missing(lambda: read(directory / 'properties.json'))
 
 
 def age(stamp):
@@ -154,7 +160,7 @@ class RecoveryMonitor:
                         continue
                     if facts.get('state') != 'running' or facts.get('status') != 'idle':
                         continue
-                    properties = read(self.directory / 'properties.json')
+                    properties = _properties(self.directory)
                     if recovery_unavailable(SessionHandle.from_records(properties, facts, self.directory)):
                         return
                     if not properties.get('native_session_id') or not facts.get('startup_checked'):
@@ -175,7 +181,7 @@ class RecoveryMonitor:
                             or current.get('status') != 'idle' or current.get('ending_at')
                             or (current.get('native_relay') or {}).get('state') == 'lost'
                             or current.get('native_service') != facts.get('native_service')
-                            or read(self.directory / 'properties.json').get('native_session_id') != properties['native_session_id']
+                            or _properties(self.directory).get('native_session_id') != properties['native_session_id']
                             or current.get('native_status_version', 0) != version):
                         continue
                     pending = in_flight(self.directory, current, properties['native_session_id'], since=started_at)
@@ -194,7 +200,7 @@ def schedule(directory, launch_id):
     facts = agents.runtime(directory)
     if facts.get('launch_id') != launch_id or facts.get('ending_at'):
         return
-    reason = eligibility(read(directory / 'properties.json'), facts)
+    reason = eligibility(_properties(directory), facts)
     if reason:
         agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + reason)
         return
@@ -204,7 +210,7 @@ def schedule(directory, launch_id):
             return
         if (facts.get('auto_recovery') or {}).get('state') in ('checking', 'restarting', 'resuming'):
             return
-        properties = read(directory / 'properties.json')
+        properties = _properties(directory)
         reason = eligibility(properties, facts) or in_flight(directory, facts, properties.get('native_session_id'))
         if reason:
             agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + reason)
@@ -231,7 +237,8 @@ def run(directory, launch_id, role_path=None):
     try:
         with existing_lock(directory / '.launch.lock'):
             facts = agents.runtime(directory)
-            if facts.get('launch_id') != launch_id or not (directory / 'properties.json').is_file():
+            if (facts.get('launch_id') != launch_id
+                    or not stat.S_ISREG(retry_missing((directory / 'properties.json').stat).st_mode)):
                 return
             role_path = role_path or (directory / facts['recovery_worker'] if facts.get('recovery_worker') else None)
             if role_path and Path(role_path).resolve().parent != (directory / 'launches' / launch_id / 'roles').resolve():
@@ -255,7 +262,7 @@ def _run(directory, launch_id, worker):
                 or (facts.get('auto_recovery') or {}).get('state') != 'checking'):
             raise ValueError('Automatic reconnect cancelled or superseded')
         proof = facts.get('recovery_snapshot') or {}
-        properties = read(directory / 'properties.json')
+        properties = _properties(directory)
         if (proof.get('safe') is not True or proof.get('workspace') != properties.get('workspace')
                 or proof.get('native_id') != properties.get('native_session_id')
                 or proof.get('service') != facts.get('native_service')
@@ -276,7 +283,7 @@ def _run(directory, launch_id, worker):
                 time.sleep(delay)
             with existing_lock(directory / '.launch.lock'):
                 facts = current()
-                properties = read(directory / 'properties.json')
+                properties = _properties(directory)
                 if restore_deadline is not None and time.monotonic() >= restore_deadline:
                     agents.record_recovery(directory, launch_id, 'skipped',
                                            'Automatic reconnect skipped: ' + restore_reason, attempts=attempt)
@@ -309,7 +316,7 @@ def _run(directory, launch_id, worker):
                 return
             with existing_lock(directory / '.launch.lock'):
                 facts = current()
-                properties = read(directory / 'properties.json')
+                properties = _properties(directory)
                 if restore_deadline is not None and time.monotonic() >= restore_deadline:
                     agents.record_recovery(directory, launch_id, 'skipped',
                                            'Automatic reconnect skipped: ' + restore_reason, attempts=attempt)

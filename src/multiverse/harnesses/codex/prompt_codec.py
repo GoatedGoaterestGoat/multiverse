@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 import json
 
 
-VERSION = (0, 167, 0)
-VERSIONS = frozenset(((0, 166, 0), VERSION))
+VERSION = (0, 167, 2)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), VERSION))
 DETAIL_BYTES = 64 << 10
 RESPONSE_BYTES = 128 << 10  # Typed wrappers and offered native values can expand a bounded answer file.
 METHODS = {
@@ -482,6 +482,9 @@ def elicitation(offer):
 
 def describe(method, params, *, item=None):
     """Keep unsupported native requests visible, with no fabricated answer path."""
+    if method == 'request_user_input_async':
+        from .async_questions import describe as async_question
+        return async_question(params)
     if method not in METHODS:
         return None
     params = object_value(params)

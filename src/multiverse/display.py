@@ -3,6 +3,7 @@
 The tmux status line keeps its own copies of a few of these: tmux runs it with
 `python -S`, outside this package's imports.
 """
+from datetime import datetime, timezone
 
 
 def clean(value):
@@ -51,18 +52,32 @@ def state(row):
     return live_label(row)
 
 
-def blocked_label(value):
-    """What a blocked agent waits on, as its reported phase shows it: `lifecycle`, `qa-claude in qa`, `user`, `self`.
+def model_label(row, effort=True):
+    """An agent's model as people name it: `Opus 5.5`, with its effort when asked, `Opus 5.5 (xhigh)`.
 
-    `value` is a listing row's `blocked_on`. An agent named like one of the two other sources reads `agent user`,
-    so it is never taken for the person; one the listing can no longer find adds `: gone`. Anything else is None."""
+    The name is the listing's `model_name` (the universe's custom name, else the model table's); a model neither
+    names reads as recorded, and an agent with no recorded model reads `-`. No recorded effort adds nothing."""
+    model = row.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return "-"
+    name = row.get("model_name")
+    label = clean(name if isinstance(name, str) and name.strip() else model).strip()
+    chosen = row.get("effort")
+    if effort and isinstance(chosen, str) and chosen.strip():
+        label += f" ({clean(chosen).strip()})"
+    return label
+
+
+def _target(value):
+    """The name of what a blocked agent waits on, and whether the listing could still find it; (None, False) for
+    anything that isn't a readable `blocked_on`."""
     if not isinstance(value, dict):
-        return None
+        return None, False
     if value.get("kind") in ("user", "self"):
-        return value["kind"]
+        return value["kind"], False
     name = clean(value.get("name")).strip() if value.get("kind") == "agent" and isinstance(value.get("name"), str) else ""
     if not name:
-        return None
+        return None, False
     if name in ("user", "self"):
         name = f"agent {name}"
     place = value.get("universe")
@@ -71,14 +86,61 @@ def blocked_label(value):
             parts = place.rstrip("/").split("/")
             place = parts[-2] if parts[-1] == ".multiverse" and len(parts) > 1 else parts[-1]
         name += f" in {clean(place)}"
-    return name + (": gone" if value.get("gone") else "")
+    return name, bool(value.get("gone"))
+
+
+def blocked_label(value):
+    """What a blocked agent waits on: `lifecycle`, `qa-claude in qa`, `user`, `self`.
+
+    `value` is a listing row's `blocked_on`. An agent named like one of the two other sources reads `agent user`,
+    so it is never taken for the person; one the listing can no longer find adds `: gone`. Anything else is None."""
+    name, gone = _target(value)
+    return name and name + (": gone" if gone else "")
+
+
+def summary_parts(row):
+    """What a blocked agent waits on, where the row carries it (`Waiting for user`, `Waiting for ada (gone)` for
+    one the listing can no longer find), else None; and its summary on one line."""
+    summary = " ".join(str(row.get("summary") or "").split())
+    name, gone = _target(row.get("blocked_on")) if row.get("phase") == "blocked" else (None, False)
+    return (f"Waiting for {name}" + (" (gone)" if gone else "") if name else None), summary
+
+
+def summary_label(row):
+    """An agent's summary, led by what a blocked one waits on where the row carries it:
+    `Waiting for user: decide the model list`, or `Waiting for user` with no summary."""
+    lead, summary = summary_parts(row)
+    return f"{lead}: {summary}" if lead and summary else lead or summary
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def report_age(row):
+    """How long ago a working or blocked agent last reported, so how stale its summary is: `32s`, `10m`, `2h`,
+    `3d`. None for any other phase, or a record whose report time isn't a readable timestamp with its time zone
+    (core writes UTC; a naive or date-only one is damaged, not guessed at)."""
+    if row.get("phase") not in ("working", "blocked") or not isinstance(row.get("reported_at"), str):
+        return None
+    try:
+        at = datetime.fromisoformat(row["reported_at"])
+        if at.tzinfo is None:
+            return None
+        seconds = int(max(0, (_now() - at).total_seconds()))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
 
 
 def phase_label(row):
-    """An agent's reported phase, with what it is blocked on when it says: `blocked (lifecycle)`."""
-    phase = row.get("phase")
-    target = blocked_label(row.get("blocked_on")) if phase == "blocked" else None
-    return f"blocked ({target})" if target else phase
+    """An agent's reported phase, with how long ago it reported: `working (10m)`, `blocked (50m)`. What a blocked
+    agent waits on is in its summary (`summary_label`)."""
+    phase, age = row.get("phase"), report_age(row)
+    return f"{phase} ({age})" if phase and age else phase
 
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}

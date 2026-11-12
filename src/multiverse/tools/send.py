@@ -4,9 +4,9 @@ from pathlib import Path
 import sys
 from ..plugins import access
 from .. import universe, display
-from ..runtime import native, missing_runtime
+from ..runtime import native, missing_runtime, queued_prompts
 from ..terminal.recovery import Unreachable
-from ..store import lock, read
+from ..store import lock, read, retry_missing
 from ..universe import agents, blocked, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
@@ -22,10 +22,12 @@ def configure(parser):
     parser.add_argument("--queue-only", action="store_true", help="Save inbox-only; becomes a follow-up if the recipient reports being blocked on you")
     parser.add_argument("--delivery", choices=("steer", "follow-up", "inbox-only"), default="steer",
                         help="Native timing: next safe boundary or the next turn")
+    parser.add_argument("--force", action="store_true",
+                        help="Send even when the recipient's follow-ups are queued for you")
 
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
-        json=False, _present=None, _present_error=None, _note_for=None):
+        force=False, json=False, _present=None, _present_error=None, _note_for=None):
     """`_note_for` is a focus id: mv2's own note about that focus's held messages, sent only while no newer
     focus has begun."""
     access.require('act', f'send to {agent}')
@@ -49,28 +51,53 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
-    unread_senders = _unread_senders(caller) if _present or _present_error else set()
-    results, seen = [], set()
+    targets = []
     for reference in references:
         try:
-            directory = agents.directory(root, reference)
+            targets.append((reference, agents.directory(root, reference), None))
         except ValueError as error:
+            targets.append((reference, None, error))
+    queue_check, queued_senders, unconfirmed_senders = None, frozenset(), None
+    if (caller is not None and _note_for is None
+            and (force or not queue_only and delivery != 'inbox-only')):
+        queue_check, queued_senders, unconfirmed_senders = queued_prompts.for_send(caller.root, caller.identity)
+    unread_senders = None
+    results, seen = [], set()
+    for reference, directory, error in targets:
+        if error is not None:
             damaged = isinstance(error, (records.RecordError, agents.AmbiguousAgent))
+            detailed = damaged or isinstance(error, agents.AgentNotFound) and bool(error.related_hint)
             if len(references) == 1:
-                if damaged:
-                    raise  # The target is known; preserve its named record error.
+                if detailed:
+                    raise error  # Preserve record errors, ambiguity and related-universe advice.
                 raise ValueError('Could not find one matching agent. Run mv2 list and use its name.') from None
-            name = display.clean(reference) if damaged else failure_reason(reference)
-            reason = display.clean(str(error)) if damaged else 'Could not find one matching agent'
+            name = display.clean(reference) if detailed else failure_reason(reference)
+            reason = display.clean(str(error)) if detailed else 'Could not find one matching agent'
             result = {'ok': False, 'saved': False, 'reason': reason}
-            line = (f'Not sent to {name}: {reason}.' if damaged else
+            line = (f'Not sent to {name}: {reason.rstrip(".")}.' if detailed else
                     f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.')
         else:
             if directory in seen:
                 continue  # An alias of the same recipient must not duplicate a prompt.
             seen.add(directory)
             properties = read(directory / 'properties.json')
+            # Recovery folders can differ from their stored agent identity.
+            recipient_id = properties.get('id', directory.name)
             name = properties['name']
+            if recipient_id in queued_senders and not force:
+                clean_name = display.clean(name)
+                reason = (f'Your message to {clean_name} is not delivered because you have unread messages from '
+                          f'{clean_name} queued as follow-ups. End your turn to receive queued follow-ups; earlier '
+                          'queued messages may arrive first. It is recommended that you read '
+                          f"{clean_name}'s messages first before messaging them. If you still want to message "
+                          f'{clean_name}, resend with --force.')
+                results.append({'agent': name, 'ok': False, 'saved': False, 'reason': reason,
+                                'blocked_recipients': [clean_name]})
+                if _present_error or _present:
+                    (_present_error or _present)(reason)
+                continue
+            if unread_senders is None:
+                unread_senders = _unread_senders(caller) if _present or _present_error else set()
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and _running(directory))
@@ -104,15 +131,29 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                         f"The follow-up failed: {why}. " + line)
             elif result.get('upgrade_unavailable'):
                 line = (f"{name} is blocked on you, but cannot take a follow-up in its current session. " + line)
-            if properties.get('id', directory.name) in unread_senders:
+            if recipient_id in unread_senders:
                 line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
+            if (force and queue_check is not None and queue_check.state == 'ok'
+                    and queue_check.coverage == 'complete' and recipient_id not in queued_senders):
+                note = f"You have no queued follow-ups from {display.clean(name)}, so you don't need --force."
+                result['force_note'] = note
+                line += '\n' + note
+            elif (not force and queue_check is not None
+                    and (queue_check.state != 'ok' or queue_check.coverage != 'complete')
+                    and (unconfirmed_senders is None or recipient_id in unconfirmed_senders)):
+                reason = display.clean(queue_check.reason or 'The harness queue is unknown').rstrip('.')
+                note = f"mv2 couldn't check whether {name}'s follow-ups to you are still queued: {reason}."
+                result['queue_check_note'] = note
+                line += '\n' + note
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
             present(line)
     if len(references) == 1:
         return {key: value for key, value in results[0].items() if key != 'agent'}
-    return {'recipients': results, 'ok': all(result.get('ok', True) for result in results)}
+    blocked_names = [name for result in results for name in result.get('blocked_recipients', [])]
+    return {'recipients': results, 'ok': all(result.get('ok', True) for result in results),
+            **({'blocked_recipients': blocked_names} if blocked_names else {})}
 
 
 def _unread_senders(caller):
@@ -123,7 +164,8 @@ def _unread_senders(caller):
 def _running(directory):
     """Observe only for readable failure advice; uncertainty never changes delivery evidence."""
     try:
-        return native.observe(read(directory / 'properties.json'), agents.runtime(directory))['live'] == 'alive'
+        properties = retry_missing(lambda: read(directory / 'properties.json'))
+        return native.observe(properties, agents.runtime(directory))['live'] == 'alive'
     except (OSError, ValueError, KeyError, RuntimeError):
         return False
 
@@ -146,15 +188,6 @@ def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None
         if upgraded and result.get('saved') and (result['delivery'] == 'follow-up' or result['state'] == 'held'):
             result['upgraded_from'] = 'inbox-only'
         return result, receipt
-
-
-
-def _upgraded_text(text, sender, *, held=False):
-    name = display.clean(sender.get('name') or 'the sending agent')
-    note = (f'This message was sent as a follow-up because your status is blocked on {name}; '
-            'it was held in your inbox while you were focused.' if held else
-            f'This message was delivered as a follow-up because your status is blocked on {name}.')
-    return f'{note}\n\n{text}'
 
 
 
@@ -181,8 +214,7 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=
     # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
     if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
         return _skipped(sender, text, delivery, 'a newer focus began')
-    held_text = _upgraded_text(text, sender, held=True) if upgraded else text
-    held = focus.hold(directory, lambda focus_id: append_message(directory, held_text, sender, 'inbox-only', intended=delivery,
+    held = focus.hold(directory, lambda focus_id: append_message(directory, text, sender, 'inbox-only', intended=delivery,
                                                                  focus=focus_id)) if delivery != 'inbox-only' and note_for is None else None
     if held:
         # Saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
@@ -207,8 +239,6 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=
                 # launch-only agent with a supported wake still takes the normal follow-up path.
                 delivery = 'inbox-only'
                 upgrade_unavailable = True
-            else:
-                text = _upgraded_text(text, sender)
         if delivery != 'inbox-only':
             try:
                 facts = agents.runtime(directory)

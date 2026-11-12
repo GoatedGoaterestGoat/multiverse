@@ -15,14 +15,19 @@ import tempfile
 
 from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
-from ..store import existing_lock, lock, now, read, uid, write
+from ..store import exists_replaced, retry_missing, existing_lock, lock, missing_records, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import model_choices as model_policy
 
 TEARDOWN_TIMEOUT = 10
+
+
+def model_choices(root, harness):
+    return model_policy.for_launch(root, harness)
 
 def damaged_row(scope, error, properties=None):
     """The row of an agent whose record cannot be used: always well formed, never raising.
@@ -106,8 +111,8 @@ def _listing_runtime(directory, facts, *, prepare=False):
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
-    'id', 'universe_id', 'name', 'harness', 'model', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
-    'workspace', 'created_at', 'updated_at', 'native_session_id', 'native_session_home',
+    'id', 'universe_id', 'name', 'harness', 'model', 'model_name', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
+    'workspace', 'created_at', 'updated_at', 'reported_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
@@ -131,7 +136,14 @@ def row_usage(row):
     return {'usage': measured, 'tokens': display.usage_total(measured), 'usage_detail': display.usage_details(measured)}
 
 
-def listing(root, recursive=False, only=None, *, usage=True):
+def observation_paths(directories):
+    """Optional metadata a listing and its doctor checks can observe in one batch."""
+    names = ('focus.json', 'inbox-state.json', 'native-delivery.json', 'inbox.cursor', 'inbox-read.json',
+             'sessions.jsonl', 'slash/pending.json')
+    return (directory / name for directory in directories for name in names)
+
+
+def listing(root, recursive=False, only=None, *, usage=True, observed_missing=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
     One agent's damaged records never stop the others: that agent's row says which file is unusable and why
@@ -139,10 +151,15 @@ def listing(root, recursive=False, only=None, *, usage=True):
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
-    rows, snapshots, dependencies = [], {}, {}
+    rows, snapshots, dependencies, model_names = [], {}, {}, {}
+    scopes = []
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
         paths = [agents_dir / only / "properties.json"] if only is not None else agents.record_paths(scope)
+        scopes.append((scope, paths))
+    if observed_missing is None:
+        observed_missing = missing_records(observation_paths(path.parent for _, paths in scopes for path in paths), observed=True)
+    for scope, paths in scopes:
         for path in paths:
             if only is not None and not path.parent.is_dir():
                 continue
@@ -165,7 +182,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                 preparing_launch = facts.get('launch_id') if facts.get('preparing') is True else None
                 identity_problem = None
                 try:
-                    properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
+                    properties, facts = native.session_snapshot(scope, path.parent, properties, facts,
+                                                                 observed_missing=observed_missing)
                 except Exception as error:
                     identity_problem = str(error)
                     facts = records.runtime(path.parent / "runtime.json")
@@ -187,7 +205,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                                 facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
                 try:
                     delivery_problem = mailbox.delivery_problem(path.parent, properties['name'],
-                        is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
+                        is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']),
+                        observed_missing=observed_missing)
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append(text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
@@ -200,7 +219,8 @@ def listing(root, recursive=False, only=None, *, usage=True):
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
-                             "focus": focus.current(path.parent), "runtime": facts,
+                             "focus": focus.current(path.parent, observed_missing=observed_missing), "runtime": facts,
+                             "model_name": model_policy.recorded_name(scope, properties, model_names),
                              "blocked_on": blocked.display(scope, properties, dependencies)}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
@@ -507,6 +527,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices, ignored_settings, effort_notices, [item.notice for item in storage_notices],
                     _resume_notices(adapter, session, ambient, context.environment, storage,
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
+        resolved_model = None
         while True:
             command = (effects.call(adapter, 'resume', session, context) if resume and not fresh
                        else effects.call(adapter, 'spawn', context))
@@ -531,20 +552,32 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     raise _effort_problem(f'Harness {harness} does not support --effort for an individual launch', properties, effort)
                 if native.adapter_hook(adapter, 'check_model') is None:
                     raise _effort_problem(f'Harness {harness} cannot validate the model and effort for this launch', properties, effort)
+            # Unrestricted launches without effort keep the native harness's model acceptance policy.
+            if model_policy.restricted(adapter) or properties.get('effort') is not None:
                 check_environment = {**environment, **dict.fromkeys(command.unset_env, None), **command.environment}
-                checked = effects.call(adapter, 'check_model', model, effort=properties['effort'],
-                                       environment=check_environment)
-                if not isinstance(checked, ModelCheck) or checked.ok is not True:
-                    if model_changed and effort is None and isinstance(checked, ModelCheck) and checked.ok is False:
-                        default = effects.call(adapter, 'check_model', model, environment=check_environment)
-                        if isinstance(default, ModelCheck) and default.ok is True:
-                            notices.append(f"Dropped recorded effort {properties['effort']!r}: model {model!r} does not take it. "
-                                           'Using the harness default.')
-                            properties['effort'] = None
-                            context = replace(context, effort=None)
-                            continue  # Reprepare once without the inherited flag; nothing has launched or been saved.
-                    raise _effort_problem((checked.reason if isinstance(checked, ModelCheck) else None)
-                                          or 'The harness refused this model and effort', properties, effort)
+                checked = model_policy.check(root, adapter, model, effort=properties.get('effort'), environment=check_environment)
+                if checked.ok is not True:
+                    if model_policy.restricted(adapter):
+                        # The policy already names the allowed choices. A native default may itself be forbidden.
+                        raise ValueError(checked.reason or 'The model and effort are not allowed by the harness settings')
+                    if properties.get('effort') is not None:
+                        if model_changed and effort is None and not model_policy.restricted(adapter):
+                            default = effects.call(adapter, 'check_model', model, environment=check_environment)
+                            if isinstance(default, ModelCheck) and default.ok is True:
+                                notices.append(f"Dropped recorded effort {properties['effort']!r}: model {model!r} does not take it. "
+                                               'Using the harness default.')
+                                properties['effort'] = None
+                                context = replace(context, effort=None)
+                                continue  # Reprepare once without the inherited flag; nothing has launched or been saved.
+                        raise _effort_problem(checked.reason or 'The harness refused this model and effort', properties, effort)
+                    raise ValueError(checked.reason or 'The harness refused this model')
+                if model_policy.restricted(adapter) and checked.model != model:
+                    if resolved_model is not None:
+                        raise ValueError('The launch environment changed model resolution during preparation; try again')
+                    resolved_model = model = checked.model
+                    context = replace(context, model=model, values={**context.values, 'model': model})
+                    continue  # Canonical ID bypasses native alias remaps; validate the final command's environment too.
+            model_policy.require_command(root, adapter, model, properties.get('effort'), environment, command)
             storage = selected_storage
             break
         properties['native_storage_environment'] = storage
@@ -694,6 +727,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
+            model_policy.require_command(root, adapter, model, properties.get('effort'),
+                                         {**environment, **context.environment}, command)
             service = native.service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
             if service and asdict(service.identity) != properties.get('native_service_identity'):
                 raise ValueError('Native service scope changed during launch preparation')
@@ -856,7 +891,7 @@ def _publish_record(root, agent_dir, properties, launch_id):
                                 if (runtime(agent_dir) == facts
                                         and read(agent_dir / 'properties.json') == published):
                                     agent_dir.rename(staging)
-                        if agent_dir.is_dir() and (not (agent_dir / 'runtime.json').exists() or minimal):
+                        if agent_dir.is_dir() and (not exists_replaced(agent_dir / 'runtime.json') or minimal):
                             write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
                                   'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
                                   'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
@@ -1075,7 +1110,7 @@ def _request(argv, env, command, endpoint, resume_message_id):
 
 
 def launch_result(root, agent_dir):
-    properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+    properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
     notices = display.notice_lines(facts.get('launch_notices'))
     return {**properties, 'universe': str(root), 'runtime': facts,
             'session': asdict(SessionHandle.from_records(properties, facts, agent_dir)),
@@ -1137,12 +1172,12 @@ def note_ready(root, agent_dir, launch_id):
         marker = launch / 'ready-event'
         if marker.exists() or not events.subscribers(root, 'agent.ready'):
             return
-        properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+        properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
         if facts.get('launch_id') != launch_id:
             return
         adapter = harnesses.load(root, properties['harness'])
         live = observe(properties, facts)['live']
-        if not launch_ready(adapter, properties, facts, agent_dir, read(launch / 'request.json'), live):
+        if not launch_ready(adapter, properties, facts, agent_dir, retry_missing(lambda: read(launch / 'request.json')), live):
             return
         _record_ready(agent_dir, launch_id, properties)
     except Exception:
@@ -1161,7 +1196,7 @@ def _record_ready(agent_dir, launch_id, properties):
 
 def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True):
     """Observe one launch without holding the lock needed by native binding."""
-    request = read(agent_dir / 'launches' / launch_id / 'request.json')
+    request = retry_missing(lambda: read(agent_dir / 'launches' / launch_id / 'request.json'))
     deadline = time.monotonic() + timeout
     exit_deadline = None
     screen_deadline = None
@@ -1261,10 +1296,10 @@ def kill(root, reference, *, attachment_only=False):
     initial, malformed = missing_runtime.recovery_snapshot(agent_dir)
     initial_observation = None
     damaged = malformed is not None or missing_runtime.damage(agent_dir, initial)
-    if not damaged and (agent_dir / 'runtime.json').exists():
+    if not damaged and exists_replaced(agent_dir / 'runtime.json'):
         initial_observation = observe(records.properties(agent_dir / 'properties.json'), initial)
         damaged = missing_runtime.mismatch(agent_dir, initial, initial_observation)
-    if not (agent_dir / 'runtime.json').exists() or damaged:
+    if not exists_replaced(agent_dir / 'runtime.json') or damaged:
         recovered = missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
         if recovered is not None:
             return recovered

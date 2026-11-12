@@ -13,8 +13,8 @@ def configure(parser):
     task = parser.add_mutually_exclusive_group()
     task.add_argument("--task", "--prompt", help="Initial prompt sent to the new agent")
     task.add_argument("--task-file", type=Path)
-    parser.add_argument("--model")
-    parser.add_argument("--effort", help="Effort for this agent only; requires harness support and a known --model; default uses the harness default")
+    parser.add_argument("--model", help="Model ID or alias; passed to the harness unless a subset or effort requires validation")
+    parser.add_argument("--effort", help="Effort for this agent only, from its model's allowed levels; default leaves it unset when permitted")
     add_wait(parser)
     parser.add_argument("--json", action="store_true", help="Print the full launch record as JSON")
 

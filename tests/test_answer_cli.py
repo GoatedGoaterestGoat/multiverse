@@ -27,6 +27,9 @@ PROMPTS = PromptList(state="ok", coverage="complete", prompts=(
         PromptQuestion(id="run", header="Run", question="Run the tool?", options=(("Allow", ""), ("Other", "")),
                        free_text=False, takes_note=True),
         PromptQuestion(id="key", header="Key", question="Its key?", secret=True, takes_note=True, required=False))),
+    WaitingPrompt(id="async1", kind="question", tool="request_user_input_async", summary="Which branch?",
+                  requires_waiting=False, questions=(
+        PromptQuestion(id="branch", header="Branch", question="Which branch?", options=(("main", ""), ("dev", ""))),)),
 ))
 
 
@@ -70,6 +73,9 @@ class AnswerCommandTests(PluginTestCase):
                 self.assertIn("allow_always (Always) [saves a rule; person only]", out)
                 self.assertIn("1. Database: Which database should I use?  [Postgres | SQLite]", out)
                 self.assertIn("secret: answer with --stdin", out)
+                self.assertIn("async1  question  request_user_input_async: Which branch?  (doesn't need the agent "
+                              "waiting)", out)
+                self.assertNotIn("rm -rf build  (doesn't need", out)
             with self.subTest("a choice with its message"):
                 sent.clear()
                 status, out, _ = self.mv2("perm1", "--choice", "deny", "--message", "use staging", "--timeout", "5")
@@ -155,6 +161,11 @@ class AnswerCommandTests(PluginTestCase):
                 outcome[0] = PromptResult(id="perm1", state="sent_first", reason="Sent first; Codex doesn't confirm it.")
                 status, out, _ = self.mv2("perm1", "--choice", "allow")
                 self.assertEqual((status, out.strip()), (0, "Sent first; Codex doesn't confirm it."))
+            with self.subTest("answered, with core's reason saying what it proves"):
+                said = "Delivered to the conversation as the answer; the card may still show."
+                outcome[0] = PromptResult(id="perm1", state="answered", reason=said)
+                status, out, _ = self.mv2("perm1", "--choice", "allow")
+                self.assertEqual((status, out.strip()), (0, f"Answered. {said}"))
             with self.subTest("--timeout 0 returns once sent, and a pending outcome says how to read it"):
                 sent.clear()
                 outcome[0] = PromptResult(id="perm1", state="submitted")

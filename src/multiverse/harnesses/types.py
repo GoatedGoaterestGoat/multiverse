@@ -19,8 +19,8 @@ EFFECTS: Mapping[str, Effect] = {
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable',
-        'models', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
-        'waiting_prompts', 'prompt_outcome',
+        'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
+        'waiting_prompts', 'prompt_outcome', 'queued_prompts',
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
@@ -247,7 +247,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash', 'answer')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery', 'slash', 'answer', 'queued')
 
 
 @dataclass(frozen=True)
@@ -424,6 +424,7 @@ class WaitingPrompt:
     answerable: bool = True
     reason: str | None = None
     subagent: str | None = None
+    requires_waiting: bool = True  # Only retained questions may be answerable outside waiting.
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -444,6 +445,16 @@ class PromptAnswer:
     notes: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PromptInput:
+    """Transient native input recipe; core reserves and submits it through ordinary delivery.
+
+    id must be 'prompt-' + PromptAnswer.id. Text is never an audit or receipt field.
+    """
+    id: str
+    text: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class PromptResult:
     id: str
@@ -454,8 +465,35 @@ class PromptResult:
     cause: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class QueuedPrompt:
+    """One mv2 input present in the harness queue when observed; no message text."""
+    message_id: str
+    mode: str
+    since: str | None = None
+    native_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class QueueReport:
+    """Coverage concerns mv2 inputs only; absence says nothing about delivery."""
+    state: str
+    coverage: str = 'unknown'
+    reason: str | None = None
+    observed_at: str | None = None
+    entries: tuple[QueuedPrompt, ...] = ()
+
+
+class QueueProvider(Protocol):
+    """Read the current launch's queued mv2 inputs without changing their delivery."""
+    def queued_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
+
+
 class PromptProvider(Protocol):
-    """Exact open prompts, one exclusive answer, and read-only outcomes for the original request."""
+    """Native prompts and retained questions, one mv2 submission, and read-only outcomes.
+
+    Core reads input receipts through get_delivery; callback prompt_outcome remains read-only.
+    """
     def waiting_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def answer_prompt(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
     def prompt_outcome(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
@@ -598,6 +636,15 @@ class ModelProvider(Protocol):
     def models(self, *, environment: Mapping[str, str | None]) -> ModelCatalog: ...
     def check_model(self, model: str, *, effort: str | None = None,
                     environment: Mapping[str, str | None]) -> ModelCheck: ...
+
+
+class ModelNameProvider(Protocol):
+    """Optional table labels beyond the catalog's IDs/aliases (observe), never live model observations.
+
+    Include provider-specific spellings when their names are known. The environment selects current table
+    aliases, as for ModelProvider; core applies universe display overrides after these names.
+    """
+    def model_names(self, *, environment: Mapping[str, str | None]) -> Mapping[str, str]: ...
 
 
 @dataclass(frozen=True, kw_only=True)

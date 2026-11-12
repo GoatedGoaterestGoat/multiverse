@@ -14,7 +14,7 @@ from uuid import UUID
 
 from ..runtime.process import process_command, process_parent, process_snapshot, start_matches, valid_start
 from ..runtime.paths import directory_problem
-from ..store import write
+from ..store import retry_missing, write
 
 
 class Unreachable(RuntimeError):
@@ -46,7 +46,8 @@ def registry(socket):
 @contextmanager
 def _regular(path, *, create=False):
     flags = os.O_NONBLOCK | os.O_NOFOLLOW | (os.O_RDWR | os.O_CREAT if create else os.O_RDONLY)
-    fd = os.open(path, flags, 0o600)
+    # Only the replaced identity record can be retried; lock creation is a mutation.
+    fd = os.open(path, flags, 0o600) if create else retry_missing(lambda: os.open(path, flags, 0o600))
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():

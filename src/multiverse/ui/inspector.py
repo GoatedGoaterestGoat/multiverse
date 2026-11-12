@@ -8,7 +8,8 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean, live_label, phase_label
+from ..display import clean, live_label, phase_label, summary_label
+from .columns import summary_text
 from . import theme
 from .plugin_service import in_daemon
 from .prompt_screen import prompt_line
@@ -78,8 +79,10 @@ class Inspector(Vertical):
         self.query_one("#inspect-hint", Static).update(
             ("r resume · " if dormant else "") + "v full details · p / Esc close")
         self.query_one("#inspect-label", Static).update("PURPOSE" if group else "CURRENT WORK")
-        self.query_one("#inspect-work", Static).update(clean(
-            row.get("description", "No description yet.") if group else row.get("summary") or row.get("task") or "No work reported yet."))
+        self.query_one("#inspect-work", Static).update(
+            Text(clean(row.get("description", "No description yet."))) if group
+            else summary_text(row, empty="") if summary_label(row)
+            else Text(clean(row.get("task") or "No work reported yet.")))
         self.query_one("#inspect-group").display = group
         self.query_one("#pane-scroll").display = not group and not dormant
         if group:
@@ -167,23 +170,30 @@ class Inspector(Vertical):
             self.inbox_if_needed()
 
     def show_prompts(self, found):
-        """The prompt the agent waits on (`found`: core's listing, None for no line), and the outcome of the last
-        answer sent from here, which shows until another one is sent."""
+        """The prompt the agent waits on, or the questions it has open while it works (`found`: core's listing, None
+        for no line), and the outcome of the last answer sent from here, which shows until another one is sent.
+
+        For an agent that isn't waiting the line shows only what core lists, with its coverage note where some are
+        listed; an empty listing or a failed read says nothing there, since most agents have no open questions."""
         widget = self.query_one("#inspect-prompt", Static)
         text = Text()
+        waiting = bool(self.row) and self.row.get("status") == "waiting"
         if isinstance(found, dict) and found.get("state") == "ok":
             prompts = found.get("prompts") or []
             if prompts:
                 first = prompts[0]
-                text.append("⏸ Waiting on: " + (f"{len(prompts)} prompts, first " if len(prompts) > 1 else "")
-                            + prompt_line(first), style=theme.PEACH)
+                many = f"{len(prompts)} prompts, first " if waiting else f"{len(prompts)}, first "
+                text.append(("⏸ Waiting on: " if waiting else "Open questions: ")
+                            + (many if len(prompts) > 1 else "") + prompt_line(first), style=theme.PEACH)
                 answerable = any(item.get("answerable", True) for item in prompts)
                 text.append(" · a answers it" if answerable else
                             " · " + clean(first.get("reason") or "answer it in the terminal"), style=theme.SUBTEXT0)
-            if found.get("coverage") != "complete":
-                text.append(("\n" if prompts else "") + "mv2 may not see every prompt it waits on: "
+            if found.get("coverage") != "complete" and (waiting or prompts):
+                text.append(("\n" if prompts else "")
+                            + ("mv2 may not see every prompt it waits on: " if waiting else
+                               "mv2 may not see every open question: ")
                             + clean(found.get("reason") or "coverage unknown"), style=theme.OVERLAY1)
-        elif isinstance(found, dict):  # the read failed: why, quietly
+        elif isinstance(found, dict) and waiting:  # the read failed: why, quietly
             text.append("Prompts: " + clean(found.get("reason") or found.get("state") or "unavailable"),
                         style=theme.OVERLAY1)
         last = (self.app.prompt_outcomes.get(self.row["id"]) if self.row and self.row.get("kind") == "agent"
@@ -196,12 +206,13 @@ class Inspector(Vertical):
         widget.update(text)
 
     def prompts_if_needed(self):
-        """What a waiting agent waits on, read off the event loop once per scan; nothing is read for another agent."""
+        """What the selected agent waits on, or the questions it has open while it works, read off the event loop
+        once per scan: core says which there are (Codex asks some without stopping), so every agent is read."""
         row = self.row
         revision = (self.generation, self.app.scan_count)
         if not (row and row["kind"] == "agent" and callable(getattr(self.app.backend, "waiting_prompts", None))):
             return
-        if row.get("status") != "waiting":
+        if isinstance(row.get("damaged"), dict):
             self.prompts_revision = revision
             self.show_prompts(None)
             return
@@ -267,7 +278,11 @@ def active_work(members, accent):
     work = Text("ACTIVE WORK\n", style=theme.OVERLAY1)
     for agent in members[:4]:
         work.append("\n" + clean(agent["name"]) + "\n", style=accent)
-        work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
+        if summary_label(agent):
+            work.append_text(summary_text(agent, empty=""))
+            work.append("\n")
+        else:
+            work.append(clean(agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
     if not members:
         work.append("\nNo agents yet. Select this group and press n.")
     return work

@@ -1,6 +1,6 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import error_text, phase_label, shorten, state, live_label
+from ..display import error_text, model_label, phase_label, shorten, state, summary_label, live_label
 from ..runtime import lifecycle
 from ..universe import focus
 from .. import universe
@@ -10,9 +10,11 @@ NAME_WIDTH = 24
 COLUMNS = {
     "name": lambda row, root, wide: row["name"],
     "status": lambda row, root, wide: state(row),
-    "phase": lambda row, root, wide: phase_label(row) or "?",  # a blocked agent's says on what: `blocked (user)`
-    "summary": lambda row, root, wide: " ".join((row.get("summary") or "").split()) if wide else shorten(row.get("summary", "")),
+    "phase": lambda row, root, wide: phase_label(row) or "?",  # with how long ago it was reported: `working (10m)`
+    # led by what a blocked agent waits on: `Waiting for user: decide the model list`
+    "summary": lambda row, root, wide: summary_label(row) if wide else shorten(summary_label(row)),
     "harness": lambda row, root, wide: row.get("harness") or "?",
+    "model": lambda row, root, wide: model_label(row),  # its display name and effort: `Opus 5.5 (xhigh)`
     "universe": lambda row, root, wide: place(row, root) or ".",
     "id": lambda row, root, wide: row.get("id") or "",
 }

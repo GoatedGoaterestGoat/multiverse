@@ -3,6 +3,7 @@ from itertools import chain
 from pathlib import Path
 
 from .. import universe
+from ..store import exists_replaced
 from . import agents, records
 
 
@@ -16,7 +17,7 @@ def select(root, reporter, reference, target_universe=None):
     name = reference.removeprefix('agent:').strip()
     if not name or ',' in name:
         raise ValueError('--blocked-on names one agent, user, or self')
-    directory = agents.directory(scope, name)
+    directory = agents.directory(scope, name, universe_option='--blocked-on-universe')
     target = records.properties(directory / 'properties.json')
     if directory.resolve() == reporter.resolve():
         return {'kind': 'self'}
@@ -55,7 +56,7 @@ def _top(root):
 def _find(scope, identity):
     # Normally one record read. Also cover a legacy folder named differently from its saved ID.
     direct = scope / 'state' / 'agents' / identity / 'properties.json'
-    paths = [direct] if direct.exists() else agents.record_paths(scope)
+    paths = [direct] if exists_replaced(direct) else agents.record_paths(scope)
     for path in paths:
         try:
             value = records.properties(path)

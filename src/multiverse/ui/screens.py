@@ -46,8 +46,8 @@ Esc              Cancel
 
 INLINE NEW AGENT
 n                Add a draft row in the selected group
-Tab / Shift-Tab  Name → harness → model
-↑ / ↓           Choose a configured harness; Enter creates the agent
+Tab / Shift-Tab  Name → harness → model → effort (where the model takes one)
+↑ / ↓           Choose a harness, model or effort from its list; Enter creates the agent
 Enter            Create; Esc discards the draft
 
 MOUSE

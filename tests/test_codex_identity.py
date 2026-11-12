@@ -80,10 +80,12 @@ class PlainRefusalTest(unittest.TestCase):
         it scrapes Codex's TUI text, and a false positive marks a healthy agent refused (3a83ea2, 661fc41)."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
-        current = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.0.json').read_text())
+        previous = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.0.json').read_text())
+        current = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.1.json').read_text())
+        latest = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.2.json').read_text())
         # Each release admits its own captured footer, including every public version representation.
         for release, frames in (('0.163.0', captures), ('0.164.0', captures),
-                                ('0.166.0', captures), ('0.167.0', current)):
+                                ('0.166.0', captures), ('0.167.0', previous), ('0.167.1', current), ('0.167.2', latest)):
             parts = tuple(map(int, release.split('.')))
             for version in (release, 'codex-cli ' + release, parts, list(parts)):
                 for capture in frames:
@@ -97,7 +99,7 @@ class PlainRefusalTest(unittest.TestCase):
                         self.assertIsNone(adapter.launch_refusal(evidence))
         snapshots = json.loads((Path(__file__).parent / 'fixtures/codex/upstream-screens-0.167.0.json').read_text())
         remapped = next(row for row in snapshots if row['name'] == 'ownership refusal remapped keymap')
-        self.assertIsNotNone(adapter.launch_refusal({'cli_version': '0.167.0',
+        self.assertIsNotNone(adapter.launch_refusal({'cli_version': '0.167.1',
             'cursor_visible': False, 'text': remapped['text']}))
         # Source-derived variants from rendering.rs, key_hint.rs and keymap.rs,
         # not additional tmux captures. The transcript hint may be absent or remapped.
@@ -124,7 +126,10 @@ class PlainRefusalTest(unittest.TestCase):
             with self.subTest(invalid_transcript_hint=hint):
                 self.assertIsNone(adapter.launch_refusal({**current[0],
                     'text': current[0]['text'].replace('⌃t transcript', hint + ' transcript')}))
-        self.assertIsNone(adapter.launch_refusal({**captures[0], 'cli_version': '0.167.0'}))
+        for version in ('0.167.0', '0.167.1', '0.167.2'):
+            self.assertIsNone(adapter.launch_refusal({**captures[0], 'cli_version': version}))
+        self.assertFalse(adapter.supports_launch_refusal('0.167.3'))
+        self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.167.3'}))
         self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.166.0'}))
         for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev', 'codex-cli codex-cli 0.163.0',
                         {}, [0, 163], [False, 163, False], (0, '163', 0), True):

@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 
 from ..harnesses.types import normalize_session_id
-from ..store import lock, now, read, uid, write
+from ..store import retry_missing, lock, now, read, uid, write
 from . import parent, tree, records
 
 
@@ -99,12 +99,13 @@ def _recorded_homes(data):
     return [data.get('native_session_home'), *homes]
 
 
-def journal(directory):
+def journal(directory, *, observed_missing=()):
     path = directory / 'sessions.jsonl'
-    if not path.exists():
-        return []
+    if path in observed_missing:
+        return []  # Initial diagnostic snapshot only; authority callers use a fresh read.
     rows, identities = [], set()
     try:
+        # The journal is append-only: absence is not an atomic-replacement gap.
         with path.open() as stream:
             while line := stream.readline(16385):
                 if not line.endswith('\n') or len(line) > 16384:
@@ -154,14 +155,16 @@ def journal(directory):
                     raise ValueError('storage changes without retirement')
                 identities.add(row['id'])
                 rows.append(row)
+    except FileNotFoundError:
+        return []
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise JournalError(directory, f'cannot read ({error})' if isinstance(error, OSError) else str(error)) from error
     return rows
 
 
-def effective(directory, data):
+def effective(directory, data, *, observed_missing=()):
     """Validate a journal and compute its authoritative pointer, without writes."""
-    rows = journal(directory)
+    rows = journal(directory, observed_missing=observed_missing)
     if rows:
         last = rows[-1]
         if any(row['harness'] != data.get('harness') for row in rows):
@@ -238,7 +241,7 @@ def pending_fresh(directory, data):
     for launch in launches:
         for name in ('request.json', 'ready', 'cleanup.json', 'roles'):
             try:
-                (directory / 'launches' / launch / name).lstat()
+                retry_missing((directory / 'launches' / launch / name).lstat)
             except FileNotFoundError:
                 continue
             raise ValueError('The fresh conversation launch was already published; verify its native ID and bind it before resuming')

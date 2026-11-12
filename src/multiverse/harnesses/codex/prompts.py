@@ -9,8 +9,9 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
-from ..types import NativeResult
+from ..types import NativeResult, PromptInput
 from . import prompt_codec as codec
+from . import async_questions
 from .prompt_files import Candidate, Files, identifier
 
 
@@ -138,22 +139,31 @@ def submit(session, answer, executor):
     found = catalog(session)
     if found.state != 'ok':
         return found
-    if session.status != 'waiting':
-        return NativeResult('unavailable', 'The agent is not waiting on this prompt; nothing was sent')
     try:
         identifier(answer.id)
         if not any(row.get('id') == answer.id and row.get('answerable') is True for row in found.value['prompts']):
             return NativeResult('unavailable', 'That exact prompt is no longer known to be open; nothing was sent')
         files = files_for(session)
         record = files.read(answer.id + '.open.json')
-        if not scoped(record, files, session.native_id, answer.id) or request_id(record.get('request_id')) is None:
+        asynchronous = record.get('method') == async_questions.METHOD
+        if (not scoped(record, files, session.native_id, answer.id)
+                or not asynchronous and request_id(record.get('request_id')) is None):
             raise ValueError('The prompt changed launch or conversation')
+        if not asynchronous and session.status != 'waiting':
+            return NativeResult('unavailable', 'The agent is not waiting on this prompt; nothing was sent')
         offer = codec.describe(record['method'], record['params'], item=record.get('item'))
         if (offer is None or json.dumps(offer.public(answer.id), sort_keys=True)
                 != json.dumps(record['prompt'], sort_keys=True)):
             raise ValueError('The native prompt choices changed')
-        offer.response(asdict(answer))
+        response = offer.response(asdict(answer))
         executor.check_session()
+        if asynchronous:
+            value = {'schema': 1, 'launch_id': session.launch_id, 'native_id': session.native_id,
+                     'id': answer.id, 'input_id': 'prompt-' + answer.id}
+            claim = files.claim_input(answer.id, value)
+            if not claim.won:
+                return NativeResult('ok', value=claim.outcome())
+            return NativeResult('ok', value=PromptInput(value['input_id'], response))
         return executor.write_prompt_answer(session, answer)
     except (OSError, ValueError, TypeError, KeyError):
         return NativeResult('unavailable', 'The exact prompt or its offered response cannot be verified; nothing was sent')
@@ -180,6 +190,8 @@ class Relay:
         self.connection = connection
         self.files = Files(context.get('agent_directory'), context.get('launch_id'))
         self.records, self.by_request, self.items = OrderedDict(), {}, OrderedDict()
+        self.by_question = {}
+        self.async_overflow = False
         self.jobs = Jobs()
         self.partial = False
         self.disabled = False
@@ -223,13 +235,15 @@ class Relay:
             return
         open_ids = [r['id'] for r in self.records.values() if r['open'] and r['native_id'] == self.native_id]
         self.revision += 1
-        reason = ('Some native prompts were not captured by this owning connection; answer those in the terminal'
+        reason = ('Further async questions this launch can only be answered in the terminal because the prompt registry reached its bound'
+                  if self.async_overflow else
+                  'Some native prompts were not captured by this owning connection; answer those in the terminal'
                   if self.partial else None)
-        if not open_ids:
+        if not open_ids and not self.async_overflow:
             reason = 'No primary waiting request has been observed on this relay connection; answer in the terminal'
         value = {**self.envelope(self.native_id), 'active': self.eligible(), 'revision': self.revision,
                  'updated': time.time(), 'open': open_ids,
-                 'coverage': 'unknown' if self.partial or not open_ids else 'complete', 'reason': reason}
+                 'coverage': 'unknown' if self.partial or self.async_overflow or not open_ids else 'complete', 'reason': reason}
         self.jobs.append(('write', 'index.json', value))
         self.heartbeat = time.monotonic()
 
@@ -239,13 +253,33 @@ class Relay:
                  'choices': deepcopy(record['offer'].choices), 'questions': deepcopy(record['offer'].questions),
                  'saved_rule': state == 'sent_first' and record.get('saved_rule', False)}
         record['result'] = value
-        self.jobs.append(('write', record['id'] + '.result.json', value))
+        action = 'settle' if record.get('async') and state != 'submitted' else 'write'
+        self.jobs.append((action, record['id'] + '.result.json', value))
+
+    def applied(self, results):
+        """Only the relay loop imports outcomes from its off-loop file worker."""
+        for id, value, disposition in results or ():
+            record = self.records.get(id)
+            if record is not None and scoped(value, self.files, record['native_id'], id):
+                record['result'] = value
+                record['open'] = False
+                if disposition in ('input', 'unknown', 'uncertain'):
+                    record['attempted'] = True
 
     def close_record(self, record, cause, reason):
         if record['open']:
             record['open'] = False
             self.jobs.extend([('remove', record['id'] + '.open.json', None),
                               ('discard', record['id'] + '.answer.json', None)])
+        if record.get('async'):
+            if record.get('result', {}).get('state') == 'person':
+                return
+            if record['attempted']:
+                self.result(record, 'unknown', reason + ' An ordinary answer input was reserved; its delivery '
+                            'is unconfirmed. Read its result and do not send it again.', cause=cause)
+            else:
+                self.result(record, 'gone', reason + ' No mv2 answer was sent.', cause=cause)
+            return
         if record.get('local'):
             if not record.get('resolved') or not record.get('effect'):
                 record['contradiction'] = True
@@ -257,6 +291,9 @@ class Relay:
         """Release the optional feature without disabling the native terminal."""
         self.disabled = True
         for record in self.records.values():
+            if record.get('async'):
+                self.close_record(record, 'connection_lost', 'The prompt relay connection ended.')
+                continue
             if record['open']:
                 record['open'] = False
                 self.jobs.extend([('remove', record['id'] + '.open.json', None),
@@ -304,7 +341,10 @@ class Relay:
                         and thread['status'].get('type') == 'idle' and isinstance(thread.get('id'), str)):
                     # Only a later accepted owning bind can use this candidate.
                     self.binding_mode = thread['id']
-            if direction == 'incoming' and value.get('method') in codec.METHODS:
+            if direction == 'incoming' and (value.get('method') in codec.METHODS
+                    or value.get('method') == 'item/completed' and isinstance(value.get('params'), dict)
+                    and isinstance(value['params'].get('item'), dict)
+                    and value['params']['item'].get('questions')):
                 self.partial = True  # A request observed before binding is not a complete inventory.
             return
         self.synchronize()
@@ -340,11 +380,19 @@ class Relay:
                     self.mode_requests[key] = method
             if method == 'turn/interrupt':
                 for record in self.records.values():
-                    if (record['target_id'] == target and record['turn'] in (None, params.get('turnId'))
+                    if (not record.get('async') and record['target_id'] == target and record['turn'] in (None, params.get('turnId'))
                             and (record['open'] or record['local'])):
                         self.close_record(record, 'interrupted', 'An interruption was requested; this prompt may be closing.')
                 self.index()
             return
+        item = params.get('item')
+        if (method == 'item/completed' and (primary or side) and isinstance(item, dict)
+                and item.get('type') == 'agentMessage' and item.get('delivery') == 'async'):
+            self.async_request(params, terminal_only=('/btw side conversation' if side else
+                'review' if self.review_turns or self.mode == 'review' or 'review/start' in self.mode_requests.values()
+                else 'conversation whose current mode is unknown' if self.mode != 'normal' else None))
+        elif (primary or side) and method in ('item/started', 'item/completed') and isinstance(item, dict) and item.get('type') == 'userMessage':
+            self.async_reply(item, target)
         if primary and method in ('item/started', 'item/completed', 'item/fileChange/patchUpdated'):
             item = params.get('item')
             if method == 'item/fileChange/patchUpdated':
@@ -387,7 +435,7 @@ class Relay:
             if primary and method == 'turn/completed' and turn.get('id') in self.review_turns:
                 self.leave_review(turn['id'])
             for record in self.records.values():
-                if record['target_id'] == target and (method == 'turn/completed' and record['turn'] in (None, turn.get('id'))
+                if not record.get('async') and record['target_id'] == target and (method == 'turn/completed' and record['turn'] in (None, turn.get('id'))
                         or method == 'turn/started' and record['turn'] != turn.get('id') and not record['review']):
                     cause = 'interrupted' if turn.get('status') == 'interrupted' else 'turn_ended'
                     self.close_record(record, cause, 'The native turn was interrupted.' if cause == 'interrupted'
@@ -396,6 +444,106 @@ class Relay:
         elif primary and 'id' in value:
             self.partial = True
             self.index()
+
+    def async_request(self, params, *, terminal_only=None):
+        item, turn = params['item'], params.get('turnId')
+        questions, item_id = item.get('questions'), item.get('id')
+        if (not isinstance(questions, list) or not isinstance(item_id, str) or not 1 <= len(item_id) <= 4096
+                or not isinstance(turn, str) or not 1 <= len(turn) <= 4096):
+            self.partial = True
+            self.index()
+            return
+        for index, question in enumerate(questions):
+            key = (params['threadId'], item_id, index)
+            replay = replay_digest(question)
+            existing = self.records.get(self.by_question.get(key))
+            if existing is not None:
+                if replay is None or existing['replay'] != replay:
+                    self.close_record(existing, 'unconfirmed' if replay is None else 'replaced',
+                                      'The native async question identity no longer has matching verifiable data.')
+                    self.async_overflow = self.partial = True
+                continue
+            if self.async_overflow:
+                break  # Never admit an untracked or overflowed ID later in this launch.
+            if len(self.records) >= MAX_RETAINED or sum(r['open'] for r in self.records.values()) >= MAX_REQUESTS:
+                self.async_overflow = self.partial = True
+                break
+            native = {'threadId': params['threadId'], 'turnId': turn, 'itemId': item_id,
+                      'questionIndex': index, 'question': question}
+            offer = codec.describe(async_questions.METHOD, native)
+            if terminal_only:
+                offer.params, offer.questions = {}, []
+                offer.answerable = False
+                offer.summary = 'Question in a ' + terminal_only
+                offer.reason = 'Answer this ' + terminal_only + ' question in the terminal'
+                offer.detail = {'terminal_only': True}
+            id = str(uuid4())
+            try:
+                native_question = async_questions.question_id(item_id, index)
+            except (ValueError, UnicodeError):
+                native_question = None
+            record = {'id': id, 'request': None, 'method': async_questions.METHOD, 'replay': replay,
+                      'question_id': native_question,
+                      'native_id': self.native_id, 'target_id': params['threadId'], 'turn': turn, 'offer': offer,
+                      'review': False, 'item': None, 'async': True, 'open': True, 'local': False,
+                      'resolved': False, 'attempted': False, 'contradiction': False, 'sent': False, 'effect': None}
+            self.records[id] = record
+            self.by_question[key] = id
+            self.publication(record)
+        self.index()
+
+    def async_reply(self, item, target, *, terminal=False):
+        replies = async_questions.replies(item.get('content'))
+        if not replies:
+            return ()
+        closed = []
+        for record in self.records.values():
+            if (not record.get('async') or record['target_id'] != target
+                    or not record['open'] and not terminal):
+                continue
+            if not record.get('question_id') or item.get('clientId') == 'prompt-' + record['id']:
+                continue  # Core, not a native callback winner, reconciles mv2's ordinary input.
+            reply = next((v for v in replies if v['questionItemId'] == record['question_id']), None)
+            if reply is None:
+                continue
+            record['open'] = False
+            self.jobs.append(('remove', record['id'] + '.open.json', None))
+            self.result(record, 'person', 'This exact question was answered by native structured input; '
+                        'no mv2 answer was sent.', cause='person',
+                        person=(codec.public_answer({'answers': {'answer': [reply['answer']]}})
+                                if record['offer'].answerable else None))
+            closed.append(record)
+        self.index()
+        return closed
+
+    async def before_send(self, value):
+        """Publish the shared winner before terminal input can reach the daemon."""
+        params = value.get('params')
+        if (value.get('method') not in ('turn/start', 'turn/steer') or request_id(value.get('id')) is None
+                or not isinstance(params, dict) or params.get('threadId') != self.connection.root.native_id
+                or self.connection.owns_primary() is not True):
+            return
+        # This fence also applies after the optional inventory worker has failed:
+        # its old open snapshot may still be readable by another process.
+        closed = self.async_reply({'content': params.get('input'),
+                                   'clientId': params.get('clientUserMessageId')}, params['threadId'], terminal=True)
+        jobs = tuple(('settle', record['id'] + '.result.json', record['result']) for record in closed)
+        if jobs:
+            winners = ('person', 'input', 'closed')
+            if self.disabled or self.closed:
+                claims = await asyncio.to_thread(lambda: [self.files.input_claim(record['id'], record['native_id'])
+                                                         for record in closed])
+                valid = len(claims) == len(jobs) and all(claim.disposition in winners for claim in claims)
+            else:
+                results = await asyncio.to_thread(self.files.apply, jobs)
+                valid = len(results) == len(jobs) and all(disposition in winners for _, _, disposition in results)
+                if valid:
+                    self.applied(results)
+            if not valid:
+                raise ValueError('The terminal answer winner could not be published; input was not forwarded')
+            if (params['threadId'] != self.connection.root.native_id
+                    or self.connection.owns_primary() is not True):
+                raise ValueError('The conversation owner changed; input was not forwarded')
 
     def review_marker(self, params, item):
         turn = params.get('turnId')
@@ -458,8 +606,8 @@ class Relay:
         if len(self.records) >= MAX_RETAINED:
             # Keep the tombstones that suppress late terminal responses. Do not
             # silently evict them and allow a reused ID to inherit an answer.
-            self.partial = True
-            self.disable()
+            self.partial = self.async_overflow = True
+            self.index()
             return
         if sum(r['open'] for r in self.records.values()) >= MAX_REQUESTS:
             self.partial = True
@@ -477,6 +625,7 @@ class Relay:
         id = str(uuid4())
         record = {'id': id, 'request': deepcopy(value['id']), 'method': value['method'],
                   'replay': replay,
+                  'countdown_question': value['method'] == 'item/tool/requestUserInput' and params.get('isBlocking') is False,
                   'native_id': self.native_id, 'target_id': params['threadId'], 'turn': params.get('turnId'), 'offer': offer,
                   'review': terminal_only == 'review', 'review_turn': self.mode_turn if terminal_only == 'review' else None,
                   'item': deepcopy(item), 'open': True, 'local': False, 'resolved': False,
@@ -495,8 +644,16 @@ class Relay:
             return True
         if record['local']:
             return False  # A late duplicate must not consume another native callback.
+        reason = 'The person replied to this prompt in the terminal first; mv2 did not send an answer.'
+        native_reply = value.get('result')
+        if (record['method'] == 'item/tool/requestUserInput'
+                and record.get('countdown_question') is True
+                and isinstance(native_reply, dict) and set(native_reply) == {'answers'}
+                and native_reply['answers'] == {}):
+            reason = ('The terminal replied with no answers, as it does when nobody answers before its countdown ends; '
+                      'the person may also have sent it. mv2 did not send an answer.')
         if record.get('terminal_only'):
-            self.result(record, 'person', 'The person replied in the terminal; mv2 did not send an answer.',
+            self.result(record, 'person', reason,
                         cause='person', person=record['offer'].person_answer(value.get('result')))
             return True
         if not self.eligible() or not record['open']:
@@ -504,7 +661,7 @@ class Relay:
         record['open'] = False
         self.jobs.extend([('remove', record['id'] + '.open.json', None),
                           ('discard', record['id'] + '.answer.json', None)])
-        self.result(record, 'person', 'The person replied to this prompt in the terminal first; mv2 did not send an answer.',
+        self.result(record, 'person', reason,
                     cause='person', person=record['offer'].person_answer(value.get('result')))
         self.index()
         return True
@@ -631,6 +788,24 @@ class Relay:
                                     cause='unconfirmed')
                     if not record['open'] or record['attempted']:
                         continue
+                    if record.get('async'):
+                        claim = await asyncio.to_thread(self.files.input_claim, record['id'], record['native_id'])
+                        if claim.disposition == 'unclaimed':
+                            continue
+                        if claim.disposition == 'input':
+                            record['attempted'], record['open'] = True, False
+                            self.jobs.append(('remove', record['id'] + '.open.json', None))
+                            self.result(record, 'submitted', 'An ordinary answer input was reserved; read its '
+                                        'delivery result, never send it again.')
+                            self.index()
+                        else:
+                            record['open'] = False
+                            record['attempted'] = claim.disposition in ('unknown', 'uncertain')
+                            self.jobs.append(('remove', record['id'] + '.open.json', None))
+                            value = claim.outcome()
+                            self.result(record, value['state'], value['reason'], cause=value['cause'])
+                            self.index()
+                        continue
                     if not record['offer'].answerable:
                         self.jobs.append(('discard', record['id'] + '.answer.json', None))
                         continue
@@ -650,7 +825,7 @@ class Relay:
                             candidate.answer.clear()
             jobs, self.jobs = self.jobs, Jobs()
             if jobs:
-                await asyncio.to_thread(self.files.apply, jobs)
+                self.applied(await asyncio.to_thread(self.files.apply, jobs))
             await asyncio.sleep(POLL)
 
     async def close(self):
@@ -663,10 +838,11 @@ class Relay:
             self.jobs.extend([('remove', record['id'] + '.open.json', None),
                               ('discard', record['id'] + '.answer.json', None)])
             if record.get('result'):
-                self.jobs.append(('write', record['id'] + '.result.json', record['result']))
+                action = 'settle' if record.get('async') else 'write'
+                self.jobs.append((action, record['id'] + '.result.json', record['result']))
         jobs, self.jobs = self.jobs, Jobs()
         if jobs:
             try:
-                await asyncio.to_thread(self.files.apply, jobs, final=True)
+                self.applied(await asyncio.to_thread(self.files.apply, jobs, final=True))
             except (OSError, ValueError):
                 pass  # Absent/stale files cannot be used as proof of a live prompt.

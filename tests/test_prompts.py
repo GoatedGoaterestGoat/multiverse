@@ -145,6 +145,9 @@ class PromptTest(BaseTest):
                                                'message': 'PRIVATE REFUSAL MESSAGE'}})
         result = prompts.result(self.root, self.agent, self.prompt_id)
         self.assertEqual(result.person_answer, {'answers': {'one': ['B']}, 'typed': {'text': ['PERSON TYPED TEXT']}})
+        self.assertEqual((result.state, result.cause), ('person', 'person'))
+        self.assertEqual(result.reason, 'This prompt was answered in its terminal first; mv2 did not send its answer.')
+        self.assertEqual(store.read(record)['result']['reason'], result.reason)
         self.assertNotIn('PRIVATE', str(result))
         self.assertNotIn('PRIVATE', record.read_text())
         for call in self.events.call_args_list:
@@ -385,7 +388,7 @@ class PromptTest(BaseTest):
 
     def test_unanswered_result_reads_closure_without_creating_or_consuming_an_answer(self):
         """A missing core attempt must still explain closure, without sending, repairing state or hiding damaged records."""
-        for name in ('.launch.lock', '.prompts.lock'):
+        for name in ('.launch.lock', '.delivery.lock', '.prompts.lock'):
             with store.lock(self.directory / name):
                 pass
         before = {p.relative_to(self.directory): p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}

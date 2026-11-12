@@ -6,7 +6,8 @@ from collections.abc import Mapping
 OPEN_ELSEWHERE = 'This conversation is open in another app'
 CLOSE_ELSEWHERE = 'Close it there and press R to continue here.'
 # Retain earlier checked screens and unmanaged side-thread protocols when adding a release.
-SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0), (0, 166, 0), (0, 167, 0))
+COMMAND_CENTER_VERSIONS = ((0, 167, 0), (0, 167, 1), (0, 167, 2))
+SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0), (0, 166, 0)) + COMMAND_CENTER_VERSIONS
 
 
 def supports_plain_refusal(version):
@@ -88,9 +89,9 @@ def plain_refusal(evidence):
         return None
     block = ' '.join(' '.join(lines[candidates[-1]:]).split())
     version = evidence.get('cli_version')
-    command_center = (version.removeprefix('codex-cli ') == '0.167.0' if isinstance(version, str)
-                      else tuple(version) == (0, 167, 0))
-    if command_center:
+    if isinstance(version, str):
+        version = tuple(map(int, version.removeprefix('codex-cli ').split('.')))
+    if tuple(version) in COMMAND_CENTER_VERSIONS:
         # Pinned rendering.rs uses Esc alone when Left is remapped. Its optional
         # transcript hint is a configured single key or two-key chord; key_hint.rs
         # renders platform modifiers and keymap.rs limits function keys to F1-F24.

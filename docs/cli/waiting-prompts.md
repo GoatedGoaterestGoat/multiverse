@@ -1,6 +1,8 @@
-# Answer a waiting agent
+# Answer an agent's prompts and questions
 
 When an agent's status is `waiting`, it is stopped at a prompt in its terminal: a permission prompt, a question it asked you, a plan to approve, or a form. `mv2 answer` shows that prompt with the choices the harness offers, and answers it through the harness's own answer path. The agent gets what it would get if you had answered in its terminal. It works for agents whose harness supports it, with a live connection; `mv2 capabilities --agent NAME` says `answer: unavailable` and why for the others.
+
+Codex can also ask asynchronous questions while it carries on working. mv2 lists these retained questions and accepts an answer without requiring `waiting`. Each has its own prompt ID, even when several have the same wording. Questions observed in this launch remain available until answered, the conversation switches or the launch ends; history is not imported. The answer is ordinary conversation input tagged with the original question's native ID.
 
 ```sh
 mv2 answer worker                                  # the prompts it waits on, each with its ID
@@ -14,7 +16,7 @@ Only a person, from a terminal that isn't an agent's, or a plugin can read or an
 
 ## Read the prompts
 
-`mv2 answer NAME` lists every prompt the agent waits on now. Each line shows the prompt's ID, its kind, and what it is about, such as the command or file a permission prompt asks about. Under it are its choices, or its questions, numbered:
+`mv2 answer NAME` lists the prompts the agent waits on and its retained asynchronous questions. Each line shows the prompt's ID, its kind, and what it is about, such as the command or file a permission prompt asks about. Under it are its choices, or its questions, numbered:
 
 ```text
 4f2c9a1e  permission  Bash: rm -rf build
@@ -25,7 +27,9 @@ Only a person, from a terminal that isn't an agent's, or a plugin can read or an
 
 A choice marked `saves a rule` also changes your saved settings, such as always allowing a command, and only a person can give it. A prompt mv2 can't answer says why, often "answer it in the terminal". When mv2 can't tell whether it sees every prompt the agent waits on, the list ends with `Coverage unknown` and the reason.
 
-A prompt can be answered only while it is open and the agent is `waiting`. mv2 never answers a prompt in advance or holds an answer for a later one.
+A permission prompt, plan, form or blocking question can be answered only while it is open and the agent is `waiting`. A Codex asynchronous question is marked as not needing the agent to wait. mv2 never substitutes a newer question for the ID you give.
+
+Codex keeps an asynchronous question card's skipped state inside its terminal. Skipping a card does not withdraw the question from mv2: an answer can still be delivered to the conversation, where the agent acts on it as ordinary input. The ID identifies the original question; it does not ask Codex to reject the answer if the card has gone. If the terminal and mv2 both submit answers, the conversation can receive both.
 
 ## Answer
 
@@ -45,7 +49,7 @@ EOF
 
 `mv2 answer` refuses a secret answer or note on the command line, where your shell history and the process list would keep it. mv2 never shows a secret answer back or records it.
 
-Before it sends an answer given on the command line, `mv2 answer` reads the prompt to find its questions and to check that none is secret. If that prompt isn't among the ones it can read, it sends nothing and says what became of it: the person answered or refused it in the terminal first, it closed, the agent isn't running, or mv2 already answered it. Only when mv2 can't tell does it say to read the prompts again or to use `--stdin`. An error never quotes the answer or note you typed.
+Before it sends an answer given on the command line, `mv2 answer` reads the prompt to find its questions and to check that none is secret. If that prompt isn't among the ones it can read, it sends nothing and says what became of it: it was answered or refused in its terminal first, it closed, the agent isn't running, or mv2 already answered it. Only when mv2 can't tell does it say to read the prompts again or to use `--stdin`. An error never quotes the answer or note you typed.
 
 ## Read the outcome
 
@@ -53,16 +57,22 @@ The answer waits up to 30 seconds for its outcome; change that with `--timeout`,
 
 | Outcome | Means |
 | --- | --- |
-| Answered | mv2's answer took. It says when the choice was one that saves a rule to your settings, which the harness then writes |
-| The person answered first | Someone answered in the terminal before mv2's answer arrived. It says what they chose when the harness shows it |
+| Answered | mv2's answer took, or a Codex asynchronous answer was confirmed as input in the conversation. The reason says which. It says when the choice was one that saves a rule to your settings, which the harness then writes |
+| Answered in the terminal first | Someone answered in the terminal, or the Codex terminal itself after its countdown, before mv2's answer arrived. It says what was submitted when the harness shows it |
 | The prompt closed | The prompt closed another way: Esc, the turn ended, or the agent stopped |
 | Sent first | mv2's answer went to the agent ahead of any answer from its terminal, but the harness doesn't confirm it took it (Codex) |
 | Sent, outcome not known yet | Read it later with `--result ID` |
 | Can't tell which answer took | Sent, but mv2 can't say whether it or the person's answer took |
 | Not sent | The answer was refused, and the reason says why |
 
+Some Codex question dialogs automatically submit an empty answer when their countdown ends. That response looks the same as submitting no answers yourself. The result says the terminal replied; it cannot identify which happened.
+
 When an answer didn't take, the result says why: as fact when mv2 knows, such as the person answering first, the turn ending, or the agent waiting on another prompt by now (then `mv2 answer NAME` shows that one), and as possible explanations when it doesn't. It never tells you to answer again after an answer was sent.
 
 The command exits 1 unless the answer took, went first, or is still pending. Each prompt takes one answer: mv2 never sends an answer twice, and `--result` only reads. For a prompt mv2 sent no answer to, `--result` says what became of it, or that it is still open. `--json` prints the whole result.
 
 Each answer is recorded in the agent's `prompts/` folder: who answered, the prompt's kind and tool, the choice and the labels chosen, and the outcome, never a secret answer.
+
+An asynchronous answer uses Codex's existing delivery path and receipt checks. Accepted or queued input is `submitted` until its client message ID appears in the conversation; that confirmation is `answered`. It confirms delivery of the answer, not whether the question card was open or what the agent did with it. An uncertain submission is never sent again by a result check.
+
+A pending or uncertain asynchronous answer blocks in-terminal conversation switches for that launch. Read its outcome with `--result ID`. Replacing the launch ends this local guard without resending the answer or proving its delivery. Native idle and empty-queue checks still apply to later switches.

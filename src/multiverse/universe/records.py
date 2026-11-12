@@ -7,11 +7,12 @@ RecordError, which says which file and why in one line, for the caller to report
 only what a reader depends on, not a schema: a record that merely lacks a field is still readable.
 """
 from pathlib import Path
+import errno
 import json
 import os
 import re
 
-from ..store import open_regular
+from ..store import open_replaced
 
 MAX_BYTES = 8 * 1024 * 1024  # a record is a few kilobytes; a file this large is not one
 
@@ -34,19 +35,23 @@ def _kind(value):
             float: "a number", type(None): "null"}.get(type(value), type(value).__name__)
 
 
-def _object(path):
-    """The JSON object in `path`; RecordError (never another exception) for anything else."""
+def _object(path, *, missing_ok=False, growing=False):
+    """A JSON object, or None for exhausted ENOENT with missing_ok; other failures are RecordError."""
     path = Path(path)
+    max_bytes = None if growing else MAX_BYTES
     try:
-        with open_regular(path) as stream:
-            if os.fstat(stream.fileno()).st_size > MAX_BYTES:
-                raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
-            raw = stream.read(MAX_BYTES + 1)
-        if len(raw) > MAX_BYTES:
-            raise RecordError(path, f"larger than {MAX_BYTES // (1024 * 1024)} MiB")
+        with open_replaced(path) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if max_bytes is not None and size > max_bytes:
+                raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
+            raw = stream.read(size if max_bytes is None else max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
     except RecordError:
         raise
     except OSError as error:
+        if missing_ok and error.errno == errno.ENOENT:
+            return None
         raise RecordError(path, f"cannot be read: {error.strerror or type(error).__name__}") from None
     if not raw.strip():
         raise RecordError(path, "is empty")
@@ -61,6 +66,11 @@ def _object(path):
     if not isinstance(data, dict):
         raise RecordError(path, f"must be a JSON object, not {_kind(data)}")
     return data
+
+
+def ledger(path):
+    """An optional growing inbox ledger; size alone is not damage, unlike a launch/identity record."""
+    return _object(path, missing_ok=True, growing=True) or {}
 
 
 def properties(path, *, harness_optional=False):
@@ -89,14 +99,22 @@ def properties(path, *, harness_optional=False):
                           error.data) from None
 
 
-def runtime(path):
-    """An agent's `runtime.json` as a dict, {} when the agent never launched; RecordError when it cannot be used."""
-    if not Path(path).exists():
-        return {}
+def runtime(path, *, required=False):
+    """Read an optional record; launch callers must corroborate absence before treating an agent as never launched.
+
+    Network filesystems may briefly return ENOENT while a writer replaces this file.
+    Only that error is retried; damage and other I/O errors remain immediate failures.
+    `required` is for callers already carrying launch authority, never optional ledgers.
+    """
+    path = Path(path)
     try:
-        return _object(path)
+        data = _object(path, missing_ok=True)
+        if data is not None:
+            return data
+        if not required:
+            return {}
+        raise RecordError(path, 'is missing after retrying; current launch authority cannot be verified')
     except RecordError as error:
-        path = Path(path)
         if path.name != 'runtime.json':
             raise
         remedy = 'restore read access or restore' if error.reason.startswith('cannot be read:') else 'repair or restore'
@@ -108,7 +126,7 @@ def runtime(path):
 def mentions(path, value):
     """Bounded raw evidence scan; absence is useful only when the file was readable."""
     needle, tail, scanned = value.encode().lower(), b'', 0
-    with Path(path).open('rb') as stream:
+    with open_replaced(path) as stream:
         while chunk := stream.read(65536):
             scanned += len(chunk)
             if scanned > MAX_BYTES:

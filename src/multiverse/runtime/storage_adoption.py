@@ -5,6 +5,7 @@ import os
 import stat
 
 from ..harnesses.types import SessionHandle
+from ..store import retry_missing
 from ..universe import storage as records
 from ..universe import records as agent_records, sessions
 from .native import adapter_hook
@@ -52,9 +53,12 @@ def _candidate_home(adapter, environment, base):
     return os.path.realpath(result), selected
 
 
-def _present(path):
+def _present(path, *, replaced=False):
     try:
-        path.lstat()
+        if replaced:
+            retry_missing(path.lstat)
+        else:
+            path.lstat()
         return True
     except FileNotFoundError:
         return False
@@ -80,12 +84,13 @@ def _never_started(adapter, properties, previous, directory):
         for name in ('sessions.jsonl', 'session.jsonl', 'native-delivery.json'):
             path = directory / name
             try:
-                if path.read_bytes().strip():
+                data = retry_missing(path.read_bytes) if name == 'native-delivery.json' else path.read_bytes()
+                if data.strip():
                     return False
             except FileNotFoundError:
                 pass
         try:
-            (directory / 'inbox-state.json').stat()
+            retry_missing((directory / 'inbox-state.json').stat)
         except FileNotFoundError:
             states = {}
         else:
@@ -110,7 +115,8 @@ def _never_started(adapter, properties, previous, directory):
                 return False
             # A ready/request publication could have released a child even if
             # the subsequent runtime write was lost. Never infer exit from it.
-            if any(_present(launch / name) for name in ('request.json', 'ready', 'cleanup.json', 'roles')):
+            if any(_present(launch / name, replaced=name in ('request.json', 'cleanup.json'))
+                   for name in ('request.json', 'ready', 'cleanup.json', 'roles')):
                 return False
         return True
     except (OSError, ValueError, TypeError, AttributeError):
@@ -133,7 +139,7 @@ def _launch_requests(directory):
             if not stat.S_ISDIR(launch.lstat().st_mode):
                 raise ValueError(f'Cannot verify conversation storage: {launch} is not a regular launch directory')
             try:
-                mode = path.lstat().st_mode
+                mode = retry_missing(path.lstat).st_mode
             except FileNotFoundError:
                 continue  # Failed preparations need not have published a request.
             if not stat.S_ISREG(mode):

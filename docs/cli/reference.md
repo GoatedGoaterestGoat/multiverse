@@ -50,7 +50,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`native-status`](#native-status) | Read optional native observations; unavailable and failed observations are explicit. |
 | [`ask`](#ask) | Ask an isolated side question without changing the main conversation. |
 | [`slash`](#slash) | Run a harness command when the agent is idle, or read its command list and results. |
-| [`answer`](#answer) | Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path. |
+| [`answer`](#answer) | Read an agent's prompts and retained questions, and answer one through its harness. |
 | [`get-usage`](#get-usage) | Read measured usage for the exact native session. |
 | [`tui`](#tui) | Browse universes and operate agents. |
 | [`doctor`](#doctor) | Check local definitions and report uncertain agent state. |
@@ -100,7 +100,7 @@ mv2 list [--recursive] [--wide] [--columns COLUMNS] [--json]
 | --- | --- | --- | --- |
 | `--recursive` |  |  |  |
 | `--wide` |  | Show full summaries and errors |  |
-| `--columns` | `COLUMNS` | Show these columns, comma-separated, in this order: name, status, phase, summary, harness, universe, id. One column prints one value per line and nothing else. With --json, name fields of each entry instead, such as id,name,live,status; usage is read only for usage, tokens, usage_detail |  |
+| `--columns` | `COLUMNS` | Show these columns, comma-separated, in this order: name, status, phase, summary, harness, model, universe, id. One column prints one value per line and nothing else. With --json, name fields of each entry instead, such as id,name,live,status; usage is read only for usage, tokens, usage_detail |  |
 | `--json` |  |  |  |
 
 ## catalog
@@ -142,8 +142,8 @@ mv2 spawn --name NAME [--harness HARNESS] [--task TASK | --task-file TASK_FILE] 
 | `--harness` | `HARNESS` | Configured harness name | `codex` |
 | `--task`, `--prompt` | `TASK` | Initial prompt sent to the new agent |  |
 | `--task-file` | `TASK_FILE` |  |  |
-| `--model` | `MODEL` |  |  |
-| `--effort` | `EFFORT` | Effort for this agent only; requires harness support and a known --model; default uses the harness default |  |
+| `--model` | `MODEL` | Model ID or alias; passed to the harness unless a subset or effort requires validation |  |
+| `--effort` | `EFFORT` | Effort for this agent only, from its model's allowed levels; default leaves it unset when permitted |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
 | `--json` |  | Print the full launch record as JSON |  |
@@ -161,8 +161,8 @@ mv2 resume [--model MODEL] [--effort EFFORT] [--start-fresh] [--wait] [--wait-ti
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
-| `--model` | `MODEL` |  |  |
-| `--effort` | `EFFORT` | Effort for this agent only; retained on later resumes; default clears it and uses the harness default |  |
+| `--model` | `MODEL` | Allowed model ID or alias; overrides the recorded choice |  |
+| `--effort` | `EFFORT` | Allowed effort for this agent, retained on later resumes; default clears it when permitted |  |
 | `--start-fresh` |  | Recover a missing conversation with a new one, only after every candidate storage proves it absent |  |
 | `--wait` |  | Wait until the launch is ready or failed |  |
 | `--wait-timeout` | `WAIT_TIMEOUT` | Readiness limit with --wait, in seconds | `60` |
@@ -269,7 +269,7 @@ mv2 inspect [--lines LINES] [--json] agent
 Save and deliver a message to the exact native session.
 
 ```sh
-mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delivery {steer,follow-up,inbox-only}] agent
+mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delivery {steer,follow-up,inbox-only}] [--force] agent
 ```
 
 | Argument | Value | Description | Default |
@@ -281,6 +281,7 @@ mv2 send [--json] [--text TEXT | --file FILE | --stdin] [--queue-only] [--delive
 | `--stdin` |  | Read stdin (automatic for piped or redirected input) |  |
 | `--queue-only` |  | Save inbox-only; becomes a follow-up if the recipient reports being blocked on you |  |
 | `--delivery` | `steer`, `follow-up`, `inbox-only` | Native timing: next safe boundary or the next turn | `steer` |
+| `--force` |  | Send even when the recipient's follow-ups are queued for you |  |
 
 Use at most one of `--text`, `--file`, `--stdin`.
 
@@ -479,7 +480,7 @@ Use at most one of `--list`, `--result`.
 
 ## answer
 
-Read the prompts a waiting agent is blocked on, and answer one through the harness's own answer path.
+Read an agent's prompts and retained questions, and answer one through its harness.
 
 ```sh
 mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--note QUESTION=TEXT] [--stdin] [--result ID] [--timeout TIMEOUT] [--json] agent [id]
@@ -487,7 +488,7 @@ mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--no
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `agent` |  | The waiting agent |  |
+| `agent` |  | The agent, waiting or with retained questions |  |
 | `id` |  | The prompt to answer, as listed |  |
 | `--choice` | `CHOICE` | One of the prompt's choices, such as allow or deny |  |
 | `--message` | `MESSAGE` | Text that goes with the choice, where the choice takes one |  |

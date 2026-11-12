@@ -26,7 +26,7 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from textual.css.query import NoMatches
 from textual.worker import WorkerFailed
 
-from ..display import clean, phase_label
+from ..display import clean, phase_label, summary_label
 from ..plugins import loader
 from . import columns, theme
 from .backend import LocalBackend, usage_identity, usage_key
@@ -39,8 +39,8 @@ from .stale import CodeWatch
 from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
-from .tree import group_key, rate_limits
-from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
+from .tree import group_key, header_counts
+from .widgets import AgentTable, Breadcrumb, DraftMenu, Fleet
 
 
 HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
@@ -137,7 +137,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.inspector = None
         self.draft = None
         self.moving = None  # The row being moved while a destination is chosen.
-        self._harness_options = None
+        self._menu_options = None
         self.scan_count = 0
         self.usage_reading = False  # a usage read is running in its daemon thread
         self.prompt_outcomes = {}  # agent id -> (what the last answer sent from here came to, whether it took)
@@ -163,7 +163,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         yield Static("", id="selection", markup=False)
         yield Static("", id="status", markup=False)
         yield Footer()
-        yield HarnessMenu(id="harness-menu")
+        yield DraftMenu(id="draft-menu")
 
     def get_default_screen(self):
         return MainScreen(id="_default")
@@ -314,23 +314,24 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.show_totals()
 
     def show_totals(self):
-        """The header counts: agents, the account's rate limits, plugin errors and a plugin host that is needed but off."""
+        """The header counts: agents, plugin errors and a plugin host that is needed but off."""
         if not self.snapshot:
             return
         totals = self.snapshot["counts"]
-        limits = rate_limits(self.snapshot["agents"])
         failures = self.plugin_service.error_count() + len((self.host or {}).get("stopped") or ())
-        line = Text((limits + " · " if limits else "")
-                    + f'{totals["alive"]} live · {totals["waiting"]} waiting · '
-                    + (f'{totals["focused"]} focused · ' if totals.get("focused") else '')
-                    + f'{totals["blocked"]} blocked · {totals["total"]} agents'
-                    + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
+        parts = [(header_counts(totals), None),
+                 (f'{failures} plugin error{"s" if failures != 1 else ""}' if failures else '', None)]
         if self.host and self.host.get("needed") and not self.host.get("running"):
-            line.append(" · host off", style=theme.PEACH)
+            parts.append(("host off", theme.PEACH))
         if self.snapshot.get("plugin_trouble"):  # the plugin system itself failed while reading; the agents are unaffected
-            line.append(" · plugins unreadable", style=theme.PEACH)
+            parts.append(("plugins unreadable", theme.PEACH))
         if self.code_watch.stale:  # what is running is no longer what is on disk
-            line.append(" · mv2 changed: reopen", style=theme.PEACH)
+            parts.append(("mv2 changed: reopen", theme.PEACH))
+        line = Text()
+        for text, style in (part for part in parts if part[0]):
+            line.append((" · " if line else "") + text)
+            if style:
+                line.stylize(style, len(line) - len(text))
         self.query_one("#totals", Static).update(line)
 
     @work(group="plugin-host", exclusive=True, exit_on_error=False)
@@ -361,14 +362,43 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.query_one("#agents", DataTable).scroll_to(x=scroll[0], y=scroll[1], animate=False)
         self.query_one("#local-view", LocalView).scroll_to(y=scroll[2], animate=False)
 
-    @on(OptionList.OptionSelected, "#harness-menu")
-    def choose_harness(self, event):
+    @on(OptionList.OptionSelected, "#draft-menu")
+    def choose_option(self, event):
+        """A click in the draft's menu picks that harness, model or effort; a harness moves on to the model."""
         event.stop()
-        if self.draft and not self.operating and event.option_index < len(self.draft.harnesses):
-            self.draft.values["harness"] = self.draft.harnesses[event.option_index]
-            self.draft.focus("model")
+        options = self.draft.options() if self.draft and not self.operating else None
+        if options and event.option_index < len(options):
+            field = self.draft.active
+            self.draft.choose(field, options[event.option_index])
+            if field == "harness":
+                self.draft.focus("model")
             self.populate_table()
             self.query_one("#agents", DataTable).focus()
+
+    def models_if_needed(self):
+        """Read the draft's harness's model list off the event loop, once per harness; a backend without lists types."""
+        draft = self.draft
+        harness = draft.values.get("harness") if draft is not None and hasattr(draft, "choices") else None
+        if not harness or harness in draft.choices or harness in draft.asking:
+            return
+        if not callable(getattr(self.backend, "model_choices", None)):
+            draft.choices[harness] = None
+            return
+        draft.asking.add(harness)
+        self.read_models(draft, harness)
+
+    @work(group="model-choices", exit_on_error=False)
+    async def read_models(self, draft, harness):
+        try:
+            found = await asyncio.to_thread(self.backend.model_choices, draft.scope, harness)
+        except Exception as error:  # the dashboard stays up; the model is typed and spawn checks it
+            found = {"error": str(error) or type(error).__name__}
+        finally:
+            draft.asking.discard(harness)
+        if self.draft is draft:
+            draft.choices[harness] = found
+            draft.settle()
+            self.populate_table()
 
     @on(DataTable.RowHighlighted, "#agents")
     def highlight(self, event):
@@ -776,7 +806,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
             row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
-                   **({"phase": phase_label(row) or "—"} if self.selected else {}),
+                   **({"phase": phase_label(row) or "—", "summary": summary_label(row) or "—"} if self.selected else {}),
                    "fallback_reason": (mode or {}).get("fallback_reason") or "",
                    "plugin_outcomes": plugin_outcomes(row)[0] if self.selected else ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields

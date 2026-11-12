@@ -25,8 +25,8 @@ The rule for both: a lead never deals with, asks about or hears about anything i
 
 ## Delivery between them
 
-- `--delivery follow-up`: a new task with its scope; results the other agent is waiting for; a question or answer your work needs.
-- `--delivery steer`: only something urgent that affects the other agent's work under way, such as a bug you found outside your own scope that breaks it.
-- `--delivery inbox-only`: only FYIs requiring no action and no reply your work depends on, even if read much later. Otherwise use follow-up, or steer when urgent and relevant to current work.
+- Use `--delivery follow-up` when both hold: (a) the recipient needs to act or your work needs a reply; (b) the message can wait until the current turn ends. A new task, a needed reply, or task results are examples.
+- Use `--delivery steer` when both hold: (a) the message is relevant to the recipient's work at hand; (b) they need it before they finish that work. For example, cancel or stop the task the other agent is working on, change a requirement, or say “don't do X”.
+- Use `--delivery inbox-only` when both hold: (a) the recipient needn't act on the message; (b) none of your work waits on a reply. Expect inbox messages not to be read frequently. A background FYI is one example.
 
-Keep asks short: the question plus only what is needed to answer. Put background in notes or inbox-only if both tests pass.
+Keep asks short: the question plus only what is needed to answer. Put background in notes or inbox-only if both inbox-only tests pass.

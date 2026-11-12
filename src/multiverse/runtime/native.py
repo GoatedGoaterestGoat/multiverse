@@ -23,7 +23,7 @@ from . import effects
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from ..harnesses.types import ObservedBinding, normalize_session_id
-from ..store import lock, now, read
+from ..store import exists_replaced, lock, now, read
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
 from ..universe import agents, records
@@ -385,13 +385,16 @@ def _observed(adapter, session):
     return observed
 
 
-def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False, observed_missing=()):
     """Follow session lineage and completed command receipts before exposing the saved settings."""
     from .navigation import require_settled
     require_settled(facts)
+    if launch_locked:
+        observed_missing = ()  # A diagnostic absence cannot survive an authority recheck.
     properties, facts = _session_snapshot(root, directory, properties, facts, adapter=adapter,
-                                          launch_locked=launch_locked)
-    if not (directory / 'slash' / 'pending.json').exists():
+                                          launch_locked=launch_locked, observed_missing=observed_missing)
+    pending = directory / 'slash' / 'pending.json'
+    if pending in observed_missing or not exists_replaced(pending):
         return properties, facts
     if not launch_locked:
         with _snapshot_lock(directory):
@@ -400,23 +403,26 @@ def session_snapshot(root, directory, properties, facts, *, adapter=None, launch
     return slash.reconcile(root, directory, properties, facts, adapter=adapter), facts
 
 
-def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+def _session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False, observed_missing=()):
     """Reconcile adapter evidence before using a native ID. No native probes.
 
     A provider owns the evidence checks. Core owns launch fencing, the CAS,
     storage scope, ownership and the durable transition.
     """
     effects.require('observed_binding', properties.get('id', 'agent'))
+    if launch_locked:
+        observed_missing = ()
     if not properties.get('harness') or not properties.get('workspace'):
         # Legacy/minimal records have no observation contract. Resume supplies
         # its normal workspace fallback before opting into this path.
         return properties, facts
     adapter = adapter or harnesses.load(root, properties['harness'])
-    if adapter_hook(adapter, 'observed_binding') is None and not (directory / 'sessions.jsonl').exists():
+    journal = directory / 'sessions.jsonl'
+    if adapter_hook(adapter, 'observed_binding') is None and (journal in observed_missing or not exists_replaced(journal)):
         return properties, facts
     session = SessionHandle.from_records(properties, facts, directory)
     observed = _observed(adapter, session)
-    effective, _ = agents.sessions.effective(directory, properties)
+    effective, _ = agents.sessions.effective(directory, properties, observed_missing=observed_missing)
     changed = observed is not None and normalize_session_id(observed.native_id) != session.native_id
     if effective == properties and not changed and not (observed and facts.get('binding_conflict')):
         return properties, facts
@@ -965,6 +971,20 @@ def _receipt_evidence(directory, adapter, session, executor, message, tracking):
                               {'repair_terminal': True} if isinstance(error, Unreachable) else None).to_dict(), 'ok': False}
 
 
+def submit_input(directory, adapter, session, message, executor, *, restart_id=None):
+    """Submit one durably reserved input under the caller's launch and delivery locks.
+
+    A new input may claim one FIFO restart. Receipt checks never call this helper.
+    The caller owns audit persistence, uncertainty and the once-only decision.
+    """
+    if not session.native_id:
+        return NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
+    if restart_id is not None and adapter_hook(adapter, 'continue_queued') is not None:
+        from .queue_continuation import claim_restart
+        session = claim_restart(directory, session, restart_id)
+    return effects.call(adapter, 'send', session, message, executor)
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     effects.require('get_delivery' if check else 'send', reference)
     directory = agents.directory(root, reference)
@@ -1093,15 +1113,11 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
                        last_receipt=None, native_receipt=None, transcript_confirmed_at=None,
                        final_reason=None, delivery_context=delivery_context)
         try:
-            if not session.native_id:
-                result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
-            else:
-                if (not retry and (new_message or tracking.get('restart_on_delivery') is True)
-                        and adapter_hook(adapter, 'continue_queued') is not None):
-                    from .queue_continuation import claim_restart
-                    session = claim_restart(directory, session, message_id)
-                result = effects.call(adapter, 'send', session, Message(native_message_id, message['text'], message.get('from', {}),
-                                      delivery=selected_mode, framed=framed, sent_at=message.get('at')), executor)
+            restart = message_id if not retry and (new_message or tracking.get('restart_on_delivery') is True) else None
+            result = submit_input(directory, adapter, session,
+                                  Message(native_message_id, message['text'], message.get('from', {}),
+                                          delivery=selected_mode, framed=framed, sent_at=message.get('at')),
+                                  executor, restart_id=restart)
         except Denied:
             raise
         except Exception as error:

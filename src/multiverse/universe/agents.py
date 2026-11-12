@@ -1,6 +1,6 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
-from ..store import existing_lock, lock, now, read, write
+from ..store import exists_replaced, retry_missing, existing_lock, lock, now, read, write
 from . import focus, sessions, records
 import fcntl
 import re
@@ -24,7 +24,7 @@ def orphaned(directory):
     """
     for name in ('properties.json', 'runtime.json', 'sessions.jsonl'):
         try:
-            (directory / name).stat()
+            retry_missing((directory / name).stat)
         except FileNotFoundError:
             continue
         return False
@@ -53,7 +53,7 @@ def orphaned(directory):
 def properties_missing(directory):
     """Only proven absence permits removal using the folder's recovery identity."""
     try:
-        (directory / 'properties.json').stat()
+        retry_missing((directory / 'properties.json').stat)
     except FileNotFoundError:
         return True
     return False
@@ -62,12 +62,16 @@ def properties_missing(directory):
 class AgentNotFound(ValueError):
     """No saved agent matches a reference; no launch was attempted."""
 
+    def __init__(self, message, *, hint=''):
+        self.related_hint = hint
+        super().__init__(message)
+
 
 class AmbiguousAgent(ValueError):
     """A reference names several agents; retain names and full IDs for selection."""
 
 
-def directory(root, reference, *, allow_damaged=False):
+def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
     matches, exact_names, exact_ids, damaged, names = [], [], [], [], {}
     for path in record_paths(root):
         usable = True
@@ -93,8 +97,13 @@ def directory(root, reference, *, allow_damaged=False):
     elif exact_names:
         matches = exact_names
     if not matches:
+        from ..display import clean
+        from .agent_hints import hint
+        related = hint(root, reference, universe_option)
         detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
-        raise AgentNotFound(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
+        advice = related or "Run mv2 list to see this universe's agents."
+        label = clean(reference) if related else reference
+        raise AgentNotFound(f"No agent named {label} here. {advice}" + detail, hint=related)
     if len(matches) != 1:
         detail = ", ".join(f"{names[path]} ({path.name})" for path in sorted(matches))
         raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. Use a full UUID")
@@ -143,9 +152,9 @@ def check_available_name(root, name, *, locked=False, exclude=None):
                              f"pick another name or resume it with mv2 resume {name}")
 
 
-def runtime(agent_dir):
+def runtime(agent_dir, *, required=False):
     path = agent_dir / "runtime.json"
-    return records.runtime(path)
+    return records.runtime(path, required=required)
 
 
 def preparing(facts):
@@ -160,7 +169,7 @@ def preparing(facts):
 
 def _child_evidence(agent_dir, facts):
     launch = agent_dir / 'launches' / facts['launch_id']
-    return any((launch / name).exists() for name in ('request.json', 'registration.json', 'cleanup.json'))
+    return any(exists_replaced(launch / name) for name in ('request.json', 'registration.json', 'cleanup.json'))
 
 
 def interrupted_preparation(facts, agent_dir):
@@ -351,7 +360,7 @@ def report(root, reference, phase=None, summary=None, *, blocked_on=None):
             data["blocked_on"] = blocked_on
         if summary is not None:
             data["summary"] = summary
-        data["updated_at"] = now()
+        data["reported_at"] = data["updated_at"] = now()
         write(agent_dir / "properties.json", data)
     _reported(agent_dir, data)
     return data

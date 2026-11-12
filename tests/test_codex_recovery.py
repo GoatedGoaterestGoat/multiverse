@@ -278,7 +278,9 @@ class RecoveryWorkerTest(unittest.TestCase):
         def advance(seconds):
             self.elapsed[0] += seconds
         self.backend = Mock()
-        with patch.object(recovery.time, 'monotonic', side_effect=lambda: self.elapsed[0]), \
+        # Only recovery backoff drives these scripted events; optional record retries are covered separately.
+        with patch('multiverse.store.MISSING_ATTEMPTS', 1), \
+                patch.object(recovery.time, 'monotonic', side_effect=lambda: self.elapsed[0]), \
                 patch.object(recovery.time, 'sleep', side_effect=sleep or advance), \
                 patch.object(recovery, 'BACKOFF', backoff), \
                 patch.object(recovery, 'RESTORE_TIMEOUT', recovery.RESTORE_TIMEOUT if timeout is None else timeout), \

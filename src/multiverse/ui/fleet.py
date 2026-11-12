@@ -8,9 +8,10 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean, phase_label
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, MARKS, PHASE_WIDE, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, MODEL_WIDE, PHASE_WIDE, PluginColumn, lookup
+from .drafts import HINT
 from .tree import group_key, hierarchy
-from .widgets import HarnessMenu
+from .widgets import DraftMenu
 
 
 class FleetView:
@@ -40,13 +41,17 @@ class FleetView:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
         flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
                     or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
-        for key in [key for key in widths if lookup(key) is COLUMNS["phase"]]:  # `phase` or `core:phase`, not a
-            # plugin column standing in for it: a blocked agent's phase may say what it waits on, so it grows to fit,
-            # but only into the room the other columns leave, the flexible one keeping its least width
-            room = (available - 2 * len(fields) - (6 if flexible else 0)
-                    - sum(w for k, w in widths.items() if k not in (key, flexible)))
-            widths[key] = max(widths[key], min(PHASE_WIDE, room, max(
-                (cell_len(clean(phase_label(row) or "")) for row in projected if row["kind"] == "agent"), default=0)))
+        # Core's Phase and Model (not a plugin column standing in for one) grow to fit what they show, a blocked
+        # agent's dependency or a long model name and its effort, but only into the room the other columns leave,
+        # the flexible one keeping its least width; what still doesn't fit is shortened by the column itself.
+        growing = ((COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or "")),
+                   (COLUMNS["model"], MODEL_WIDE, COLUMNS["model"].label))
+        for column, bound, shown in growing:
+            for key in [key for key in widths if lookup(key) is column]:
+                room = (available - 2 * len(fields) - (6 if flexible else 0)
+                        - sum(w for k, w in widths.items() if k not in (key, flexible)))
+                widths[key] = max(widths[key], min(bound, room, max(
+                    (cell_len(shown(row)) for row in projected if row["kind"] == "agent"), default=0)))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -79,7 +84,7 @@ class FleetView:
                 return COLUMNS["name"].render(row, widths["name"],
                                               moving if self.moving and row["key"] == self.moving["key"] else ())
             column = lookup(field)
-            if column is COLUMNS["phase"]:
+            if column is COLUMNS["phase"] or column is COLUMNS["model"] or isinstance(column, PluginColumn):
                 return column.render(row, widths[field])
             return column.render(row)
 
@@ -99,7 +104,8 @@ class FleetView:
         self.query_one("#empty", Static).update("No matches. Esc clears search.")
         table.display = bool(keys)
         self.show_selection(self.selected_key)
-        self.call_after_refresh(self.position_harness_menu)
+        self.models_if_needed()
+        self.call_after_refresh(self.position_draft_menu)
         if self.inspector.row:
             self.inspector.update_row(self.visible_rows.get(self.inspector.row["key"]))
 
@@ -114,27 +120,34 @@ class FleetView:
     def scope_harnesses(self, scope):
         return next((g.get("harnesses", []) for g in self.snapshot["groups"] if g["path"] == str(scope)), [])
 
-    def position_harness_menu(self):
-        menu = self.query_one("#harness-menu", HarnessMenu)
+    def position_draft_menu(self):
+        """Show the draft's choices for the active field under it: the harnesses, or the model list and efforts."""
+        menu = self.query_one("#draft-menu", DraftMenu)
         draft = self.draft
-        menu.display = bool(draft and draft.active == "harness" and draft.harnesses and not self.operating)
+        field = draft.active if draft else None
+        options = draft.options() if field in ("harness", "model", "effort") else None
+        menu.display = bool(options and not self.operating)
         if not menu.display:
             return
-        if self._harness_options != draft.harnesses:
-            menu.clear_options().add_options(Text(name) for name in draft.harnesses)
-            self._harness_options = draft.harnesses
-        value = draft.values["harness"]
-        menu.highlighted = draft.harnesses.index(value) if value in draft.harnesses else None
+        labels = tuple(name if field == "harness" else draft.option_label(field, name) for name in options)
+        if self._menu_options != (field, labels):
+            menu.clear_options().add_options(Text(label) for label in labels)
+            self._menu_options = (field, labels)
+        value = draft.values[field]
+        menu.highlighted = options.index(value) if value in options else None
         table = self.query_one("#agents", DataTable)
         columns = table.ordered_columns
-        column = next(i for i, item in enumerate(columns) if item.key.value == "harness")
+        column = next(i for i, item in enumerate(columns) if item.key.value == ("harness" if field == "harness" else "summary"))
         x = table.content_region.x + sum(c.width + table.cell_padding * 2 for c in columns[:column]) - int(table.scroll_x)
+        if field != "harness":  # under its own words in the "Model: … · Effort: …" cell
+            cell = draft.column_cell("summary").plain
+            x += table.cell_padding + (cell.index("Effort: ") + 8 if field == "effort" else 7)
         row_y = table.content_region.y + table.header_height + list(table.rows).index(draft.key) - int(table.scroll_y)
         if not table.content_region.y + table.header_height <= row_y < table.content_region.bottom:
             menu.display = False
             return
-        width = min(32, max(16, max(len(name) for name in draft.harnesses) + 4))
-        height = min(8, len(draft.harnesses) + 2)
+        width = min(48, max(16, max(len(label) for label in labels) + 4))
+        height = min(10, len(labels) + 2)
         x = max(0, min(x, self.size.width - width))
         y = row_y + 1
         if y + height > self.size.height - 2:
@@ -160,6 +173,9 @@ class FleetView:
                 hint = "↑↓ choose · Enter create · Tab model" if self.draft.harnesses else "No harnesses configured in this group"
                 self.update_selection(f"Harness: {value} ▾ · {hint}")
                 return
+            if (hint := self.model_hint()) is not None:
+                self.update_selection(hint)
+                return
             label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
             value = self.draft.cell(self.draft.active)
             # Keep the insertion point visible while editing a long value.
@@ -176,6 +192,35 @@ class FleetView:
             self.update_selection(content)
         else:
             self.update_selection("/ search · n new agent · g new subverse · ? keys")
+
+    def model_hint(self):
+        """The selection line for the draft's model or effort while it is a picker or being read, else None."""
+        draft = self.draft
+        if draft.active not in ("model", "effort") or not hasattr(draft, "choices"):
+            return None
+        fields = draft.fields
+        after = draft.labels[fields[(fields.index(draft.active) + 1) % len(fields)]].lower()
+        label = Text(f"{draft.label()}: ", style=theme.TEAL)
+        if draft.active == "model" and draft.reading():
+            return label + Text(f"reading {clean(draft.values['harness'])}'s models… · Tab {after}", style=HINT)
+        found = draft.choices.get(draft.values["harness"])
+        if (draft.active == "model" and draft.typed() and draft.values["model"]
+                and (draft.model() is None or not draft.select_all)):
+            return None  # being typed: the line shows it with the cursor
+        if draft.options() is None:
+            if isinstance(found, dict) and found.get("error"):  # typed, with why there's no list to pick from
+                return label + Text(clean(draft.values["model"]) or "default") + Text(
+                    f" · couldn't read its models: {clean(found['error'])}", style=HINT)
+            return None
+        label.append(draft.option_label(draft.active, draft.values[draft.active]) + " ▾")
+        label.append(f" · ↑↓ choose{' or type a model ID' if draft.active == 'model' and draft.typed() else ''}"
+                     f" · Enter create · Tab {after}", style=HINT)
+        if draft.active == "model" and isinstance(found, dict):
+            if found.get("narrowed"):
+                label.append(" · narrowed in this universe's harness settings", style=HINT)
+            for problem in found.get("problems") or ():
+                label.append(f" · {clean(problem)}", style=theme.YELLOW)
+        return label
 
     def scope_trail(self, row):
         path = Path(row["path"] if row["kind"] == "group" else row["universe"])

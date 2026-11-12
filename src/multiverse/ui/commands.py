@@ -133,21 +133,26 @@ class AgentCommands:
                                  note + "\n\n" + "\n".join(clean(line) for line in text.splitlines())))
 
     def action_answer(self):
+        """Answer what the selected agent waits on, or a question it has open while it works; core says which."""
         if self.ready() and self.selected:
-            row = dict(self.selected)
-            if row.get("status") != "waiting":
-                self.set_status(f"{clean(row['name'])} isn't waiting on a prompt.")
-                return
-            self.open_answer(row)
+            self.open_answer(dict(self.selected))
 
     @work(group="answer-view", exclusive=True, exit_on_error=False)
     async def open_answer(self, row):
         """Read the agent's prompts fresh, then open the one to answer; nothing is sent until the person answers."""
         name = clean(row["name"])
+        waiting = row.get("status") == "waiting"
         try:
             found = await asyncio.to_thread(self.backend.waiting_prompts, Path(row["universe"]), row["id"])
         except Exception as error:
             self.set_status(f"{name}: its prompts can't be read: {error_text(error, kind=False)}", error=True)
+            return
+        if not waiting and found.get("state") == "ok" and not found.get("prompts"):
+            # none listed is no open questions only as far as mv2 can see; a failed read says its own reason below
+            self.set_status(f"{name} isn't waiting on a prompt and has no open questions"
+                            + ("." if found.get("coverage") == "complete" else
+                               f" mv2 can see; it may not see every one: "
+                               + clean(found.get("reason") or "coverage unknown") + "."))
             return
         if found.get("state") != "ok":
             self.set_status(f"{name}: " + clean(found.get("reason") or "its prompts can't be read"), error=True)
@@ -166,7 +171,8 @@ class AgentCommands:
         def picked(prompt_id):
             if prompt_id:
                 self.answer_screen(row, next(item for item in open_prompts if item["id"] == prompt_id))
-        self.push_screen(ChoiceScreen(f"{name} waits on {len(open_prompts)} prompts",
+        self.push_screen(ChoiceScreen(f"{name} {'waits on' if waiting else 'has'} {len(open_prompts)} "
+                                      f"{'prompts' if waiting else 'open questions'}",
                                       [(item["id"], prompt_line(item)) for item in open_prompts]), picked)
 
     def answer_screen(self, row, item):

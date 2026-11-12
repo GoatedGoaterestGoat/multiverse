@@ -12,7 +12,7 @@ from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox
 from .. import display, plugins
 from ..runtime import lifecycle, prompts
 from . import columns, plugin_panels, theme
-from .columns import BLOCKED_ON, COLUMNS, MARKS, UNREAD
+from .columns import BLOCKED_ON, COLUMNS, EFFORT, MARKS, UNREAD
 from .panels import error_widget
 from .tree import counts, within
 from .views import view
@@ -67,7 +67,7 @@ def inbox_stamp(directory):
         records = sorted((directory / UNSUBMITTED).glob("*.json"))
     except FileNotFoundError:
         records = []
-    return (tuple(_file_stamp(directory / name) for name in INBOX_FILES),
+    return (tuple(_file_stamp(directory / name) for name in (*INBOX_FILES, UNSUBMITTED)),
             tuple((path.name, _file_stamp(path)) for path in records))
 
 
@@ -109,9 +109,6 @@ class LocalBackend:
         except Exception:
             self._unread.pop(key, None)
             return None
-        if stamp[0][0] is None:
-            self._unread[key] = (stamp, 0)
-            return 0  # no message ever sent to it: nothing to read, and no lock taken
         if cached is not None and cached[0] == stamp:
             return cached[1]
         try:
@@ -150,9 +147,13 @@ class LocalBackend:
             for member in members:
                 if not isinstance(member.get("damaged"), dict):
                     member[UNREAD] = self.unread_count(member)
-        if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "phase" or key == "phase"
+        if any(columns.core_key(key) == "model" or key == "model" for key in config["columns"]):
+            effort = EFFORT in config["columns"]  # effort shows only inside the Model cell
+            for member in members:
+                member["model_label"] = display.model_label(member, effort=effort)
+        if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "summary" or key == "summary"
                                                            for key in config["columns"]):
-            # Shown only where the view lists both: otherwise a blocked agent is plainly blocked everywhere, the
+            # Shown only where the view lists both: otherwise a blocked agent's summary is its own everywhere, the
             # inspector and details included.
             for member in members:
                 member.pop(BLOCKED_ON, None)
@@ -213,7 +214,20 @@ class LocalBackend:
 
     def spawn(self, root, values):
         return spawn.run(root, name=values["name"], task=values.get("task", ""),
-                         harness=values.get("harness") or "codex", model=values.get("model") or None)
+                         harness=values.get("harness") or "codex", model=values.get("model") or None,
+                         effort=values.get("effort") or None)
+
+    def model_choices(self, root, harness):
+        """The models (and each one's efforts) spawn takes for `harness` here, narrowed by the universe's harness
+        settings, for the new-agent picker; None when the harness has no list, so the model is typed."""
+        found = lifecycle.model_choices(root, harness)
+        if found is None:
+            return None
+        return {"models": [{"id": m["id"], "name": m.get("name") or m["id"], "efforts": list(m.get("efforts") or ()),
+                            "effort_unset": m["effort_unset"]} for m in found["models"]],
+                "free_form": found["free_form"], "narrowed": found["narrowed"], "unset": found["unset"],
+                "default_model": found["default_model"],
+                "problems": list(found["problems"])}
 
     def send(self, root, reference, text, delivery='steer', queue_only=False):
         return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None},

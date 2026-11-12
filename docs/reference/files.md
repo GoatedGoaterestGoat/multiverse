@@ -79,6 +79,8 @@ This is the short text every agent gets at spawn and resume, alongside the harne
 
 These files record which plugins are on, their settings and their state. See [plugins](../use/plugins.md).
 
+mv2 briefly retries missing reads of its replaced plugin records, including settings, host status, event cursors, progress and caches. This avoids treating a network filesystem's replacement gap as defaults or a first subscription. After the retry budget, each record keeps its normal missing-file behavior. Other errors, malformed content, plugin source files and append-only journals are not retried.
+
 ### plugins.json
 
 This file says which plugins are on in this universe. A missing file, or a plugin it doesn't name, means the plugin's default. The default is off, except for bundled plugins marked on, such as typeahead.
@@ -173,6 +175,8 @@ Schema 2 points at a built-in adapter and adjusts it:
 | --- | --- |
 | `executable` | Command to run instead of `codex`, `claude` or `pi`. |
 | `model` | Default model for agents spawned without `--model`. |
+| `model_names` | Optional map from exact recorded model spellings to nonempty, single-line display names. It changes labels only; see [display names](../use/harnesses.md#model-display-names). |
+| `models` | Optional nonempty object from a catalog model ID or alias to `{}` or `{"efforts": ["low", "high"]}`. An effort list is nonempty, distinct and limited to offered levels. Unknown entries refuse launches and runs; see [model choices](../use/harnesses.md#narrow-the-available-choices). |
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |
 | `env` | Variables (name to string) set for every spawn and resume. It can't set `MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`, or the storage variables mv2 reads (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). Pi's can set `PI_CODING_AGENT_DIR`, which mv2 does not use to locate Pi sessions: spawn records that value, and a resume keeps the recorded one and names a changed setting or shell value it ignored; `mv2 resume --start-fresh` takes the current one. |
@@ -243,7 +247,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 
 | Path | Meaning |
 | --- | --- |
-| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains proven storage variable values; `null` means explicitly unset on future launches. A missing legacy key remains unknown, not unset. A legacy adoption also keeps its proven `HOME` when a default storage path depends on it. Explicit missing-conversation recovery keeps every old and replacement scope in `native_session_homes` before retiring the old binding. A plain recovery records `native_service_identity: null` (no shared service); this is valid for later recoveries, while malformed non-null service identities refuse. |
+| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `reported_at` is the UTC time of the latest accepted report, including a summary-only report; other updates change `updated_at` without changing it. `native_storage_environment` retains proven storage variable values; `null` means explicitly unset on future launches. A missing legacy key remains unknown, not unset. A legacy adoption also keeps its proven `HOME` when a default storage path depends on it. Explicit missing-conversation recovery keeps every old and replacement scope in `native_session_homes` before retiring the old binding. A plain recovery records `native_service_identity: null` (no shared service); this is valid for later recoveries, while malformed non-null service identities refuse. |
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane, and `server` with its socket, PID, process start token and tmux start epoch), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). A message a focus held is `inbox-only` and adds `intended` (`steer` or `follow-up`) and `focus` (the focus's `id`). mv2's note about a focus's held messages is a `follow-up` with `focus_note` (that focus's `id`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |

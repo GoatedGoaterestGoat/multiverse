@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "claude_code": "2.1.319",
+  "claude_code": "2.1.322",
   "models": [
     {
       "id": "claude-3-5-haiku",
@@ -683,6 +683,38 @@
       ]
     },
     {
+      "id": "claude-fable-5-2",
+      "name": "Fable 5.2",
+      "family": "fable",
+      "provider_ids": {
+        "first_party": "claude-fable-5-2",
+        "bedrock": "us.anthropic.claude-fable-5-2",
+        "vertex": "claude-fable-5-2",
+        "foundry": "claude-fable-5-2",
+        "anthropic_aws": "claude-fable-5-2",
+        "anthropic_google_cloud": "claude-fable-5-2",
+        "mantle": "anthropic.claude-fable-5-2",
+        "gateway": "claude-fable-5-2"
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": []
+    },
+    {
       "id": "claude-mythos-5",
       "name": "Mythos 5",
       "family": "mythos",
@@ -739,6 +771,38 @@
       "max_output_tokens": 128000,
       "default": false,
       "picker": []
+    },
+    {
+      "id": "claude-mythos-5-2",
+      "name": "Mythos 5.2",
+      "family": "mythos",
+      "provider_ids": {
+        "first_party": "claude-mythos-5-2",
+        "bedrock": null,
+        "vertex": null,
+        "foundry": null,
+        "anthropic_aws": null,
+        "anthropic_google_cloud": null,
+        "mantle": null,
+        "gateway": null
+      },
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1000000,
+      "long_context_window": null,
+      "max_output_tokens": 128000,
+      "default": false,
+      "picker": []
     }
   ],
   "aliases": {
@@ -777,7 +841,7 @@
       }
     },
     "fable": {
-      "default": "claude-fable-5-1",
+      "default": "claude-fable-5-2",
       "per_provider": {
         "gateway": "claude-fable-5"
       }

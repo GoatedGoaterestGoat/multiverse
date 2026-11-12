@@ -18,7 +18,7 @@ import threading
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from ..display import clean, live_label, phase_label
+from ..display import clean, live_label, model_label, phase_label, summary_parts
 from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
@@ -28,12 +28,17 @@ COMPACT_WIDTH = 110
 # A view key that is not a column of its own: listed in a view's `columns`, it adds the agent's unread inbox count
 # to the name cell (the backend reads it only then).
 UNREAD = "unread"
-# Another such key: listed in a view, a blocked agent's Phase cell says what it is blocked on, `blocked (lifecycle)`.
-# A view without the Phase column shows neither.
+# Another such key: listed in a view, a blocked agent's summary says what it waits on, `Waiting for user: …`.
+# A view without the Summary column shows neither.
 BLOCKED_ON = "blocked_on"
-MARKS = frozenset({UNREAD, BLOCKED_ON})
+# Another: listed with "model", an agent's Model cell adds its effort, `Opus 5.5 (xhigh)`. Without "model" it shows
+# nowhere.
+EFFORT = "effort"
+MARKS = frozenset({UNREAD, BLOCKED_ON, EFFORT})
 # The widest a Phase cell grows to say what an agent is blocked on; a longer name is shortened inside it.
 PHASE_WIDE = 24
+# The widest a Model cell grows for a long name and its effort; a longer name is shortened, its effort kept whole.
+MODEL_WIDE = 32
 # Columns no plugin column stands in for: they say whether an agent needs the person or is held.
 ATTENTION = frozenset(ATTENTION_COLUMNS)
 
@@ -134,17 +139,48 @@ class FocusColumn(Column):
         return f'{row["focused"]} ◉' if row.get("focused") else ""
 
 
-class PhaseColumn(Column):
-    """The reported phase; a blocked agent's says what it waits on where the view lists `blocked_on`.
+class ModelColumn(Column):
+    """The agent's model by its display name, with its effort where the view also lists `effort`; `-` unknown.
 
-    Given the cell's `width`, a long name is shortened inside the parentheses, so the cell still reads as blocked
-    on someone; a cell too narrow for even that says only `blocked`."""
+    Given the cell's `width`, a name too long for it is shortened, never the effort after it: the effort is what the
+    person chose, and a clipped cell would show a different one, or none."""
+    @staticmethod
+    def label(row):
+        return row.get("model_label") or model_label(row, effort=False)
+
+    def agent(self, row):
+        """The whole label: what a plugin column standing in for Model shows where it has no value of its own."""
+        return self.styled(self.label(row))
+
+    @staticmethod
+    def styled(value):
+        return Text(value, style=theme.OVERLAY1 if value == "-" else theme.SUBTEXT0)
+
+    def render(self, row, width=None):
+        if row["kind"] == "group" or width is None:
+            return super().render(row)
+        value = self.label(row)
+        if cell_len(value) > width:
+            effort = clean(row.get("effort") or "").strip()
+            suffix = f" ({effort})" if effort and value.endswith(f" ({effort})") else ""
+            room = width - cell_len(suffix)
+            if suffix and room >= 2:
+                value = set_cell_size(value[:-len(suffix)], room - 1).rstrip() + "…" + suffix
+            else:
+                value = set_cell_size(value, max(0, width - 1)).rstrip() + "…"
+        return self.styled(value)
+
+
+class PhaseColumn(Column):
+    """The reported phase and how long ago it was reported: `working (10m)`, `blocked (50m)`.
+
+    Given the cell's `width`, a cell too narrow for the time since the last report says only the phase."""
     def render(self, row, width=None):
         if row["kind"] == "group":
             return self.group(row)
         value = clean(phase_label(row) or "—")
-        if width is not None and cell_len(value) > width and value.startswith("blocked ("):
-            value = "blocked (" + set_cell_size(value[9:-1], width - 11).rstrip() + "…)" if width >= 12 else "blocked"
+        if width is not None and cell_len(value) > width:
+            value = clean(row.get("phase") or "—")
         return Text(value, style=STATE_COLORS.get(value.partition(" ")[0], theme.SUBTEXT0))
 
 
@@ -158,7 +194,24 @@ class ContextColumn(Column):
         return text
 
 
+def summary_text(row, empty="—"):
+    """The summary as drawn: what a blocked agent waits on in its own colour, so it stands out from the rest."""
+    lead, summary = (clean(part) if part else part for part in summary_parts(row))
+    text = Text(style=theme.SUBTEXT0)
+    if lead:
+        text.append(lead, style=f"bold {theme.YELLOW}")
+        if summary:
+            text.append(": ")
+    text.append(summary or ("" if lead else empty))
+    return text
+
+
 class SummaryColumn(Column):
+    """What the agent last reported working on, led by what a blocked one waits on where the view lists
+    `blocked_on`: `Waiting for user: decide the model list`."""
+    def agent(self, row):
+        return summary_text(row)
+
     def group_value(self, row):
         return ((f'{row["waiting"]} waiting · ' if row["waiting"] else "")
                 + (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]))
@@ -172,6 +225,7 @@ class TaskColumn(Column):
 COLUMNS = {column.key: column for column in (
     NameColumn("name", "Universe / agent", 26),
     Column("harness", "Harness", 7, compact=False),
+    ModelColumn("model", "Model", 18, compact=False),
     LiveColumn("live", "Live", 7),
     ContextColumn("context", "Context", 10, compact=False),
     Column("cost", "Cost", 7, compact=False),
@@ -204,6 +258,14 @@ class PluginColumn(Column):
         if value is None and self.fallback in COLUMNS:
             return COLUMNS[self.fallback].agent(row)
         return Text("—" if value is None else value, style=theme.SUBTEXT0)
+
+    def render(self, row, width=None):
+        """Given the cell's `width`, a row with no value of its own falls back to core's Model shortened to that
+        width, so its effort shows whole; the plugin's own values, and its width, are left as they are."""
+        if (row["kind"] != "group" and width is not None and self.fallback == "model"
+                and (row.get("plugin_cells") or {}).get(self.key) is None):
+            return COLUMNS["model"].render(row, width)
+        return super().render(row)
 
     def group_value(self, row):
         value = (row.get("plugin_cells") or {}).get(self.key)

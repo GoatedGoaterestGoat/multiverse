@@ -27,6 +27,11 @@ def catalog(environment):
         for item in data['models']), free_form=True, source='table', version=data['codex'])
 
 
+def names(environment):
+    """Human labels for recorded IDs; keep the generated native catalog unchanged."""
+    return {item['id']: item['name'].replace('-', ' ') for item in table()['models']}
+
+
 def check(model, effort, environment):
     text = (model or '').strip()
     if not text:

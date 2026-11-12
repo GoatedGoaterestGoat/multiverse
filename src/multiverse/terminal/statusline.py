@@ -1,16 +1,22 @@
-"""Read-only tmux status renderer. Direct execution imports only the standard library.
+"""Tmux status renderer with a time-limited core inbox peek in a separate process.
 
 The wrapper invokes this file with exact root, agent, launch and adapter-family
 arguments; tmux's command environment need not belong to the displayed agent.
 """
 from datetime import datetime, timezone
+import errno
 import json
 import math
 import os
 from pathlib import Path
 import re
 import stat
+import select
+import signal
+import subprocess
 import sys
+import time
+import threading
 import unicodedata
 
 
@@ -21,7 +27,7 @@ DEFAULTS = {
     'harnesses': {'codex': {'items': {'status': True}},
                   'claude': {'items': {'phase': False, 'inbox': False}}},
 }
-INBOX_LIMIT = 50
+INBOX_TIMEOUT = 1.0  # seconds, including the isolated shared-reader process
 READ_LIMIT = 1024 * 1024
 # Plugin items: what a launch declared (runtime.json `plugins.status_items`), each read from
 # status-items/<name>.txt. Names follow the plugin manifest rule and never take a core item's name.
@@ -40,11 +46,56 @@ def object_value(value):
     return value if isinstance(value, dict) else {}
 
 
-def read_object(path):
+def _retry_missing(operation):
+    """Standalone counterpart of store.retry_missing, only for replaced records."""
+    deadline = time.monotonic() + .05
+    for attempt in range(5):
+        try:
+            return operation()
+        except OSError as error:
+            if error.errno != errno.ENOENT:
+                raise
+            remaining = deadline - time.monotonic()
+            if attempt == 4 or remaining <= 0:
+                raise
+            time.sleep(min(.005, remaining))
+
+
+def missing_records(paths):
+    """Observe optional absences together for this render, never cache identity or file contents."""
+    def missing(candidates):
+        pending = []
+        for path in candidates:
+            try:
+                path.stat()
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    pending.append(path)
+                # The reader still diagnoses permission errors and special files.
+        return pending
+
+    pending = missing(dict.fromkeys(Path(path) for path in paths))
+    if not pending:
+        return frozenset()
+    deadline = time.monotonic() + .05
+    for _ in range(1, 5):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(.005, remaining))
+        pending = missing(pending)
+        if not pending:
+            break
+    return frozenset(pending)
+
+
+def read_object(path, *, observed_missing=()):
+    if path in observed_missing:
+        return {}
     try:
         # Non-blocking, so a FIFO in a record's place never hangs the bar. The descriptor is closed here:
         # wrapping a directory's would fail and leak it.
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = _retry_missing(lambda: os.open(path, os.O_RDONLY | os.O_NONBLOCK))
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return {}
@@ -104,94 +155,83 @@ def clean(value, limit=80):
     return cut.rstrip(' ,;:.-') + '…'
 
 
-def _dated(value):
-    """Only a timezone-bearing timestamp can attest confirmation or a consumed inbox copy."""
-    if not isinstance(value, str):
-        return False
+def _read_unread(directory):
+    """The helper's only inbox operation is the dashboard's non-consuming, nonblocking peek."""
+    # Direct execution uses -S and has only terminal/ on sys.path. Load this installation's core,
+    # not an editable installation or code selected by the displayed agent's environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from multiverse.universe import mailbox
+    return len(mailbox.unread(directory, blocking=False))
+
+
+def _exec_unread(directory):
+    """Threaded callers use exec isolation; the standalone bar takes the cheaper fork path."""
     try:
-        return datetime.fromisoformat(value).tzinfo is not None
-    except ValueError:
-        return False
-
-
-def _inbox_bytes(path, limit):
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError('Not a regular inbox file')
-        with os.fdopen(descriptor, 'rb', closefd=False) as source:
-            return source.read(limit + 1)
-    finally:
-        os.close(descriptor)
-
-
-def _inbox_object(path):
-    try:
-        data = _inbox_bytes(path, READ_LIMIT)
-    except FileNotFoundError:
-        return {}
-    if len(data) > READ_LIMIT:
-        raise ValueError('Inbox ledger exceeds the status read budget')
-    value = json.loads(data)
-    if not isinstance(value, dict):
-        raise ValueError('Inbox ledger is not an object')
-    return value
-
-
-def unread(directory):
-    """Bounded observation of unread manual input; never locks or advances a cursor.
-
-    Blocked-on upgrade copies can precede the cursor, so the bounded scan includes history. Ordinary
-    native messages do not count. Unknown/corrupt/over-budget counts are None, never zero.
-    """
-    try:
-        try:
-            cursor_data = _inbox_bytes(directory / 'inbox.cursor', 64)
-            cursor = int(cursor_data) if len(cursor_data) <= 64 else -1
-        except FileNotFoundError:
-            cursor = 0
-        if cursor < 0:
-            return None
-        try:
-            data = _inbox_bytes(directory / 'inbox.jsonl', READ_LIMIT)
-        except FileNotFoundError:
-            return 0 if cursor == 0 else None
-        if cursor > len(data) or cursor and data[cursor - 1:cursor] != b'\n':
-            return None
-        states = _inbox_object(directory / 'inbox-state.json')
-        read_ahead = _inbox_object(directory / 'inbox-read.json')
-        count, offset = 0, 0
-        for line in data[:READ_LIMIT].splitlines(keepends=True):
-            if not line.endswith(b'\n'):
-                break
-            offset += len(line)
-            message = json.loads(line)
-            if not isinstance(message, dict):
-                return None
-            state = states.get(message.get('id'), {})
-            if not isinstance(state, dict) or not isinstance(state.get('native_receipt') or {}, dict):
-                return None
-            copy = (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
-                    and isinstance(message.get('inbox_only_text'), str) and not _dated(state.get('inbox_copy_read_at'))
-                    and not _dated(state.get('transcript_confirmed_at'))
-                    and (state.get('native_receipt') or {}).get('transcript_confirmed') is not True)
-            manual = (offset > cursor and (message.get('schema') != 2 or message['delivery'] == 'inbox-only')
-                      and message.get('id') not in read_ahead)
-            if copy or manual:
-                count += 1
-                if count >= INBOX_LIMIT:
-                    return INBOX_LIMIT
-        return count if len(data) <= READ_LIMIT else None
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        result = subprocess.run([sys.executable, '-B', '-S', str(Path(__file__).resolve()), '--inbox', str(directory)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                timeout=INBOX_TIMEOUT, check=True, text=True)
+        value = result.stdout.strip()
+        return int(value) if value.isascii() and value.isdecimal() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
-def focus_text(directory):
+def unread(directory):
+    """A private reader process bounds work without importing the CLI or starting another interpreter."""
+    # Forking with another thread or an external child reaper cannot preserve this helper's ownership.
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        return None
+    if threading.active_count() != 1:
+        return _exec_unread(directory)
+    reader = writer = child = None
+    try:
+        reader, writer = os.pipe()
+        child = os.fork()
+        if child == 0:
+            try:
+                os.close(reader)
+                value = _read_unread(directory)
+                os.write(writer, str(value).encode('ascii'))
+            except BaseException:
+                pass  # Unreadable, busy or damaged: no count, and no inbox text in diagnostics.
+            finally:
+                os._exit(0)
+        os.close(writer)
+        writer = None
+        if not select.select([reader], [], [], INBOX_TIMEOUT)[0]:
+            return None
+        value = os.read(reader, 32).decode('ascii').strip()
+        return int(value) if value.isascii() and value.isdecimal() else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        try:
+            if child:
+                try:
+                    ended, _ = os.waitpid(child, os.WNOHANG)
+                except ChildProcessError:
+                    ended = child  # No ownership proof: never signal a possibly reused PID.
+                if not ended:
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.waitpid(child, 0)
+                    except ChildProcessError:
+                        pass
+        finally:
+            for descriptor in (reader, writer):
+                if descriptor is not None:
+                    os.close(descriptor)
+
+
+def focus_text(directory, *, observed_missing=()):
     """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts.
 
     universe.focus owns the file; this follows its `active` rules for a record in effect.
     """
-    record = read_object(directory / 'focus.json')
+    record = read_object(directory / 'focus.json', observed_missing=observed_missing)
     def moment(value):
         stamp = datetime.fromisoformat(value)
         return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
@@ -257,10 +297,13 @@ def declared_items(runtime):
     return found
 
 
-def plugin_item(directory, name):
+def plugin_item(directory, name, *, observed_missing=()):
     """The first line of a plugin item's file, bounded and cleaned; '' when missing, empty or unreadable."""
+    path = directory / 'status-items' / f'{name}.txt'
+    if path in observed_missing:
+        return ''
     try:
-        with (directory / 'status-items' / f'{name}.txt').open('rb') as source:
+        with _retry_missing(lambda: path.open('rb')) as source:
             data = source.read(ITEM_READ_LIMIT)
     except OSError:
         return ''
@@ -281,7 +324,13 @@ def render(root, agent_id, launch_id, family=''):
             or not launch_id or not meta.get('id') or properties.get('universe_id') != meta['id']):
         return ''
     declared = declared_items(runtime)
-    items, _ = config(read_object(root / 'statusline.json'), family, declared)
+    # Optional files that have never been published share one retry delay, including all declared plugin items.
+    # This snapshot belongs only to this render; required identity and runtime above always read fresh records.
+    observed_missing = missing_records([
+        root / 'statusline.json', directory / 'focus.json',
+        *(directory / 'status-items' / f'{name}.txt' for name, _ in declared),
+    ])
+    items, _ = config(read_object(root / 'statusline.json', observed_missing=observed_missing), family, declared)
     plugins = {name for name, _ in declared}
     phase = clean(properties.get('phase'), 24)
     summary = clean(properties.get('summary'), SUMMARY_LENGTH)
@@ -305,7 +354,7 @@ def render(root, agent_id, launch_id, family=''):
             if name:
                 parts.append(name)
         elif item == 'focus':
-            text = focus_text(directory)
+            text = focus_text(directory, observed_missing=observed_missing)
             if text:
                 parts.append(text)
         elif item == 'status':
@@ -324,13 +373,13 @@ def render(root, agent_id, launch_id, family=''):
             if count is None:
                 parts.append('inbox ?')
             elif count:
-                parts.append(f'inbox {count}+' if count >= INBOX_LIMIT else f'inbox {count}')
+                parts.append(f'inbox {count}')
         elif item == 'context':
             text = context_text(properties, runtime, family)
             if text:
                 parts.append(text)
         elif item in plugins:
-            text = plugin_item(directory, item)
+            text = plugin_item(directory, item, observed_missing=observed_missing)
             if text:
                 parts.append(text)
     # tmux interprets styles in job output; agent text must remain literal.
@@ -338,6 +387,12 @@ def render(root, agent_id, launch_id, family=''):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--inbox':
+        try:
+            print(_read_unread(Path(sys.argv[2])))
+        except Exception:
+            pass  # No message bodies or filesystem diagnostics belong in tmux output.
+        return
     if len(sys.argv) != 5:
         return
     print(render(*sys.argv[1:]))

@@ -282,6 +282,56 @@ class CodexPluginsTest(PluginTestCase):
             self.assertIn('conflicting', self.detail(command, 'a')['reason'])
             self.assertIn('collision', self.detail(command)['reason'])
 
+    def test_launch_effort_wins_in_plain_bridge_and_plugin_config(self):
+        """A per-agent effort must beat configured and plugin defaults in both launch modes or it silently changes."""
+        self.assertIs(getattr(CodexAdapter, 'supports_launch_effort', False), True)
+        for plugin in (False, True):
+            if plugin:
+                self.add_plugin(fields={'config': {'model_reasoning_effort': 'low'}})
+            for mode in ('spawn', 'resume'):
+                for bridge in (False, True, None):
+                    for configured in (False, True):
+                        for effort in (None, 'high'):
+                            with self.subTest(plugin=plugin, mode=mode, bridge=bridge,
+                                              configured=configured, effort=effort):
+                                settings = {'inbox_bridge': bridge}
+                                if configured:
+                                    settings[mode + '_args'] = ['-c', 'model_reasoning_effort="medium"']
+                                context = replace(self.context, model='gpt-5.4', effort=effort)
+                                command = self.command(settings, mode=mode, context=context)
+                                expected = effort or ('medium' if configured else 'low' if plugin else None)
+                                for candidate in (command, command.fallback):
+                                    if candidate is None:
+                                        continue
+                                    self.assertEqual(self.config(candidate).get('model_reasoning_effort'), expected)
+                                    before = candidate.argv[:candidate.argv.index('--')]
+                                    self.assertNotIn('--effort', before)
+                                    self.assertEqual(before[before.index('--model') + 1], 'gpt-5.4')
+                                    if effort:
+                                        at = before.index('model_reasoning_effort="high"')
+                                        self.assertEqual(before[at - 1], '-c')
+                                    if not candidate.rpc_proxy:
+                                        continue
+                                    protocol = LaunchProtocol(candidate.rpc_proxy.settings)
+                                    request = {'id': 1, 'method': 'thread/' + ('start' if mode == 'spawn' else 'resume'),
+                                        'params': {'threadId': self.values['session_id'], 'config': {
+                                            'model_reasoning_effort': 'xhigh'}}}
+                                    snapshot = deepcopy(request)
+                                    sent = protocol.outgoing(request)
+                                    # No mv2 effort leaves the TUI/native config alone, except existing
+                                    # explicit harness config overlapping a plugin contribution.
+                                    wanted = effort or ('medium' if configured and plugin else 'xhigh')
+                                    self.assertEqual(sent['params']['config']['model_reasoning_effort'], wanted)
+                                    self.assertEqual(request, snapshot)
+        self.disable('demo')
+
+        with self.subTest('an empty initial prompt has no separator'):
+            context = replace(self.context, model='gpt-5.4', effort='high', values={**self.values, 'task': ''})
+            for bridge in (False, True):
+                command = self.command({'inbox_bridge': bridge}, context=context)
+                self.assertNotIn('--', command.argv)
+                self.assertEqual(self.config(command).get('model_reasoning_effort'), 'high')
+
     def test_explicit_user_config_beats_plugin_defaults(self):
         """Explicit user config wins over plugin defaults across five -c spellings, TOML dotted parents and children,
         and leaves the bridge TUI drops, without the relay mutating frames; a break silently overrides the user's
