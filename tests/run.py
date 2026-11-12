@@ -5,9 +5,9 @@
     .venv/bin/python tests/run.py -j 4 -v
 
 A module runs through its own load_tests, as discovery runs it; a shard runs every Nth of its tests. Modules
-start longest first, by the times the last run recorded in .run/test-durations.json, and one the record does
-not know counts as long. Every process guards the real ~/.multiverse (home_safety) and fails if a test wrote
-there.
+start longest first, by the times the last run recorded in .run/test-durations.json, or for a module this checkout
+has not run yet, by tests/durations.json, the baseline committed with the tests; one neither knows counts as long.
+Every process guards the real ~/.multiverse (home_safety) and fails if a test wrote there.
 
 Runs started at once share the machine: a unit starts only when it holds one of the CPU count's slots in
 /tmp/mv2-test-slots-<uid> (a directory only this user may change), so two agents' full runs take turns instead of
@@ -296,6 +296,7 @@ class Run:
         self.start, self.jobs, self.timeout, self.verbose = Path(start).resolve(), jobs, timeout, verbose
         self.grace, self.slowest = grace, slowest
         self.durations = self.start.parent / ".run" / "test-durations.json"
+        self.baseline = self.start / "durations.json"  # committed, so a fresh checkout splits slow modules too
         self.processes, self.lock, self.stopping, self.modules = set(), threading.Lock(), threading.Event(), []
         self.slots, self.budget, self.held = Path(slots), budget or os.cpu_count() or 4, 0
         self.holder, self.noticed = json.dumps(_holder()) + "\n", None  # who this run is; when it last said who waits
@@ -330,15 +331,16 @@ class Run:
             chosen += [module for module in self.modules if module == name or module.startswith(name + ".")] or [name]
         return chosen if names else list(self.modules)
 
-    def recorded(self):
+    def recorded(self, path=None):
+        """The module times in `path`: this checkout's record by default."""
         try:
-            return dict(json.loads(self.durations.read_text())["modules"])
+            return dict(json.loads((path or self.durations).read_text())["modules"])
         except (OSError, ValueError, KeyError, TypeError):
             return {}
 
     def plan(self, targets):
         """(target, shard, shards) for each unit, the longest expected first."""
-        known, units = self.recorded(), []
+        known, units = {**self.recorded(self.baseline), **self.recorded()}, []
         for target in targets:
             expected = known.get(target, UNKNOWN_SECONDS) if target in self.modules else 0
             shards = max(1, round(expected / SHARD_SECONDS)) if target in known else 1

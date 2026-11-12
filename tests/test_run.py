@@ -83,8 +83,10 @@ class RunnerTest(unittest.TestCase):
                               capture_output=True, timeout=60)
 
     def test_it_runs_exactly_what_unittest_discover_runs(self):
-        """Runs what `unittest discover` runs, once each, through load_tests, packages and shards; a test it dropped or
-        ran twice would still leave the run green, so the loss would go unnoticed."""
+        """Runs what `unittest discover` runs, once each, through load_tests, packages and shards, splitting slow
+        modules by this checkout's record or else the committed baseline; a test it dropped or ran twice would still
+        leave the run green, and a fresh checkout that never split a slow module would just be slow, so neither would
+        be noticed."""
         self.module("recording", RECORDING)
         self.module("test_alpha", """
             from recording import Recorded
@@ -144,16 +146,26 @@ class RunnerTest(unittest.TestCase):
         expected = self.recorded()
         self.assertEqual(len(expected), 12, expected)
         self.record.unlink()
-        # A long recorded time splits test_alpha into shards.
-        (self.row / ".run").mkdir()
+        modules = ["loaded", "pkg.deeper.test_deep", "pkg.test_inner", "test_alpha", "test_beta", "test_gamma",
+                   "withinit", "withinit.test_mod"]
+        # A fresh checkout has no record of its own: the committed baseline splits test_alpha into shards, and the
+        # record that run writes keeps only what it measured.
+        baseline = self.tests / "durations.json"
+        baseline.write_text(json.dumps({"modules": {"test_alpha": 100, "test_gone": 50}}))
+        result = self.run_tests()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded(), expected)
+        self.assertIn("test_alpha (1 of 5)", result.stdout)
+        self.assertEqual(sorted(json.loads((self.row / ".run/test-durations.json").read_text())["modules"]), modules)
+        self.record.unlink()
+        # A long time recorded by this checkout's own runs splits test_alpha into shards, whatever the baseline says.
+        baseline.write_text(json.dumps({"modules": {"test_alpha": 1}}))
         (self.row / ".run/test-durations.json").write_text(json.dumps({"modules": {"test_alpha": 100}}))
         result = self.run_tests()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recorded(), expected)
         self.assertIn("test_alpha (1 of 5)", result.stdout)
         self.assertEqual(result.stdout.splitlines()[-1], "OK")
-        modules = ["loaded", "pkg.deeper.test_deep", "pkg.test_inner", "test_alpha", "test_beta", "test_gamma",
-                   "withinit", "withinit.test_mod"]
         # This run's times replace the record, so the next run plans with them.
         times = json.loads((self.row / ".run/test-durations.json").read_text())["modules"]
         self.assertEqual(sorted(times), modules)
