@@ -17,9 +17,11 @@ mv2 init ~/my-project --template qa --name my-project
 | --- | --- |
 | Inside an agent session | The agent's own universe |
 | Anywhere else | The nearest `.multiverse/` in the current directory or a parent |
-| With `-u PATH` | That universe or subverse, which must exist |
+| With `-u PATH` | That universe or subverse, or the workspace containing its `.multiverse`; it must exist |
 
 Put `-u` before the command: `mv2 -u ~/other-project/.multiverse list`.
+
+An explicit `-u` path never falls back to an enclosing universe. An empty value, a missing path, an ordinary subfolder or an abandoned subverse is refused before the command runs or migrates settings. If the selected universe disappears during the command, later reads fail instead of switching to its parent. Without `-u`, discovery from the current directory or `MV2_UNIVERSE` still searches parent directories.
 
 ## Subverses
 
