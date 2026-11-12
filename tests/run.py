@@ -292,9 +292,9 @@ def _holder():
 
 
 class Run:
-    def __init__(self, start, jobs, timeout, verbose, slots=SLOTS, budget=None, grace=GRACE):
+    def __init__(self, start, jobs, timeout, verbose, slots=SLOTS, budget=None, grace=GRACE, slowest=0):
         self.start, self.jobs, self.timeout, self.verbose = Path(start).resolve(), jobs, timeout, verbose
-        self.grace = grace
+        self.grace, self.slowest = grace, slowest
         self.durations = self.start.parent / ".run" / "test-durations.json"
         self.processes, self.lock, self.stopping, self.modules = set(), threading.Lock(), threading.Event(), []
         self.slots, self.budget, self.held = Path(slots), budget or os.cpu_count() or 4, 0
@@ -576,7 +576,7 @@ class Run:
         units = self.plan(self.targets(names))
         print(f"{len(units)} units on {self.jobs} processes", flush=True)
         began, totals, problems, measured, done = time.monotonic(), {"run": 0, "skipped": 0}, [], {}, 0
-        counts = {"failures": 0, "errors": 0}
+        counts, timed = {"failures": 0, "errors": 0}, {}
         with tempfile.TemporaryDirectory(prefix="mv2-tests-") as scratch:
             pool = concurrent.futures.ThreadPoolExecutor(self.jobs)
             try:
@@ -594,6 +594,7 @@ class Run:
                         totals["skipped"] += len(data["skipped"])
                         counts["failures"] += len(data["failures"])
                         counts["errors"] += len(data["errors"])
+                        timed.update(data["times"])
                         if target in self.modules:  # a module's time, not one class's or test's
                             measured[target] = measured.get(target, 0) + sum(data["times"].values())
                     failed = code != 0 or not data or bool(data["failures"] or data["errors"])
@@ -619,6 +620,10 @@ class Run:
             pool.shutdown()
         self.show(problems)
         self.record(measured)
+        if self.slowest:
+            print("-" * 70 + f"\nSlowest {min(self.slowest, len(timed))} tests:")
+            for test, seconds in sorted(timed.items(), key=lambda item: -item[1])[:self.slowest]:
+                print(f"{seconds:8.1f} s  {test}")
         print("-" * 70 + f"\nRan {totals['run']} tests in {time.monotonic() - began:.1f}s on {self.jobs} processes\n")
         skipped = f"skipped={totals['skipped']}" if totals["skipped"] else ""
         if not problems:
@@ -654,6 +659,17 @@ class Run:
                                                      **{k: round(v, 2) for k, v in measured.items()}}},
                                         indent=1, sort_keys=True) + "\n")
         temporary.replace(self.durations)
+
+
+def _count(text):
+    """A number of tests to list: 0 or more."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, not {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, not {value}")
+    return value
 
 
 def _terminated(signum, frame):
@@ -713,6 +729,8 @@ def _main(argv):
                         help="units at once (default: the CPU count)")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="show each unit's tests as it ends")
     parser.add_argument("--list", action="store_true", help="print the modules a run would run, one a line, and stop")
+    parser.add_argument("--durations", type=_count, default=0, metavar="N",
+                        help="after the run, list its N slowest tests, setUp and cleanups included")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"seconds before a unit is killed (default: {TIMEOUT})")
     parser.add_argument("-s", "--start-directory", default=str(HERE), help=argparse.SUPPRESS)
@@ -725,7 +743,7 @@ def _main(argv):
         print("\n".join(run.targets(args.names)))
         return 0
     return Run(args.start_directory, max(1, args.jobs), args.timeout, bool(args.verbose), args.slots_directory,
-               args.budget, args.grace)(args.names)
+               args.budget, args.grace, args.durations)(args.names)
 
 
 if __name__ == "__main__":
