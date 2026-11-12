@@ -1,7 +1,8 @@
 """Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox."""
 from datetime import datetime
 
-from .. import universe
+from .. import display, universe
+from ..runtime import queued_prompts
 from ..store import read
 from ..universe import agents, focus, mailbox
 
@@ -48,7 +49,9 @@ def target(root, agent, as_user):
     return directory, bool(me)
 
 
-def run(root=None, *, agent=None, duration=None, turn=False, json=False, as_user=False):
+def run(root=None, *, agent=None, duration=None, turn=False, json=False, as_user=False, check_queue=False):
+    """Focus an agent. `check_queue` also says which follow-ups its harness already holds, which the focus won't stop;
+    the command line asks for it, the dashboard doesn't, since the read can take up to 2 s."""
     directory, own = target(root, agent, as_user)
     name = read(directory / "properties.json")["name"]
     if own and duration is not None:
@@ -61,19 +64,60 @@ def run(root=None, *, agent=None, duration=None, turn=False, json=False, as_user
         raise ValueError(f"{name}'s harness is not reporting its turns now, so a turn focus would never end; "
                          + ("focus until mv2 unfocus instead" if own else
                             "focus for a duration with --for, or until mv2 unfocus")) from None
-    return {"agent": name, "focused": True, "ends": focus.ends(record, own), **record}
+    result = {"agent": name, "focused": True, "ends": focus.ends(record, own), **record}
+    if check_queue:
+        # Read after the focus began: anything sent from now on is held, so what the harness holds came before.
+        result.update(queued(root, directory, name, own, turn))
+    return result
+
+
+def queued(root, directory, name, own, turn):
+    """`queued_follow_ups` (a count, or None when unknown) and `queue_note`, from the read send uses.
+
+    Follow-ups only: a steer reaches the agent within its current turn. An unknown queue gets a line only when one
+    may be queued, as for send: mv2's records hold an unconfirmed follow-up to the agent, or can't be read.
+    """
+    try:
+        # The target's own universe: an agent focusing itself may have another one selected.
+        report, _, unconfirmed = queued_prompts.for_send(directory.parents[2], directory.name)
+    except Exception:
+        return {"queued_follow_ups": None, "queue_note": None}  # Never fails a focus that has begun.
+    complete = report.state == "ok" and report.coverage == "complete"
+    count = sum(entry.mode == "follow-up" for entry in report.entries) if report.state == "ok" else 0
+    whom, whose = ("you", "your") if own else (name, "its")
+    if count:
+        noun = "message was" if count == 1 else "messages were"
+        note = (f"{'' if complete else 'At least '}{count} follow-up {noun} already queued for {whom} before this focus, "
+                f"and it won't stop {'it' if count == 1 else 'them'}: {'it arrives' if count == 1 else 'they arrive'} "
+                f"when {whose} turn ends")
+        if turn:
+            note += (" and start" + ("s" if count == 1 else "") + " a new turn. A turn focus counts any turn end, so it "
+                     "will likely end with that turn")
+            note += (", before the user answers. To stay focused until the user answers, run mv2 focus instead, "
+                     "and mv2 unfocus once they have." if own else ".")
+        else:
+            note += ". The focus holds only messages sent from now on."
+    elif not complete and (unconfirmed is None or unconfirmed):
+        reason = display.clean(report.reason or "The harness queue is unknown").rstrip(".")
+        note = (f"mv2 couldn't check whether follow-up messages are already queued for {whom}: {reason}. "
+                f"If any are, this focus won't stop them.")
+    else:
+        note = None
+    return {"queued_follow_ups": count if complete or count else None, "queue_note": note}
 
 
 def cli_run(root=None, *, json=False, **options):
-    result = run(root, **options)
+    result = run(root, check_queue=True, **options)
     if json:
         return result
     if result["by"] == "agent":
         line = f"Focused {result['ends']}. Steer and follow-up messages to you wait in your inbox."
-        return line + (" Run mv2 unfocus once the user has answered." if result["ends"] == "until unfocused"
-                       else " It ends by itself; mv2 unfocus ends it sooner.")
-    return (f"Focused {result['agent']} {result['ends']}. Steer and follow-up messages to it wait in its inbox, "
-            f"with its inbox-only messages.")
+        line += (" Run mv2 unfocus once the user has answered." if result["ends"] == "until unfocused"
+                 else " It ends by itself; mv2 unfocus ends it sooner.")
+    else:
+        line = (f"Focused {result['agent']} {result['ends']}. Steer and follow-up messages to it wait in its inbox, "
+                f"with its inbox-only messages.")
+    return line + ("\n" + result["queue_note"] if result.get("queue_note") else "")
 
 
 def unread(directory, since=None):

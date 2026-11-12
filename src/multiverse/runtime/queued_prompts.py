@@ -139,8 +139,9 @@ def _ledger(directory, session):
                     for value in (receipt, initial, current))
                     or attempt is latest and mailbox._dated(state.get('transcript_confirmed_at'))):
                 confirmed.add(identifier)
+    # Sender IDs of unconfirmed follow-ups; None stands for a person's or a plugin's, which no recipient ID matches.
     unconfirmed = frozenset(sender for identifier, (_, mode, sender) in found.items()
-                            if identifier not in confirmed and mode == 'follow-up' and sender is not None)
+                            if identifier not in confirmed and mode == 'follow-up')
     return found, unconfirmed, frozenset(unproven)
 
 
@@ -224,7 +225,10 @@ def _catalog(adapter, session, executor, ledger, unconfirmed, unproven):
 
 
 def for_send(root, agent):
-    """Return report, queued sender IDs and unconfirmed sender IDs (None for unreadable history)."""
+    """Return report, queued sender IDs and unconfirmed sender IDs (None for unreadable history).
+
+    The unconfirmed set holds None too when a person's or a plugin's follow-up is unconfirmed.
+    """
     effects.require('queued_prompts', agent)
     deadline = time.monotonic() + BUDGET
     key = (str(root), str(agent))

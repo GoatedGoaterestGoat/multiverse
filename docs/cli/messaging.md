@@ -246,6 +246,8 @@ While an agent is focused:
 - What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
 - A `steer` or `follow-up` sent before the focus began is still delivered if the harness had already accepted it, or if it waited for the agent to finish starting. The turn it starts counts toward a `--turn` focus.
 
+`mv2 focus` says when the agent's harness already holds follow-ups from mv2, which the focus won't stop. It reads them the way [send does](../design/queued-prompts.md), counting follow-ups only. With `--turn`, it also says that the turn they start will likely end the focus before the user answers, and suggests a focus until `mv2 unfocus` instead. When mv2 can't read the queue and a follow-up may be queued, it says it couldn't check, and why. The dashboard's `f` doesn't check.
+
 Only the user can focus an agent for a time: inside an agent, `focus --for` is refused. `unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
 
 A turn focus ends when the agent's status next goes from working or waiting to idle:

@@ -554,6 +554,57 @@ class FocusCommandTest(BaseTest):
         self.assertEqual(self.output('unfocus', agent='asker'), 'Unfocused; messages reach you normally again. You '
                          'have 1 unread inbox message, sent while you were focused: read it now with mv2 inbox.\n')
 
+    def test_focus_says_which_follow_ups_its_harness_already_holds(self):
+        """mv2 focus says when follow-ups were queued before it, which it won't stop, and for --turn that their turn
+        will likely end it; without the note an agent waits for an answer while its focus is used up."""
+        from multiverse.harnesses.types import QueuedPrompt, QueueReport
+        from multiverse.runtime import queued_prompts
+        from multiverse.ui.backend import LocalBackend
+        def complete(*modes):
+            entries = tuple(QueuedPrompt(message_id=str(uuid4()), mode=mode) for mode in modes)
+            return QueueReport(state='ok', coverage='complete', observed_at=store.now(), entries=entries), frozenset(), frozenset()
+        def unknown(unconfirmed):
+            return QueueReport(state='unavailable', reason='Reading the harness queue took longer than 2 s.',
+                               observed_at=store.now()), frozenset(), unconfirmed
+        rows = [
+            (complete('follow-up', 'steer', 'follow-up'), ['--turn'], 'asker',
+             "2 follow-up messages were already queued for you before this focus, and it won't stop them: they arrive "
+             "when your turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
+             "turn, before the user answers. To stay focused until the user answers, run mv2 focus instead, and mv2 "
+             "unfocus once they have."),
+            (complete('follow-up'), [], 'asker',
+             "1 follow-up message was already queued for you before this focus, and it won't stop it: it arrives when "
+             "your turn ends. The focus holds only messages sent from now on."),
+            (complete('follow-up', 'follow-up'), ['asker', '--turn'], None,
+             "2 follow-up messages were already queued for asker before this focus, and it won't stop them: they arrive "
+             "when its turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
+             "turn."),
+            (complete('steer'), [], 'asker', None),
+            (unknown(frozenset({'some sender'})), [], 'asker',
+             "mv2 couldn't check whether follow-up messages are already queued for you: Reading the harness queue took "
+             "longer than 2 s. If any are, this focus won't stop them."),
+            (unknown(None), ['asker'], None, "mv2 couldn't check whether follow-up messages are already queued for asker"),
+            (unknown(frozenset()), [], 'asker', None),
+        ]
+        directory = self.directories['asker']
+        agents.update_runtime(directory, self.launch, status='working')
+        for report, arguments, caller, note in rows:
+            with self.subTest(arguments=arguments, caller=caller, note=note), \
+                    patch.object(queued_prompts, 'for_send', return_value=report) as read:
+                focus.end(directory)
+                output = self.output('focus', *arguments, agent=caller)
+                read.assert_called_once()
+                self.assertEqual(read.call_args.args[1], directory.name)
+                if note is None:
+                    self.assertEqual(output.count('\n'), 1, output)
+                else:
+                    self.assertIn('\n' + note, output)
+                record = json.loads(self.output('focus', '--json', *arguments, agent=caller))
+                self.assertEqual(record['queue_note'] is None, note is None)
+        focus.end(directory)
+        with patch.object(queued_prompts, 'for_send', side_effect=AssertionError('the dashboard read the queue')):
+            self.assertNotIn('queue_note', LocalBackend().focus(self.root, 'asker'))
+
     def test_agents_change_only_their_own_focus(self):
         """An agent can focus and unfocus only itself while the person can change any agent; otherwise one agent could
         silence another or clear its focus."""

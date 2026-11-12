@@ -1,8 +1,9 @@
 # Queued prompts
 
 A harness can report which of mv2's messages it holds for an agent right now: messages mv2 handed over that are
-waiting for the agent's turn to end, not yet in its conversation. mv2 uses that report for one thing so far: an agent
-reads the follow-ups another agent sent it before writing back.
+waiting for the agent's turn to end, not yet in its conversation. mv2 uses that report in two places: an agent
+reads the follow-ups another agent sent it before writing back, and
+`mv2 focus` says which queued follow-ups the focus won't stop ([focus an agent](../cli/messaging.md#focus-an-agent)).
 
 ## Read the follow-ups first
 
@@ -39,6 +40,13 @@ follow-ups to A are still queued is refused with that sentence, and the others g
 refused ones with `--force` then reaches only them. The check reads mv2's records of A's messages first, then A's
 harness, once, before anything is saved and within the two-second bound, and changes nothing: not A's queue, not
 any receipt, not any read mark.
+
+## What a focus won't stop
+
+Right after `mv2 focus` begins a focus (the CLI, not the dashboard), it reads the focused agent's report once.
+Follow-ups the harness already holds went in before the focus, so the focus can't hold them back: the output says so,
+and with `--turn` that their turn will likely end the focus. When the report can't tell, the output gives a
+"couldn't check" line like a send's, under the same rule. The read changes nothing.
 
 ## The report
 
