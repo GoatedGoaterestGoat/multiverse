@@ -52,20 +52,44 @@ def state(row):
     return live_label(row)
 
 
-def model_label(row, effort=True):
-    """An agent's model as people name it: `Opus 5.5`, with its effort when asked, `Opus 5.5 (xhigh)`.
+def model_parts(row):
+    """(name, effort) for an agent's Model cell, or (None, None) when nothing is known:
 
-    The name is the listing's `model_name` (the universe's custom name, else the model table's); a model neither
-    names reads as recorded, and an agent with no recorded model reads `-`. No recorded effort adds nothing."""
-    model = row.get("model")
-    if not isinstance(model, str) or not model.strip():
+    1. a running agent: the model and effort its session last reported (`usage.value`);
+    2. otherwise, or before a reading lands: its recorded model;
+    3. no recorded model: its harness's default (`settings.model`), what a launch would use;
+    4. none of these: nothing, which reads `-`.
+
+    The name is the listing's display name for that model (custom, else the table's), else the spelling as
+    recorded. The effort is a running agent's session's where it reports one (with or without its model), else
+    the recorded effort; never a default."""
+    def text(value):
+        return isinstance(value, str) and value.strip()
+
+    usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+    observed = usage.get("value") if usage.get("state") == "ok" and isinstance(usage.get("value"), dict) else {}
+    running = row.get("live") == "alive"
+    # The effort follows the session on its own: a session can report its effort without its model.
+    effort = (observed["effort"] if running and text(observed.get("effort")) else
+              row.get("effort") if text(row.get("effort")) else None)
+    if running and text(observed.get("model")):
+        name, model = row.get("observed_model_name"), observed["model"]
+    elif text(row.get("model")):
+        name, model = row.get("model_name"), row["model"]
+    elif text(row.get("default_model")):
+        name, model = row.get("default_model_name"), row["default_model"]
+    else:
+        return None, None
+    return clean(name if text(name) else model).strip(), clean(effort).strip() if effort else None
+
+
+def model_label(row, effort=True):
+    """An agent's model as people name it, `Opus 5.5`, with its effort when asked, `Opus 5.5 (xhigh)`; `-` when
+    nothing is known. See model_parts for which model it is."""
+    name, chosen = model_parts(row)
+    if name is None:
         return "-"
-    name = row.get("model_name")
-    label = clean(name if isinstance(name, str) and name.strip() else model).strip()
-    chosen = row.get("effort")
-    if effort and isinstance(chosen, str) and chosen.strip():
-        label += f" ({clean(chosen).strip()})"
-    return label
+    return name + (f" ({chosen})" if effort and chosen else "")
 
 
 def _target(value):

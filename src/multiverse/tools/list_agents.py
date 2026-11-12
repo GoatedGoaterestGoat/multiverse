@@ -20,7 +20,7 @@ COLUMNS = {
 }
 DEFAULT_COLUMNS = ("name", "status", "phase", "summary")
 # The --json fields that need each agent's token usage read, the slow part of a listing; nothing else reads it.
-USAGE_FIELDS = ("usage", "tokens", "usage_detail")
+USAGE_FIELDS = lifecycle.USAGE_FIELDS
 # Where a refusal under --json points: there are too many fields to list in one line.
 JSON_FIELDS_HINT = "fields of mv2 list --json, such as id,name,live,status; plain mv2 list --json shows every field"
 
@@ -74,6 +74,14 @@ def run(root=None, *, recursive=False, json=False, wide=False, columns=None):
     rows = lifecycle.listing(root, recursive, usage=json and (names is None or any(name in USAGE_FIELDS for name in names)))
     if json:
         return rows
+    if "model" in names:  # a running agent's model is what its session reports: read only those agents' usage
+        for row in rows:
+            if row.get("live") == "alive" and not row.get("damaged") and "identity_error" not in row:
+                try:
+                    row.update({key: value for key, value in lifecycle.row_usage(row).items()
+                                if key in ("usage", "observed_model_name")})
+                except Exception:
+                    pass  # the recorded or default model stands
     if len(names) == 1:  # for scripts: one value per agent, and nothing that could be read as one
         return "\n".join(COLUMNS[names[0]](row, root, wide) for row in rows)
     if not rows:

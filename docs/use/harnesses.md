@@ -263,7 +263,7 @@ Set `settings.model_names` in `harnesses/NAME/harness.json` to override names in
 
 Each key matches the recorded spelling exactly. Without an exact override, mv2 ignores surrounding whitespace and uses the table's name for that ID or alias, including known provider IDs. Custom override keys are never normalized. Table aliases follow the universe's current harness environment. These are labels for the recorded choice, not observations of the model serving a session. Names can change when the bundled tables or harness settings change. They do not change which models are allowed.
 
-A recorded model with no known name shows its raw ID. An agent with no recorded model shows `-`. See [dashboard columns](../reference/dashboard.md) for the Model column and its optional effort suffix.
+A model with no known name shows its raw ID. A running agent shows the model its session last reported, when available; otherwise the cell shows the recorded model, else the harness's default (`settings.model`), else `-`. See [dashboard columns](../reference/dashboard.md) for the Model column and its optional effort suffix.
 
 ### Claude's models
 

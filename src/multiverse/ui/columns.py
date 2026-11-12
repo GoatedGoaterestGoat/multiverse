@@ -18,7 +18,7 @@ import threading
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from ..display import clean, live_label, model_label, phase_label, summary_parts
+from ..display import clean, live_label, model_label, model_parts, phase_label, summary_parts
 from ..plugins.loader import ATTENTION_COLUMNS
 from ..universe import focus
 from . import theme
@@ -161,7 +161,7 @@ class ModelColumn(Column):
             return super().render(row)
         value = self.label(row)
         if cell_len(value) > width:
-            effort = clean(row.get("effort") or "").strip()
+            effort = model_parts(row)[1] or ""
             suffix = f" ({effort})" if effort and value.endswith(f" ({effort})") else ""
             room = width - cell_len(suffix)
             if suffix and room >= 2:

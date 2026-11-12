@@ -31,7 +31,7 @@ def harnesses(root):
     return sorted(available, key=lambda name: ({"codex": 0, "claude": 1}.get(name, 2), name))
 
 
-USAGE_FIELDS = ("usage", "tokens", "usage_detail")
+USAGE_FIELDS = lifecycle.USAGE_FIELDS
 
 
 def usage_key(row):
