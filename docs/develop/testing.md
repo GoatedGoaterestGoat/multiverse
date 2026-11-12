@@ -95,8 +95,8 @@ Live native tests use local scripted providers and isolated homes. They need no 
 
 `.github/workflows/tests.yml` runs on Ubuntu 24.04 with tmux 3.4 and Node 22. Codex, Claude and Pi aren't installed there, so their live tests skip.
 
-- **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, and on 3.13, for pull requests and for pushes to `main` and `ci/*` branches. Each takes about three and a half minutes.
-- **each module alone** runs nightly, and on demand from the Actions tab: every module `tests/run.py --list` prints, by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
+- **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, on 3.13 and on 3.14, for pull requests, for pushes to `main` and `ci/*` branches, and on demand from the Actions tab. Each takes about five minutes. The nightly run doesn't repeat it: the push to `main` already ran it for the same commit.
+- **each module alone** runs nightly when `main` has changed since the last nightly run, and on demand from the Actions tab: every module `tests/run.py --list` prints, by itself with plain `unittest`, each in its own process with its own tmux and run folders, as many at once as the runner has cores. A module can pass beside the others and fail alone, when nothing else imports or sets up what it relies on. It takes about six minutes.
 
 The plugin submodules are private and aren't fetched, so CI runs mv2's own tests only: not the GOAT and remote-control plugins' own tests, and not a submodule pin bump. Run `tests/run.py test_plugin_checkouts` locally, with the submodules checked out, before bumping a pin.
 
