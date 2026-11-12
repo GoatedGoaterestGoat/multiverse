@@ -250,7 +250,7 @@ While an agent is focused:
 
 Only the user can focus an agent for a time: inside an agent, `focus --for` is refused. `unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus.
 
-A turn focus ends when the agent's status next goes from working or waiting to idle:
+A turn focus ends when the agent's status next goes to idle from working, or from waiting that began inside a turn. A command's own dialog you open while the agent is idle, such as Claude Code's `/model` picker, shows `waiting` but isn't a turn, so closing it doesn't count:
 
 - **An agent that focuses itself, or one you focus while it is working,** finishes its current turn first. The focus ends with the turn after it, which takes your answer.
 - **One you focus while it is waiting on you or idle** has its focus end with the turn that takes your answer: for a permission prompt, that is the current turn.

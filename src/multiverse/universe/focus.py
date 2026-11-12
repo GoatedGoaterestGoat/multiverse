@@ -7,9 +7,11 @@ the agent directory holds the focus while it lasts:
     {"id": ..., "since": ISO time, "until": ISO time or null, "turns": 1, 2 or null, "by": "agent" or "user"}
 
 `until` ends it at a time. `turns` counts the turn ends still to come: when the
-harness status goes from working or waiting to idle, `turn_ended` counts one, and
-the last removes the file. With neither, it lasts until `end`. Readers never
-remove an expired record; the next `start` or `end` replaces it.
+harness status goes to idle from working, or from waiting that began inside a turn,
+`turn_ended` counts one, and the last removes the file. A command's dialog opened
+while the agent is idle waits outside any turn and doesn't count. With neither, it
+lasts until `end`. Readers never remove an expired record; the next `start` or `end`
+replaces it.
 
 A steer or follow-up sent during the focus is saved as an inbox-only message that
 names the focus (`hold`). `focus-last.json` outlives the focus, however it ends:

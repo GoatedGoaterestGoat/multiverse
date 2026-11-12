@@ -156,6 +156,8 @@ class FocusRecordTest(BaseTest):
         messages back for a turn longer, or none."""
         for status in ('idle', 'waiting'):
             with self.subTest(status=status):
+                if status == 'waiting':
+                    self.status('working')  # a permission prompt or a question waits inside a turn
                 self.status(status)
                 focus.start(self.directory, turn=True)
                 if status == 'idle':
@@ -166,6 +168,65 @@ class FocusRecordTest(BaseTest):
         # The agent runs focus --turn inside its turn, whatever its last reported status says.
         self.status('waiting')
         self.assertEqual(focus.start(self.directory, turn=True, by='agent')['turns'], 2)
+
+    def test_a_dialog_opened_while_idle_is_not_a_turn(self):
+        """A command's dialog the person opens while the agent is idle (Claude's /model picker) reports waiting
+        outside any turn; counting its close as a turn end ended a --turn focus and sent the held note before the
+        person answered."""
+        self.status('working')                                 # the agent's turn, reported
+        focus.start(self.directory, turn=True, by='agent')  # the agent asks, and focuses itself until the answer
+        self.status('idle')                                    # its turn ends
+        for status in ('waiting', 'idle', 'waiting', 'idle'):  # the person opens and closes a dialog, twice
+            self.status(status)
+        self.assertIsNotNone(focus.current(self.directory))
+        self.status('working')                                 # the answer's turn
+        self.status('waiting')                                 # a prompt inside it
+        agents.update_runtime(self.directory, self.launch, observed_model='x')  # a record update while it waits
+        self.status('idle')
+        self.assertIsNone(focus.current(self.directory))
+
+    def test_a_turn_end_counts_once_per_turn(self):
+        """Only a turn's own end counts, once: a repeated idle, a turn that works, waits and works again, and a status
+        of unknown in between; a break ends a --turn focus early or late."""
+        cases = [  # (case, statuses after a turns=2 focus starts mid-turn, focus still on at the end)
+            ('one turn end, then idle again', ('idle', 'idle'), True),
+            ('working, waiting, working: one turn', ('idle', 'working', 'waiting', 'working', 'idle'), False),
+            ('unknown in between never counts', ('unknown', 'idle', 'working', 'unknown', 'idle'), True),
+        ]
+        for case, statuses, held in cases:
+            with self.subTest(case):
+                self.status('working')
+                focus.end(self.directory)
+                focus.start(self.directory, turn=True, by='agent')
+                for status in statuses:
+                    self.status(status)
+                self.assertEqual(focus.current(self.directory) is not None, held)
+
+    def test_a_record_written_before_the_turn_flag_ends_a_working_turn_only(self):
+        """A runtime record from before mv2 kept `in_turn`: a turn running at the upgrade still ends, and a wait whose
+        start mv2 never saw doesn't count; a break ends a focus on an idle-time dialog, or never ends the running turn."""
+        for before, left in (('working', 1), ('waiting', 1)):  # working: 2 turns, one counted; waiting: 1, none counted
+            with self.subTest(before=before):
+                store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': before})
+                focus.end(self.directory)
+                started = focus.start(self.directory, turn=True)['turns']
+                self.status('idle')
+                self.assertEqual((started, focus.current(self.directory)['turns']), (2 if before == 'working' else 1, left))
+        with self.subTest('working, then a prompt in that turn'):  # the saved working proves the wait's turn
+            store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'working'})
+            focus.end(self.directory)
+            self.status('waiting')
+            focus.start(self.directory, turn=True)  # the person's, while it waits on them: one turn
+            self.status('idle')
+            self.assertIsNone(focus.current(self.directory))
+        for flag in ('false', 1, ['x']):  # a damaged flag proves nothing
+            with self.subTest(flag=flag):
+                store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'waiting',
+                                                               'in_turn': flag})
+                focus.end(self.directory)
+                focus.start(self.directory, turn=True)
+                self.status('idle')
+                self.assertIsNotNone(focus.current(self.directory))
 
     def test_a_turn_end_saved_before_a_turn_focus_never_counts_against_it(self):
         """A focus --turn that starts just after a turn end was saved is not consumed by that turn end; a break ends

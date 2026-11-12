@@ -268,10 +268,18 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
             data['startup_delivery'] = 'failed'
             data['delivery_error'] = data['reason']
             data['status'] = 'unknown'
+        # A turn ends when the harness goes idle from working, or from waiting on the person inside a turn: a
+        # command's dialog the person opens while the agent is idle (Claude's /model picker) waits outside any turn.
+        # `in_turn` (exactly true) is set while working, and when a wait starts from working (a record from before the
+        # flag still proves its turn that way); it is cleared when the agent goes idle.
+        turn_end = data.get('status') == 'idle' and (before == 'working' or (before == 'waiting' and data.get('in_turn') is True))
+        if data.get('status') == 'working' or (data.get('status') == 'waiting' and before == 'working'):
+            data['in_turn'] = True
+        elif data.get('status') == 'idle':
+            data.pop('in_turn', None)
         write(agent_dir / "runtime.json", data)
-        # A turn ends when the harness goes idle from working or waiting on the person. Under the lock,
-        # so a focus --turn, which reads the status under it too, is ordered with this turn end.
-        if data.get('status') == 'idle' and before in ('working', 'waiting'):
+        # Under the lock, so a focus --turn, which reads the status under it too, is ordered with this turn end.
+        if turn_end:
             ended = focus.turn_ended(agent_dir)
     if ended:
         # The turn ended a focus: tell the agent about messages it held, after the lock.

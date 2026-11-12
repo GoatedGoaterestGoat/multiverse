@@ -1613,7 +1613,17 @@ report their phase with `mv2 report` but never set their status: `working` while
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched
 to its call through the engine's `ask` verdict and ends when the call finishes, is
 denied, or (Bash) draws its progress row; an approved call that runs briefly
-without a progress row can read `waiting` until it finishes.
+without a progress row can read `waiting` until it finishes. A command's own
+dialog (`/model`'s "Switch model?" confirmation, its picker, `/config`) reaches no
+hook, so while a command runs the mod asks the prompt box every second to take an
+empty insert at the cursor: Claude refuses it with the cause `dialog` while a
+dialog holds the keys, and otherwise it changes nothing. The wait belongs to the
+command, not the turn: an immediate command runs mid-turn, so a turn's end leaves
+its dialog waiting until the dialog closes or the command ends. The insert passes
+through other plugins' `prompt.fill` hooks like any plugin's fill, so one that
+rewrote every fill would rewrite this one; none of mv2's bundled plugins hooks it.
+A dialog Claude opens outside a command, such as its "Resume this conversation?"
+usage warning, is still not seen.
 
 With the bridge, plugins extend Claude launches as they extend any harness
 ([plugins](plugins.md)): a launch contribution adds environment variables,

@@ -9,6 +9,8 @@
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import { agePhrase } from '../hooks/age'
+import { dialogIn, watch, EVERY_MS, FIRST_MS } from '../hooks/dialog'
+import { register } from '../hooks/index'
 
 const STEER = '3f2a0c1e-1111-4222-8333-944455556661'
 const FOLLOW_UP = '3f2a0c1e-1111-4222-8333-944455556662'
@@ -234,6 +236,115 @@ describe('status', () => {
     await $.turn.complete(turnComplete('t1'))
     await w.clock.settle()
     expect(w.statuses.at(-1)).toBe('idle')
+  })
+
+  // Claude's own dialogs (/model's "Switch model?" confirmation, its picker, /config) reach no hook: an agent behind
+  // one showed idle while nobody saw it, and a follow-up queued behind it unseen (2.1.322). The kit strips a refusal
+  // cause a test's hook gives, so the dialog itself is driven through hooks/dialog.ts below; this checks the wiring.
+  test("a command's run checks for its dialog with an empty insert, only while it runs", async ($, on) => {
+    const w = world(on)
+    let box: { isFilled: boolean; refusal?: string } = { isFilled: true }
+    const fills: unknown[] = []
+    on('prompt.fill', async ($, e) => { fills.push(e); return box as never })
+    let finish!: () => void
+    on('command.run', async () => { await new Promise<void>((resolve) => { finish = resolve }); return { text: '' } })
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    await w.clock.advance(5000)
+    expect(fills).toHaveLength(0)  // no command, no check
+    const run = $.command.run({ command: 'model', args: 'sonnet', origin: { kind: 'composer' },
+      presentation: { isFullscreen: false, columns: 100 } } as never)
+    for (const answer of [{ isFilled: true }, { isFilled: false, refusal: 'no_composer' }, { isFilled: false }]) {
+      box = answer
+      await w.clock.advance(1000)
+      await w.clock.settle()
+      expect(w.statuses.at(-1)).toBe('idle')  // no box, or a hook keeping text out, is no dialog
+    }
+    expect(fills.length).toBeGreaterThanOrEqual(3)
+    // The check never changes the draft: an empty insert at the cursor.
+    expect(fills.every((e) => (e as { text: string }).text === '' && (e as { mode: string }).mode === 'insert')).toBe(true)
+    finish()
+    await run
+    await w.clock.settle()
+    const checked = fills.length
+    await w.clock.advance(5000)
+    await w.clock.settle()
+    expect(fills.length).toBe(checked)  // no check after the command ends
+  })
+
+  test("a dialog is open from the check that sees it until one that doesn't, and never after the stop", async () => {
+    expect([{ isFilled: false, refusal: 'dialog' }, { isFilled: false, refusal: 'no_composer' }, { isFilled: false },
+      { isFilled: true }, undefined].map(dialogIn)).toEqual([true, false, false, false, false])
+    const timers: [number, () => void][] = []
+    const changes: boolean[] = []
+    let open = false
+    let gate: Promise<void> | undefined
+    const stop = watch(async () => { await gate; return open }, (ms, run) => timers.push([ms, run]), (now) => changes.push(now))
+    const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve() }
+    const tick = async () => { timers.shift()![1](); await flush() }
+    expect(timers.map(([ms]) => ms)).toEqual([FIRST_MS])
+    await tick()
+    expect(changes).toEqual([])  // closed, as it started
+    open = true
+    await tick()
+    expect(changes).toEqual([true])
+    await tick()
+    expect(changes).toEqual([true])  // still open: reported once
+    open = false
+    await tick()
+    expect(changes).toEqual([true, false])
+    expect(timers.map(([ms]) => ms)).toEqual([EVERY_MS])
+    // A check under way when the command ends reports nothing and schedules nothing.
+    let release!: () => void
+    gate = new Promise<void>((resolve) => { release = resolve })
+    open = true
+    timers.shift()![1]()
+    stop()
+    release()
+    await flush()
+    expect([changes, timers.length]).toEqual([[true, false], 0])
+  })
+
+  // An immediate command runs mid-turn, so its dialog can outlast the turn: the turn's end once cleared the dialog's
+  // wait while the check, seeing the same dialog, had nothing new to report, and the agent read idle behind it
+  // (reviewer, b8363faf). The kit strips a refusal cause a test's hook gives, so this drives the mod's own hooks with
+  // a stand-in Claude whose prompt box refuses as a dialog.
+  test("a command's dialog stays waiting when a turn ends under it", async () => {
+    const hooks = new Map<string, Function>()
+    register(((name: string, ...args: unknown[]) => { hooks.set(name, args.at(-1) as Function) }) as never, {} as never)
+    const timers: { ms: number; run: () => void }[] = []
+    const statuses: string[] = []
+    let dialog = true
+    const stand = {
+      env: { get: async (name: string) => (name === 'MV2_PYTHON' ? '/python' : undefined) },
+      clock: { after: (ms: number, run: () => void) => { timers.push({ ms, run }); return { cancel() {} } }, now: async () => 0 },
+      prompt: { fill: async () => (dialog ? { isFilled: false, refusal: 'dialog' } : { isFilled: true }) },
+      process: { run: async (argv: string[]) => {
+        if (argv.includes('--status')) statuses.push(argv[argv.indexOf('--status') + 1] ?? '')
+        return { exitCode: 0, stdout: '', stderr: '' }
+      } },
+      fs: { write: async () => undefined, read: async () => { throw new Error('absent') } },
+      ui: { log() {} },
+    }
+    const flush = async () => { for (let i = 0; i < 50; i++) await Promise.resolve() }
+    const raise = async (name: string, e: unknown, inner: () => Promise<unknown> = async () => ({})) => hooks.get(name)!(stand, e, inner)
+    const tick = async (ms: number) => { const i = timers.findIndex((t) => t.ms === ms); timers.splice(i, 1)[0]!.run(); await flush() }
+    await raise('turn.start', { text: 'task', turnId: 't1' })
+    await flush()
+    let finish!: () => void
+    const running = raise('command.run', { command: 'model', args: 'sonnet' },
+      async () => { await new Promise<void>((resolve) => { finish = resolve }); return { text: '' } })
+    await tick(FIRST_MS)
+    expect(statuses.at(-1)).toBe('waiting')
+    await raise('turn.complete', { isAborted: false, turnId: 't1' })
+    await flush()
+    await tick(EVERY_MS)
+    expect(statuses.at(-1)).toBe('waiting')  // the dialog is still open
+    dialog = false
+    await tick(EVERY_MS)
+    expect(statuses.at(-1)).toBe('idle')
+    finish()
+    await running
   })
 
   test("a subagent's or teammate's turns leave the main loop's status alone", async ($, on) => {
