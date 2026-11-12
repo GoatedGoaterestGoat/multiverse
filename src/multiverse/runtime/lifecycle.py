@@ -108,6 +108,9 @@ def _listing_runtime(directory, facts, *, prepare=False):
             facts = current
 
 
+# Fields supplied by row_usage, omitted together when a listing skips usage.
+USAGE_FIELDS = ('usage', 'tokens', 'usage_detail', 'observed_model_name')
+
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
@@ -118,11 +121,11 @@ ROW_FIELDS = frozenset((
     'agent_identity', 'agent_environment', 'native_fresh_pending',
     'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error', 'identity_error',
     'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
-    'usage', 'tokens', 'usage_detail',
+    *USAGE_FIELDS, 'default_model', 'default_model_name',
 ))
 
 
-def row_usage(row):
+def row_usage(row, *, model_names=None):
     """Measure an already reconciled row, without rebinding or writing core records.
 
     The caller must discard a result if the displayed row's universe, agent,
@@ -133,7 +136,11 @@ def row_usage(row):
         return {}
     measured = (NativeResult('error', row['identity_error']).to_dict() if 'identity_error' in row else
                 native.usage_snapshot(Path(row['universe']), row, row['runtime'], reconciled=True))
-    return {'usage': measured, 'tokens': display.usage_total(measured), 'usage_detail': display.usage_details(measured)}
+    value = measured.get('value') if measured.get('state') == 'ok' else None
+    observed = value.get('model') if isinstance(value, dict) else None
+    name = model_policy.model_name(Path(row['universe']), row, observed, {} if model_names is None else model_names)
+    return {'usage': measured, 'tokens': display.usage_total(measured),
+            'usage_detail': display.usage_details(measured), 'observed_model_name': name}
 
 
 def observation_paths(directories):
@@ -200,7 +207,8 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
                 identity_fields = {'identity_error': identity_problem} if identity_problem is not None else {}
-                usage_fields = row_usage({**properties, **identity_fields, 'universe': str(scope), 'runtime': facts}) if usage else {}
+                usage_fields = row_usage({**properties, **identity_fields, 'universe': str(scope), 'runtime': facts},
+                                         model_names=model_names) if usage else {}
                 relay = facts.get('native_relay') or {}
                 relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
                 if relay_problem and observation['live'] == 'alive':
@@ -226,6 +234,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                              "delivery_problem": delivery_problem,
                              "focus": focus.current(path.parent, observed_missing=observed_missing), "runtime": facts,
                              "model_name": model_policy.recorded_name(scope, properties, model_names),
+                             **model_policy.default_fields(scope, properties, model_names),
                              "blocked_on": blocked.display(scope, properties, dependencies)})))
             except records.RecordError as error:
                 rows.append((path.parent, damaged_row(scope, error, properties)))

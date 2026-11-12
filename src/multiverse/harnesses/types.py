@@ -516,6 +516,9 @@ class Usage:
 
     Input includes cached input; cache counts are subsets, never added twice.
     Unknown counters are None. An observed zero is distinct from unavailable.
+    Model and effort name the latest main-conversation turn, exactly as recorded.
+    observed_at is that turn's aware ISO timestamp, not the time this record was read.
+    Missing observation fields never inherit requested settings or catalog defaults.
     """
     native_session_id: str
     input_tokens: int
@@ -526,6 +529,9 @@ class Usage:
     cached_input_tokens: int | None = None
     cache_write_tokens: int | None = None
     complete: bool = True
+    model: str | None = None
+    effort: str | None = None
+    observed_at: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

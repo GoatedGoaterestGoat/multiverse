@@ -102,6 +102,19 @@ def string(value):
     return value if isinstance(value, str) and value else None
 
 
+def turn_settings(payload):
+    model = payload.get('model')
+    effort = payload.get('effort')
+    try:
+        if (isinstance(model, str) and model.strip() and model.isprintable() and len(model.encode()) <= 4096
+                and (effort is None or isinstance(effort, str) and effort.strip() and effort.isprintable()
+                     and len(effort.encode()) <= 128)):
+            return model, effort
+    except UnicodeError:
+        pass
+    return None, None
+
+
 @dataclass(frozen=True)
 class Entry:
     fact: RowFact
@@ -122,6 +135,10 @@ class Entry:
     trim_context: bool | None = False
     rollback_echo: bool = False
     model_member: bool | None = False
+    model: str | None = None
+    effort: str | None = None
+    review: bool | None = None
+    primary: bool | None = None
 
 
 # Codex 0.164.0 core/src/event_mapping.rs and context/contextual_user_message.rs.
@@ -367,6 +384,18 @@ def entry(line, offset, previous):
     if member is None:
         rollback_boundary = None
     call = string(payload.get('call_id'))
+    model, effort = turn_settings(payload) if outer == 'turn_context' else (None, None)
+    review = None
+    if outer == 'event_msg':
+        item_type = mapping(payload.get('item')).get('type') if inner in ('item_started', 'item_completed') else None
+        if inner == 'entered_review_mode' or item_type == 'EnteredReviewMode':
+            review = True
+        elif inner == 'exited_review_mode' or item_type == 'ExitedReviewMode':
+            review = False
+    primary = None
+    if outer == 'session_meta':
+        primary = (payload.get('source') in (None, 'cli', 'vscode', 'exec', 'mcp')
+                   and payload.get('thread_source') in (None, 'user'))
     fact = RowFact(position=f'{offset + len(line)}:{chain}', ref=string(payload.get('id'))
                    if outer in ('response_item', 'inter_agent_communication') else None,
                    kind=kind, label=label, source='peer' if outer == 'inter_agent_communication' else None,
@@ -388,7 +417,7 @@ def entry(line, offset, previous):
                  outer == 'session_meta' and payload.get('history_base') is not None,
                  string(payload.get('id')) if outer == 'session_meta' else None, rollback_boundary, trim_context,
                  clear_ordinary_text(content) if outer == 'response_item' and role == 'user' else False,
-                 member)
+                 member, model=model, effort=effort, review=review, primary=primary)
 
 
 def signature(status):

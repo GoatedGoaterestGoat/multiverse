@@ -567,15 +567,44 @@ def _plugin_capabilities(adapter, session, facts, taken):
         return {}
 
 
+def _usage_observation(session, facts, value):
+    """Only the captured launch's current conversation can supply turn observations."""
+    empty = dict.fromkeys(('model', 'effort', 'observed_at'))
+    if not session.native_id or value.get('native_session_id') != session.native_id:
+        return empty
+    try:
+        observed = datetime.fromisoformat(value['observed_at'])
+        started = datetime.fromisoformat(facts['started_at'])
+        if observed.utcoffset() is None or started.utcoffset() is None or observed < started:
+            return empty
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return empty
+
+    def text(name):
+        found = value.get(name)
+        return found if isinstance(found, str) and found.strip() and not any(c in found for c in ('\0', '\n', '\r')) else None
+
+    return {'model': text('model'), 'effort': text('effort'), 'observed_at': value['observed_at']}
+
+
 def _adjusted_usage(adapter, session, facts, result):
-    """An adapter's usage result after plugins' adjustments, only when it is ok. A plugin failure leaves it as measured."""
+    """Filter turn observations for this launch; plugins may adjust only the other usage fields."""
     if result.get('state') != 'ok' or not isinstance(result.get('value'), dict):
         return result
+    observation = _usage_observation(session, facts, result['value'])
+    value = {**result['value'], **observation}
     try:
         plugin_harness, info = _plugin_info(adapter, session, facts)
-        return {**result, 'value': plugin_harness.adjust_usage(info, result['value'])}
+        adjusted = plugin_harness.adjust_usage(info, dict(value))
+        value = {**adjusted, **observation}
     except Exception:
-        return result
+        pass  # A plugin failure leaves the filtered measurement usable.
+    # Identity and observation are one measured fact, not an adjuster's replacement metadata.
+    if 'native_session_id' in result['value']:
+        value['native_session_id'] = result['value']['native_session_id']
+    else:
+        value.pop('native_session_id', None)
+    return {**result, 'value': value}
 
 
 def usage_snapshot(root, properties, facts, *, reconciled=False):

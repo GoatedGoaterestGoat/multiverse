@@ -143,6 +143,21 @@ class TranscriptApiTest(PluginTestCase):
         raw = agent.transcript_rows(labels={"prompt"})
         self.assertEqual([row.abandoned for row in raw.rows], [False, True])
 
+    def test_a_fake_transcripts_rows_name_its_own_session(self):
+        """Placeholder rows can silently read as another conversation; binding them must preserve deliberately foreign identities."""
+        def written():
+            return [json.loads(line).get("sessionId", "absent") for line in self.fake.path.read_text().splitlines()]
+        first = self.fake.native_id
+        self.assertEqual(set(written()), {first})  # rewrite, from setUp
+        self.assertTrue(all(row["sessionId"] == "fake" for row in self.rows.rows))  # the caller's rows unchanged
+        foreign, unnamed = str(uuid4()), {"type": "assistant", "message": {"role": "assistant", "content": []}}
+        self.fake.append(ClaudeRows().add("assistant", sessionId=foreign), {**unnamed, "sessionId": None}, unnamed,
+                         ClaudeRows().add("user"))
+        self.assertEqual(written()[-4:], [foreign, None, "absent", first])
+        self.fake.clear(self.rows.rows)
+        self.assertNotEqual(self.fake.native_id, first)
+        self.assertEqual(set(written()), {self.fake.native_id})
+
     def test_reads_need_access_and_say_why_they_cannot_go_on(self):
         """A transcript read needs transcripts.read and observe where the plugin is on, checked for every page;
         a /clear under a cursor raises TranscriptChanged("replaced") with where to resume, malformed generation

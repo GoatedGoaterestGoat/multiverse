@@ -13,6 +13,7 @@ These pages record decisions, rationale and detailed contracts for maintainers. 
 | [harness-commands.md](harness-commands.md) | How mv2 runs a harness's own command in a running agent (`mv2 slash`): which commands run, waiting, the result, what mv2 records, and what an adapter provides |
 | [waiting-prompts.md](waiting-prompts.md) | How mv2 reads and answers the prompts an agent waits on (`mv2 answer`): who may answer, stale answers, outcomes, and what an adapter provides |
 | [queued-prompts.md](queued-prompts.md) | Which of mv2's messages a harness holds for an agent, and why an agent's send is refused while the recipient's follow-ups to it are still queued |
+| [observed-model.md](observed-model.md) | The model and effort a running session reports for its latest turn, and the Model cell's rules |
 | [plugins.md](plugins.md) | The plugin system's design: discovery, trust, settings, the API and its versions, harness extensions, the event journal and host, and moving compaction into a plugin |
 | [codex-plugins.md](codex-plugins.md) | The Codex investigation behind the plugin design's Codex section: what 0.159.3 and 0.162.1 support, the launch contribution, and the full inventory of config keys |
 

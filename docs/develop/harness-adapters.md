@@ -192,6 +192,18 @@ PYTHONPATH="${MV2_SOURCE:+$MV2_SOURCE${PYTHONPATH:+:}}$PYTHONPATH" "$MV2_PYTHON"
 
 Integrations report `--status` (`idle`, `working`, `waiting`, `unknown`) and `--usage-json` the same way. `MV2_SOURCE` names the running package's import root. Prepend it to `PYTHONPATH` for each callback child only, preserving any existing path. When `MV2_SOURCE` is unset, leave `PYTHONPATH` alone. Do not export that change to the agent or its tool shells. `runtime_update` checks `MV2_LAUNCH_ID` and refuses an outdated launch. The adapter compares the reported bridge ID with its own constant.
 
+## Observed model and effort
+
+`Usage` and the dictionary returned by `get_usage` carry `model`, `effort` and `observed_at`. These describe the main conversation's latest turn, with the exact spelling the harness recorded. In a valid native observation, a missing model or effort is `None`; never fill it from requested settings or a catalog default. `observed_at` is the turn's timezone-bearing ISO timestamp, not the time of the read or a later usage report. Side conversations and subagents cannot supply these fields.
+
+Adapters first validate the native turn record. Codex's checked `turn_context` schema requires `model` and permits an absent `effort`. A missing or invalid model makes that observation unavailable, clearing all three fields even with a valid timestamp. An earlier context cannot supply replacements.
+
+Core keeps observations only when the reading's `native_session_id` matches the current session and its timestamp is at or after `runtime.started_at`. A missing or invalid timestamp, including one without a timezone, clears all three fields to `None`. Token and context readings remain usable. Plugin usage adjustments cannot change the observed fields or their measured native session ID. This check uses the captured launch and session, without another native read or a record write.
+
+Listing rows keep recorded `model`, `model_name` and `effort` separate. `default_model` and `default_model_name` describe the harness's launch default; `observed_model_name` labels the filtered usage model. Labels use the same catalog and `model_names` overrides. An unknown label is `None`, leaving the raw spelling available to the caller. The usage worker returns the observed label with its reading; callers discard it if the row's launch or conversation changed meanwhile.
+
+`lifecycle.USAGE_FIELDS` names the fields supplied by `row_usage`: `usage`, `tokens`, `usage_detail` and `observed_model_name`. A listing with `usage=False` omits all four and reads no native usage or transcripts; recorded and default model labels remain available.
+
 ## Plugin launch contributions
 
 Plugins can add to a launch: extra plugin directories for Claude Code, extensions for Pi, and allowlisted config, instructions and MCP servers for Codex. Before calling `spawn` or `resume`, lifecycle builds a plan from the plugins that are on (`plugins/harness.py`). The adapter applies the parts it supports, gated by the harness version. `runtime.json` records what was applied, skipped or refused under `plugins`. See [plugins](plugins.md#extension-points).

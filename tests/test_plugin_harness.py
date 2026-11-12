@@ -243,12 +243,14 @@ class LaunchPlanTest(PluginTestCase):
             def snapshot(result):
                 with mock.patch("multiverse.harnesses.claude.ClaudeAdapter.get_usage", return_value=result):
                     return native.usage_snapshot(self.root, properties, facts, reconciled=True)
-            self.assertEqual(snapshot(NativeResult("ok", value=measured))["value"], adjusted)
+            self.assertEqual(snapshot(NativeResult("ok", value=measured))["value"],
+                             {**adjusted, "model": None, "effort": None, "observed_at": None})
             for state in ("unavailable", "error"):
                 result = NativeResult(state, "not measured", value=measured)
                 self.assertEqual(snapshot(result), result.to_dict())
             with mock.patch.object(loader, "active", side_effect=RuntimeError("plugins broke")):
-                self.assertEqual(snapshot(NativeResult("ok", value=measured))["value"], measured)
+                self.assertEqual(snapshot(NativeResult("ok", value=measured))["value"],
+                                 {**measured, "model": None, "effort": None, "observed_at": None})
 
     def test_version_of_follows_an_executable_replaced_in_place(self):
         """The harness version cache is keyed on the executable's mtime, and Pi's version bounds ask the launched

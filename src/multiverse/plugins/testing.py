@@ -310,6 +310,10 @@ def _inherited(key):
     return key in CLEARED or key in INHERITED or key.startswith(INHERITED_PREFIXES)
 
 
+_ABSENT = object()  # a ClaudeRows field left out of the row, as distinct from one written as null
+PLACEHOLDER_SESSION = "fake"  # a ClaudeRows row's sessionId until a FakeTranscript writes it as its own session's
+
+
 class ClaudeRows:
     """Claude transcript rows for a fake transcript (1.13): each joined to the one before by parentUuid, with rising
     timestamps, in the shapes Claude Code stores. `prompt` and `command` start a turn; the rest belong to the
@@ -327,7 +331,8 @@ class ClaudeRows:
         from uuid import uuid4
         self._clock += timedelta(seconds=1)
         row = {"type": kind, "uuid": str(uuid4()), "parentUuid": self._parent, "timestamp": self._clock.isoformat(),
-               "sessionId": "fake", **({"promptId": self._prompt} if self._prompt and kind == "user" else {}),
+               "sessionId": PLACEHOLDER_SESSION,
+               **({"promptId": self._prompt} if self._prompt and kind == "user" else {}),
                **fields}
         self.rows.append(row)
         self._parent = row["uuid"]
@@ -338,14 +343,21 @@ class ClaudeRows:
         self._prompt = str(uuid4())
         return self.add("user", message={"role": "user", "content": text}, origin={"kind": source})
 
-    def response(self, text=None, *, tool=None, stop="end_turn"):
-        """The model's reply: `text`, or a tool call (`tool` = (call_id, name, input)), with its stop reason."""
+    def response(self, text=None, *, tool=None, stop="end_turn", model="claude-test", effort=_ABSENT,
+                 per_turn_effort=_ABSENT):
+        """The model's reply: `text`, or a tool call (`tool` = (call_id, name, input)), with its stop reason.
+        `model` (1.19) is the model Claude records for the reply, which `agent.usage()` reports as the latest
+        turn's; the row's timestamp is when it was observed. `per_turn_effort` and `effort` (1.19) write the
+        row's perTurnEffort and effort only when given (None writes null): Claude's effort for the turn is
+        perTurnEffort when the row has it, null meaning none, else effort."""
         from uuid import uuid4
         block = ({"type": "tool_use", "id": tool[0], "name": tool[1], "input": tool[2]} if tool
                  else {"type": "text", "text": text or ""})
-        return self.add("assistant", message={"id": "msg_" + uuid4().hex[:12], "role": "assistant", "model": "claude-test",
-                                              "content": [block], "stop_reason": "tool_use" if tool else stop,
-                                              "usage": {"input_tokens": 10, "output_tokens": 5}})
+        efforts = {key: value for key, value in (("effort", effort), ("perTurnEffort", per_turn_effort))
+                   if value is not _ABSENT}
+        message = {"id": "msg_" + uuid4().hex[:12], "role": "assistant", "model": model, "content": [block],
+                   "stop_reason": "tool_use" if tool else stop, "usage": {"input_tokens": 10, "output_tokens": 5}}
+        return self.add("assistant", **efforts, message=message)
 
     def tool_result(self, call_id, text):
         return self.add("user", message={"role": "user", "content": [
@@ -418,17 +430,26 @@ class FakeTranscript:
         agents.rebind_session(self.agent_dir.parent.parent.parent, self.agent_dir.name, previous, native_id, reason,
                               launch, home=home)
 
+    def _lines(self, rows):
+        """Rows as Claude stores them in this session: a row still naming ClaudeRows' placeholder session names
+        this one (1.19), written as a copy. Any other sessionId is written as given: another session's ID or an
+        explicit null, which name rows that aren't this session's, or none, which the file's own session is
+        taken to own, as with Claude's older rows."""
+        return "".join(json.dumps({**row, "sessionId": self.native_id}
+                                  if isinstance(row, dict) and row.get("sessionId") == PLACEHOLDER_SESSION else row)
+                       + "\n" for row in rows)
+
     def append(self, *rows):
         """Rows Claude writes next."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a") as stream:
-            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+            stream.write(self._lines(rows))
 
     def rewrite(self, rows):
         """The same file, its bytes changed (as Claude does when it removes a row): same inode, new content."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("w") as stream:
-            stream.write("".join(json.dumps(row) + "\n" for row in rows))
+            stream.write(self._lines(rows))
 
     def clear(self, rows=()):
         """A /clear: the agent moves to a new session, the old one stays on disk and in its lineage."""

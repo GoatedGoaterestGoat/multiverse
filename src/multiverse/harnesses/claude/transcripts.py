@@ -237,7 +237,10 @@ class Transcript:
     once per response ID. A row with zero usage is never a response: a compaction that keeps a row stores it again
     with zero usage, and an installed compaction's rows arrive as new IDs with zero usage (Claude's `<synthetic>`
     model). Neither replaces a real response's usage or becomes the latest request, so `last` stays the latest real
-    response.
+    response, and `observed` its model, effort and time: the latest main-thread turn's, as Claude recorded them.
+    Only this conversation's turn counts: never a sidechain row, nor one whose sessionId names another conversation
+    (null included; a row without the field is this one's, as the delivery and prompt readers hold). A complete row
+    that can't be read after it may be the newer reply, so it makes `observed` unknown (None) until a later reply.
 
     Claude isn't append-only: it truncates a file at a tombstoned row and writes the rest back in place, and can
     rewrite a whole file. The index starts over on a new inode or a smaller file, and otherwise, when the file
@@ -257,6 +260,7 @@ class Transcript:
 
     def _reset(self, inode):
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
+        self.observed = None
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
         self.views = {}  # the adapter's views of this index as read, by tip and what they were built from
@@ -310,18 +314,24 @@ class Transcript:
         end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
         # Parse the new lines first and change nothing until all of them parsed: a failure leaves the index as it
         # was, so the next read starts from the same place and never counts a row twice.
-        added, responses, last, position = [], {}, self.last, self.offset
+        added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
+        conversation = self.path.stem  # a main transcript is named after its session
         chain = self.entries[-1].chain if self.entries else ''
         for line in data[:end].split(b'\n')[:-1]:
             item = entry(position, line + b'\n', chain)
             added.append(item)
+            if item.kind == 'unreadable':
+                observed = None
             if item.kind == 'assistant' and item.usage is not None and item.response:
                 responses[item.response] = item.usage
                 last = item.at or last
+                if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
+                    # The latest reply's own fields, even when its model is missing: never an older turn's.
+                    observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
             position, chain = position + item.size, item.chain
         self.entries.extend(added)
         self.responses.update(responses)
-        self.last = last
+        self.last, self.observed = last, observed
         self.prefix.update(data[:end])
         self.tail = (self.tail + data[:end])[-TAIL:]
         self.offset += end
@@ -343,21 +353,24 @@ def counted(usage, key):
 
 
 def context_reading(native_id, workspaces=(), environment=None):
-    """(tokens, timestamp) of the latest main-thread request, or None.
+    """(tokens, timestamp, observed) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
-    excluded: they have their own context windows.
+    excluded: they have their own context windows. `observed` is {'model',
+    'effort', 'observed_at'} of the latest main-thread turn, as Claude recorded
+    them, or None before one.
     """
     mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     with _transcripts_lock:
         transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
-        responses, stamp = transcript.responses, transcript.last
+        responses, stamp, observed = transcript.responses, transcript.last, transcript.observed
     if not responses:
         return None
     latest = list(responses.values())[-1]
-    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')), stamp
+    tokens = sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+    return tokens, stamp, dict(observed) if observed else None
 
 
 def context_usage(native_id):
@@ -432,6 +445,10 @@ class Entry:
     stop: str | None = None
     preserved: tuple = ()           # a boundary's preservedMessages, in Claude's order
     companion: str | None = None    # a skill's instructions: the tool call they belong to
+    model: str | None = None        # an assistant row's model, as Claude recorded it (`<synthetic>` for its own rows)
+    effort: str | None = None       # the effort that row's request used, as Claude recorded it
+    session: str | None = None      # the row's sessionId, when it is a string
+    has_session: bool = False       # whether the row has a sessionId at all (null included)
 
 
 def _text(content):
@@ -490,7 +507,11 @@ def _fields(offset, line, digest, chain, row):
         usage if usage and any(counted(usage, key) for key in USAGE_KEYS) else None,
         string(message.get('stop_reason')) if row.get('type') == 'assistant' else None,
         tuple(uuid for uuid in preserved if isinstance(uuid, str)) if isinstance(preserved, list) else (),
-        string(row.get('sourceToolUseID')) if row.get('isMeta') is True and (row.get('turnCompanion') or row.get('sourceToolUseID')) else None)
+        string(row.get('sourceToolUseID')) if row.get('isMeta') is True and (row.get('turnCompanion') or row.get('sourceToolUseID')) else None,
+        string(message.get('model')) if row.get('type') == 'assistant' else None,
+        # Claude reads a turn's effort as perTurnEffort when the row has the key (null: none), else effort.
+        string(row['perTurnEffort'] if 'perTurnEffort' in row else row.get('effort')) if row.get('type') == 'assistant' else None,
+        string(row.get('sessionId')), 'sessionId' in row)
 
 
 INTERRUPTED = '[Request interrupted by user'  # Claude's marker for an Esc: it ends the turn, and usually no turn_duration follows

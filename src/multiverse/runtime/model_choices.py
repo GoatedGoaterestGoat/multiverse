@@ -154,11 +154,11 @@ def for_launch(root, harness):
             'default_model': default_model, 'problems': []}
 
 
-def display_names(root, harness):
+def display_names(root, harness, *, adapter=None):
     """Labels for recorded choices, independent of the allowed subset and native running settings."""
     from .. import harnesses
     from .run_environment import launch
-    adapter = harnesses.load(root, harness)
+    adapter = harnesses.load(root, harness) if adapter is None else adapter
     environment = launch(adapter)
     names = {}
     try:
@@ -175,19 +175,41 @@ def display_names(root, harness):
     return labels(names), labels((getattr(adapter, 'settings', None) or {}).get('model_names', {}))
 
 
-def recorded_name(root, properties, cache):
-    """Read metadata once per scope/harness in this listing; a broken table never damages an agent row."""
-    model, harness = properties.get('model'), properties.get('harness')
-    if not isinstance(model, str) or not model or not isinstance(harness, str) or not harness:
-        return None
+def _display_metadata(root, harness, cache):
+    """One table/settings read per scope and harness; display failures never damage an agent row."""
     key = (root, harness)
     if key not in cache:
         try:
-            cache[key] = display_names(root, harness)
+            from .. import harnesses
+            adapter = harnesses.load(root, harness)
+            names, overrides = display_names(root, harness, adapter=adapter)
+            default = getattr(adapter, 'default_model', None)
+            if not isinstance(default, str) or not default.strip():
+                default = None
+            cache[key] = names, overrides, default
         except Exception:
-            cache[key] = ({}, {})
-    names, overrides = cache[key]
+            cache[key] = {}, {}, None
+    return cache[key]
+
+
+def model_name(root, properties, model, cache):
+    """Labels use the exact override first, then table aliases; unknown spellings stay unlabeled."""
+    harness = properties.get('harness')
+    if not isinstance(model, str) or not model or not isinstance(harness, str) or not harness:
+        return None
+    names, overrides, _ = _display_metadata(root, harness, cache)
     return overrides.get(model, names.get(model.strip()))
+
+
+def recorded_name(root, properties, cache):
+    return model_name(root, properties, properties.get('model'), cache)
+
+
+def default_fields(root, properties, cache):
+    """The launch default is separate from requested and observed choices; effort has no default here."""
+    harness = properties.get('harness')
+    default = _display_metadata(root, harness, cache)[2] if isinstance(harness, str) and harness else None
+    return {'default_model': default, 'default_model_name': model_name(root, properties, default, cache)}
 
 
 def require_command(root, adapter, model, effort, environment, command):

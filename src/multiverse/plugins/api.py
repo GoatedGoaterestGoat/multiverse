@@ -1760,6 +1760,15 @@ class Agent:
         return "\n".join(inspect.tail(capture, lines)) if isinstance(capture, str) else str(capture)
 
     def usage(self):
+        """The agent's measured usage (needs agents.read), as `mv2 get-usage --json` gives it: `state` (ok,
+        unavailable or error), `reason`, and, when `state` is ok, `value` with the token counts and `context`.
+        `value` also has `model`, `effort` and `observed_at` (1.19): the model and effort of the main
+        conversation's latest recorded turn in this launch, as the harness recorded them, and when that turn was
+        recorded. All three are None while this launch has no observation yet. In an observation the harness
+        admits, `model` or `effort` alone may be None when it wasn't recorded (no default or launch value fills it
+        in); a turn missing a field its harness requires (Codex's turn context names its model) gives no
+        observation at all. After /model they change with the next recorded turn. A stopped agent's current
+        launch may still give its last turn."""
         self._plugin._need("agents.read")
         from ..tools import get_usage
         with _acting(self._plugin._loaded, "observe", self.universe, "reading usage"):

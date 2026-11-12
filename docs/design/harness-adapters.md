@@ -1192,6 +1192,8 @@ fallback to plain mode. The dashboard keeps showing the count and labels it
 including Codex's resume usage replay. This is retained measurement, not an
 estimate. A changed thread ID never inherits another thread's count.
 
+Codex usage keeps a bounded observation cache separate from transcript row indexes. Unchanged rollout stamps reuse the saved result without opening the rollout, including empty observations and failures read from a stable copy. Plain growth verifies the complete prior prefix in fixed-size chunks, then parses only the appended complete lines; rewrites and changed compressed copies are rescanned. Inconsistent copies never supply an observed model.
+
 Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
 cached input and reasoning output are already included and are not added again.
 The window is native `modelContextWindow`; a missing window stays unknown.
