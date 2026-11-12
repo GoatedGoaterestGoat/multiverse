@@ -64,7 +64,7 @@ mv2 doctor
 - Every inbox is readable.
 - No agent has a failed launch, a lost connection or an unknown state.
 
-If a recovered agent's folder name differs from its stored ID, `doctor` checks the inbox in that existing folder. It does not create a second agent folder under the stored ID. If an older doctor already created a recordless folder there, it reports that leftover and still checks the real inbox. When that folder's recovery address is ambiguous or cannot be verified, the advice names its full path for manual inspection instead of suggesting `mv2 remove` with the conflicting ID. Do not shorten the ID to work around the ambiguity: a prefix can select the other agent.
+If a recovered agent's folder name differs from its stored ID, `doctor` checks the inbox in that existing folder. It does not create a second agent folder under the stored ID. If an older doctor already created a recordless folder there, it reports that leftover and still checks the real inbox. When that folder's recovery address is ambiguous or cannot be verified, the advice names its full path for manual inspection instead of suggesting `mv2 remove` with the conflicting ID. Shortening a conflicting ID does not resolve that ambiguity.
 
 It answers in sentences: `No problems.`, or a list of what's wrong. It exits non-zero when something is wrong. It doesn't check `harness.json`; `mv2 capabilities --harness NAME` does that. See [troubleshooting](../use/troubleshooting.md).
 

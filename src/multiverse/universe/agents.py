@@ -73,6 +73,7 @@ class AmbiguousAgent(ValueError):
 
 def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
     matches, exact_names, exact_ids, damaged, names = [], [], [], [], {}
+    addresses, prefix_addresses = {}, set()
     for path in record_paths(root):
         usable = True
         try:
@@ -83,6 +84,11 @@ def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
             data = error.data or {}
         identity = data.get('id') if isinstance(data.get('id'), str) else path.parent.name
         name = data.get('name')
+        names[path.parent] = name if isinstance(name, str) and name else path.parent.name
+        for address in {identity, path.parent.name}:
+            addresses.setdefault(address, []).append(path.parent)
+            if usable and address.startswith(reference):
+                prefix_addresses.add(address)
         if reference == name:
             exact_names.append(path.parent)
         if reference in (identity, path.parent.name):
@@ -90,12 +96,15 @@ def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
         if (reference in (identity, name, path.parent.name)
                 or usable and (identity.startswith(reference) or path.parent.name.startswith(reference))):
             matches.append(path.parent)
-            names[path.parent] = name if isinstance(name, str) and name else path.parent.name
     if exact_ids:
         # Legacy UUID-shaped names must not hide an agent's recovery address.
         matches = exact_ids
     elif exact_names:
         matches = exact_names
+    else:
+        # A prefix may not hide a collision in the full address it matches.
+        # Distinct damaged addresses still need their exact recovery address.
+        matches = sorted({path for address in prefix_addresses for path in addresses[address]})
     if not matches:
         from ..display import clean
         from .agent_hints import hint
@@ -106,7 +115,9 @@ def directory(root, reference, *, allow_damaged=False, universe_option='-u'):
         raise AgentNotFound(f"No agent named {label} here. {advice}" + detail, hint=related)
     if len(matches) != 1:
         detail = ", ".join(f"{names[path]} ({path.name})" for path in sorted(matches))
-        raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. Use a full UUID")
+        advice = ("This exact recovery address is ambiguous; inspect the listed record folders"
+                  if exact_ids else "Use a full UUID")
+        raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. {advice}")
     if not allow_damaged:
         # Recheck the selected record, never a peer's runtime. Actions cannot
         # treat unreadable identity or launch facts as an empty/stopped agent.
