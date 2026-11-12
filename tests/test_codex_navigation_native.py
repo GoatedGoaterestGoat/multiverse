@@ -113,7 +113,12 @@ def read_transcript(operation, *, timeout=30):
         if last_retry is not None and time.monotonic() >= deadline:
             raise last_retry
         try:
-            return operation()
+            value = operation()
+            if isinstance(value, transcripts.TranscriptInfo) and value.state != 'supported':
+                error = (transcripts.Retry if value.state == 'unavailable' and getattr(value, 'retry', False) is True
+                         else transcripts.Unavailable)
+                raise error(value.reason)
+            return value
         except transcripts.Retry as error:
             last_retry = error
             remaining = deadline - time.monotonic()
@@ -123,9 +128,44 @@ def read_transcript(operation, *, timeout=30):
 
 
 class NavigationReadTest(unittest.TestCase):
+    def test_info_contention_retries_the_exact_requested_generation(self):
+        """A normalized transient info failure must not look like missing native identity or lineage."""
+        root, directory, generation = object(), object(), object()
+        expected = transcripts.TranscriptInfo(state='supported', native_id='original')
+        snapshot = SimpleNamespace(earlier=(), session=SimpleNamespace(native_id='original'))
+        for boundary in ('snapshot', 'load'):
+            for failure in (transcripts.Retry('contention'), transcripts.Unavailable('damaged'),
+                            transcripts.Unavailable('provider error', state='error'),
+                            transcripts.Unavailable('provider error', state='error', retry=True)):
+                with self.subTest(boundary=boundary, retry=failure.retry, state=failure.state):
+                    attempts = []
+                    transient = failure.state == 'unavailable' and failure.retry is True
+                    def operation():
+                        attempts.append((root, directory, generation))
+                        if len(attempts) != 1:
+                            self.assertTrue(transient, 'Permanent info failures must propagate immediately')
+                            return expected
+                        with patch.object(transcripts, '_snapshot', side_effect=failure if boundary == 'snapshot' else None,
+                                          return_value=snapshot), \
+                                patch.object(transcripts, '_load', side_effect=failure):
+                            value = transcripts.info(root, directory, generation=generation)
+                        self.assertIs(getattr(value, 'retry', False), failure.retry)
+                        self.assertEqual((value.state, value.reason), (failure.state, str(failure)))
+                        return value
+                    with patch('test_codex_navigation_native.time',
+                               SimpleNamespace(monotonic=lambda: 0, sleep=lambda seconds: None)):
+                        if transient:
+                            self.assertIs(read_transcript(operation), expected)
+                        else:
+                            with self.assertRaises(transcripts.Unavailable) as caught:
+                                read_transcript(operation)
+                            self.assertNotIsInstance(caught.exception, transcripts.Retry)
+                            self.assertEqual(str(caught.exception), str(failure))
+                    self.assertEqual(attempts, [(root, directory, generation)] * (2 if transient else 1))
+
     def test_retry_keeps_the_original_cursor_and_does_not_hide_replacement(self):
         """A transient identity lock must not flake the native proof or refresh its old cursor and hide replacement."""
-        for outcome in ('replaced', 'busy', 'late-success', 'unavailable'):
+        for outcome in ('replaced', 'busy', 'late-success', 'unavailable', 'busy-info', 'late-success-info'):
             with self.subTest(outcome=outcome):
                 root, directory, cursor = object(), object(), object()
                 changed = transcripts.Changed('replaced', 'new-start', 'new-generation')
@@ -141,8 +181,10 @@ class NavigationReadTest(unittest.TestCase):
                     if outcome == 'unavailable':
                         self.assertEqual(rows.call_count, 1, 'Permanent unavailability must propagate')
                     self.assertLessEqual(rows.call_count, 5, 'Transcript retry deadline was reset')
-                    if outcome == 'late-success' and clock[0] >= .2:
+                    if outcome.startswith('late-success') and clock[0] >= .2:
                         return 'a read started after the deadline'
+                    if outcome in ('busy-info', 'late-success-info'):
+                        return transcripts.TranscriptInfo(state='unavailable', reason=str(error), retry=True)
                     raise error
                 with patch.object(transcripts, 'rows', side_effect=read) as rows, \
                         patch('test_codex_navigation_native.time',
@@ -152,7 +194,7 @@ class NavigationReadTest(unittest.TestCase):
                 if outcome == 'replaced':
                     self.assertIs(raised.exception, changed)
                     self.assertEqual(rows.call_count, 2)
-                elif outcome in ('busy', 'late-success'):
+                elif outcome in ('busy', 'late-success', 'busy-info', 'late-success-info'):
                     self.assertGreater(rows.call_count, 1)
                     self.assertLessEqual(rows.call_count, 5)
                     self.assertLessEqual(clock[0], .2)
@@ -489,10 +531,11 @@ class NativeNavigationTest(TerminalBase):
             with self.assertRaises(transcripts.Changed) as replaced:
                 read_transcript(lambda: transcripts.rows(self.root, directory, after=initial.start))
             self.assertEqual(replaced.exception.reason, 'replaced')
-            earlier = next(row for row in read_transcript(lambda: transcripts.info(self.root, directory)).earlier
-                           if row.native_id == original)
-            self.assertEqual(read_transcript(lambda: transcripts.info(
-                self.root, directory, generation=earlier.generation)).native_id, original)
+            earlier_info = read_transcript(lambda: transcripts.info(self.root, directory))
+            self.assertIn(original, {row.native_id for row in earlier_info.earlier}, earlier_info)
+            earlier = next(row for row in earlier_info.earlier if row.native_id == original)
+            original_info = read_transcript(lambda: transcripts.info(self.root, directory, generation=earlier.generation))
+            self.assertEqual(original_info.native_id, original, original_info)
             hold = message('NAV_HOLD', second, wait=False)
             callback('NAV_HOLD', second)
             queued = message('NAV_QUEUED', second, wait=False)
@@ -626,8 +669,8 @@ class NativeNavigationTest(TerminalBase):
             self.assertEqual([(row['from'], row['to'], row['reason']) for row in navigation], [
                 (original, second, 'new'), (second, third, 'clear'),
                 (third, original, 'resume'), (original, third, 'resume'), (third, original, 'resume')])
-            self.assertEqual({row.native_id for row in read_transcript(
-                lambda: transcripts.info(self.root, directory)).earlier}, {second, third})
+            lineage_info = read_transcript(lambda: transcripts.info(self.root, directory))
+            self.assertEqual({row.native_id for row in lineage_info.earlier}, {second, third}, lineage_info)
             # Reattachment keeps native saved grants, which a following /new
             # must inherit even though the resume CLI has no --add-dir flag.
             reattached = switch('/new', original)
