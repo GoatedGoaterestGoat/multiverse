@@ -144,7 +144,12 @@ def observation_paths(directories):
 
 
 def listing(root, recursive=False, only=None, *, usage=True, observed_missing=None):
-    """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
+    """Every agent's row, or just the already resolved folder named by `only`; damage stays local to each row."""
+    return [row for _, row in listing_records(root, recursive, only, usage=usage, observed_missing=observed_missing)]
+
+
+def listing_records(root, recursive=False, only=None, *, usage=True, observed_missing=None):
+    """Physical folder and diagnostic row pairs; `only` is an already resolved folder name.
 
     One agent's damaged records never stop the others: that agent's row says which file is unusable and why
     (see damaged_row). With usage=False, omit usage fields without reading native transcripts."""
@@ -166,13 +171,13 @@ def listing(root, recursive=False, only=None, *, usage=True, observed_missing=No
             try:
                 properties = records.properties(path)
             except records.RecordError as error:
-                rows.append(damaged_row(scope, error))
+                rows.append((path.parent, damaged_row(scope, error)))
                 continue
             try:
                 facts = records.runtime(path.parent / "runtime.json")
                 facts = _listing_runtime(path.parent, facts, prepare=True)
             except records.RecordError as error:
-                rows.append(damaged_row(scope, error, properties))
+                rows.append((path.parent, damaged_row(scope, error, properties)))
                 continue
             try:
                 facts, observation = _listing_observation(properties, facts, snapshots)
@@ -209,7 +214,7 @@ def listing(root, recursive=False, only=None, *, usage=True, observed_missing=No
                         observed_missing=observed_missing)
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
-                rows.append(text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
+                rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
@@ -221,12 +226,12 @@ def listing(root, recursive=False, only=None, *, usage=True, observed_missing=No
                              "delivery_problem": delivery_problem,
                              "focus": focus.current(path.parent, observed_missing=observed_missing), "runtime": facts,
                              "model_name": model_policy.recorded_name(scope, properties, model_names),
-                             "blocked_on": blocked.display(scope, properties, dependencies)}))
+                             "blocked_on": blocked.display(scope, properties, dependencies)})))
             except records.RecordError as error:
-                rows.append(damaged_row(scope, error, properties))
+                rows.append((path.parent, damaged_row(scope, error, properties)))
             except Exception as error:  # content no reader expected: this agent's row says so, the others still list
-                rows.append(damaged_row(scope, records.RecordError(path.parent, f"unexpected content: {type(error).__name__}: {error}"),
-                                        properties))
+                rows.append((path.parent, damaged_row(scope, records.RecordError(path.parent, f"unexpected content: {type(error).__name__}: {error}"),
+                                        properties)))
     return rows
 
 
