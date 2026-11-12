@@ -51,6 +51,21 @@ class DamagedAgentCliTest(BaseTest):
                               env={**os.environ, 'PYTHONPATH': str(ROOT / 'src')},
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
 
+    def test_inspect_keeps_the_stored_identity_when_the_record_folder_is_renamed(self):
+        """Inspect must show a recovered agent's facts rather than confuse its folder with its stored identity."""
+        original = self.entries['healthy']
+        moved = original.with_name('recovered-folder')
+        original.rename(moved)
+        for reference in ('healthy', original.name, moved.name):
+            for flags in ((), ('--json',)):
+                with self.subTest(reference=reference, flags=flags):
+                    result = self.invoke('inspect', reference, *flags)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('healthy', result.stdout)
+                    if flags:
+                        self.assertEqual(json.loads(result.stdout)['harness'], 'fake')
+        self.assertFalse(original.exists())
+
     def test_each_command_keeps_a_damaged_record_local(self):
         """list, inspect, doctor, send and kill, as text and as JSON, keep each form of a damaged record local and
         name its file and distinguish readable damage from denied access, also through the real CLI; fragile

@@ -48,8 +48,11 @@ def tail(capture, lines):
 
 def facts(root, agent):
     """The agent's row from the listing: the same facts the dashboard shows."""
-    identity = agents.directory(root, agent, allow_damaged=True).name
-    return next(row for row in lifecycle.listing(root, only=identity) if row["id"] == identity)
+    directory = agents.directory(root, agent, allow_damaged=True)
+    rows = lifecycle.listing(root, only=directory.name)
+    if not rows:
+        raise ValueError(f"Agent record folder disappeared: {directory}")
+    return rows[0]
 
 
 def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):

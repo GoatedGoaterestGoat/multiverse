@@ -56,6 +56,8 @@ mv2 inspect worker --lines 100
 mv2 attach worker             # open its terminal
 ```
 
+`inspect` uses the agent's existing record folder, even if recovery left its folder name different from the stored ID. You can still select it by its name, stored ID or folder name.
+
 Press `Ctrl-b d` to detach from an attached terminal; the agent keeps running. [Concepts](../concepts.md#agent-state) explains the live, status and phase fields.
 
 `mv2 capabilities --agent worker` lists what that agent can do now, one line each, such as `steer: supported` or `ask: unavailable: REASON`. `--harness NAME` answers for a harness's launches instead; with `--probe` it also checks that the executable exists and, for Claude, its version. `--json` prints every record.
