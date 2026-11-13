@@ -210,6 +210,44 @@ class ClaudeUsageTest(BaseTest):
             value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value
             self.assertEqual([key for key in ('model', 'effort', 'observed_at') if value and value.get(key)], [])
 
+    def test_usage_reads_keep_no_rows_and_transcript_reads_keep_a_few(self):
+        """The dashboard reads every agent's usage on each listing; an index that kept an entry per row for each
+        transcript, never evicted, held about 1.5 times every transcript in memory (0.7 GB on one machine)."""
+        from multiverse.harnesses.claude import transcripts as t
+        self.enterContext(patch.object(t, '_usage', t.OrderedDict()))
+        self.enterContext(patch.object(t, '_transcripts', t.OrderedDict()))
+        adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+        natives = [str(uuid4()) for _ in range(t.FULL_INDEXES + 3)]
+        for native_id in natives:
+            project = self.transcript(native_id, self.turn('m1', '2026-11-13T10:00:00Z', 'claude-opus-5-5', effort='high'),
+                                      self.turn('m2', '2026-11-13T10:01:00Z', 'claude-sonnet-5-5', effort='low'))
+            (project / native_id / 'subagents' / 'agent-1.jsonl').write_text(self.response('sub_1', 3, 4))
+            value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value
+            self.assertEqual((value['total_tokens'], value['model'], value['effort']), (2 + 2 + 7, 'claude-sonnet-5-5', 'low'))
+        self.assertEqual(len(t._usage), 2 * len(natives))  # each main and subagent transcript
+        self.assertEqual([len(index.entries) for index in t._usage.values()], [0] * len(t._usage))
+        self.assertEqual(len(t._transcripts), 0)  # usage builds no full index
+        for native_id in natives:
+            self.assertEqual(len(t.newest_copy(native_id, None, ()).entries), 2)  # a transcript read: every row
+        self.assertEqual(len(t._transcripts), t.FULL_INDEXES)
+        # A full index read as the file grows hashes its rows as a fresh read does (cursors and positions use them).
+        grown = t.newest_copy(natives[0], None, ())
+        path = grown.path
+        with path.open('a') as handle:
+            handle.write(self.turn('m3', '2026-11-13T10:02:00Z', 'claude-opus-5-5'))
+        self.assertEqual([e.chain for e in grown.read().entries], [e.chain for e in t.Transcript(path).read().entries])
+        # An index evicted and built again starts above every version a reader could hold: a history that changed
+        # while no index watched it (a compaction putting rows before ones already read) is never read as grown.
+        held = t.newest_copy(natives[-1], None, ())
+        seen = t.analyse(held).version
+        for native_id in natives[:t.FULL_INDEXES]:
+            t.newest_copy(native_id, None, ())
+        self.assertNotIn(held.path, t._transcripts)
+        self.assertGreater(t.analyse(t.newest_copy(natives[-1], None, ())).version, seen)
+        self.enterContext(patch.object(t, 'USAGE_INDEXES', 4))
+        adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=natives[0]))
+        self.assertEqual(len(t._usage), 4)
+
     def reported(self):
         """An agent whose last response (00:00, 150k) the mod reported at 00:05."""
         agent, directory = self.agent()

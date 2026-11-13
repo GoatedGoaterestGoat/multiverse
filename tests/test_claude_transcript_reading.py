@@ -22,7 +22,9 @@ class ClaudeTranscriptReadingTest(BaseTest):
         self.project.mkdir(parents=True)
         self.path = self.project / f'{self.native}.jsonl'
         t._transcripts.clear()
+        t._usage.clear()
         self.addCleanup(t._transcripts.clear)
+        self.addCleanup(t._usage.clear)
 
     def adapter(self):
         return harnesses.load(self.root, 'claude')
@@ -294,7 +296,7 @@ class ClaudeTranscriptReadingTest(BaseTest):
         first = [response('a', 'm1', 10), response('b', 'm2', 20), response('c', 'm3', 30)]
         self.write(first)
         index, analysis = self.read()
-        before = [t.position_of(item) for item in index.entries]
+        before, version = [t.position_of(item) for item in index.entries], analysis.version
         self.assertEqual(sorted(index.responses), ['m1', 'm2', 'm3'])
         view = self.adapter().transcript_view(self.session())
         inode = self.path.stat().st_ino
@@ -306,7 +308,7 @@ class ClaudeTranscriptReadingTest(BaseTest):
         self.assertEqual((index.rewrites, sorted(index.responses)), (1, ['m1', 'm3', 'm4']))
         self.assertEqual(t.position_of(index.entries[0]), before[0])  # rows before the change keep their position
         self.assertNotEqual(t.position_of(index.entries[1]), before[2])  # 'c' moved up: its position changed
-        self.assertEqual(analysis.version, 1)
+        self.assertGreater(analysis.version, version)  # the history changed other than by growing
         with self.assertRaises(TranscriptRowsChanged):  # a body from the old view is refused, never mixed in
             self.adapter().transcript_bodies(self.session(), view, [1], max_bytes=1 << 20)
         with self.subTest('an equal-length rewrite of an earlier row'):
@@ -346,7 +348,7 @@ class ClaudeTranscriptReadingTest(BaseTest):
         rows = [{'type': 'assistant', 'uuid': f'u{n}', 'message': {'id': f'm{n}', 'usage': {'input_tokens': n},
                  'content': 'x' * 500}} for n in range(400)]  # well over TAIL
         self.write(rows)
-        index = t._transcripts[self.path] = t.Transcript(self.path).read()  # the index usage and the reads share
+        index = t._transcripts[self.path] = t.Transcript(self.path).read()  # usage and the reads share this proof
         self.assertGreater(index.offset, 2 * t.TAIL)
         with patch.object(t.Transcript, '_intact', side_effect=AssertionError('usage proved the whole prefix')):
             with open(self.path, 'ab') as handle:

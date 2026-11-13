@@ -1680,6 +1680,12 @@ Claude usage is measured from the session's own transcript under Claude's
 usage, counted once per response ID. It works with or without the bridge. The
 adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
+Usage keeps only those totals and the latest turn per transcript, never a record
+per row: a listing reads every agent's transcripts, and a per-row index holds
+about 1.5 times its file. The transcript reads keep their per-row index for the
+eight most recently read transcripts. History versions come from one counter
+that only grows, so an index built again after its eviction never reuses a
+version a reader holds.
 
 An accepted `send` means written to the Claude session inbox; the receipt
 confirms delivery. The mod was tested against Claude Code 2.1.325; the mod API

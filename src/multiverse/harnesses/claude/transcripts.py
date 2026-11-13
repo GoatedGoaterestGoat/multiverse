@@ -11,7 +11,9 @@ it, so more than one copy is an anomaly, which the transcript reads check (`newe
 Every file is opened through `open_regular`, and any part of the storage that could hold the session but can't
 be read raises `Unreadable` rather than read as absence.
 """
+from collections import OrderedDict
 from dataclasses import dataclass
+import itertools
 import hashlib
 import json
 import os
@@ -230,8 +232,8 @@ PROOF_INTERVAL = 60  # seconds: a file that keeps growing is proved in full at l
 
 
 class Transcript:
-    """One copy's index, read once and then as it grows: an Entry per complete line (metadata only, never bodies),
-    and the usage readers' totals from it.
+    """One copy's index, read once and then as it grows: an Entry per complete line (metadata only, never bodies;
+    none for a usage index), and the usage readers' totals from it.
 
     Claude writes one record per content block of a response, each with the response's usage, so usage is counted
     once per response ID. A row with zero usage is never a response: a compaction that keeps a row stores it again
@@ -254,13 +256,14 @@ class Transcript:
     append never changes an earlier row's position.
     """
 
-    def __init__(self, path):
-        self.path, self.rewrites = path, 0
+    def __init__(self, path, rows=True):
+        # rows=False: a usage index, which keeps the totals and the latest turn but no Entry per row.
+        self.path, self.rewrites, self.rows = path, 0, rows
         self._reset(None)
 
     def _reset(self, inode):
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
-        self.observed = None
+        self.observed, self.chain = None, ''
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
         self.views = {}  # the adapter's views of this index as read, by tip and what they were built from
@@ -316,20 +319,22 @@ class Transcript:
         # was, so the next read starts from the same place and never counts a row twice.
         added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
         conversation = self.path.stem  # a main transcript is named after its session
-        chain = self.entries[-1].chain if self.entries else ''
+        chain = self.chain
         for line in data[:end].split(b'\n')[:-1]:
             item = entry(position, line + b'\n', chain)
-            added.append(item)
+            if self.rows:
+                added.append(item)
             if item.kind == 'unreadable':
                 observed = None
             if item.kind == 'assistant' and item.usage is not None and item.response:
-                responses[item.response] = item.usage
+                responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
                 last = item.at or last
                 if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
                     # The latest reply's own fields, even when its model is missing: never an older turn's.
                     observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
             position, chain = position + item.size, item.chain
         self.entries.extend(added)
+        self.chain = chain
         self.responses.update(responses)
         self.last, self.observed = last, observed
         self.prefix.update(data[:end])
@@ -343,8 +348,32 @@ class Transcript:
         return self
 
 
-_transcripts = {}
+# Indexes by path. Usage reads every agent's transcripts on each listing, so its indexes keep no Entry per row (a
+# full index holds about 1.5 times its file); the transcript reads' full indexes are kept for the most recently read
+# transcripts only.
+USAGE_INDEXES = 256
+FULL_INDEXES = 8
+_usage = OrderedDict()
+_transcripts = OrderedDict()
 _transcripts_lock = threading.Lock()
+# History versions come from one counter that only grows, for every transcript: a full index built again after its
+# eviction starts above any version a reader holds from before, so the reader parses again rather than trusting a
+# cursor into a history that changed while no index watched it.
+_versions = itertools.count(1)
+
+
+def _index(path, rows):
+    """The kept index for `path` (a full one when `rows`), the most recently used last; under _transcripts_lock."""
+    cache, limit = (_transcripts, FULL_INDEXES) if rows else (_usage, USAGE_INDEXES)
+    index = cache.get(path)
+    if index is None:
+        index = cache[path] = Transcript(path, rows)
+        if rows:
+            index.history_version = next(_versions)
+    cache.move_to_end(path)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+    return index
 
 
 def counted(usage, key):
@@ -364,7 +393,7 @@ def context_reading(native_id, workspaces=(), environment=None):
     if not mains:
         return None
     with _transcripts_lock:
-        transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
+        transcript = _index(mains[-1], rows=False).read()
         responses, stamp, observed = transcript.responses, transcript.last, transcript.observed
     if not responses:
         return None
@@ -387,7 +416,7 @@ def measured_usage(native_id, workspaces=(), environment=None):
         return None
     paths = [mains[-1], *subagent_transcripts(mains[-1])]
     with _transcripts_lock:
-        transcripts = [_transcripts.setdefault(path, Transcript(path)).read() for path in paths]
+        transcripts = [_index(path, rows=False).read() for path in paths]
     responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
     cached = sum(counted(usage, 'cache_read_input_tokens') for usage in responses)
     written = sum(counted(usage, 'cache_creation_input_tokens') for usage in responses)
@@ -729,7 +758,7 @@ def newest_copy(native_id, environment, workspaces=()):
         return None
     with _transcripts_lock:
         try:
-            indexes = [_transcripts.setdefault(path, Transcript(path)).read(prove=True) for path in paths]
+            indexes = [_index(path, rows=True).read(prove=True) for path in paths]
         except (OSError, Unreadable) as error:
             raise CantTell(f"Claude's transcript can't be read: {error}") from error
         newest = indexes[-1]
@@ -740,7 +769,7 @@ def newest_copy(native_id, environment, workspaces=()):
                 raise CantTell(f'Copies of this session disagree: {older.path} is not part of {newest.path}')
         if getattr(newest, 'copies', None) != paths:  # a change of newest copy is a rewrite for readers
             if getattr(newest, 'copies', None) is not None:
-                newest.history_version = getattr(newest, 'history_version', 0) + 1
+                newest.history_version = next(_versions)
             newest.copies = paths
         return newest
 
@@ -774,7 +803,7 @@ def analyse(index, tip=None):
                                      or refs[:len(previous)] != previous):
             # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones
             # already read (its boundary and summary come before the rows it kept).
-            version += 1
+            version = next(_versions)
         index.history_version, index.history_refs, index.history_rewrites = version, refs, index.rewrites
     result = Analysis(len(entries), labelled, history, on, context, version)
     index.analysis = (key, result)
