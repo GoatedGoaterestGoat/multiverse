@@ -45,7 +45,8 @@ A **cursor** is an opaque position between rows, made by core. It encodes the
 generation, the adapter's own position and the nearest ref before it. Rows are
 never addressed by number, because every view of a conversation shifts:
 
-- a compaction stores kept rows again under new IDs;
+- a compaction stores kept rows again under new IDs, or moves them after its
+  summary;
 - `/clear` starts a new session;
 - a rewind leaves a branch behind;
 - Claude removes a row by truncating its file at the row and writing the rest
@@ -168,6 +169,16 @@ own call). A row off the history is **abandoned**.
   takes an optional **tip**, a row ref. Right after a rewind,
   before the next prompt, only the live session knows which branch is
   current. Without a stored tip, the history starts at the newest leaf.
+- A Claude compaction can keep the end of the last turn (the boundary's
+  `preservedMessages`). The kept rows keep their old parents, before the
+  boundary, but the live session holds them right after Claude's summary, so
+  the history puts them there, even where their old parents don't lead. The
+  compaction that moves them raises the history version, since its boundary
+  and summary come before rows already read. A tip that is one of them, as the
+  live session's last message is right after an idle or automatic compaction,
+  is read through the latest compaction that kept it: everything before it,
+  the boundary, the summary and the kept rows. Rows stored after that summary
+  are left out, since the live session no longer holds them.
 - A **gap** is a parent the history needs that Claude never stored (its writes
   failed for a while), or a link back into rows the history already holds, as
   when an automatic compaction's boundary links to a row Claude stored after

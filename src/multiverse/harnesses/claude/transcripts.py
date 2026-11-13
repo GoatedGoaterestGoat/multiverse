@@ -577,8 +577,9 @@ class History:
 
     `gap` is a parent Claude never stored (its writes failed for a while), or a link back into rows the walk already
     passed: an automatic compaction's boundary links to a row Claude stored after its summary. Behind Claude's own
-    compaction a gap doesn't matter, and the history starts at Claude's summary. `tip` is the ref the walk started
-    from.
+    compaction a gap doesn't matter, and the history starts at Claude's summary. The rows a compaction keeps
+    (`preservedMessages`) come right after its summary, as Claude rebuilds the session, though on disk they keep their
+    old parents before the boundary. `tip` is the ref asked for, else the newest leaf the walk started from.
     """
     rows: tuple
     tip: str | None
@@ -601,6 +602,14 @@ def _summaries(by_ref, order):
     return found
 
 
+def _keeping(by_ref, order, summaries, tip):
+    """The latest of Claude's own compactions stored after `tip` that kept it, or None: the live session then holds
+    `tip` after that compaction's summary, so its history is read from the summary."""
+    found = [item for ref, item in by_ref.items() if item.kind == 'system/compact_boundary' and ref in summaries
+             and tip in item.preserved]
+    return max(found, key=lambda item: order[item.ref]) if found else None
+
+
 def walk(entries, tip=None, labelled=None):
     """The history: from `tip` when stored, else the newest leaf of the parent graph (the last stored: a batch of
     rows, such as a compaction's install, can carry older timestamps than a row before it), back through parent links and across a boundary by its logical parent, plus every block of each response it
@@ -621,7 +630,13 @@ def walk(entries, tip=None, labelled=None):
         return History((), None)
     summaries = _summaries(by_ref, order)
     current = tip if tip in by_ref else max(leaves, key=order.get)
-    start, walked, seen, claude, boundaries = current, [], set(), None, []
+    start = current
+    # A tip a later compaction kept (its kept reply, right after an idle or automatic compaction): read from that
+    # compaction's summary, so the boundary and the summary are on the history and rows stored after it aren't.
+    keeping = _keeping(by_ref, order, summaries, tip) if tip in by_ref else None
+    if keeping is not None:
+        current = summaries[keeping.ref]
+    walked, seen, claude, boundaries = [], set(), None, []
     while current in by_ref and current not in seen:
         seen.add(current)
         walked.append(current)
@@ -639,16 +654,30 @@ def walk(entries, tip=None, labelled=None):
     if gap and claude is not None:
         count, boundary = claude
         summary = summaries[boundary.ref]
-        kept = [ref for ref in boundary.preserved if ref in by_ref]
-        seen = set(walked[:count]) | set(kept)
-        for index, ref in enumerate(kept, 1):  # after the summary, as Claude delivers them
-            position[ref] = order[summary] + index / (len(kept) + 1)
+        seen = set(walked[:count]) | {ref for ref in boundary.preserved if ref in by_ref}
         gap = None
+    else:
+        seen = set(walked)
+    # A compaction's kept rows are in the live session, wherever their old parents lead.
+    for boundary in boundaries:
+        if summaries.get(boundary.ref) in seen:
+            seen |= {ref for ref in boundary.preserved if ref in by_ref}
     responses = {by_ref[ref].response for ref in seen} - {None}
     seen |= {ref for ref, item in by_ref.items() if item.response in responses
              and (summary is None or position[ref] > position[summary] or ref in seen)}
     calls = {call for ref in seen for call in by_ref[ref].calls}
     seen |= {ref for ref, item in by_ref.items() if item.kind == 'user' and set(item.answers) & calls}
+    # A compaction's kept rows come right after its summary, as Claude delivers them: once every row is in (a response's
+    # other blocks and parallel results join after the walk), and the newest compaction first, as the live session
+    # holds a row kept twice after the later summary.
+    placed = set()
+    for boundary in boundaries:
+        note = summaries.get(boundary.ref)
+        kept = [ref for ref in boundary.preserved if ref in seen and ref not in placed]
+        if note in seen and kept:
+            for index, ref in enumerate(kept, 1):
+                position[ref] = order[note] + index / (len(kept) + 1)
+            placed.update(kept)
     for boundary in boundaries:  # the typed /compact row the boundary answers stays: the person typed it
         if boundary.ref not in seen:
             continue
@@ -723,7 +752,7 @@ class Analysis:
     history: History
     on: frozenset          # entry indexes on the history
     context: frozenset     # entry indexes in context
-    version: int           # rises when the history changes other than by growing
+    version: int           # rises when the history changes other than by growing at its end
 
 
 def analyse(index, tip=None):
@@ -742,8 +771,10 @@ def analyse(index, tip=None):
     previous = getattr(index, 'history_refs', None)
     if tip is None:
         if previous is not None and (getattr(index, 'history_rewrites', index.rewrites) != index.rewrites
-                                     or not set(previous) <= set(refs)):
-            version += 1  # a rewrite, or a rewind that left rows of the history behind
+                                     or refs[:len(previous)] != previous):
+            # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones
+            # already read (its boundary and summary come before the rows it kept).
+            version += 1
         index.history_version, index.history_refs, index.history_rewrites = version, refs, index.rewrites
     result = Analysis(len(entries), labelled, history, on, context, version)
     index.analysis = (key, result)

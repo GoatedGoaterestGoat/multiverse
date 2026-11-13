@@ -169,6 +169,63 @@ class ClaudeTranscriptReadingTest(BaseTest):
                 index, analysis = self.read()
                 self.assertEqual([index.entries[i].ref for i in analysis.history.rows], refs)
                 self.assertEqual((analysis.history.gap, analysis.history.summary), (gap, named))
+        # An idle or automatic compaction keeps the end of the last turn (preservedMessages, Claude 2.1.323): the kept
+        # rows keep their old parents before the boundary, and the live session holds them after Claude's summary.
+        # GOAT reads from the live session's last message, the kept reply; read from its old parents, the boundary
+        # and the summary were missing, and GOAT refused every tree compaction of the session (compaction, 2026-11-13).
+        keeps = lambda uuid, logical, kept: {'type': 'system', 'subtype': 'compact_boundary', 'uuid': uuid,
+                                             'logicalParentUuid': logical,
+                                             'compactMetadata': {'preservedMessages': {'uuids': kept, 'allUuids': kept}}}
+        note = lambda uuid, parent: user(uuid, parent, 'Summary of earlier work', isCompactSummary=True)
+        start = [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'),
+                 call('k1', 'start', [], 'm1'), call('k2', 'k1', [], 'm2')]
+        idle = [*start, keeps('b4', 'k2', ['k1', 'k2']), note('s4', 'b4'), attach('i4', 's4', 'date'),
+                user('rewound', 'i4', 'A turn the live session no longer holds', origin={'kind': 'human'}, promptId='p2')]
+        tipped = [  # (case, rows, tip, the history's refs)
+            ('a kept tip reads from the summary: the boundary, the summary and the kept rows, nothing stored after',
+             idle, 'k2', ['start', 'b4', 's4', 'k1', 'k2']),
+            ('the newest read has the kept rows right after the summary too',
+             idle, None, ['start', 'b4', 's4', 'k1', 'k2', 'i4', 'rewound']),
+            ('kept by two compactions in a row: the later one is the live one',
+             [*start, keeps('b4', 'k2', ['k1', 'k2']), note('s4', 'b4'), keeps('b5', 'k2', ['k1', 'k2']), note('s5', 'b5')],
+             'k2', ['start', 'b5', 's5', 'k1', 'k2']),
+            # A response's other block and a parallel result join after the walk; they must follow the summary too.
+            ('kept blocks and parallel results the walk adds later come after the summary too',
+             [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'), call('a1', 'start', ['c1'], 'm1'),
+              call('a2', 'a1', ['c2'], 'm1'), result('r1', 'a2', 'c1'), result('r2', 'a1', 'c2'), call('k2', 'r2', [], 'm2'),
+              keeps('b4', 'k2', ['a1', 'a2', 'r1', 'r2', 'k2']), note('s4', 'b4')],
+             'k2', ['start', 'b4', 's4', 'a1', 'a2', 'r1', 'r2', 'k2']),
+            ('a row two walked compactions kept follows the later summary',
+             [*start[:2], keeps('b4', 'k1', ['k1']), note('s4', 'b4'), user('meta', 's4', 'Context', isMeta=True),
+              keeps('b5', 'meta', ['k1']), note('s5', 'b5')],
+             'k1', ['start', 'b4', 's4', 'meta', 'b5', 's5', 'k1']),
+            ('a kept row off the old parent chain is on the history too: the live session holds it',
+             [user('start', None, 'Read it', origin={'kind': 'human'}, promptId='p1'), call('k1', 'start', [], 'm1'),
+              call('k2', 'start', [], 'm2'), keeps('b4', 'k2', ['k1', 'k2']), note('s4', 'b4')],
+             'k2', ['start', 'b4', 's4', 'k1', 'k2']),
+            ('a boundary without Claude\'s summary leaves the tip read as before',
+             [*start, keeps('b4', 'k2', ['k1', 'k2']), user('s4', 'b4', 'Not a summary', origin={'kind': 'human'}, promptId='p3')],
+             'k2', ['start', 'k1', 'k2'])]
+        for case, rows, tip, refs in tipped:
+            with self.subTest(case):
+                self.write(rows)
+                index, analysis = self.read(tip=tip)
+                self.assertEqual([index.entries[i].ref for i in analysis.history.rows], refs)
+                self.assertEqual((analysis.history.tip, analysis.history.gap), (tip or refs[-1], None))
+        with self.subTest('a compaction that puts rows before ones already read raises the history version'):
+            # Its boundary and summary come before the rows it kept: a reader taking the history as grown at its end
+            # would skip them.
+            self.write(start)
+            _, before = self.read()
+            with self.path.open('a') as handle:
+                handle.write(''.join(json.dumps(row) + '\n' for row in (keeps('b4', 'k2', ['k1', 'k2']), note('s4', 'b4'))))
+            index, after = self.read()
+            self.assertEqual([index.entries[i].ref for i in after.history.rows], ['start', 'b4', 's4', 'k1', 'k2'])
+            self.assertGreater(after.version, before.version)
+            with self.path.open('a') as handle:
+                handle.write(json.dumps(user('next', 's4', 'Go on', origin={'kind': 'human'}, promptId='p5')) + '\n')  # Claude chains on from the summary
+            _, grown = self.read()
+            self.assertEqual(grown.version, after.version)  # growing at the end keeps it
         with self.subTest("the newest leaf is the last stored, though an install's rows carry older timestamps"):
             # Read right after a tree compaction installed its rows, before Claude stores the next one: Claude's own
             # note from just before the boundary is a dead branch with a newer timestamp.
