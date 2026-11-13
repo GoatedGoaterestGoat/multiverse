@@ -65,6 +65,7 @@ _installed = False
 _strict = False  # whether writes no check() reported make the process exit 1 (the default once installed)
 _TEST = "_mv2_test"  # on a Thread: the test it was started in (threads it starts carry it on)
 _open_context = threading.local()  # the dir_fd of the os.open call running in this thread: its audit event lacks it
+_follow_context = threading.local()  # chmod/utime audit events omit follow_symlinks
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
@@ -126,6 +127,15 @@ def install(home=None, strict=True):
             return start(thread, *args, **kwargs)
         threading.Thread.start = tagged_start
         os.open = _open_with_context(os.open)
+        for name in ("chmod", "utime", "lchmod"):
+            original = getattr(os, name, None)
+            if original is None:
+                continue
+            wrapped = _follow_with_context(original, default=name != "lchmod")
+            setattr(os, name, wrapped)
+            for supported in (os.supports_dir_fd, os.supports_fd, os.supports_follow_symlinks):
+                if original in supported:
+                    supported.add(wrapped)
         sys.addaudithook(_hook)
         atexit.register(_at_exit)
     return Path(directory)
@@ -167,6 +177,7 @@ _TARGETS = {"os.mkdir": [(0, 2)], "os.rmdir": [(0, 1)], "os.remove": [(0, 1)], "
             "os.utime": [(0, 3)], "os.rename": [(0, 2), (1, 3)], "os.link": [(1, 3)], "os.symlink": [(1, 2)],
             "os.truncate": [(0, None)], "shutil.rmtree": [(0, 1)], "shutil.copyfile": [(1, None)],
             "shutil.move": [(0, None), (1, None)]}
+_NAMES = {"os.remove", "os.rmdir", "os.rename", "os.link", "os.symlink", "shutil.rmtree"}
 
 
 def _hook(event, args):
@@ -189,13 +200,17 @@ def _hook(event, args):
                    for at, fd in _TARGETS[event]]
     else:
         return
-    for path, directory in targets:
+    for number, (path, directory) in enumerate(targets):
         where = _absolute(path, directory)
         if where is None:
             continue
-        # As written and as resolved: a link elsewhere may point into the home. realpath resolves the links that
-        # exist and keeps a new file's own name, so a file about to be made through one is judged by where it goes.
-        for candidate in dict.fromkeys((where, os.path.realpath(where))):
+        # Name-only changes never follow the final link, but still resolve linked parents.
+        # Writes and metadata changes that follow links must protect the target as well.
+        name_only = (event in _NAMES or event == "shutil.move" and number == 0
+                     or event in ("os.chmod", "os.utime") and not getattr(_follow_context, "following", True))
+        resolved = (os.path.normpath(os.path.join(os.path.realpath(os.path.dirname(where)), os.path.basename(where)))
+                    if name_only else os.path.realpath(where))
+        for candidate in dict.fromkeys((os.path.normpath(where), resolved)):
             if event == "socket.connect" and _in_harness_home(candidate):
                 continue
             if _guarded(candidate):
@@ -227,6 +242,21 @@ def _open_with_context(real):
     return open
 
 
+def _follow_with_context(real, *, default=True):
+    """Preserve no-follow intent, which chmod/utime audit events do not carry."""
+    def change(path, *args, **kwargs):
+        previous = getattr(_follow_context, "following", True)
+        _follow_context.following = bool(kwargs.get("follow_symlinks", default))
+        if "follow_symlinks" in kwargs:
+            kwargs["follow_symlinks"] = _follow_context.following
+        try:
+            return real(path, *args, **kwargs)
+        finally:
+            _follow_context.following = previous
+    change.__doc__, change.__wrapped__ = real.__doc__, real
+    return change
+
+
 def _allowed(where):
     """Not mv2's state although inside the home: the plugin under test's own directory, and Python's bytecode in
     a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs;
@@ -247,7 +277,8 @@ def _writes(mode, flags):
 def _absolute(path, directory=None):
     """The absolute path a call changes: relative to `directory` (a dir_fd, as shutil.rmtree passes) when given,
     else to the working directory; None when it cannot be told (a file descriptor, or a dir_fd whose path this
-    system cannot give), which is then not counted."""
+    system cannot give), which is then not counted. Keep dot components and final separators until resolution:
+    link/. and link/ traverse a directory link even when an operation does not follow its final entry."""
     if isinstance(path, int) or path is None:
         return None
     try:
@@ -255,11 +286,11 @@ def _absolute(path, directory=None):
     except TypeError:
         return None
     if os.path.isabs(path):
-        return os.path.normpath(path)
+        return path
     if isinstance(directory, int) and not isinstance(directory, bool) and directory >= 0:  # AT_FDCWD is negative
         base = _fd_path(directory)
-        return os.path.normpath(os.path.join(base, path)) if base else None
-    return os.path.normpath(os.path.join(os.getcwd(), path))
+        return os.path.join(base, path) if base else None
+    return os.path.join(os.getcwd(), path)
 
 
 def _fd_path(fd):
