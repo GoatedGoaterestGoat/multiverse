@@ -9,6 +9,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
+from multiverse.harnesses.codex.plugins import CHECKED_VERSION
 from multiverse.runtime import native
 from multiverse.harnesses.types import SessionHandle, CommandSpec, LaunchContext, Message
 from multiverse.universe.mailbox import append_message, inbox
@@ -46,6 +47,10 @@ class AdapterContractTest(BaseTest):
         """For each harness, bridge mode and fresh or saved session, the wake prompt is the last argv item after --,
         with no -p, and an empty task adds nothing; fragile because each adapter builds argv itself and a prompt
         starting with - becomes a flag, so the wake fails as a startup error."""
+        self.enterContext(patch('multiverse.harnesses.codex.plugins.codex_version', return_value=CHECKED_VERSION))
+        self.enterContext(patch('multiverse.harnesses.claude.claude_version', return_value=None))
+        self.enterContext(patch('subprocess.Popen', side_effect=AssertionError(
+            'An argv-only adapter contract must not launch an installed native binary')))
         for name in harnesses.BUILTINS:
             with self.subTest(name=name, task=''):
                 adapter = harnesses.load(self.root, name)
