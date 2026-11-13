@@ -243,7 +243,7 @@ In this universe's `harnesses/NAME/harness.json`, add `settings.models` to allow
 }
 ```
 
-Each key is an ID or alias from that harness's model table. `{}` allows all of the model's efforts and lets the native harness choose effort. An `efforts` list must contain at least one offered level; it requires an explicit effort. The list follows table order, regardless of the order in the settings file. Aliases are resolved for the launch environment and passed as canonical IDs when a subset is set.
+Each key is an ID or alias from that harness's model table. `{}` allows all of the model's efforts and lets the native harness choose effort. An `efforts` list must contain at least one offered level; it requires an explicit effort. The list follows table order, regardless of the order in the settings file. Aliases are resolved for the launch environment and passed as canonical IDs when a subset is set. For an omitted or excluded model, the hint lists the allowed keys as you wrote them in `models`, so you can select or edit those names even when the provider uses a different ID.
 
 Spawn, resume and plugin runs all check this setting, including plugins such as GOAT that select a builder model. A recorded model or effort outside the subset refuses resume; supply an allowed `--model` or `--effort` to replace it. If a configured entry is no longer in the table, mv2 names it and the settings file. Fix or remove the entry before launching or running another model call. Entries are never silently discarded.
 

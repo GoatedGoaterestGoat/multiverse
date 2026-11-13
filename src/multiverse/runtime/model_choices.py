@@ -103,9 +103,9 @@ def check(root, adapter, model, *, effort=None, environment):
         policy = _policy(root, adapter, environment) if narrowed else None
     except ModelChoicesError as error:
         return ModelCheck(ok=False, model=model, effort=effort, verified=True, reason=str(error))
+    names = ', '.join(adapter.settings['models']) if narrowed else ''
     if not model:
         if narrowed:
-            names = ', '.join(item.id for item in policy[0].models)
             return ModelCheck(ok=False, reason=f'Choose a model from {names}; the native default cannot be verified '
                               f'against {Path(root) / "harnesses" / adapter.name / "harness.json"}')
         if effort is None:
@@ -118,7 +118,7 @@ def check(root, adapter, model, *, effort=None, environment):
     path = Path(root) / 'harnesses' / adapter.name / 'harness.json'
     if not found.verified or item is None:
         return replace(found, ok=False, reason=f'Model {model!r} is not allowed by {path}; choose a model from '
-                       + ', '.join(item.id for item in chosen.models))
+                       + names)
     if effort is None and not effort_unset[item.id]:
         return replace(found, ok=False, effort=None,
                        reason=f'Choose an effort for {item.id} from {", ".join(item.efforts)}; '
