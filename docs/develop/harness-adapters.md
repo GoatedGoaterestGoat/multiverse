@@ -64,7 +64,7 @@ Core also looks for these optional methods and attributes:
 | `retained_usage(session, runtime)` | The last usage reading, kept across resume |
 | `display_pane(text)` | The dashboard's live pane without the harness's input box and the rows under it; see [pane display](#pane-display) |
 
-Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Plain and compressed rollouts use the same bounded metadata proof, and a plain sibling takes precedence.
+Codex checks the native thread UUID in a rollout's metadata header under the candidate's `sessions/` or `archived_sessions/` folder, including reverted rollouts with a separate rollout ID. A matching filename alone is insufficient. Plain and compressed rollouts use the same bounded metadata proof, and a plain sibling takes precedence. Python-zstandard contexts are leased exclusively to each open stream and returned only after successful close, with at most four idle contexts retained. Closed streams release their source references; rewinds and corrupt or cancelled reads keep the same frame, window and byte limits. The Python 3.14 built-in decoder path is unchanged.
 
 Unreadable or malformed metadata, unavailable Zstandard support, damaged compression, linked storage, entries that disappear during traversal and exhausted scan limits return `unknown`, never absence. Core selects candidate homes and owns adoption and notices; this check starts no native process and changes no files.
 
