@@ -7,12 +7,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from ..types import NativeResult, normalize_session_id
-from .launch import LaunchProtocol
+from .launch import LaunchProtocol, navigation_environments
 from .protocol import object_field, result
 from .side import local_error
 
-VERSION = (0, 167, 2)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), VERSION))
+VERSION = (0, 169, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), VERSION))
 # Pinned app-server-protocol common.rs reads. New thread-scoped methods fail
 # closed instead of accidentally granting stale-widget mutation authority.
 READ_ONLY = frozenset(('thread/goal/get', 'thread/queue/list', 'thread/attachment/list',
@@ -117,6 +117,13 @@ class Selection:
         if (self.root.current_grants is None or self.root.grant_ceiling is None
                 or self.root.grants_native_id != self.root.native_id):
             raise local_error(self.root.grants_error, identifier)
+        if (self.connection.version == (0, 169, 0) and method == 'thread/resume'
+                and params.get('environments') is not None):
+            try:
+                navigation_environments(params, required=True, policy=self.root.current_grants,
+                                        cwd=self.root.settings['workspace'])
+            except ValueError as error:
+                raise local_error(str(error), identifier) from error
         home = self.root.settings.get('navigation_home')
         if not isinstance(home, str) or not Path(home).is_absolute():
             raise local_error('Conversation navigation needs recorded storage; use a normal mv2 resume first', identifier)
@@ -153,6 +160,7 @@ class Selection:
             else:
                 thread = object_field(observed, 'thread')
                 if (thread.get('ephemeral') is not False or thread.get('parentThreadId') is not None
+                        or thread.get('attachedToThreadId') is not None
                         or thread.get('canAcceptDirectInput') is not True
                         or not isinstance(thread.get('status'), dict)
                         or thread['status'].get('type') != 'idle'

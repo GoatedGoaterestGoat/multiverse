@@ -7,7 +7,7 @@ from ...store import read, retry_missing
 
 
 # Qualify turn-context observations independently of other versioned features.
-MODEL_VERSIONS = frozenset({'0.166.0', '0.167.0', '0.167.1', '0.167.2'})
+MODEL_VERSIONS = frozenset({'0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'})
 
 
 def observation(session, *, bridge):

@@ -71,7 +71,7 @@ class CodexRunTests(unittest.TestCase):
         with patch.object(Path, 'open', opened):
             self.assertEqual(run.login_home(environment), home)
             with patch.object(run, 'executable', return_value='/fake/codex'), patch.object(run, 'codex_version') as version:
-                for observed, supported in (((0, 166, 0), True), ((0, 167, 0), True), ((0, 166, 1), False), ((0, 167, 1), True), ((0, 167, 2), True), ((0, 167, 3), False), (None, False)):
+                for observed, supported in (((0, 166, 0), True), ((0, 167, 0), True), ((0, 166, 1), False), ((0, 167, 1), True), ((0, 167, 2), True), ((0, 169, 0), True), ((0, 169, 1), False), (None, False)):
                     version.return_value = observed
                     self.assertEqual(run.options({'spawn': ['codex']}, environment).supported, supported)
                     if supported:

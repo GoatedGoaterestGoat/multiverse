@@ -75,10 +75,218 @@ class CodexSideTest(unittest.TestCase):
         view = root.for_connection('owner', lambda: owner[0])
         self.initialize(view)
         view.outgoing({'id': 2, 'method': 'thread/resume', 'params': {'threadId': self.main}})
-        view.incoming({'id': 2, 'result': {'thread': {'id': self.main, 'cwd': '/fixture/workspace'}, **policy}})
+        view.incoming({'id': 2, 'result': {'thread': {'id': self.main, 'cwd': '/fixture/workspace',
+            **({'environments': [{'environmentId': 'local', 'cwd': '/fixture/workspace',
+                'runtimeWorkspaceRoots': policy['runtimeWorkspaceRoots']}], 'ephemeral': False,
+                'parentThreadId': None, 'attachedToThreadId': None, 'forkedFromId': None, 'threadSource': 'user'}
+               if root.settings['navigation_cli'] == [0, 169, 0] else {})}, **policy}})
         owner[0] = True  # Core accepted the exact initial binding before calling after_bind.
         view.after_bind('/fixture/native.sock')
         return root, view
+
+    def test_navigation_environment_evidence_and_attached_identity_never_publish_unproven_grants(self):
+        """Legacy grant equality cannot hide new environment roots or promote an attached side into the primary."""
+        absent = object()
+        full = {'cwd': '/fixture/workspace', 'config': {}, 'model': None, 'modelProvider': None,
+                'developerInstructions': None, 'approvalPolicy': None, 'sandbox': None, 'permissions': None}
+        policy = {'approvalPolicy': 'never', 'approvalsReviewer': 'user',
+                  'sandbox': {'type': 'dangerFullAccess'}, 'activePermissionProfile': None, 'runtimeWorkspaceRoots': []}
+        canonical = [{'environmentId': 'local', 'cwd': '/fixture/workspace', 'runtimeWorkspaceRoots': []}]
+        cases = [('local exact', canonical), ('missing', absent), ('null', None), ('empty', []), ('object', {}), ('false', False),
+                 ('string', ''), ('local roots', [{'environmentId': 'local', 'cwd': '/fixture/workspace',
+                    'runtimeWorkspaceRoots': ['/different/root']}]),
+                 ('remote', [{'environmentId': 'remote', 'cwd': '/remote', 'runtimeWorkspaceRoots': ['/remote']}])]
+        def thread(value):
+            return {'id': self.main, 'cwd': '/fixture/workspace', 'ephemeral': False,
+                    'parentThreadId': None, 'attachedToThreadId': None, 'forkedFromId': None, 'threadSource': 'user',
+                    **({} if value is absent else {'environments': deepcopy(value)})}
+        def bound(version, value, *, attached=False):
+            root = LaunchProtocol({**self.settings, 'navigation_cli': list(map(int, version.split('.'))),
+                                   'navigation_home': '/private/codex'})
+            owner = [False]
+            view = root.for_connection('environment', lambda: owner[0])
+            self.initialize(view, 'codex/' + version)
+            view.outgoing({'id': 2, 'method': 'thread/resume', 'params': {'threadId': self.main}})
+            view.incoming({'id': 2, 'result': {'thread': {**thread(value),
+                **({'attachedToThreadId': self.main} if attached else {})}, **deepcopy(policy)}})
+            owner[0] = True
+            view.after_bind('/fixture/native.sock')
+            return root, view
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'):
+            with self.subTest(initial_attached=version):
+                root, view = bound(version, [], attached=True)
+                self.assertTrue(root.bound)
+                self.assertIsNone(root.current_grants)
+            seed = canonical if version == '0.169.0' else []
+            for name, value in cases:
+                expected = name == 'local exact' if version == '0.169.0' else name in ('empty', 'missing', 'null')
+                with self.subTest(initial=(version, name)):
+                    root, view = bound(version, value)
+                    self.assertTrue(root.bound, 'Unmapped navigation evidence must leave ordinary binding usable')
+                    self.assertEqual(root.current_grants, policy if expected else None)
+                with self.subTest(notification=(version, name)):
+                    root, view = bound(version, seed)
+                    before, ceiling = root.current_grants, deepcopy(root.grant_ceiling)
+                    projection = {**deepcopy(policy), 'cwd': '/fixture/workspace',
+                                  'sandboxPolicy': policy['sandbox']}
+                    projection.pop('sandbox')
+                    projection.pop('runtimeWorkspaceRoots')
+                    if value is not absent:
+                        projection['environments'] = deepcopy(value)
+                    for target in ('foreign', self.main):
+                        view.incoming({'method': 'thread/settings/updated', 'params': {
+                            'threadId': target, 'threadSettings': projection}})
+                        if target == 'foreign':
+                            self.assertIs(root.current_grants, before)
+                    self.assertEqual(root.grant_ceiling, ceiling)
+                    self.assertEqual(root.current_grants, policy if expected else None)
+                    if not expected:
+                        # An unchanged later empty snapshot cannot revive authority.
+                        view.incoming({'method': 'thread/settings/updated', 'params': {
+                            'threadId': self.main, 'threadSettings': {**projection, 'environments': seed}}})
+                        self.assertIsNone(root.current_grants)
+            for name, value in [*cases, ('attached', [])]:
+                with self.subTest(reselection=(version, name)):
+                    root, view = bound(version, seed)
+                    before, ceiling, epoch = root.current_grants, deepcopy(root.grant_ceiling), root.grants_epoch
+                    view.outgoing({'id': 20, 'method': 'thread/resume', 'params': {'threadId': self.main}})
+                    selected = thread(value)
+                    if name == 'attached':
+                        selected['attachedToThreadId'] = self.main
+                    view.incoming({'id': 20, 'result': {'thread': selected, **deepcopy(policy)}})
+                    expected = name == 'local exact' if version == '0.169.0' else name in ('empty', 'missing', 'null')
+                    self.assertEqual(root.native_id, self.main)
+                    self.assertEqual(root.grant_ceiling, ceiling)
+                    self.assertEqual(root.current_grants, policy if expected else None)
+                    if expected:
+                        self.assertIs(root.current_grants, before)
+                        self.assertEqual(root.grants_epoch, epoch)
+                    else:
+                        self.assertGreater(root.grants_epoch, epoch)
+                        view.outgoing({'id': 21, 'method': 'thread/resume', 'params': {'threadId': self.main}})
+                        view.incoming({'id': 21, 'result': {'thread': thread(seed), **deepcopy(policy)}})
+                        self.assertIsNone(root.current_grants, 'Same-primary reselection cannot revive invalid grants')
+                with self.subTest(selection=(version, name)):
+                    root, view = bound(version, seed)
+                    target = str(uuid4())
+                    request = {'id': 20, 'method': 'thread/resume', 'params': {**full, 'threadId': target}}
+                    view.outgoing(request)
+                    event = view.navigation('outgoing', request)
+                    view.navigation_done(event, {'token': 'admitted'})
+                    selected = {**thread(value), 'id': target, 'ephemeral': False, 'parentThreadId': None,
+                                'canAcceptDirectInput': True, 'status': {'type': 'idle'},
+                                'path': '/private/codex/sessions/rollout.jsonl'}
+                    if name == 'attached':
+                        selected['attachedToThreadId'] = self.main
+                    reply = {'id': 20, 'result': {'thread': selected, 'cwd': '/fixture/workspace', **deepcopy(policy)}}
+                    expected = name == 'local exact' if version == '0.169.0' else name in ('empty', 'missing', 'null')
+                    if expected:
+                        view.incoming(reply)
+                        self.assertEqual(view.navigation('incoming', reply)['action'], 'commit')
+                    else:
+                        with self.assertRaises(LocalProtocolError):
+                            view.incoming(reply)
+                        self.assertEqual(root.native_id, self.main)
+                        self.assertEqual(root.grant_ceiling, policy)
+                        self.assertIsNotNone(root._selection)
+
+    def test_canonical_local_navigation_keeps_effective_grants_and_pins_only_new_input(self):
+        """A resolved built-in local selection needs exact grant roots, not a default or label inference."""
+        policy = {'approvalPolicy': 'never', 'approvalsReviewer': 'user', 'sandbox': {'type': 'dangerFullAccess'},
+                  'activePermissionProfile': None, 'runtimeWorkspaceRoots': ['/agent/root', '/fixture/workspace']}
+        local = [{'environmentId': 'local', 'cwd': '/fixture/workspace',
+                  'runtimeWorkspaceRoots': ['/agent/root', '/fixture/workspace']}]
+        def selected(identifier, value=None, **changes):
+            return {'id': identifier, 'cwd': '/fixture/workspace', 'ephemeral': False,
+                    'parentThreadId': None, 'attachedToThreadId': None, 'forkedFromId': None,
+                    'threadSource': 'user', 'environments': deepcopy(local if value is None else value), **changes}
+        def bound(**changes):
+            root = LaunchProtocol({**self.settings, 'navigation_cli': [0, 169, 0], 'navigation_home': '/private/codex'})
+            owner = [False]
+            view = root.for_connection('canonical', lambda: owner[0])
+            self.initialize(view, 'codex/0.169.0')
+            view.outgoing({'id': 2, 'method': 'thread/resume', 'params': {'threadId': self.main}})
+            view.incoming({'id': 2, 'result': {'thread': selected(self.main, **changes), **deepcopy(policy)}})
+            owner[0] = True
+            view.after_bind('/fixture/native.sock')
+            return root, view
+        for field, value in (('parentThreadId', self.side), ('attachedToThreadId', self.main),
+                ('forkedFromId', self.side), ('threadSource', 'tui_side_chat'), ('ephemeral', True)):
+            with self.subTest(root_provenance=field):
+                root, view = bound(**{field: value})
+                self.assertTrue(root.bound)
+                self.assertIsNone(root.current_grants)
+        root, view = bound()
+        self.assertEqual(root.current_grants, policy)
+        full = {'cwd': '/fixture/workspace', 'config': {}, 'model': None, 'modelProvider': None,
+                'developerInstructions': None, 'approvalPolicy': None, 'sandbox': None, 'permissions': None}
+        for reason in ('new', 'clear', 'resume'):
+            with self.subTest(reason=reason):
+                root, view = bound()
+                target = str(uuid4())
+                params = {**full, **({'threadId': target} if reason == 'resume' else {
+                    'threadSource': 'user', 'ephemeral': False, 'historyMode': 'paginated',
+                    'sessionStartSource': 'clear' if reason == 'clear' else None})}
+                request = {'id': 20, 'method': 'thread/resume' if reason == 'resume' else 'thread/start', 'params': params}
+                forwarded = view.outgoing(request)
+                if reason == 'resume':
+                    self.assertNotIn('environments', forwarded['params'])
+                else:
+                    self.assertEqual(forwarded['params'].get('environments'), [{**local[0],
+                        'runtimeWorkspaceRoots': policy['runtimeWorkspaceRoots']}])
+                    self.assertEqual(forwarded['params']['runtimeWorkspaceRoots'], policy['runtimeWorkspaceRoots'])
+                event = view.navigation('outgoing', forwarded)
+                view.navigation_done(event, {'token': 'admitted'})
+                response = {'id': 20, 'result': {'thread': selected(target, path='/private/codex/sessions/rollout.jsonl',
+                    status={'type': 'idle'}, canAcceptDirectInput=True), 'cwd': '/fixture/workspace', **deepcopy(policy)}}
+                view.incoming(response)
+                self.assertEqual(view.navigation('incoming', response)['action'], 'commit')
+        root, view = bound()
+        view.outgoing({'id': 20, 'method': 'thread/resume', 'params': {'threadId': self.main,
+            'environments': deepcopy(local)}})
+        self.assertEqual(root.current_grants, policy, 'A matching explicit local selection preserves known grants')
+        view.incoming({'id': 20, 'result': {'thread': selected(self.main), **deepcopy(policy)}})
+        self.assertEqual(root.current_grants, policy)
+        # An observation after the native reply but before core commit cannot revive a stale grant snapshot.
+        target = str(uuid4())
+        request = {'id': 21, 'method': 'thread/start', 'params': {**full, 'threadSource': 'user',
+            'ephemeral': False, 'historyMode': 'paginated'}}
+        forwarded = view.outgoing(request)
+        view.navigation_done(view.navigation('outgoing', forwarded), {'token': 'admitted'})
+        response = {'id': 21, 'result': {'thread': selected(target, path='/private/codex/sessions/rollout.jsonl',
+            status={'type': 'idle'}, canAcceptDirectInput=True), 'cwd': '/fixture/workspace', **deepcopy(policy)}}
+        view.incoming(response)
+        commit = view.navigation('incoming', response)
+        view.incoming({'method': 'thread/settings/updated', 'params': {'threadId': self.main,
+            'threadSettings': {**deepcopy(policy), 'cwd': '/fixture/workspace',
+                'sandboxPolicy': policy['sandbox'], 'environments': []}}})
+        self.assertIsNone(root.current_grants)
+        view.navigation_done(commit, {'native_id': target})
+        self.assertIsNone(root.current_grants)
+        self.assertEqual(root.grant_ceiling, policy)
+        for name, value in [('disabled', []), ('remote', [{**local[0], 'environmentId': 'remote'}]),
+                ('multiple', local * 2), ('narrow roots', [{**local[0], 'runtimeWorkspaceRoots': []}]),
+                ('other cwd', [{**local[0], 'cwd': '/other'}]), ('extra', [{**local[0], 'extra': True}])]:
+            with self.subTest(notification=name):
+                root, view = bound()
+                before = deepcopy(root.grant_ceiling)
+                settings = {**deepcopy(policy), 'cwd': '/fixture/workspace', 'sandboxPolicy': policy['sandbox'],
+                            'environments': value}
+                settings.pop('sandbox')
+                view.incoming({'method': 'thread/settings/updated', 'params': {'threadId': self.main,
+                    'threadSettings': settings}})
+                self.assertIsNone(root.current_grants)
+                settings['environments'] = deepcopy(local)
+                view.incoming({'method': 'thread/settings/updated', 'params': {'threadId': self.main,
+                    'threadSettings': settings}})
+                self.assertIsNone(root.current_grants)
+                self.assertEqual(root.grant_ceiling, before)
+        for supplied in ([], [{**local[0], 'runtimeWorkspaceRoots': ['/conflict']}], local * 2):
+            with self.subTest(new_override=supplied):
+                root, view = bound()
+                with self.assertRaises(LocalProtocolError):
+                    view.outgoing({'id': 20, 'method': 'thread/start', 'params': {**full,
+                        'threadSource': 'user', 'ephemeral': False, 'historyMode': 'paginated', 'environments': supplied}})
 
     def test_side_thread_lifecycle_leaves_the_primary_untouched(self):
         """A /btw side thread's whole lifecycle, down to closing one saturated with requests, leaves the primary
@@ -303,7 +511,7 @@ class CodexSideTest(unittest.TestCase):
                     with self.assertRaises(LocalProtocolError):
                         view.outgoing(input)
 
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'):
             with self.subTest(navigation_version=version):
                 root, view = self.navigation_bound(navigation_cli=list(map(int, version.split('.'))))
                 self.initialize(view, 'codex/' + version)
@@ -321,7 +529,8 @@ class CodexSideTest(unittest.TestCase):
                 (True, [0, 166, 0], '0.167.0', False), (True, [0, 167, 0], '0.166.0', False),
                 (True, [0, 167, 0], '0.167.1', False), (True, [0, 167, 1], '0.167.0', False),
                 (True, [0, 167, 1], '0.167.2', False), (True, [0, 167, 2], '0.167.1', False),
-                (True, [0, 167, 3], '0.167.3', False),
+                (True, [0, 169, 0], '0.167.2', False), (True, [0, 167, 2], '0.169.0', False),
+                (True, [0, 168, 0], '0.168.0', False), (True, [0, 169, 1], '0.169.1', False),
                 (True, [0, 166, 0], '0.166.0', True)):
             with self.subTest(owner=owner, cli=cli, daemon=daemon, side=side):
                 root, view = self.navigation_bound(navigation_cli=cli)
@@ -691,7 +900,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2'):
+        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'):
             with self.subTest(supported=version):
                 view = self.connection('checked-' + version, lambda: True)
                 self.initialize(view, 'codex/' + version)

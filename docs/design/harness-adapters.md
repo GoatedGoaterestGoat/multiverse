@@ -781,6 +781,46 @@ Startup-screen checks, private ask and one-shot runs, native side conversations,
 
 The user-authorized native suite used isolated homes and daemons with scripted localhost providers. Seventeen checks passed in the initial run. A shared-daemon stop check hit a terminal/runner ownership error; the same module passed on clean main and on an unchanged targeted repeat. Ask and tool-free runs, navigation and restored grants, refusals, side conversations, queue continuation, permissions, identity and recovery were covered. The private captured rollout produced identical facts and body reads in plain and compressed form. Prompt and queue version routing also passed their offline fake-peer tests. Linux validation was unavailable because Docker was not running.
 
+### Codex 0.169.0 compatibility audit
+
+This compares official tags `rust-v0.167.2` (`ce21072c90d32c40af7a55b60b2fb35c84a43a6a`) and `rust-v0.169.0` (`d32063f96c2dff1dc96af839b3952abb6acfeda4`). The installed experimental protocol export grows from 470 to 479 schemas: nine are added and 54 change. All five recorded CLI help outputs match. Both model catalogs regenerate from the release's bundled metadata with identical model data and shape, changing only the checked-version stamps. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.169.0).
+
+The native queue adds optional Responses API metadata while retaining exact client message IDs, FIFO listing and a maximum page of 100. mv2 continues to ignore bodies and metadata in queue reports, and confirms deliveries only by exact client IDs in the conversation. Thread settings add environments and thread history adds attached-thread lineage. These additions do not grant new permissions or change mv2's exact primary-thread routing. For 0.169.0, navigation requires the exact single-local mapping below when establishing, selecting, reselecting or preserving grants. Earlier checked releases retain their qualified environment boundary. Attached-thread replies cannot establish primary navigation grants.
+
+The private run recipe keeps OpenAI, its trimmed same-model catalog and explicit tool/discovery settings. The native regular-provider incremental tool feature remains provider-specific; the new code-mode host defaults cannot enable code mode when it is disabled. The rollout compression implementation is byte-identical to 0.167.2: plain siblings take precedence, cold files use zstd streams and active writers materialize plain files under native writer locks. Turn-context model remains required and effort optional; observed readings keep the latest primary context, its timestamp and the review exclusions.
+
+Startup screens, native side conversations, waiting prompts, retained asynchronous questions, queue reports, observed model readings, private ask and one-shot runs explicitly admit this release. Navigation additionally requires the single-local mapping and ordinary-root provenance described below. The initial empty-only guard refused normal resolved environments; its failed repeat is retained and is not counted as qualification. Older qualified versions remain supported. Navigation, prompt publication and queue reports still require matching checked CLI and daemon versions; 0.168.0 and future releases are not inferred from this check. The refusal fixture is the pinned upstream renderer snapshot, not a terminal capture.
+
+Eighteen tests in the user-authorized native audit passed using private homes, copied release packages, daemons and localhost scripted providers. They covered tool-free fresh and replayed ask/run input, startup refusals, side routing, queued input, permissions, identity and recovery. That initial candidate also passed navigation before source review exposed the incomplete environment projection; it does not qualify navigation after the corrective guard. The captured rollout has identical facts and body reads in plain and compressed form. Waiting-prompt answering remains source- and fake-peer-qualified; this does not claim a live approval exercise.
+
+The first isolation attempts hit two fixture setup limits: a cleanup guard refused a temporary executable symlink, and an executable-only copy could not start a daemon without its package resources. A byte-verified private copy of the complete installed package resolved both without weakening guards or touching the user's native state. Those failed setup logs are retained separately from the successful checks.
+
+#### Codex 0.169.0 local environment mapping
+
+An ordinary root thread may use exactly one built-in `local` environment, with
+explicitly null parent, attachment and fork relations and no feature thread source.
+Its cwd and runtime root set must equal the primary workspace and complete grant
+envelope. The local ID is reserved by native construction, TOML and registration;
+a label or a guessed path is not evidence of local execution. Empty, missing,
+multiple, remote and mismatched selections remain unsupported.
+
+`SessionConfiguration::effective_permission_profile` projects the Ready primary
+configuration into `ThreadConfigSnapshot`; its sandbox and active profile are
+therefore effective primary fields. Public root environment requests construct
+`FromThread` configuration. Inherited, attached, fork and feature provenance is
+excluded because the wire does not expose Pending/Failed owner readiness.
+New and clear explicitly pin the existing environment parameter to the verified
+local cwd and roots. Resume retains its saved semantics and must return the same
+representable envelope. Notifications only preserve existing matching authority;
+selection/root changes invalidate it without widening the ceiling or reviving it.
+This is an observed-launch boundary, not a universal native lease.
+
+The isolated native navigation scenario passes this mapping: nine full primary
+responses retain the same canonical local selection and five-field grants across
+seven recorded transitions, including reattachment. Outside-workspace bind, report
+and inbox callbacks succeed after new; untouched fresh-thread stop and private
+process cleanup retain their existing checks.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other

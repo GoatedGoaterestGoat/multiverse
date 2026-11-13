@@ -77,7 +77,7 @@ class CodexLaunchTest(unittest.TestCase):
             # 0.163.0's screens are checked too, so it gets no notice: its checks stay on.
             for version, relation in (((0, 154, 0), 'older'), ((0, 162, 1), 'older'), ((0, 163, 0), None),
                                       ((0, 164, 0), None), ((0, 165, 0), 'older'), ((0, 166, 0), None),
-                                      ((0, 167, 0), None), ((0, 167, 1), None), ((0, 167, 2), None), ((0, 167, 3), 'newer'), (None, None)):
+                                      ((0, 167, 0), None), ((0, 167, 1), None), ((0, 167, 2), None), ((0, 169, 0), None), ((0, 169, 1), 'newer'), (None, None)):
                 with patch('multiverse.harnesses.codex.plugins.codex_version', return_value=version):
                     for mode in ('spawn', 'resume'):
                         adapter = CodexAdapter.configured('codex', {})

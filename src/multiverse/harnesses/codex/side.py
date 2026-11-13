@@ -7,7 +7,7 @@ from pathlib import Path
 from copy import deepcopy
 
 from ..types import NativeResult, normalize_session_id
-from .launch import LaunchProtocol, grant_policy
+from .launch import LaunchProtocol, grant_policy, navigation_environments, navigation_root
 from .plugins import server_version
 from .protocol import object_field, result
 from .refusal import SCREEN_VERSIONS
@@ -98,6 +98,13 @@ class LaunchConnection:
                 supplied['runtimeWorkspaceRoots'] = normalized['runtimeWorkspaceRoots']
             if 'sandboxPolicy' in supplied:
                 supplied['sandboxPolicy'] = normalized['sandbox']
+            if self.version == (0, 169, 0) and 'environments' in supplied:
+                try:
+                    navigation_environments({'environments': supplied.pop('environments')}, required=True,
+                                            policy=policy, cwd=root.settings['workspace'])
+                except ValueError:
+                    root.invalidate_grants()
+                    return
             if configured or any(value != expected[key] for key, value in supplied.items()):
                 root.invalidate_grants()
         elif method == 'thread/settings/updated' and 'id' not in value:
@@ -107,6 +114,8 @@ class LaunchConnection:
                 if (not isinstance(cwd, str) or not Path(cwd).is_absolute()
                         or Path(cwd).resolve() != Path(root.settings['workspace']).resolve()):
                     raise ValueError('Unverified native settings workspace')
+                navigation_environments(settings, required=self.version == (0, 169, 0),
+                                        policy=root.current_grants, cwd=root.settings['workspace'])
                 # ThreadSettings omits runtime roots. Equal observed permissions
                 # only preserve this snapshot; they never establish or revive it.
                 policy = grant_policy({'runtimeWorkspaceRoots': root.current_grants['runtimeWorkspaceRoots'],
@@ -267,7 +276,14 @@ class LaunchConnection:
                     raise ValueError('Native primary selection differs from this launch binding')
                 if self.root.current_grants is not None:
                     try:
-                        if grant_policy(observed) != self.root.grant_ceiling:
+                        if thread.get('attachedToThreadId') is not None:
+                            raise ValueError('An attached side conversation cannot preserve primary navigation grants')
+                        policy = grant_policy(observed)
+                        if self.version == (0, 169, 0):
+                            navigation_root(thread)
+                        navigation_environments(thread, required=self.version == (0, 169, 0),
+                                                policy=policy, cwd=self.root.settings['workspace'])
+                        if policy != self.root.grant_ceiling:
                             raise ValueError('Native primary permissions changed')
                     except ValueError:
                         self.root.invalidate_grants()

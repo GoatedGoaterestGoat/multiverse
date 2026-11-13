@@ -82,10 +82,11 @@ class PlainRefusalTest(unittest.TestCase):
         captures = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())
         previous = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.0.json').read_text())
         current = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.1.json').read_text())
-        latest = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.2.json').read_text())
+        patch = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.167.2.json').read_text())
+        latest = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.169.0.json').read_text())
         # Each release admits its own captured footer, including every public version representation.
         for release, frames in (('0.163.0', captures), ('0.164.0', captures),
-                                ('0.166.0', captures), ('0.167.0', previous), ('0.167.1', current), ('0.167.2', latest)):
+                                ('0.166.0', captures), ('0.167.0', previous), ('0.167.1', current), ('0.167.2', patch), ('0.169.0', latest)):
             parts = tuple(map(int, release.split('.')))
             for version in (release, 'codex-cli ' + release, parts, list(parts)):
                 for capture in frames:
@@ -126,10 +127,10 @@ class PlainRefusalTest(unittest.TestCase):
             with self.subTest(invalid_transcript_hint=hint):
                 self.assertIsNone(adapter.launch_refusal({**current[0],
                     'text': current[0]['text'].replace('⌃t transcript', hint + ' transcript')}))
-        for version in ('0.167.0', '0.167.1', '0.167.2'):
+        for version in ('0.167.0', '0.167.1', '0.167.2', '0.169.0'):
             self.assertIsNone(adapter.launch_refusal({**captures[0], 'cli_version': version}))
-        self.assertFalse(adapter.supports_launch_refusal('0.167.3'))
-        self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.167.3'}))
+        self.assertFalse(adapter.supports_launch_refusal('0.169.1'))
+        self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.169.1'}))
         self.assertIsNone(adapter.launch_refusal({**current[0], 'cli_version': '0.166.0'}))
         for version in (None, '', '0.162.1', '0.165.0', 'codex-cli 0.163.0-dev', 'codex-cli codex-cli 0.163.0',
                         {}, [0, 163], [False, 163, False], (0, '163', 0), True):

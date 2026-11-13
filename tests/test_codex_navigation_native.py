@@ -25,6 +25,7 @@ from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from native_safety import install, isolated_home
 from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
+from multiverse.harnesses.codex.navigation import VERSIONS as NAVIGATION_VERSIONS
 from multiverse.harnesses.types import NativeResult, RpcNotification, RpcRequest, RpcSpec
 from multiverse.runtime import lifecycle, native, recovery, transcripts
 from multiverse.store import existing_lock, read, write
@@ -255,7 +256,7 @@ class PrivateWire:
                                 key: params[key] for key in ('threadId', 'cwd', 'threadSource',
                                     'ephemeral', 'historyMode', 'sessionStartSource', 'excludeTurns',
                                     'approvalPolicy', 'approvalsReviewer', 'sandbox', 'permissions',
-                                    'runtimeWorkspaceRoots', 'clientUserMessageId', 'turnId')
+                                    'runtimeWorkspaceRoots', 'environments', 'clientUserMessageId', 'turnId')
                                 if key in params},
                             'parameter_keys': sorted(params),
                             'config_keys': sorted((params.get('config') or {}).keys())})
@@ -276,7 +277,7 @@ class PrivateWire:
                     self.records.append({'connection': connection, 'direction': 'notification',
                         'method': method, 'thread_id': params.get('threadId'),
                         'settings': {key: settings[key] for key in ('cwd', 'approvalPolicy', 'approvalsReviewer',
-                            'sandboxPolicy', 'activePermissionProfile', 'runtimeWorkspaceRoots')
+                            'sandboxPolicy', 'activePermissionProfile', 'runtimeWorkspaceRoots', 'environments')
                             if key in settings} if isinstance(settings, dict) else None})
                 elif not outgoing and not method and identifier in pending:
                     request, target_id = pending.pop(identifier)
@@ -285,7 +286,9 @@ class PrivateWire:
                     self.records.append({'connection': connection, 'direction': 'response',
                         'id': identifier, 'method': request,
                         'thread': {key: thread[key] for key in ('id', 'cwd', 'status', 'ephemeral', 'forkedFromId',
-                                                              'path', 'parentThreadId', 'canAcceptDirectInput')
+                                                              'path', 'parentThreadId', 'canAcceptDirectInput',
+                                                              'attachedToThreadId', 'environments',
+                                                              'threadSource', 'source')
                                    if key in thread},
                         'cwd': result.get('cwd'),
                         'grants': {key: result[key] for key in ('approvalPolicy', 'approvalsReviewer', 'sandbox',
@@ -332,6 +335,8 @@ class NativeNavigationTest(TerminalBase):
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
                                    text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
             self.skipTest(f'native navigation evidence pinned to {version_text(CHECKED_VERSION)}')
+        if CHECKED_VERSION not in NAVIGATION_VERSIONS:
+            self.skipTest(f'In-terminal navigation is not qualified on Codex {version_text(CHECKED_VERSION)}')
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         requests = []
         work = self.work / 'project'
@@ -708,6 +713,21 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(directory.is_relative_to(work))
             for row in primary_replies:
                 self.assertEqual(grant_set(row), effective_grants, row)
+                if CHECKED_VERSION == (0, 169, 0):
+                    for relation in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'):
+                        self.assertIn(relation, row['thread'], row)
+                        self.assertIsNone(row['thread'][relation], row)
+                    self.assertIn('threadSource', row['thread'], row)
+                    self.assertIn(row['thread']['threadSource'], (None, 'user'), row)
+                    environments = row['thread'].get('environments')
+                    self.assertIsInstance(environments, list, row)
+                    self.assertEqual(len(environments), 1, row)
+                    selected = environments[0]
+                    self.assertEqual(set(selected), {'environmentId', 'cwd', 'runtimeWorkspaceRoots'}, row)
+                    self.assertEqual(selected['environmentId'], 'local', row)
+                    self.assertEqual(selected['cwd'], str(work), row)
+                    self.assertEqual(sorted(set(selected['runtimeWorkspaceRoots'])),
+                                     effective_grants['runtimeWorkspaceRoots'], row)
             starts = [row for row in wire.records if row.get('direction') == 'request'
                       and row.get('method') == 'thread/start' and type(row.get('id')) is int]
             self.assertEqual([row['params'].get('sessionStartSource') for row in starts], [None, 'clear', None, None])

@@ -88,7 +88,7 @@ never written.
 
 ### Codex
 
-On a verified bridge with a matching checked CLI and daemon (0.166.0, 0.167.0, 0.167.1 or 0.167.2), the adapter reads the
+On a verified bridge with a matching checked CLI and daemon (0.166.0, 0.167.0, 0.167.1, 0.167.2 or 0.169.0), the adapter reads the
 bound conversation's after-turn queue (`thread/queue/list`, one page of up to 100) after confirming the daemon's
 version and the exact thread and workspace, within the two-second bound, and calls nothing else. It reports each
 entry's client message ID and queue ID, never its text; Codex gives no mode or time, so core takes the mode from its

@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 import json
 
 
-VERSION = (0, 167, 2)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), VERSION))
+VERSION = (0, 169, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), VERSION))
 DETAIL_BYTES = 64 << 10
 RESPONSE_BYTES = 128 << 10  # Typed wrappers and offered native values can expand a bounded answer file.
 METHODS = {
