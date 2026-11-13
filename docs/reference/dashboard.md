@@ -132,7 +132,7 @@ Each universe can style its folder and its portal in `views/default.json`:
 | --- | --- |
 | `title` | The folder and portal title |
 | `accent` | A hex color, or `auto` to pick one from the universe's ID |
-| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its summary, and `effort` an agent's effort to its Model cell, instead of a column each. Both bundled templates turn `blocked_on` on. `Silicon23` also turns on `unread`, `model` and `effort`, in place of `harness`, and leaves `context` out; `base` leaves those off and shows `context` |
+| `columns` | Agent columns, in order. The top universe's choice applies to the whole tree. `unread` adds each agent's unread inbox count to its name, `blocked_on` what a blocked agent waits on to its summary, and `effort` an agent's effort to its Model cell, instead of a column each. Both bundled templates turn `blocked_on` on. `Silicon23` also turns on `unread` and `model`, in place of `harness`, and leaves `context` out; `base` leaves those off and shows `context` |
 | `replace` | `false` keeps every core column core's own, even where a plugin's column would stand in for it. The default is `true` |
 | `widgets` | Optional panels in this universe's portal: `markdown` (`title`, `text`), `table` (`title`, `columns`, `rows`) and `artifacts` (`title`, `items` with `label`, `path`, optional `description`) |
 
