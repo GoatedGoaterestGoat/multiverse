@@ -90,11 +90,14 @@ class NavigationCommitTest(DeliveryFixture):
             try:
                 self.assertTrue(advanced.wait(10), 'Commit did not publish its pointer')
                 self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], target)
+                self.assertEqual(agents.runtime(self.directory)['status'], 'idle')
                 self.assertEqual(agents.runtime(self.directory)['usage']['native_session_id'], self.native_id)
                 self.assertIsNone(snapshot())
             finally:
                 release.set()
             pending.result(timeout=10)
+        self.assertEqual(agents.runtime(self.directory)['status'], 'unknown')
+        self.assertIsNone(snapshot())
         agents.update_runtime(self.directory, self.launch, status='idle')
         properties, facts = snapshot()
         self.assertEqual(properties['native_session_id'], target)
@@ -507,12 +510,8 @@ class NativeNavigationTest(TerminalBase):
                 idle()
             return saved['id']
 
-        def switch(text, previous):
-            generation = agents.runtime(directory).get('session_generation', 0)
-            offset = len(wire.records)
-            reason = 'resume' if text.startswith('/resume ') else text.removeprefix('/')
+        def complete_switch(previous, generation, offset, reason):
             method = 'thread/resume' if reason == 'resume' else 'thread/start'
-            command(text)
             request = until(lambda: next((row for row in wire.records[offset:]
                 if row['direction'] == 'request' and row['method'] == method and type(row['id']) is int), None), seconds=20)
             props, facts = until(lambda: committed_navigation(directory, launch=launch, previous=previous,
@@ -523,6 +522,13 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(facts.get('native_refusal'))
             self.assertIn((facts.get('usage') or {}).get('native_session_id'), (None, value))
             return value
+
+        def switch(text, previous):
+            generation = agents.runtime(directory).get('session_generation', 0)
+            offset = len(wire.records)
+            reason = 'resume' if text.startswith('/resume ') else text.removeprefix('/')
+            command(text)
+            return complete_switch(previous, generation, offset, reason)
 
         try:
             callback('NAV_A_SEED', original)
@@ -630,14 +636,17 @@ class NativeNavigationTest(TerminalBase):
             until(lambda: 'Resume a previous session' in capture(), seconds=10)
             backend.run('send-keys', '-t', pane, '-l', 'NAV_THIRD')
             until(lambda: capture().count('NAV_THIRD') >= 2, seconds=10)
+            generation = agents.runtime(directory).get('session_generation', 0)
+            offset = len(wire.records)
             backend.run('send-keys', '-t', pane, 'Enter')
-            until(lambda: current() == third, seconds=20)
-            idle()
+            # The picker publishes its pointer before commit resets status.
+            # Old idle plus a new pointer does not admit the next command.
+            self.assertEqual(complete_switch(original, generation, offset, 'resume'), third)
             # This one controlled fault exercises the approved RPC boundary,
             # not a claim that the visible widget has acknowledged selection.
             wire.fail_history_target = original
-            command('/resume ' + original)
-            until(lambda: current() == original and wire.history_failed.is_set(), seconds=20)
+            self.assertEqual(switch('/resume ' + original, third), original)
+            until(wire.history_failed.is_set, seconds=20)
             # The failed history hydration leaves the widget on third. A raw
             # shell request there must fail locally rather than execute as it.
             # The checked TUI treats this RPC error as fatal, not a pane notice.
