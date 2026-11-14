@@ -5,7 +5,7 @@ import os
 import stat
 
 from ..harnesses.types import SessionHandle
-from ..store import retry_missing
+from ..store import missing_records, retry_missing
 from ..universe import storage as records
 from ..universe import records as agent_records, sessions
 from .native import adapter_hook
@@ -132,12 +132,22 @@ def _launch_requests(directory):
         return []
     except OSError as error:
         raise ValueError(f'Cannot verify conversation storage: cannot read {launches}: {error}') from error
+    # Validate containers before probing any request inside them; a symlink is not a launch directory.
+    for launch in entries:
+        try:
+            if not stat.S_ISDIR(launch.lstat().st_mode):
+                raise ValueError(f'Cannot verify conversation storage: {launch} is not a regular launch directory')
+        except OSError as error:
+            raise ValueError(f'Cannot verify conversation storage: cannot inspect {launch}: {error}') from error
     requests = []
+    absent = missing_records((launch / 'request.json' for launch in entries), follow_symlinks=False)
     for launch in entries:
         path = launch / 'request.json'
         try:
             if not stat.S_ISDIR(launch.lstat().st_mode):
                 raise ValueError(f'Cannot verify conversation storage: {launch} is not a regular launch directory')
+            if path in absent:
+                continue
             try:
                 mode = retry_missing(path.lstat).st_mode
             except FileNotFoundError:

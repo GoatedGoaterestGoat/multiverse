@@ -729,7 +729,11 @@ def _never_launched(directory, properties):
         runtime = directory / "runtime.json"
         if exists_replaced(runtime) and retry_missing(lambda: read(runtime)) != {}:
             return False
-        if exists_replaced(directory / "sessions.jsonl"):
+        try:
+            (directory / "sessions.jsonl").stat()
+        except FileNotFoundError:
+            pass  # Append-only: a missing journal was never replaced.
+        else:
             return False
         launches = directory / "launches"
         return not launches.exists() or (launches.is_dir() and not any(launches.iterdir()))
@@ -1104,6 +1108,7 @@ class TranscriptInfo:
     unchanged."""
     state: str                     # "supported", "unavailable" or "error"; the rest is empty unless supported
     reason: str = ""
+    retry: bool = False            # unavailable only for now (a conversation switch in progress): try again soon (1.19)
     format: str | None = None      # "claude-jsonl"
     version: str | None = None     # the harness version that wrote the newest row, where stored
     native_id: str | None = None
@@ -1755,6 +1760,15 @@ class Agent:
         return "\n".join(inspect.tail(capture, lines)) if isinstance(capture, str) else str(capture)
 
     def usage(self):
+        """The agent's measured usage (needs agents.read), as `mv2 get-usage --json` gives it: `state` (ok,
+        unavailable or error), `reason`, and, when `state` is ok, `value` with the token counts and `context`.
+        `value` also has `model`, `effort` and `observed_at` (1.19): the model and effort of the main
+        conversation's latest recorded turn in this launch, as the harness recorded them, and when that turn was
+        recorded. All three are None while this launch has no observation yet. In an observation the harness
+        admits, `model` or `effort` alone may be None when it wasn't recorded (no default or launch value fills it
+        in); a turn missing a field its harness requires (Codex's turn context names its model) gives no
+        observation at all. After /model they change with the next recorded turn. A stopped agent's current
+        launch may still give its last turn."""
         self._plugin._need("agents.read")
         from ..tools import get_usage
         with _acting(self._plugin._loaded, "observe", self.universe, "reading usage"):
@@ -1935,8 +1949,10 @@ class Agent:
         TranscriptChanged("replaced") with `resume` at the current start. With `generation` (a readable token
         from `earlier`), a read is of that generation only, and another's cursor is an api.Error. For an unknown
         or unreadable generation, this method returns state "unavailable" (or "error" for a provider error)
-        and reason; row and turn reads raise TranscriptUnavailable (retry false). Malformed generation syntax
-        raises api.Error, including in this method."""
+        and reason; row and turn reads raise TranscriptUnavailable (retry false). `retry` (1.19) is true when
+        the transcript is unavailable only for now, for the same reasons a row or turn read raises
+        TranscriptUnavailable with retry true (a conversation switch in progress): try again soon rather than
+        taking it as empty. Malformed generation syntax raises api.Error, including in this method."""
         return _from_core(TranscriptInfo, self._transcript("info", "reading the transcript", generation=generation,
                                                            tip=tip))
 

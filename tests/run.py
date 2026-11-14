@@ -5,9 +5,9 @@
     .venv/bin/python tests/run.py -j 4 -v
 
 A module runs through its own load_tests, as discovery runs it; a shard runs every Nth of its tests. Modules
-start longest first, by the times the last run recorded in .run/test-durations.json, and one the record does
-not know counts as long. Every process guards the real ~/.multiverse (home_safety) and fails if a test wrote
-there.
+start longest first, by the times the last run recorded in .run/test-durations.json, or for a module this checkout
+has not run yet, by tests/durations.json, the baseline committed with the tests; one neither knows counts as long.
+Every process guards the real ~/.multiverse (home_safety) and fails if a test wrote there.
 
 Runs started at once share the machine: a unit starts only when it holds one of the CPU count's slots in
 /tmp/mv2-test-slots-<uid> (a directory only this user may change), so two agents' full runs take turns instead of
@@ -292,10 +292,11 @@ def _holder():
 
 
 class Run:
-    def __init__(self, start, jobs, timeout, verbose, slots=SLOTS, budget=None, grace=GRACE):
+    def __init__(self, start, jobs, timeout, verbose, slots=SLOTS, budget=None, grace=GRACE, slowest=0):
         self.start, self.jobs, self.timeout, self.verbose = Path(start).resolve(), jobs, timeout, verbose
-        self.grace = grace
+        self.grace, self.slowest = grace, slowest
         self.durations = self.start.parent / ".run" / "test-durations.json"
+        self.baseline = self.start / "durations.json"  # committed, so a fresh checkout splits slow modules too
         self.processes, self.lock, self.stopping, self.modules = set(), threading.Lock(), threading.Event(), []
         self.slots, self.budget, self.held = Path(slots), budget or os.cpu_count() or 4, 0
         self.holder, self.noticed = json.dumps(_holder()) + "\n", None  # who this run is; when it last said who waits
@@ -330,15 +331,16 @@ class Run:
             chosen += [module for module in self.modules if module == name or module.startswith(name + ".")] or [name]
         return chosen if names else list(self.modules)
 
-    def recorded(self):
+    def recorded(self, path=None):
+        """The module times in `path`: this checkout's record by default."""
         try:
-            return dict(json.loads(self.durations.read_text())["modules"])
+            return dict(json.loads((path or self.durations).read_text())["modules"])
         except (OSError, ValueError, KeyError, TypeError):
             return {}
 
     def plan(self, targets):
         """(target, shard, shards) for each unit, the longest expected first."""
-        known, units = self.recorded(), []
+        known, units = {**self.recorded(self.baseline), **self.recorded()}, []
         for target in targets:
             expected = known.get(target, UNKNOWN_SECONDS) if target in self.modules else 0
             shards = max(1, round(expected / SHARD_SECONDS)) if target in known else 1
@@ -576,7 +578,7 @@ class Run:
         units = self.plan(self.targets(names))
         print(f"{len(units)} units on {self.jobs} processes", flush=True)
         began, totals, problems, measured, done = time.monotonic(), {"run": 0, "skipped": 0}, [], {}, 0
-        counts = {"failures": 0, "errors": 0}
+        counts, timed = {"failures": 0, "errors": 0}, {}
         with tempfile.TemporaryDirectory(prefix="mv2-tests-") as scratch:
             pool = concurrent.futures.ThreadPoolExecutor(self.jobs)
             try:
@@ -594,6 +596,7 @@ class Run:
                         totals["skipped"] += len(data["skipped"])
                         counts["failures"] += len(data["failures"])
                         counts["errors"] += len(data["errors"])
+                        timed.update(data["times"])
                         if target in self.modules:  # a module's time, not one class's or test's
                             measured[target] = measured.get(target, 0) + sum(data["times"].values())
                     failed = code != 0 or not data or bool(data["failures"] or data["errors"])
@@ -619,6 +622,10 @@ class Run:
             pool.shutdown()
         self.show(problems)
         self.record(measured)
+        if self.slowest:
+            print("-" * 70 + f"\nSlowest {min(self.slowest, len(timed))} tests:")
+            for test, seconds in sorted(timed.items(), key=lambda item: -item[1])[:self.slowest]:
+                print(f"{seconds:8.1f} s  {test}")
         print("-" * 70 + f"\nRan {totals['run']} tests in {time.monotonic() - began:.1f}s on {self.jobs} processes\n")
         skipped = f"skipped={totals['skipped']}" if totals["skipped"] else ""
         if not problems:
@@ -654,6 +661,17 @@ class Run:
                                                      **{k: round(v, 2) for k, v in measured.items()}}},
                                         indent=1, sort_keys=True) + "\n")
         temporary.replace(self.durations)
+
+
+def _count(text):
+    """A number of tests to list: 0 or more."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number, not {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, not {value}")
+    return value
 
 
 def _terminated(signum, frame):
@@ -713,6 +731,8 @@ def _main(argv):
                         help="units at once (default: the CPU count)")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="show each unit's tests as it ends")
     parser.add_argument("--list", action="store_true", help="print the modules a run would run, one a line, and stop")
+    parser.add_argument("--durations", type=_count, default=0, metavar="N",
+                        help="after the run, list its N slowest tests, setUp and cleanups included")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"seconds before a unit is killed (default: {TIMEOUT})")
     parser.add_argument("-s", "--start-directory", default=str(HERE), help=argparse.SUPPRESS)
@@ -725,7 +745,7 @@ def _main(argv):
         print("\n".join(run.targets(args.names)))
         return 0
     return Run(args.start_directory, max(1, args.jobs), args.timeout, bool(args.verbose), args.slots_directory,
-               args.budget, args.grace)(args.names)
+               args.budget, args.grace, args.durations)(args.names)
 
 
 if __name__ == "__main__":

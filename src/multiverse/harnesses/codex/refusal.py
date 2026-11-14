@@ -6,7 +6,7 @@ from collections.abc import Mapping
 OPEN_ELSEWHERE = 'This conversation is open in another app'
 CLOSE_ELSEWHERE = 'Close it there and press R to continue here.'
 # Retain earlier checked screens and unmanaged side-thread protocols when adding a release.
-COMMAND_CENTER_VERSIONS = ((0, 167, 0), (0, 167, 1), (0, 167, 2))
+COMMAND_CENTER_VERSIONS = ((0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0))
 SCREEN_VERSIONS = ((0, 163, 0), (0, 164, 0), (0, 166, 0)) + COMMAND_CENTER_VERSIONS
 
 

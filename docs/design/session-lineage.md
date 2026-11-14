@@ -161,6 +161,29 @@ Incomplete or unmappable grants disable navigation without rejecting ordinary
 startup or `/btw`. An observed current-thread permission change or malformed
 settings update also disables navigation until an ordinary `mv2 resume` verifies
 the current grants. Native settings notifications omit runtime workspace roots.
+Codex 0.169.0 also requires an ordinary root conversation: parent, attached and
+fork relations must be explicitly null, with no feature thread source. Each
+initial, selected or reselected reply must expose exactly one built-in `local`
+environment. Its native cwd and complete runtime root set must match the known
+workspace and validated five-field grant envelope. Missing/null, empty, multiple,
+remote, malformed or conflicting selections do not establish navigation grants.
+The built-in local ID is reserved by native environment construction, configuration
+and registration; it cannot name a registered remote executor.
+
+Native snapshots project the Ready primary environment's effective permission
+profile and roots. Public root environment requests use thread-owned configuration;
+inherited and feature provenance is excluded rather than guessing hidden Pending
+or Failed owner state. New and clear pin the existing environment parameter to the
+verified local cwd and roots alongside the copied grants. Resume keeps the saved
+request semantics and must confirm the full reply before committing.
+
+Current-thread settings notifications must report that same canonical selection
+and an unchanged permission projection. Emptying or changing the selection
+invalidates grants; a later matching notification or reselection cannot revive
+authority or replace the launch ceiling. Earlier checked releases retain their
+qualified omission/null behavior. These checks do not establish freshness beyond
+observations on this launch or cover inherited owner updates.
+
 A complete, unchanged permission projection in the same workspace only preserves
 an already-valid snapshot; it cannot create or revive one. Other threads'
 notifications cannot replace that policy.

@@ -781,6 +781,46 @@ Startup-screen checks, private ask and one-shot runs, native side conversations,
 
 The user-authorized native suite used isolated homes and daemons with scripted localhost providers. Seventeen checks passed in the initial run. A shared-daemon stop check hit a terminal/runner ownership error; the same module passed on clean main and on an unchanged targeted repeat. Ask and tool-free runs, navigation and restored grants, refusals, side conversations, queue continuation, permissions, identity and recovery were covered. The private captured rollout produced identical facts and body reads in plain and compressed form. Prompt and queue version routing also passed their offline fake-peer tests. Linux validation was unavailable because Docker was not running.
 
+### Codex 0.169.0 compatibility audit
+
+This compares official tags `rust-v0.167.2` (`ce21072c90d32c40af7a55b60b2fb35c84a43a6a`) and `rust-v0.169.0` (`d32063f96c2dff1dc96af839b3952abb6acfeda4`). The installed experimental protocol export grows from 470 to 479 schemas: nine are added and 54 change. All five recorded CLI help outputs match. Both model catalogs regenerate from the release's bundled metadata with identical model data and shape, changing only the checked-version stamps. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.169.0).
+
+The native queue adds optional Responses API metadata while retaining exact client message IDs, FIFO listing and a maximum page of 100. mv2 continues to ignore bodies and metadata in queue reports, and confirms deliveries only by exact client IDs in the conversation. Thread settings add environments and thread history adds attached-thread lineage. These additions do not grant new permissions or change mv2's exact primary-thread routing. For 0.169.0, navigation requires the exact single-local mapping below when establishing, selecting, reselecting or preserving grants. Earlier checked releases retain their qualified environment boundary. Attached-thread replies cannot establish primary navigation grants.
+
+The private run recipe keeps OpenAI, its trimmed same-model catalog and explicit tool/discovery settings. The native regular-provider incremental tool feature remains provider-specific; the new code-mode host defaults cannot enable code mode when it is disabled. The rollout compression implementation is byte-identical to 0.167.2: plain siblings take precedence, cold files use zstd streams and active writers materialize plain files under native writer locks. Turn-context model remains required and effort optional; observed readings keep the latest primary context, its timestamp and the review exclusions.
+
+Startup screens, native side conversations, waiting prompts, retained asynchronous questions, queue reports, observed model readings, private ask and one-shot runs explicitly admit this release. Navigation additionally requires the single-local mapping and ordinary-root provenance described below. The initial empty-only guard refused normal resolved environments; its failed repeat is retained and is not counted as qualification. Older qualified versions remain supported. Navigation, prompt publication and queue reports still require matching checked CLI and daemon versions; 0.168.0 and future releases are not inferred from this check. The refusal fixture is the pinned upstream renderer snapshot, not a terminal capture.
+
+Eighteen tests in the user-authorized native audit passed using private homes, copied release packages, daemons and localhost scripted providers. They covered tool-free fresh and replayed ask/run input, startup refusals, side routing, queued input, permissions, identity and recovery. That initial candidate also passed navigation before source review exposed the incomplete environment projection; it does not qualify navigation after the corrective guard. The captured rollout has identical facts and body reads in plain and compressed form. Waiting-prompt answering remains source- and fake-peer-qualified; this does not claim a live approval exercise.
+
+The first isolation attempts hit two fixture setup limits: a cleanup guard refused a temporary executable symlink, and an executable-only copy could not start a daemon without its package resources. A byte-verified private copy of the complete installed package resolved both without weakening guards or touching the user's native state. Those failed setup logs are retained separately from the successful checks.
+
+#### Codex 0.169.0 local environment mapping
+
+An ordinary root thread may use exactly one built-in `local` environment, with
+explicitly null parent, attachment and fork relations and no feature thread source.
+Its cwd and runtime root set must equal the primary workspace and complete grant
+envelope. The local ID is reserved by native construction, TOML and registration;
+a label or a guessed path is not evidence of local execution. Empty, missing,
+multiple, remote and mismatched selections remain unsupported.
+
+`SessionConfiguration::effective_permission_profile` projects the Ready primary
+configuration into `ThreadConfigSnapshot`; its sandbox and active profile are
+therefore effective primary fields. Public root environment requests construct
+`FromThread` configuration. Inherited, attached, fork and feature provenance is
+excluded because the wire does not expose Pending/Failed owner readiness.
+New and clear explicitly pin the existing environment parameter to the verified
+local cwd and roots. Resume retains its saved semantics and must return the same
+representable envelope. Notifications only preserve existing matching authority;
+selection/root changes invalidate it without widening the ceiling or reviving it.
+This is an observed-launch boundary, not a universal native lease.
+
+The isolated native navigation scenario passes this mapping: nine full primary
+responses retain the same canonical local selection and five-field grants across
+seven recorded transitions, including reattachment. Outside-workspace bind, report
+and inbox callbacks succeed after new; untouched fresh-thread stop and private
+process cleanup retain their existing checks.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -1191,6 +1231,8 @@ fallback to plain mode. The dashboard keeps showing the count and labels it
 `(last known)` in the inspector until a fresh native notification replaces it,
 including Codex's resume usage replay. This is retained measurement, not an
 estimate. A changed thread ID never inherits another thread's count.
+
+Codex usage keeps a bounded observation cache separate from transcript row indexes. Unchanged rollout stamps reuse the saved result without opening the rollout, including empty observations and failures read from a stable copy. Plain growth verifies the complete prior prefix in fixed-size chunks, then parses only the appended complete lines; rewrites and changed compressed copies are rescanned. Inconsistent copies never supply an observed model.
 
 Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
 cached input and reasoning output are already included and are not added again.
@@ -1611,7 +1653,17 @@ report their phase with `mv2 report` but never set their status: `working` while
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched
 to its call through the engine's `ask` verdict and ends when the call finishes, is
 denied, or (Bash) draws its progress row; an approved call that runs briefly
-without a progress row can read `waiting` until it finishes.
+without a progress row can read `waiting` until it finishes. A command's own
+dialog (`/model`'s "Switch model?" confirmation, its picker, `/config`) reaches no
+hook, so while a command runs the mod asks the prompt box every second to take an
+empty insert at the cursor: Claude refuses it with the cause `dialog` while a
+dialog holds the keys, and otherwise it changes nothing. The wait belongs to the
+command, not the turn: an immediate command runs mid-turn, so a turn's end leaves
+its dialog waiting until the dialog closes or the command ends. The insert passes
+through other plugins' `prompt.fill` hooks like any plugin's fill, so one that
+rewrote every fill would rewrite this one; none of mv2's bundled plugins hooks it.
+A dialog Claude opens outside a command, such as its "Resume this conversation?"
+usage warning, is still not seen.
 
 With the bridge, plugins extend Claude launches as they extend any harness
 ([plugins](plugins.md)): a launch contribution adds environment variables,
@@ -1628,9 +1680,15 @@ Claude usage is measured from the session's own transcript under Claude's
 usage, counted once per response ID. It works with or without the bridge. The
 adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
+Usage keeps only those totals and the latest turn per transcript, never a record
+per row: a listing reads every agent's transcripts, and a per-row index holds
+about 1.5 times its file. The transcript reads keep their per-row index for the
+eight most recently read transcripts. History versions come from one counter
+that only grows, so an index built again after its eviction never reuses a
+version a reader holds.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.322; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.325; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

@@ -1,5 +1,5 @@
 {
-  "columns": ["name", "unread", "status", "model", "effort", "phase", "blocked_on", "summary"],
+  "columns": ["name", "unread", "status", "model", "phase", "blocked_on", "summary"],
   "accent": "auto",
   "description": "Process observations and agent-reported progress stay separate."
 }

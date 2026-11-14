@@ -265,6 +265,28 @@ LEVEL_SETTINGS = {"version": 1, "schema": "settings.schema.json", "defaults": "d
 
 
 class SettingsTest(PluginTestCase):
+    def test_long_settings_notes_keep_the_path_in_every_diagnostic(self):
+        """Truncating a fallback note can lose the settings path needed to fix it across every diagnostic view."""
+        note = "fallback_model is not used: " + str(self.root / ("long-workspace/" * 24) / 'harnesses/claude/harness.json')
+        self.greeter('long-note', "def register(mv):\n"
+                                  "    @mv.settings.check\n"
+                                  "    def check(values):\n"
+                                  f"        return [{(note + chr(10) + 'second line hidden')!r}, 3] + "
+                                  "['extra ' + str(i) for i in range(25)]\n")
+        self.enable('long-note')
+        expected = [note, *[f'extra {i}' for i in range(19)]]
+        for action in ('info', 'settings', 'list'):
+            with self.subTest(action=action):
+                result = tool.run(self.root, plugin_action=action, name='long-note' if action != 'list' else None)
+                shown = tool.text(action, result)
+                self.assertIn(note, shown)
+                self.assertNotIn('second line hidden', shown)
+                notes = (result['notes'] if action == 'settings' else result['settings']['notes']
+                         if action == 'info' else next(row for row in result['plugins']
+                                                      if row['name'] == 'long-note')['settings']['notes'])
+                self.assertEqual(notes, expected)
+        self.assertTrue(any(note in problem for problem in doctor.run(self.root)['problems']))
+
     def greeter(self, name, check=None):
         self.write_plugin(name, {"module": "plugin", "settings": {
             "version": 2, "schema": "schema.json", "defaults": "defaults.json", "legacy": f"{name}.json"}},

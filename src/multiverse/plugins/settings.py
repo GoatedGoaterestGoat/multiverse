@@ -211,14 +211,14 @@ def run_check(check, data, root):
     return check(data, Path(root) if root is not None else None) if len(parameters) >= 2 else check(data)
 
 
-NOTES, NOTE_CHARACTERS = 20, 200
+NOTES = 20
 
 
 def _notes(value):
-    """A check's notes: the strings of a list or tuple it returned, each its first line, bounded; else none."""
+    """A check's notes: at most NOTES strings from its list or tuple, each its full first line; else none."""
     if not isinstance(value, (list, tuple)):
         return ()
-    lines = (note.strip().splitlines()[0][:NOTE_CHARACTERS] for note in value if isinstance(note, str) and note.strip())
+    lines = (note.strip().splitlines()[0] for note in value if isinstance(note, str) and note.strip())
     return tuple(lines)[:NOTES]
 
 

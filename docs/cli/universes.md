@@ -17,9 +17,11 @@ mv2 init ~/my-project --template qa --name my-project
 | --- | --- |
 | Inside an agent session | The agent's own universe |
 | Anywhere else | The nearest `.multiverse/` in the current directory or a parent |
-| With `-u PATH` | That universe or subverse, which must exist |
+| With `-u PATH` | That universe or subverse, or the workspace containing its `.multiverse`; it must exist |
 
 Put `-u` before the command: `mv2 -u ~/other-project/.multiverse list`.
+
+An explicit `-u` path never falls back to an enclosing universe. An empty value, a missing path, an ordinary subfolder or an abandoned subverse is refused before the command runs or migrates settings. If the selected universe disappears during the command, later reads fail instead of switching to its parent. Without `-u`, discovery from the current directory or `MV2_UNIVERSE` still searches parent directories.
 
 ## Subverses
 
@@ -36,7 +38,7 @@ Subverses don't inherit their parent's prompts after creation. Each one gets a c
 
 ## Templates
 
-mv2 bundles two templates. `base` has the coordination and mv2-help skills, a help command, a review workflow, and Claude, Codex and Pi harness definitions; `mv2 init` and `mv2 subverse` use it unless you pass `--template`. `Silicon23` is a team template: leads own the high-level direction of an area and implementers own the details of their features, as its `team` skill describes. It has Claude and Codex harnesses that skip their permission prompts (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`), and its dashboard leaves out the Live column.
+mv2 bundles two templates. `base` has the coordination and mv2-help skills, a help command, a review workflow, and Claude, Codex and Pi harness definitions, with default models for Claude (`claude-opus-5-5`) and Codex (`gpt-6.1-sol`); `mv2 init` and `mv2 subverse` use it unless you pass `--template`. `Silicon23` is a team template: leads own the high-level direction of an area and implementers own the details of their features, as its `team` skill describes. It has Claude and Codex harnesses that skip their permission prompts (`--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`), with the same default models, and that allow only Fable 5.2 and Opus, Sonnet and Haiku 5.5 for Claude and Astra, Sol, Terra and Luna for Codex (their `models`; a model's aliases count too). Its dashboard leaves out the Live column and gives the models short names, such as `Opus` or `Sol` (its harnesses' `model_names`).
 
 `--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then in `src/multiverse/templates/`. A template is a directory with a `universe.json` at its top (name, workspace and description) and the definition files you want: `bootstrap.md`, `skills/`, `harnesses/` and so on. It can't contain symlinks. To make your own, such as the `qa` template above, copy `src/multiverse/templates/base/` to `~/.multiverse/templates/qa` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
 
@@ -61,6 +63,8 @@ mv2 doctor
 - Its plugins and their settings are usable.
 - Every inbox is readable.
 - No agent has a failed launch, a lost connection or an unknown state.
+
+If a recovered agent's folder name differs from its stored ID, `doctor` checks the inbox in that existing folder. It does not create a second agent folder under the stored ID. If an older doctor already created a recordless folder there, it reports that leftover and still checks the real inbox. When that folder's recovery address is ambiguous or cannot be verified, the advice names its full path for manual inspection instead of suggesting `mv2 remove` with the conflicting ID. Shortening a conflicting ID does not resolve that ambiguity.
 
 It answers in sentences: `No problems.`, or a list of what's wrong. It exits non-zero when something is wrong. It doesn't check `harness.json`; `mv2 capabilities --harness NAME` does that. See [troubleshooting](../use/troubleshooting.md).
 

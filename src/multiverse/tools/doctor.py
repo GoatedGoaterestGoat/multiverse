@@ -1,5 +1,6 @@
 """Check local definitions and report uncertain agent state."""
 import sys
+from collections import Counter
 from pathlib import Path
 
 from ..runtime import lifecycle, model_choices
@@ -15,6 +16,14 @@ def configure(parser):
 
 def one_line(text):
     return " | ".join(line.strip() for line in str(text).splitlines() if line.strip()).rstrip(".")
+
+
+def _orphan_advice(directory, ambiguous):
+    """A diagnostic identity conflict must not suggest an unusable or misleading remove command."""
+    if not ambiguous:
+        return f"remove it with mv2 remove {directory.name}"
+    return ("its recovery address is ambiguous or unavailable; inspect or move aside this exact folder by its full path, "
+            "not an agent ID prefix")
 
 
 def check(root, notes=None):
@@ -41,16 +50,21 @@ def check(root, notes=None):
                     except (OSError, ValueError, TypeError) as error:
                         problem = str(error)
                         found.append((problem, problem))
-            for item in lifecycle.listing(scope, observed_missing=observed_missing):
+            listed = lifecycle.listing_records(scope, observed_missing=observed_missing)
+            addresses = Counter(item.get('id', directory.name) for directory, item in listed)
+            # Damaged rows use the physical folder as their ID. Unless properties are known missing,
+            # they may hide another stored ID; avoid claiming an unambiguous removal address.
+            unknown_addresses = any(item.get('damaged') and item['damaged'].get('recover') != 'remove'
+                                    for _, item in listed)
+            for directory, item in listed:
                 damage = item.get('damaged')
                 if damage:
-                    directory = scope / 'state/agents' / item['id']
                     try:
                         orphan = agents.orphaned(directory)
                     except OSError:
                         orphan = False  # Keep the named unreadable-record diagnostic.
                     problem = (f"{scope}: {item['name']}: leftover folder {directory}; no core records remain; "
-                               f"remove it with mv2 remove {item['id']}" if orphan else
+                               f"{_orphan_advice(directory, unknown_addresses or addresses[directory.name] > 1)}" if orphan else
                                f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}")
                     found.append((problem, problem))
                     continue  # No inbox or process action on damaged records.
@@ -75,7 +89,7 @@ def check(root, notes=None):
                                    else "state is unknown: ") + one_line(reason) + "."))
                 elif item.get('recovery_note') and notes is not None:
                     notes.append(f"{item['name']} reconnected automatically.")
-                if problem := inbox_problem(scope / "state" / "agents" / item["id"], observed_missing=observed_missing):
+                if problem := inbox_problem(directory, observed_missing=observed_missing):
                     found.append((f"{scope}: {item['name']}: {problem}", f"{scope}: {item['name']}: {problem}"))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))

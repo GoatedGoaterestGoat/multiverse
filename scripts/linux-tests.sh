@@ -4,7 +4,7 @@
 # nothing ignored (.venv, the checkout's .multiverse) and nothing of the host's environment goes in, except the
 # record of past test durations that tests/run.py plans its shards by.
 #
-#   scripts/linux-tests.sh [--checkout DIR] [--commit REV] [--python 3.11|3.13] [-j N] [MODULE...]
+#   scripts/linux-tests.sh [--checkout DIR] [--commit REV] [--python 3.11|3.13] [-j N] [--durations N] [MODULE...]
 #
 # With no MODULE it runs the whole suite. By default it copies the working tree of the checkout this script is in,
 # uncommitted changes included, and each initialized submodule's working tree. --commit copies that commit instead,
@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
         --checkout) checkout=$(cd "$2" && git rev-parse --show-toplevel); shift 2 ;;
         --commit) commit=$2; shift 2 ;;
         --python) python=$2; shift 2 ;;
-        -j) runner_args+=(-j "$2"); shift 2 ;;
+        -j|--durations) runner_args+=("$1" "$2"); shift 2 ;;
         -h|--help) usage ;;
         -*) echo "linux-tests: unknown option $1" >&2; usage 2 ;;
         *) runner_args+=("$1"); shift ;;

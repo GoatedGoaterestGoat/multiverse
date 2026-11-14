@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import tempfile
 import sys
@@ -10,6 +11,7 @@ from uuid import uuid4
 from unittest.mock import patch
 
 import test_codex_launch as launch_tests
+from isolation import isolate
 from multiverse.runtime import lifecycle, rpc
 from multiverse.universe import agents
 from multiverse.ui import tree
@@ -61,6 +63,7 @@ class CodexContextTest(unittest.TestCase):
 
 class CodexUsageRuntimeTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -73,6 +76,433 @@ class CodexUsageRuntimeTest(unittest.TestCase):
     def reset(self):
         write(self.root / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
         self.publish = UsagePublisher(self.root, 'launch')
+
+    def test_observed_model_uses_only_the_latest_primary_turn_context(self):
+        """Settings, side work or a stale cached turn must never look like the model the main turn used."""
+        from multiverse.harnesses.codex import observation, transcripts
+        native, side = str(uuid4()), str(uuid4())
+        home = self.root / 'codex-home'
+        folder = home / 'sessions/2026/11/12'
+        folder.mkdir(parents=True)
+        path = folder / f'rollout-2026-11-12T10-00-00-{native}.jsonl'
+        other = folder / f'rollout-2026-11-12T10-00-00-{side}.jsonl'
+        session = replace(self.session, native_id=native, home=str(home),
+                          native_versions={'cli': '0.167.2', 'daemon': '0.167.2'})
+        write(self.root / 'properties.json', {'native_session_id': native})
+        self.reset()
+        self.publish(notification(event(native), native))
+        header = {'type': 'session_meta', 'payload': {'id': native, 'cli_version': '0.167.2', 'source': 'cli'}}
+        def context(model='Provider/Model.raw', effort='xhigh', at='2026-11-12T10:01:00Z'):
+            return {'type': 'turn_context', 'timestamp': at, 'payload': {'model': model, 'effort': effort}}
+        def emit(rows, *, source='cli'):
+            path.write_text(''.join(json.dumps(row) + '\n' for row in [
+                {**header, 'payload': {**header['payload'], 'source': source}}, *rows]))
+        def observe():
+            result = self.adapter.get_usage(session)
+            self.assertEqual(result.state, 'ok', result)
+            value = result.value
+            self.assertEqual(value['context']['tokens'], 17457)
+            return {key: value.get(key) for key in ('model', 'effort', 'observed_at')}
+        first = context('Earlier', 'low', '2026-11-12T10:00:00Z')
+        expected = {'model': 'Provider/Model.raw', 'effort': 'xhigh', 'observed_at': '2026-11-12T10:01:00Z'}
+        empty = dict.fromkeys(expected)
+        for label, rows, wanted in (
+                ('latest context', [first, context()], expected),
+                ('missing effort', [first, {**context(), 'payload': {'model': 'Provider/Model.raw'}}],
+                 {**expected, 'effort': None}),
+                ('settings effort is not turn effort', [first, {**context(), 'payload': {
+                    'model': 'Provider/Model.raw', 'reasoning_effort': 'high'}}], {**expected, 'effort': None}),
+                ('settings are not a turn', [context(), {'type': 'event_msg', 'timestamp': '2026-11-12T10:02:00Z',
+                    'payload': {'type': 'thread_settings_applied', 'thread_id': native,
+                                'thread_settings': {'model': 'Not yet used', 'reasoning_effort': 'low'}}}], expected),
+                ('review in progress', [context(), {'type': 'event_msg', 'payload': {'type': 'entered_review_mode'}},
+                                        context('Review', 'high')], expected),
+                ('review finished', [context(), {'type': 'event_msg', 'payload': {'type': 'entered_review_mode'}},
+                                    context('Review', 'high'),
+                                    {'type': 'event_msg', 'payload': {'type': 'exited_review_mode'}}], expected),
+                ('review item lifecycle', [context(), {'type': 'event_msg', 'payload': {'type': 'item_started',
+                    'item': {'type': 'EnteredReviewMode'}}}, context('Review', 'high'),
+                    {'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {'type': 'ExitedReviewMode'}}}], expected),
+                ('new primary after review', [{'type': 'event_msg', 'payload': {'type': 'entered_review_mode'}},
+                    context('Review', 'high'), {'type': 'event_msg', 'payload': {'type': 'exited_review_mode'}}, context()], expected),
+                ('no timestamp', [first, context(at=None)], empty),
+                ('naive timestamp', [first, context(at='2026-11-12T10:01:00')], empty),
+                ('bad timestamp', [first, context(at='not a time')], empty),
+                ('oversized timestamp', [first, context(at='t' * 100000)], empty),
+                ('broken Z timestamp', [first, context(at='2026-11-12T10:01:00Z:00')], empty),
+                ('bad model', [first, context(model=None)], empty),
+                ('blank model', [first, context(model='  ')], empty),
+                ('unprintable model', [first, context(model='model\nother')], empty),
+                ('unencodable model', [first, context(model='\ud800')], empty),
+                ('oversized model', [first, context(model='m' * 4097)], empty),
+                ('bad effort', [first, context(effort=123)], empty),
+                ('blank effort', [first, context(effort='  ')], empty)):
+            with self.subTest(label=label):
+                emit(rows)
+                self.assertEqual(observe(), wanted)
+        for source in ({'subagent': 'review'}, {'subagent': {'spawn': {'parent_thread_id': native}}}, {'internal': 'review'}):
+            with self.subTest(source=source):
+                emit([context()], source=source)
+                self.assertEqual(observe(), empty)
+        emit([context()])
+        other.write_text(json.dumps({**header, 'payload': {**header['payload'], 'id': side}}) + '\n'
+                         + json.dumps(context('Side', 'high', '2026-11-12T10:05:00Z')) + '\n')
+        self.assertEqual(observe(), expected)
+        self.assertEqual(self.adapter.get_usage(session).value.get('native_session_id'), native)
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'):
+            with self.subTest(checked_version=version):
+                value = self.adapter.get_usage(replace(session,
+                    native_versions={'cli': version, 'daemon': version})).value
+                self.assertEqual({key: value.get(key) for key in expected}, expected)
+        plain = replace(session, native_mode={'mode': 'plain'}, native_versions={'cli': '0.167.2'})
+        value = self.adapter.get_usage(plain).value
+        self.assertEqual({key: value.get(key) for key in expected}, expected)
+        self.assertTrue(value['context']['last_known'])
+        for versions in ({}, {'cli': ['0.167.2'], 'daemon': '0.167.2'},
+                         {'cli': '0.168.0', 'daemon': '0.168.0'},
+                         {'cli': '0.169.0', 'daemon': '0.167.2'},
+                         {'cli': '0.167.2', 'daemon': '0.169.0'},
+                         {'cli': '0.169.1', 'daemon': '0.169.1'},
+                         {'cli': '0.167.2', 'daemon': '0.167.1'}):
+            with self.subTest(versions=versions):
+                value = self.adapter.get_usage(replace(session, native_versions=versions)).value
+                self.assertEqual({key: value.get(key) for key in expected}, empty)
+        with patch.object(observation.State, 'row', side_effect=AssertionError('Cached metadata was parsed again')):
+            self.assertEqual(observe(), expected)
+        emit([context()])
+        with path.open('a') as stream:
+            stream.write('{"type":"turn_context","payload":{"model":"one","model":"two"}}\n')
+        self.assertEqual(observe(), empty, 'Ambiguous latest metadata must not revive an older model')
+        with patch.object(observation, 'paths', side_effect=OSError('unreadable model metadata')):
+            self.assertEqual(observe(), empty)
+        # Exercise the real core filter with the real Codex reading, not a
+        # prebuilt usage dictionary that could overlook a missing native ID.
+        from multiverse.runtime import native as native_runtime
+        emit([context()])
+        scope = self.root / 'core-view'
+        directory = scope / 'state' / 'agents' / session.agent_id
+        properties = {'id': session.agent_id, 'harness': 'codex', 'workspace': session.workspace,
+                      'native_session_id': native, 'native_session_home': str(home)}
+        for started, wanted in (('2026-11-12T09:00:00Z', expected), ('2026-11-12T11:00:00Z', empty)):
+            with self.subTest(core_launch_started=started):
+                facts = {**read(self.root / 'runtime.json'), 'started_at': started,
+                         'native_versions': dict(session.native_versions), 'native_mode': dict(session.native_mode)}
+                write(directory / 'runtime.json', facts)
+                with patch.object(native_runtime.harnesses, 'load', return_value=self.adapter):
+                    filtered = native_runtime.usage_snapshot(scope, properties, facts, reconciled=True)
+                self.assertEqual(filtered['state'], 'ok', filtered)
+                self.assertEqual({key: filtered['value'].get(key) for key in expected}, wanted)
+                self.assertEqual(filtered['value']['context']['tokens'], 17457)
+        self.reset()
+        with patch.object(observation, 'read', side_effect=AssertionError('Unavailable usage scanned a rollout')):
+            result = self.adapter.get_usage(session)
+        self.assertEqual(result.state, 'unavailable')
+        self.assertEqual(result.reason, 'Codex has no saved context usage for this thread yet')
+
+    def test_observation_cache_parses_only_changes_without_retaining_rollout_rows(self):
+        """Refresh must retain bounded observation state, not repeatedly parse or index every stored tool result."""
+        from multiverse.harnesses.codex import observation, transcripts, usage
+        observation._states.clear()
+        observation._copies.clear()
+        transcripts._indexes.clear()
+        self.addCleanup(observation._states.clear)
+        self.addCleanup(observation._copies.clear)
+        native = str(uuid4())
+        home = self.root / 'observations'
+        folder = home / 'sessions'
+        folder.mkdir(parents=True)
+        path = folder / f'rollout-2026-11-12T10-00-00-{native}.jsonl'
+        session = replace(self.session, native_id=native, home=str(home),
+                          native_versions={'cli': '0.169.0', 'daemon': '0.169.0'})
+        def encode(row):
+            return (json.dumps(row) + '\n').encode()
+        header = encode({'type': 'session_meta', 'payload': {'id': native, 'source': 'cli'}})
+        def context(model):
+            return encode({'type': 'turn_context', 'timestamp': '2026-11-12T10:01:00Z',
+                           'payload': {'model': model, 'effort': 'high'}})
+        def append(data):
+            with path.open('ab') as stream:
+                stream.write(data)
+        tool = encode({'type': 'response_item', 'payload': {'type': 'function_call_output',
+                                                         'output': 'private tool body' * 70000}})
+        path.write_bytes(header + tool + context('initial'))
+        opened, reads, parsed = [], [], []
+        original_row = observation.State.row
+        def parse(state, line):
+            parsed.append(len(line))
+            return original_row(state, line)
+        original = observation.open_rollout
+        class Tracked:
+            def __init__(self, handle):
+                self.handle = handle
+            def __getattr__(self, key):
+                return getattr(self.handle, key)
+            def __enter__(self):
+                self.handle.__enter__()
+                return self
+            def __exit__(self, *args):
+                return self.handle.__exit__(*args)
+            def read(self, size):
+                reads.append((self.handle.tell(), size))
+                return self.handle.read(size)
+            def __iter__(self):
+                return self
+            def __next__(self):
+                start = self.handle.tell()
+                line = self.handle.readline()
+                reads.append((start, len(line)))
+                if not line:
+                    raise StopIteration
+                return line
+        def tracked(candidate):
+            opened.append(candidate)
+            return Tracked(original(candidate))
+        def observe():
+            return usage.observation(session, bridge=True)
+        with patch.object(observation, 'open_rollout', side_effect=tracked), patch.object(
+                observation.State, 'row', new=parse), patch.object(
+                transcripts, 'read_copy', side_effect=AssertionError('Usage filled the transcript index')):
+            self.assertEqual(observe()['model'], 'initial')
+            self.assertEqual(len(opened), 1)
+            for _ in range(10):
+                self.assertEqual(observe()['model'], 'initial')
+            self.assertEqual(len(opened), 1, 'Unchanged refresh must not even open a rollout')
+            old_end = path.stat().st_size
+            reads.clear()
+            parsed.clear()
+            append(context('appended'))
+            self.assertEqual(observe()['model'], 'appended')
+            self.assertTrue(reads)
+            self.assertEqual(len(parsed), 1, 'Only appended rows may be parsed after a full byte proof')
+            proof = [(offset, size) for offset, size in reads if offset < old_end - observation.TAIL_BYTES]
+            self.assertTrue(proof, 'Growth must reprove the complete prior prefix')
+            self.assertEqual(proof[0][0], 0)
+            self.assertTrue(all(size <= 65536 for _, size in proof))
+            self.assertGreaterEqual(sum(size for _, size in reads), old_end)
+            partial = context('completed')
+            append(partial[:-1])
+            self.assertEqual(observe()['model'], 'appended')
+            append(b'\n')
+            self.assertEqual(observe()['model'], 'completed')
+            enter = encode({'type': 'event_msg', 'payload': {'type': 'entered_review_mode'}})
+            leave = encode({'type': 'event_msg', 'payload': {'type': 'exited_review_mode'}})
+            append(enter + context('review') + b'not-json\n')
+            self.assertEqual(observe()['model'], 'completed')
+            append(leave + b'not-json\n')
+            self.assertEqual(observe(), {}, 'Damage outside review clears the latest context')
+            append(context('recovered'))
+            self.assertEqual(observe()['model'], 'recovered')
+            append(encode({'type': 'turn_context', 'timestamp': 't' * 100000,
+                           'payload': {'model': 'bounded'}}))
+            self.assertEqual(observe(), {})
+            self.assertIsNone(observation._states[path].latest[2])
+            # A grown file whose old end was changed is a rewrite, not an append.
+            path.write_bytes(header + tool + context('rewritten') + b' ' * (path.stat().st_size + 16000) + b'\n' + context('new tip'))
+            reads.clear()
+            self.assertEqual(observe()['model'], 'new tip')
+            self.assertTrue(any(offset == 0 for offset, _ in reads))
+            path.write_bytes(header + context('shorter'))
+            self.assertEqual(observe()['model'], 'shorter')
+            replacement = path.with_suffix('.replacement')
+            replacement.write_bytes(header + context('replaced'))
+            replacement.replace(path)
+            self.assertEqual(observe()['model'], 'replaced')
+        # A growing writer can rewrite any earlier metadata while preserving
+        # the old end. Every cached decision therefore needs the full byte proof.
+        enter = encode({'type': 'event_msg', 'payload': {'type': 'entered_review_mode'}})
+        ignored = encode({'type': 'event_msg', 'payload': {'type': 'ignored_review_mode'}})
+        prefix_cases = (
+            ('foreign identity', header + context('owned'),
+             header.replace(native.encode(), str(uuid4()).encode()) + context('owned'), context('foreign'), {}),
+            ('nonprimary source', header + context('owned'),
+             header.replace(b'"cli"', b'"bad"') + context('owned'), context('foreign'), {}),
+            ('review began earlier', header + context('owned') + ignored,
+             header + context('owned') + enter, context('review'), {'model': 'owned'}),
+            ('review marker removed', header + context('owned') + enter,
+             header + context('owned') + ignored, context('after'), {'model': 'after'}),
+            ('latest context rewritten', header + context('owned'),
+             header + context('other'), encode({'type': 'event_msg', 'payload': {'type': 'noop'}}), {'model': 'other'}))
+        for label, before, after, extra, wanted in prefix_cases:
+            with self.subTest(growing_rewrite=label):
+                self.assertEqual(len(before), len(after))
+                original_bytes = before + tool
+                path.write_bytes(original_bytes)
+                self.assertEqual(observe()['model'], 'owned')
+                changed = after + tool + extra
+                self.assertEqual(original_bytes[-observation.TAIL_BYTES:],
+                                 changed[len(original_bytes)-observation.TAIL_BYTES:len(original_bytes)])
+                inode = path.stat().st_ino
+                path.write_bytes(changed)
+                self.assertEqual(path.stat().st_ino, inode)
+                value = observe()
+                self.assertEqual({key: value.get(key) for key in wanted} if wanted else value, wanted)
+        path.write_bytes(header + context('bounded'))
+        self.assertEqual(observe()['model'], 'bounded')
+        self.assertEqual(transcripts._indexes, {})
+        state = observation._states[path]
+        self.assertFalse(any(isinstance(value, (list, dict)) for value in vars(state).values()))
+        self.assertFalse(any('private tool body' in repr(value) for value in vars(state).values()))
+        self.assertNotIn('tail', vars(state), 'Only a fixed digest of old-end bytes may be retained')
+        for index in range(observation.CACHE_LIMIT + 2):
+            other = str(uuid4())
+            candidate = folder / f'rollout-2026-11-12T10-00-00-{other}.jsonl'
+            candidate.write_bytes(encode({'type': 'session_meta', 'payload': {'id': other}}) + context('small'))
+            self.assertEqual(usage.observation(replace(session, native_id=other), bridge=True)['model'], 'small')
+        self.assertEqual(len(observation._states), observation.CACHE_LIMIT)
+        self.assertEqual(len(observation._copies), observation.CACHE_LIMIT)
+        self.assertEqual(transcripts._indexes, {})
+
+    def test_observation_copy_identity_and_compressed_changes_are_reproved(self):
+        """Cached observations must keep exact-copy identity and reject changed or inconsistent stored evidence."""
+        try:
+            import zstandard
+        except ImportError:
+            self.skipTest('zstandard is not installed; compressed observation fixtures require it')
+        from multiverse.harnesses.codex import observation, usage
+        observation._states.clear()
+        observation._copies.clear()
+        self.addCleanup(observation._states.clear)
+        self.addCleanup(observation._copies.clear)
+        native = str(uuid4())
+        folder = self.root / 'observation-copies' / 'sessions'
+        folder.mkdir(parents=True)
+        path = folder / f'rollout-2026-11-12T10-00-00-{native}.jsonl.zst'
+        session = replace(self.session, native_id=native, home=str(folder.parent),
+                          native_versions={'cli': '0.167.2', 'daemon': '0.167.2'})
+        def encode(rows):
+            return ''.join(json.dumps(row) + '\n' for row in rows).encode()
+        header = {'type': 'session_meta', 'payload': {'id': native, 'source': 'cli'}}
+        def context(model):
+            return {'type': 'turn_context', 'timestamp': '2026-11-12T10:01:00Z', 'payload': {'model': model}}
+        def compressed(rows):
+            path.write_bytes(zstandard.ZstdCompressor().compress(encode(rows)))
+        def observe():
+            return usage.observation(session, bridge=True)
+        compressed([header, context('first')])
+        with patch.object(observation, 'open_rollout', wraps=observation.open_rollout) as opened:
+            self.assertEqual(observe()['model'], 'first')
+            self.assertEqual(observe()['model'], 'first')
+            self.assertEqual(opened.call_count, 1)
+            compressed([header, context('second')])
+            self.assertEqual(observe()['model'], 'second')
+            self.assertEqual(opened.call_count, 2)
+        # Empty/invalid values and stable decoder failures are also cacheable.
+        # Otherwise a broken cold rollout is decompressed on every refresh.
+        for label, data in (
+                ('bad timestamp', zstandard.ZstdCompressor().compress(encode([
+                    header, {**context('invalid'), 'timestamp': 'not a timestamp'}]))),
+                ('empty rollout', zstandard.ZstdCompressor().compress(b'')),
+                ('corrupt compressed frame', b'not a zstd frame')):
+            with self.subTest(stable_failure=label):
+                observation._copies.clear()
+                path.write_bytes(data)
+                with patch.object(observation, 'open_rollout', wraps=observation.open_rollout) as opened:
+                    self.assertEqual(observe(), {})
+                    self.assertEqual(observe(), {})
+                    self.assertEqual(opened.call_count, 1, 'Stable failed evidence must not be reopened')
+                    self.assertIn((str(folder.parent), native), observation._copies)
+                with patch.object(observation, 'open_rollout', side_effect=AssertionError('Failed stamp read again')):
+                    self.assertEqual(observe(), {})
+        original = observation.open_rollout
+        class ExitFailure:
+            def __init__(self, handle):
+                self.handle = handle
+            def __getattr__(self, key):
+                return getattr(self.handle, key)
+            def __enter__(self):
+                self.handle.__enter__()
+                return self.handle
+            def __exit__(self, *args):
+                self.handle.__exit__(*args)
+                raise OSError('synthetic decoder failure after stream exit')
+        compressed([header, context('must not survive failed decoder exit')])
+        with patch.object(observation, 'open_rollout', side_effect=lambda candidate: ExitFailure(original(candidate))) as opened:
+            self.assertEqual(observe(), {})
+            self.assertEqual(observe(), {})
+            self.assertEqual(opened.call_count, 1)
+        observation._copies.clear()
+        with patch.object(observation, 'scan', side_effect=observation.Unstable('changed during scan')) as scanned:
+            self.assertEqual(observe(), {})
+            self.assertEqual(observe(), {})
+            self.assertEqual(scanned.call_count, 2, 'An unstable scan cannot be cached as an empty observation')
+        self.assertEqual(observation._copies, {})
+        with patch.object(observation, 'paths', side_effect=OSError('no discovery stamps')) as discovered:
+            self.assertEqual(observe(), {})
+            self.assertEqual(observe(), {})
+            self.assertEqual(discovered.call_count, 2)
+        self.assertEqual(observation._copies, {})
+        original_paths = observation.paths
+        discovery_calls = []
+        def changed_paths(home, native_id):
+            discovery_calls.append(None)
+            return original_paths(home, native_id) if len(discovery_calls) == 1 else []
+        with patch.object(observation, 'paths', side_effect=changed_paths):
+            self.assertEqual(observe(), {}, 'A changed copy set cannot publish even a completed scan')
+        self.assertEqual(len(discovery_calls), 2)
+        self.assertEqual(observation._copies, {})
+        plain = path.with_suffix('')
+        plain.write_bytes(encode([header, context('plain wins')]))
+        self.assertEqual(observe()['model'], 'plain wins')
+        archive = folder.parent / 'archived_sessions'
+        archive.mkdir()
+        older = archive / plain.name
+        shared = encode([header, {'type': 'response_item', 'payload': {
+            'type': 'function_call_output', 'output': 'x' * 20000}}, context('plain wins')])
+        plain.write_bytes(shared)
+        older.write_bytes(shared)
+        os.utime(older, ns=(1, 1))
+        self.assertEqual(observe()['model'], 'plain wins')
+        changed = shared.replace(b'x' * 20000, b'y' + b'x' * 19999, 1)
+        self.assertEqual(shared[-observation.TAIL_BYTES:], changed[-observation.TAIL_BYTES:])
+        suffix = encode([context('new tip')])
+        plain.write_bytes(shared + suffix)
+        older.write_bytes(changed + suffix)
+        os.utime(older, ns=(1, 1))
+        self.assertEqual(observe(), {}, 'Growing copies must still agree on every earlier byte')
+        plain.write_bytes(encode([header, context('plain wins')]))
+        older.write_bytes(encode([header]))
+        os.utime(older, ns=(1, 1))
+        self.assertEqual(observe()['model'], 'plain wins')
+        with patch.object(observation, 'open_rollout', side_effect=AssertionError('Unchanged copies read again')):
+            self.assertEqual(observe()['model'], 'plain wins')
+        invalid_rows = (
+                ('divergent prefix', [header, context('different')]),
+                ('wrong identity', [{**header, 'payload': {'id': str(uuid4())}}]),
+                ('later wrong identity', [header, {'type': 'session_meta', 'payload': {'id': str(uuid4())}}]),
+                ('side source', [{**header, 'payload': {'id': native, 'source': {'subagent': 'review'}}}]),
+                ('history base', [{**header, 'payload': {'id': native, 'history_base': 'base'}}]),
+                ('ambiguous header', []))
+        for label, rows in invalid_rows:
+            with self.subTest(label=label):
+                older.write_bytes(encode(rows))
+                os.utime(older, ns=(1, 1))
+                self.assertEqual(observe(), {})
+        older.unlink()
+        for label, rows in invalid_rows[1:]:
+            with self.subTest(single_copy=label):
+                plain.write_bytes(encode(rows + [context('must not be used')]))
+                self.assertEqual(observe(), {})
+        plain.write_bytes(b'{"type":"session_meta","type":"turn_context","payload":{}}\n'
+                          + encode([context('must not be used')]))
+        self.assertEqual(observe(), {})
+        original = observation.open_rollout
+        class Changed:
+            def __init__(self, handle):
+                self.handle = handle
+            def __getattr__(self, key):
+                return getattr(self.handle, key)
+            def __enter__(self):
+                self.handle.__enter__()
+                return self.handle
+            def __exit__(self, *args):
+                self.handle.__exit__(*args)
+                plain.write_bytes(encode([header, context('concurrent rewrite')]))
+        observation._copies.clear()
+        plain.write_bytes(encode([header, context('before rewrite')]))
+        with patch.object(observation, 'open_rollout', side_effect=lambda candidate: Changed(original(candidate))):
+            self.assertEqual(observe(), {}, 'A changed path cannot publish a mixed scan')
+            self.assertNotIn((str(folder.parent), native), observation._copies)
+        self.assertEqual(observe()['model'], 'concurrent rewrite')
 
     def test_last_reading_carries_forward_only_for_its_thread(self):
         """The last reading carries across stop and resume only for its own thread and source; a break goes unnoticed

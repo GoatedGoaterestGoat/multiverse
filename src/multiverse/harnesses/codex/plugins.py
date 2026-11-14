@@ -21,7 +21,7 @@ from ...plugins import harness, manifest, trust
 from ...store import is_file_replaced
 
 
-CHECKED_VERSION = (0, 167, 2)  # native layouts and unmanaged side-thread protocol
+CHECKED_VERSION = (0, 169, 0)  # native layouts and unmanaged side-thread protocol
 CONFIG_VERSION = (0, 159, 3)  # checked versioned config schema
 MCP_VERSION = (0, 162, 1)     # isolated native spawn verified on this release
 _versions = {}

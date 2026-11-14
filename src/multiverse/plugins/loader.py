@@ -34,7 +34,7 @@ import types
 from ..store import now, retry_missing, is_file_replaced
 from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 18)
+API_VERSION = (1, 19)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]

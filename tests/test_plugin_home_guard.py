@@ -111,6 +111,121 @@ class InheritedIdentityTest(unittest.TestCase):
 
 
 class GuardTest(StandInHome):
+    def test_symlink_path_components_cannot_disguise_a_protected_target(self):
+        """Dot components and final separators can traverse a link even when metadata changes request no-follow."""
+        with self.unguarded():
+            self.protected.mkdir()
+            target = self.protected / "target-dir"
+            target.mkdir()
+            sibling = self.protected / "target-file"
+            sibling.write_text("untouched")
+        link = self.work / "directory-link"
+        link.symlink_to(target, target_is_directory=True)
+        operations = [("utime", lambda path: os.utime(path, ns=(1, 1), follow_symlinks=False))]
+        if os.chmod in os.supports_follow_symlinks:
+            operations.append(("chmod", lambda path: os.chmod(path, 0o700, follow_symlinks=False)))
+        if hasattr(os, "lchmod"):
+            operations.append(("lchmod", lambda path: os.lchmod(path, 0o700)))
+        for name, operation in operations:
+            for suffix in ("/.", "/"):
+                with self.subTest(operation=name, suffix=suffix):
+                    with self.unguarded():
+                        os.chmod(target, 0o755)
+                        os.utime(target, ns=(1000000000, 1000000000))
+                    before = target.stat()
+                    try:
+                        with self.assertRaises(PermissionError):
+                            operation(str(link) + suffix)
+                        self.assertEqual((target.stat().st_mode, target.stat().st_mtime_ns),
+                                         (before.st_mode, before.st_mtime_ns))
+                    finally:
+                        self.new_violations()
+        # Resolving '..' lexically before following the link would escape the guard too.
+        raw = str(link) + "/../target-file"
+        for name, operation in (("write", lambda: Path(raw).write_text("changed")),
+                                ("chmod", lambda: os.chmod(raw, 0o700)),
+                                ("utime", lambda: os.utime(raw, ns=(1, 1), follow_symlinks=False))):
+            with self.subTest(parent_component=name):
+                before = sibling.stat()
+                try:
+                    with self.assertRaises(PermissionError):
+                        operation()
+                    self.assertEqual(sibling.read_text(), "untouched")
+                    self.assertEqual((sibling.stat().st_mode, sibling.stat().st_mtime_ns),
+                                     (before.st_mode, before.st_mtime_ns))
+                finally:
+                    self.new_violations()
+
+    def test_symlink_cleanup_checks_the_entry_but_following_writes_check_the_target(self):
+        """Private-home cleanup may remove a link into protected storage while writes through it must still fail."""
+        with self.unguarded():
+            self.protected.mkdir()
+            target = self.protected / "target"
+            target.write_text("untouched")
+        initial = target.stat()
+        for name in ("chmod", "utime"):
+            wrapped = getattr(os, name)
+            original = getattr(wrapped, "__wrapped__", wrapped)
+            for supported in (os.supports_dir_fd, os.supports_fd, os.supports_follow_symlinks):
+                self.assertEqual(wrapped in supported, original in supported)
+        destination = self.work / "renamed-link"
+        directory = os.open(self.work, os.O_RDONLY)
+        self.addCleanup(os.close, directory)
+        operations = [
+            ("unlink", lambda link: link.unlink()),
+            ("unlink by fd", lambda link: os.unlink(link.name, dir_fd=directory)),
+            ("rename", lambda link: link.rename(destination)),
+            ("chmod", lambda link: os.chmod(link, 0o700, follow_symlinks=False)),
+            ("utime", lambda link: os.utime(link, ns=(1, 1), follow_symlinks=False))]
+        if hasattr(os, "lchmod"):
+            operations.append(("lchmod", lambda link: os.lchmod(link, 0o700)))
+        for name, operation in operations:
+            if name in ("chmod", "utime") and getattr(os, name) not in os.supports_follow_symlinks:
+                continue
+            with self.subTest(entry_operation=name):
+                link = self.work / "outside-link"
+                link.symlink_to(target)
+                try:
+                    try:
+                        operation(link)
+                    except PermissionError as error:
+                        self.new_violations()
+                        self.fail(f"Changing only the outside link was refused: {error}")
+                    self.assertEqual(self.new_violations(), [])
+                    self.assertEqual(target.read_text(), "untouched")
+                    self.assertEqual((target.stat().st_mode, target.stat().st_mtime_ns),
+                                     (initial.st_mode, initial.st_mtime_ns))
+                finally:
+                    with self.unguarded():
+                        for path in (link, destination):
+                            if path.is_symlink():
+                                path.unlink()
+        link = self.work / "outside-link"
+        link.symlink_to(target)
+        try:
+            for operation in (lambda: link.write_text("changed"), lambda: os.chmod(link, 0o700),
+                              lambda: os.utime(link, ns=(1, 1))):
+                with self.subTest(following_write=operation):
+                    with self.assertRaises(PermissionError):
+                        operation()
+                    self.assertEqual(len(self.new_violations()), 1)
+            # Final names are local, but links in their parents still lead into protected storage.
+            parent = self.work / "parent-link"
+            parent.symlink_to(self.protected)
+            try:
+                with self.assertRaises(PermissionError):
+                    (parent / target.name).unlink()
+                self.assertEqual(len(self.new_violations()), 1)
+            finally:
+                with self.unguarded():
+                    parent.unlink()
+            self.assertEqual(target.read_text(), "untouched")
+            self.assertEqual((target.stat().st_mode, target.stat().st_mtime_ns),
+                             (initial.st_mode, initial.st_mtime_ns))
+        finally:
+            with self.unguarded():
+                link.unlink()
+
     def test_a_write_under_the_protected_home_is_refused_and_recorded(self):
         """The home guard refuses and records writes into the protected ~/.multiverse, the user's real ~/.claude,
         ~/.claude.json (and its ~/.claude.json.* siblings) and ~/.codex, and the .multiverse of the mv2 checkout the

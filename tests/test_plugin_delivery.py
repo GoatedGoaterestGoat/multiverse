@@ -133,14 +133,17 @@ class StuckHandlerTest(Fixture):
         with mock.patch.object(host, "HANDLER_SECONDS", 0.1):
             with self.subTest("every call out of time, though each returns"):
                 self.module.SLEEP["seconds"] = 0.4
+                self.module.HOLD["slow"] = threading.Event()  # slow stays on event 1 until the cursor is checked
                 self.emit(slow, 4)
-                # The sibling has every event while the slow handler is still on the first.
-                self.assertTrue(self.deliver_until(lambda: self.seen("fast", "slow") == [1, 2, 3, 4], seconds=3,
-                                                   scopes=[slow]), self.module.SEEN)
-                self.assertEqual(host._read_cursor(slow, "pair"), 0)  # never past an unfinished event
+                # The sibling has every event while the slow handler is still on the first, however many polls a
+                # loaded machine takes (a call of fast's can end past its limit too), and the cursor waits on it.
+                with mock.patch.object(host, "TIMEOUTS_PER_EVENT", 1000):  # not given up on yet, however long
+                    self.assertTrue(self.deliver_until(lambda: self.seen("fast", "slow") == [1, 2, 3, 4], seconds=10,
+                                                       scopes=[slow]), self.module.SEEN)
+                    self.assertEqual(host._read_cursor(slow, "pair"), 0)  # never past an unfinished event
+                self.module.HOLD["slow"].set()  # from here each of its calls returns 0.4 s (4 limits) after it starts
                 self.assertTrue(self.deliver_until(lambda: host._read_cursor(slow, "pair") == 4, scopes=[slow]),
                                 self.module.SEEN)
-                self.module.SLEEP["seconds"] = 0.0
                 self.assertEqual(self.seen("fast", "slow"), [1, 2, 3, 4])  # never replayed to the handler that finished
                 # Each call ran past its limit for 4 limits' time, then returned: one call each, never repeated.
                 self.assertEqual(self.seen("slow", "slow"), [1, 2, 3, 4])
@@ -152,13 +155,15 @@ class StuckHandlerTest(Fixture):
                 self.assertTrue(set(int(found[1]) for found in counts) <= {1, 2, 3, 4}, given_up)
                 self.assertTrue(all(int(found[2]) >= host.TIMEOUTS_PER_EVENT for found in counts), given_up)
             with self.subTest("a call that never returns, beside another universe"):
+                self.module.SLEEP["seconds"] = 0.0  # set here too, so a failure above leaves this one alone
                 self.module.HOLD["stuck"] = threading.Event()  # slow never returns there (until the test ends)
                 self.emit(stuck, 3)
                 self.emit(other, 2)
-                for scope in (stuck, other):
-                    host._deliver(self.loaded, self.mv, scope, "pair")
+                host._deliver(self.loaded, self.mv, stuck, "pair")  # slow is on event 1 there for good
+                # The other universe moves on meanwhile, in as many polls as a loaded machine takes.
+                self.assertTrue(self.deliver_until(lambda: host._read_cursor(other, "pair") == 2, scopes=[other]),
+                                self.module.SEEN)
                 self.assertEqual(self.seen("slow", "other"), [1, 2])  # the stuck universe holds up only itself
-                self.assertEqual(host._read_cursor(other, "pair"), 2)
                 self.assertEqual(host._read_cursor(stuck, "pair"), 0)
                 self.assertTrue(self.deliver_until(lambda: host._read_cursor(stuck, "pair") == 3, seconds=10,
                                                    scopes=[stuck]), self.module.SEEN)

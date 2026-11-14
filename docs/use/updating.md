@@ -69,6 +69,8 @@ mv2 refresh --apply --recursive    # this universe and every subverse
 | New in the template | Adds it |
 | Gone from the template, or deleted by you | Reports it and leaves it alone |
 
+A harness's `harness.json` is merged key by key instead. When you and the template have both changed it, `--apply` brings in the keys the template added, changed or removed, and keeps your value for every key you changed. A key you both changed keeps yours and stays a conflict until you take the template's file with `--take`. A harness's model subset (`models`) counts as one value, never combined key by key. The dry run lists the keys it merges, and `--diff` shows the merged file. refresh never writes a merge that mv2 couldn't load, or whose model settings would refuse every launch (such as a default outside the subset): it keeps your file and lists it as a conflict that says why. A file you edit while refresh runs is left as you saved it, and reported. The merge starts from the version of the file your universe was installed or last refreshed with, which mv2 saves. For a universe made before mv2 saved it, refresh finds that version among the ones mv2's bundled templates have shipped, so a key you deleted, such as a permission-skipping flag in `args`, stays deleted. When it can't find it (a template of your own, or a universe with no install record), it merges nothing: the file stays a conflict, or unknown, until you take the template's file with `--take`. A `harness.json` that isn't a JSON object is kept whole, as a conflict.
+
 Replaced files are saved in the universe's `trash/`. `refresh` never touches agent state. New skills and workflows work at once. A changed bootstrap reaches each agent the next time it starts or resumes.
 
 ## Install or update a plugin

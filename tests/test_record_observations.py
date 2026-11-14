@@ -217,13 +217,93 @@ class RecordObservationsTest(BaseTest):
                 self.assertTrue(all(not snapshot for snapshot in snapshots[1:]))
 
     def test_native_snapshot_without_a_batch_keeps_fresh_optional_checks(self):
-        """Control callers that do not request diagnostic batching must retain retries for sessions and slash metadata."""
+        """Fresh control reads must retry replaced slash metadata without waiting for an append-only journal that never existed."""
         directory, properties, facts = self.agent()
         (directory / 'slash').mkdir()
         with self.clock() as (_, sleeps):
             self.assertEqual(native.session_snapshot(self.root, directory, properties, facts,
                                                       adapter=SimpleNamespace(name='fixture')), (properties, facts))
-        self.assertEqual(len(sleeps), 2 * (store.MISSING_ATTEMPTS - 1))
+        self.assertEqual(len(sleeps), store.MISSING_ATTEMPTS - 1)
+
+    def test_each_delivery_read_shares_one_window_without_reusing_absence_across_locks(self):
+        """Delivery helpers must share optional-file waits, but a later lock must see new cursor and receipt evidence."""
+        directory, _, _ = self.agent()
+        with self.clock() as (_, sleeps):
+            self.assertEqual(mailbox.held(directory, 'no-focus', peek=True), {'messages': []})
+            self.assertEqual(sleeps, [store.MISSING_DELAY] * (store.MISSING_ATTEMPTS - 1))
+        message = mailbox.append_message(directory, 'fixture input', {}, delivery='follow-up')
+        reads = (
+            lambda: mailbox.preflight_delivery(directory),
+            lambda: mailbox.message_record(directory, message['id']),
+            lambda: mailbox.update_message(directory, message['id'], submission_state='pending'),
+            lambda: mailbox.acceptance_contexts(directory, None, None, '', current_launch=None),
+            lambda: mailbox.dismiss_messages(directory, []),
+            lambda: mailbox.held(directory, 'no-focus', peek=True),
+        )
+        for read in reads:
+            with self.subTest(read=reads.index(read)), self.clock() as (_, sleeps):
+                read()
+                self.assertEqual(sleeps, [store.MISSING_DELAY] * (store.MISSING_ATTEMPTS - 1))
+        store.write(directory / 'inbox.cursor', 0)
+        store.write(directory / 'inbox-read.json', {})
+        with self.clock() as (_, sleeps):
+            self.assertEqual(mailbox.held(directory, 'no-focus', peek=True), {'messages': []})
+            self.assertEqual(sleeps, [])
+        (directory / 'inbox.cursor').unlink()
+        (directory / 'inbox-read.json').unlink()
+        for name in ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'):
+            path = directory / name
+            path.write_text('broken')
+            with self.subTest(damaged=name), self.assertRaises(ValueError):
+                mailbox.message_record(directory, message['id'])
+            path.unlink()
+        store.write(directory / 'inbox-state.json', {message['id']: {'submission_state': 'accepted'}})
+        self.assertEqual(mailbox.message_record(directory, message['id'])[1]['submission_state'], 'accepted')
+        with self.clock() as (_, sleeps):
+            mailbox.message_record(directory, message['id'])
+            self.assertEqual(sleeps, [store.MISSING_DELAY] * (store.MISSING_ATTEMPTS - 1))
+
+    def test_terminal_registry_waits_only_for_locked_authority_and_never_prunes_a_missing_read(self):
+        """Optional tmux bookkeeping must wait once per observation, while a replacement gap must never erase live process proof."""
+        from multiverse.terminal import recovery
+        from multiverse.terminal.tmux import Tmux
+        backend = Tmux(str(self.work / 'fixture.sock'))
+        socket = recovery.address(backend)
+        path = recovery.registry(socket)
+        path.parent.mkdir(parents=True)
+        with patch.object(recovery, '_probe', return_value=None), \
+                patch.object(recovery.os, 'kill', side_effect=AssertionError('No process signal is allowed')):
+            for _ in range(2):
+                with self.clock() as (_, sleeps):
+                    self.assertIsNone(recovery.observe(backend))
+                    self.assertEqual(sleeps, [store.MISSING_DELAY] * (store.MISSING_ATTEMPTS - 1))
+        proof = {'pid': 12345, 'epoch': 100, 'started': 'Thu Oct 29 20:00:00 2026', 'socket': str(socket)}
+        store.write(path, proof)
+        original, missed = os.open, []
+
+        def gap(candidate, *args, **kwargs):
+            if Path(candidate) == path and len(missed) < 3:
+                missed.append(True)
+                raise FileNotFoundError(errno.ENOENT, 'fixture replacement gap', str(path))
+            return original(candidate, *args, **kwargs)
+
+        with self.clock() as (_, sleeps), patch.object(os, 'open', gap), \
+                patch.object(recovery, '_probe', return_value=('panes', {'pid': 12345, 'epoch': 100})), \
+                patch.object(recovery, '_state', return_value='live'), \
+                patch.object(recovery.os, 'kill', side_effect=AssertionError('No process signal is allowed')):
+            self.assertEqual(recovery.observe(backend), ('panes', proof))
+            self.assertEqual(len(missed), 3)
+            self.assertEqual(sleeps, [store.MISSING_DELAY] * 2)
+        missed.clear()
+        with self.clock() as (_, sleeps), patch.object(os, 'open', gap), \
+                patch.object(recovery, '_state', return_value='live'), \
+                patch.object(recovery.os, 'kill', side_effect=AssertionError('No process signal is allowed')):
+            # Only cleanup sees a gap; it may prune its lock, never this record.
+            with recovery.serialized(socket):
+                pass
+            self.assertTrue(path.exists(), 'A missed cleanup read erased the saved server identity')
+            self.assertEqual(store.read(path), proof)
+            self.assertEqual(sleeps, [])
 
     def test_known_record_helpers_distinguish_missing_parent_from_a_file_gap(self):
         """A missing container needs no per-file wait, but a missing name in an existing container must retain replacement retries."""
@@ -285,8 +365,7 @@ class RecordObservationsTest(BaseTest):
                 self.assertEqual(len(sleeps), store.MISSING_ATTEMPTS - 1)
 
     def test_real_fleet_listing_and_doctor_share_optional_waits(self):
-        """Real native snapshot traversal must not reintroduce per-agent delays after the diagnostic batch."""
-        real_sleep = time.sleep
+        """Real native snapshot traversal must not reintroduce per-agent retry rounds, independent of scheduler delays."""
         baseline, previous = {}, 0
         for count in (1, 20, 200):
             for index in range(previous, count):
@@ -298,21 +377,14 @@ class RecordObservationsTest(BaseTest):
             previous = count
             for name, operation in (('listing', lambda: lifecycle.listing(self.root)),
                                     ('doctor', lambda: doctor.check(self.root))):
-                waits = []
-
-                def sleeping(delay):
-                    waits.append((delay, ''.join(traceback.format_stack(limit=8))))
-                    real_sleep(delay)
-
-                started = time.monotonic()
-                with patch.object(store.time, 'sleep', side_effect=sleeping), \
+                with self.clock() as (_, sleeps), \
                         patch('multiverse.terminal.tmux.Tmux._run', side_effect=AssertionError('No terminal query expected')), \
                         patch('multiverse.terminal.tmux.Tmux.snapshot', return_value=({}, None)), \
                         patch.object(lifecycle, 'missing_records', wraps=store.missing_records) as listing_batch, \
                         patch.object(doctor, 'missing_records', wraps=store.missing_records) as doctor_batch:
                     result = operation()
-                measurement = {'elapsed': round(time.monotonic() - started, 4),
-                               'sleeps': len(waits), 'delay': round(sum(item[0] for item in waits), 4)}
+                waits = list(zip(sleeps, self.wait_stacks))
+                measurement = {'sleeps': len(waits), 'delay': round(sum(sleeps), 4)}
                 print(f'{count} stopped fixture rows {name}:', json.dumps(measurement, sort_keys=True), flush=True)
                 self.assertEqual(len(result), count if name == 'listing' else 0, result)
                 self.assertEqual(listing_batch.call_count, 1 if name == 'listing' else 0)

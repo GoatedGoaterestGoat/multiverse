@@ -45,14 +45,47 @@ def grant_policy(observed):
     return policy
 
 
-def apply_grants(params, policy):
+def navigation_root(thread):
+    """Only ordinary roots exclude inherited environment-owner authority on the checked protocol."""
+    if (thread.get('ephemeral') is not False
+            or any(key not in thread or thread[key] is not None
+                   for key in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'))
+            or 'threadSource' not in thread or thread['threadSource'] not in (None, 'user')):
+        raise ValueError('Native thread provenance cannot establish local navigation grants')
+
+
+def navigation_environments(observed, *, required=False, policy=None, cwd=None):
+    """Map only the reserved native local executor with exactly the validated roots and cwd."""
+    value = observed.get('environments')
+    if not required:
+        if value is None or type(value) is list and not value:
+            return  # Preserve the earlier checked releases' qualified omission boundary.
+    elif (type(value) is list and len(value) == 1 and isinstance(value[0], dict)
+            and set(value[0]) == {'environmentId', 'cwd', 'runtimeWorkspaceRoots'}):
+        local = value[0]
+        roots = local['runtimeWorkspaceRoots']
+        if (local['environmentId'] == 'local' and isinstance(cwd, str) and Path(cwd).is_absolute()
+                and local['cwd'] == cwd and '\0' not in cwd and policy is not None
+                and isinstance(roots, list) and all(isinstance(root, str) and root and '\0' not in root
+                    and Path(root).is_absolute() for root in roots)
+                and sorted(set(roots)) == policy['runtimeWorkspaceRoots']):
+            return
+    raise ValueError('Native local environment does not match the complete navigation grants; use mv2 resume')
+
+
+def apply_grants(params, policy, *, local=False):
     """New/clear inherits native grants, replacing rather than merging roots."""
     from .plugins import config_tree
     policy = grant_policy(policy)
     config = config_tree(object_field(params, 'config').items()) if params.get('config') is not None else {}
     if any(key in config for key in ('permissions', 'permission_profile', 'active_permission_profile', 'profiles', 'profile')):
         raise ValueError('Permission profile overrides cannot be mapped for conversation navigation')
-    if params.get('environments') not in (None, []):
+    if local:
+        if params.get('environments') is not None:
+            navigation_environments(params, required=True, policy=policy, cwd=params.get('cwd'))
+        params['environments'] = [{'environmentId': 'local', 'cwd': params['cwd'],
+                                   'runtimeWorkspaceRoots': list(policy['runtimeWorkspaceRoots'])}]
+    elif params.get('environments') not in (None, []):
         raise ValueError('Environment permission overrides cannot be mapped for conversation navigation')
     sandbox = policy['sandbox']
     mode = {'workspaceWrite': 'workspace-write', 'readOnly': 'read-only', 'dangerFullAccess': 'danger-full-access'}[sandbox['type']]
@@ -333,7 +366,8 @@ class LaunchProtocol:
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         if method == 'thread/start' and self.settings.get('navigation_grants') is not None:
-            apply_grants(params, self.settings['navigation_grants'])
+            apply_grants(params, self.settings['navigation_grants'],
+                         local=self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0)))
         self.pending = value['id']
         self.pending_method = method
         return {**value, 'params': params}
@@ -382,7 +416,14 @@ class LaunchProtocol:
                                  'This launch cannot accept input until its requested grant is verified; '
                                  'Multiverse will not reconfigure or restart the shared daemon.')
         try:
-            self.candidate_grants = grant_policy(observed)
+            if thread.get('attachedToThreadId') is not None:
+                raise ValueError('An attached side conversation cannot establish primary navigation grants')
+            policy = grant_policy(observed)
+            local = self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0))
+            if local:
+                navigation_root(thread)
+            navigation_environments(thread, required=local, policy=policy, cwd=self.settings['workspace'])
+            self.candidate_grants = policy
         except ValueError as error:
             # Older/unsupported metadata must not break ordinary binding or /btw.
             self.candidate_grants = None

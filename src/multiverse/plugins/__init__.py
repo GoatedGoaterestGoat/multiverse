@@ -123,6 +123,9 @@ def catalog_entries(root):
 
 def bootstrap_lines(root):
     """Lines plugins on here add to an agent's bootstrap, in plugin-name order."""
+    # Registration cannot add bootstrap lines without declaring this extension point.
+    if not any("bootstrap" in manifest.extends for manifest in loader.manifest_records(root)):
+        return []
     lines = []
     for loaded in loader.active(root):
         lines.extend(loaded.registrations.bootstrap)

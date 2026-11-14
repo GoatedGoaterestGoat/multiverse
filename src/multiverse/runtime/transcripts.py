@@ -64,6 +64,7 @@ class Generation:
 class TranscriptInfo:
     state: str
     reason: str = ''
+    retry: bool = False
     format: str | None = None
     version: str | None = None
     native_id: str | None = None
@@ -827,7 +828,7 @@ def info(root, directory, *, generation=None, tip=None):
             loaded = _load(root, directory, generation=generation, tip=tip, snapshot=snapshot)
         except Unavailable as error:
             return TranscriptInfo(state=error.state, reason=str(error), native_id=snapshot.session.native_id,
-                                  earlier=tuple(earlier))
+                                  earlier=tuple(earlier), retry=error.retry is True)
         view = loaded.view
         context_start = (view.history[view.context_from] if view.context_from < len(view.history) else None)
         grouped = _groups(loaded)
@@ -844,4 +845,4 @@ def info(root, directory, *, generation=None, tip=None):
                               history_version=view.history_version, stable_rows=view.source.stable_rows,
                               earlier=tuple(earlier))
     except Unavailable as error:
-        return TranscriptInfo(state=error.state, reason=str(error))
+        return TranscriptInfo(state=error.state, reason=str(error), retry=error.retry is True)

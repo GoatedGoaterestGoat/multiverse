@@ -143,6 +143,21 @@ class TranscriptApiTest(PluginTestCase):
         raw = agent.transcript_rows(labels={"prompt"})
         self.assertEqual([row.abandoned for row in raw.rows], [False, True])
 
+    def test_a_fake_transcripts_rows_name_its_own_session(self):
+        """Placeholder rows can silently read as another conversation; binding them must preserve deliberately foreign identities."""
+        def written():
+            return [json.loads(line).get("sessionId", "absent") for line in self.fake.path.read_text().splitlines()]
+        first = self.fake.native_id
+        self.assertEqual(set(written()), {first})  # rewrite, from setUp
+        self.assertTrue(all(row["sessionId"] == "fake" for row in self.rows.rows))  # the caller's rows unchanged
+        foreign, unnamed = str(uuid4()), {"type": "assistant", "message": {"role": "assistant", "content": []}}
+        self.fake.append(ClaudeRows().add("assistant", sessionId=foreign), {**unnamed, "sessionId": None}, unnamed,
+                         ClaudeRows().add("user"))
+        self.assertEqual(written()[-4:], [foreign, None, "absent", first])
+        self.fake.clear(self.rows.rows)
+        self.assertNotEqual(self.fake.native_id, first)
+        self.assertEqual(set(written()), {self.fake.native_id})
+
     def test_reads_need_access_and_say_why_they_cannot_go_on(self):
         """A transcript read needs transcripts.read and observe where the plugin is on, checked for every page;
         a /clear under a cursor raises TranscriptChanged("replaced") with where to resume, malformed generation
@@ -192,7 +207,7 @@ class TranscriptApiTest(PluginTestCase):
                 with self.subTest(case, read=name):
                     if expected is api.TranscriptUnavailable and name == "info":
                         info = call(generation=generation)
-                        self.assertEqual(info.state, "unavailable")
+                        self.assertEqual((info.state, info.retry), ("unavailable", False))  # a lasting refusal
                         self.assertIn("Unknown transcript generation", info.reason)
                         self.assertIsNone(info.start)
                         continue
@@ -201,6 +216,21 @@ class TranscriptApiTest(PluginTestCase):
                     self.assertIs(type(caught.exception), expected)
                     if expected is api.TranscriptUnavailable:
                         self.assertFalse(caught.exception.retry)
+        with self.subTest("a conversation switch in progress"):
+            # info says it's passing without raising (1.19), as row reads do by raising with retry true.
+            runtime_path = self.worker / "runtime.json"
+            saved_runtime = json.loads(runtime_path.read_text())
+            runtime_path.write_text(json.dumps({**saved_runtime, "navigation": {"state": "checking"}}))
+            try:
+                info = self.agent_.transcript()
+                self.assertEqual((info.state, info.retry, info.start), ("unavailable", True, None), info)
+                with self.assertRaises(api.TranscriptUnavailable) as caught:
+                    self.agent_.transcript_rows()
+                self.assertTrue(caught.exception.retry)
+            finally:  # settled again, so a failure here leaves the subtests after it alone
+                runtime_path.write_text(json.dumps(saved_runtime))
+            info = self.agent_.transcript()
+            self.assertEqual((info.state, info.retry), ("supported", False))
         with self.subTest("an unreadable store"):
             self.fake.unreadable()
             with self.assertRaises(api.TranscriptUnavailable) as caught:

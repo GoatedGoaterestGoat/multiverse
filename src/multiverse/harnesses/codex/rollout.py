@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import stat
 import sys
+from threading import Lock
 
 CHUNK = 64 << 10
 MAX_LINE = 64 << 20
@@ -14,6 +15,45 @@ MAX_BYTES = 512 << 20
 MAX_INPUT = 512 << 20
 MAX_ROWS = 200000
 WINDOW_LOG = 26
+IDLE_DECODERS = 4
+_decompressors = []
+_decoder_lock = Lock()
+
+
+def _after_fork():
+    global _decoder_lock
+    _decoder_lock = Lock()  # A child must not inherit another thread's held pool lock.
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
+class _PooledDecoder(io.BufferedReader):
+    def __init__(self, source, codec):
+        self._decompressor = None
+        with _decoder_lock:
+            context = _decompressors.pop() if _decompressors else None
+        if context is None:
+            context = codec.ZstdDecompressor(max_window_size=1 << WINDOW_LOG)
+        stream = None
+        try:
+            stream = context.stream_reader(source, read_size=CHUNK, read_across_frames=True, closefd=False)
+            super().__init__(stream, buffer_size=CHUNK)
+        except BaseException:
+            if stream is not None:
+                stream.close()
+            raise  # An incompletely constructed stream cannot safely return its context.
+        self._decompressor = context
+
+    def close(self):
+        context, self._decompressor = self._decompressor, None
+        if context is None:
+            return
+        super().close()  # On failure discard the context; it may still have an active reader.
+        with _decoder_lock:
+            if len(_decompressors) < IDLE_DECODERS:
+                _decompressors.append(context)
 
 
 class RolloutError(OSError):
@@ -45,9 +85,7 @@ def decoder():
             return (lambda source: zstd.ZstdFile(source, 'rb', options={
                 zstd.DecompressionParameter.window_log_max: WINDOW_LOG})), (zstd.ZstdError, EOFError)
         zstandard = import_module('zstandard')
-        return (lambda source: io.BufferedReader(zstandard.ZstdDecompressor(
-            max_window_size=1 << WINDOW_LOG).stream_reader(
-                source, read_size=CHUNK, read_across_frames=True, closefd=False), buffer_size=CHUNK)), (zstandard.ZstdError, EOFError)
+        return (lambda source: _PooledDecoder(source, zstandard)), (zstandard.ZstdError, EOFError)
     except ImportError as error:
         advice = ('Use a Python build with compression.zstd support' if sys.version_info >= (3, 14)
                   else 'Run uv sync --locked in the mv2 checkout, or reinstall mv2 to install zstandard')
@@ -165,8 +203,9 @@ class Compressed:
                 raise RolloutError('The compressed Codex rollout changed while being read')
         finally:
             try:
-                if self.stream is not None:
-                    self.stream.close()
+                stream, self.stream = self.stream, None
+                if stream is not None:
+                    stream.close()
             finally:
                 self.raw.close()
     def _read(self, method, size):

@@ -25,6 +25,7 @@ from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from native_safety import install, isolated_home
 from multiverse.harnesses.codex.plugins import CHECKED_VERSION, version_text
+from multiverse.harnesses.codex.navigation import VERSIONS as NAVIGATION_VERSIONS
 from multiverse.harnesses.types import NativeResult, RpcNotification, RpcRequest, RpcSpec
 from multiverse.runtime import lifecycle, native, recovery, transcripts
 from multiverse.store import existing_lock, read, write
@@ -89,11 +90,14 @@ class NavigationCommitTest(DeliveryFixture):
             try:
                 self.assertTrue(advanced.wait(10), 'Commit did not publish its pointer')
                 self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], target)
+                self.assertEqual(agents.runtime(self.directory)['status'], 'idle')
                 self.assertEqual(agents.runtime(self.directory)['usage']['native_session_id'], self.native_id)
                 self.assertIsNone(snapshot())
             finally:
                 release.set()
             pending.result(timeout=10)
+        self.assertEqual(agents.runtime(self.directory)['status'], 'unknown')
+        self.assertIsNone(snapshot())
         agents.update_runtime(self.directory, self.launch, status='idle')
         properties, facts = snapshot()
         self.assertEqual(properties['native_session_id'], target)
@@ -113,7 +117,12 @@ def read_transcript(operation, *, timeout=30):
         if last_retry is not None and time.monotonic() >= deadline:
             raise last_retry
         try:
-            return operation()
+            value = operation()
+            if isinstance(value, transcripts.TranscriptInfo) and value.state != 'supported':
+                error = (transcripts.Retry if value.state == 'unavailable' and getattr(value, 'retry', False) is True
+                         else transcripts.Unavailable)
+                raise error(value.reason)
+            return value
         except transcripts.Retry as error:
             last_retry = error
             remaining = deadline - time.monotonic()
@@ -123,9 +132,44 @@ def read_transcript(operation, *, timeout=30):
 
 
 class NavigationReadTest(unittest.TestCase):
+    def test_info_contention_retries_the_exact_requested_generation(self):
+        """A normalized transient info failure must not look like missing native identity or lineage."""
+        root, directory, generation = object(), object(), object()
+        expected = transcripts.TranscriptInfo(state='supported', native_id='original')
+        snapshot = SimpleNamespace(earlier=(), session=SimpleNamespace(native_id='original'))
+        for boundary in ('snapshot', 'load'):
+            for failure in (transcripts.Retry('contention'), transcripts.Unavailable('damaged'),
+                            transcripts.Unavailable('provider error', state='error'),
+                            transcripts.Unavailable('provider error', state='error', retry=True)):
+                with self.subTest(boundary=boundary, retry=failure.retry, state=failure.state):
+                    attempts = []
+                    transient = failure.state == 'unavailable' and failure.retry is True
+                    def operation():
+                        attempts.append((root, directory, generation))
+                        if len(attempts) != 1:
+                            self.assertTrue(transient, 'Permanent info failures must propagate immediately')
+                            return expected
+                        with patch.object(transcripts, '_snapshot', side_effect=failure if boundary == 'snapshot' else None,
+                                          return_value=snapshot), \
+                                patch.object(transcripts, '_load', side_effect=failure):
+                            value = transcripts.info(root, directory, generation=generation)
+                        self.assertIs(getattr(value, 'retry', False), failure.retry)
+                        self.assertEqual((value.state, value.reason), (failure.state, str(failure)))
+                        return value
+                    with patch('test_codex_navigation_native.time',
+                               SimpleNamespace(monotonic=lambda: 0, sleep=lambda seconds: None)):
+                        if transient:
+                            self.assertIs(read_transcript(operation), expected)
+                        else:
+                            with self.assertRaises(transcripts.Unavailable) as caught:
+                                read_transcript(operation)
+                            self.assertNotIsInstance(caught.exception, transcripts.Retry)
+                            self.assertEqual(str(caught.exception), str(failure))
+                    self.assertEqual(attempts, [(root, directory, generation)] * (2 if transient else 1))
+
     def test_retry_keeps_the_original_cursor_and_does_not_hide_replacement(self):
         """A transient identity lock must not flake the native proof or refresh its old cursor and hide replacement."""
-        for outcome in ('replaced', 'busy', 'late-success', 'unavailable'):
+        for outcome in ('replaced', 'busy', 'late-success', 'unavailable', 'busy-info', 'late-success-info'):
             with self.subTest(outcome=outcome):
                 root, directory, cursor = object(), object(), object()
                 changed = transcripts.Changed('replaced', 'new-start', 'new-generation')
@@ -141,8 +185,10 @@ class NavigationReadTest(unittest.TestCase):
                     if outcome == 'unavailable':
                         self.assertEqual(rows.call_count, 1, 'Permanent unavailability must propagate')
                     self.assertLessEqual(rows.call_count, 5, 'Transcript retry deadline was reset')
-                    if outcome == 'late-success' and clock[0] >= .2:
+                    if outcome.startswith('late-success') and clock[0] >= .2:
                         return 'a read started after the deadline'
+                    if outcome in ('busy-info', 'late-success-info'):
+                        return transcripts.TranscriptInfo(state='unavailable', reason=str(error), retry=True)
                     raise error
                 with patch.object(transcripts, 'rows', side_effect=read) as rows, \
                         patch('test_codex_navigation_native.time',
@@ -152,7 +198,7 @@ class NavigationReadTest(unittest.TestCase):
                 if outcome == 'replaced':
                     self.assertIs(raised.exception, changed)
                     self.assertEqual(rows.call_count, 2)
-                elif outcome in ('busy', 'late-success'):
+                elif outcome in ('busy', 'late-success', 'busy-info', 'late-success-info'):
                     self.assertGreater(rows.call_count, 1)
                     self.assertLessEqual(rows.call_count, 5)
                     self.assertLessEqual(clock[0], .2)
@@ -213,7 +259,7 @@ class PrivateWire:
                                 key: params[key] for key in ('threadId', 'cwd', 'threadSource',
                                     'ephemeral', 'historyMode', 'sessionStartSource', 'excludeTurns',
                                     'approvalPolicy', 'approvalsReviewer', 'sandbox', 'permissions',
-                                    'runtimeWorkspaceRoots', 'clientUserMessageId', 'turnId')
+                                    'runtimeWorkspaceRoots', 'environments', 'clientUserMessageId', 'turnId')
                                 if key in params},
                             'parameter_keys': sorted(params),
                             'config_keys': sorted((params.get('config') or {}).keys())})
@@ -234,7 +280,7 @@ class PrivateWire:
                     self.records.append({'connection': connection, 'direction': 'notification',
                         'method': method, 'thread_id': params.get('threadId'),
                         'settings': {key: settings[key] for key in ('cwd', 'approvalPolicy', 'approvalsReviewer',
-                            'sandboxPolicy', 'activePermissionProfile', 'runtimeWorkspaceRoots')
+                            'sandboxPolicy', 'activePermissionProfile', 'runtimeWorkspaceRoots', 'environments')
                             if key in settings} if isinstance(settings, dict) else None})
                 elif not outgoing and not method and identifier in pending:
                     request, target_id = pending.pop(identifier)
@@ -243,7 +289,9 @@ class PrivateWire:
                     self.records.append({'connection': connection, 'direction': 'response',
                         'id': identifier, 'method': request,
                         'thread': {key: thread[key] for key in ('id', 'cwd', 'status', 'ephemeral', 'forkedFromId',
-                                                              'path', 'parentThreadId', 'canAcceptDirectInput')
+                                                              'path', 'parentThreadId', 'canAcceptDirectInput',
+                                                              'attachedToThreadId', 'environments',
+                                                              'threadSource', 'source')
                                    if key in thread},
                         'cwd': result.get('cwd'),
                         'grants': {key: result[key] for key in ('approvalPolicy', 'approvalsReviewer', 'sandbox',
@@ -290,6 +338,8 @@ class NativeNavigationTest(TerminalBase):
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
                                    text=True).strip() != 'codex-cli ' + version_text(CHECKED_VERSION):
             self.skipTest(f'native navigation evidence pinned to {version_text(CHECKED_VERSION)}')
+        if CHECKED_VERSION not in NAVIGATION_VERSIONS:
+            self.skipTest(f'In-terminal navigation is not qualified on Codex {version_text(CHECKED_VERSION)}')
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         requests = []
         work = self.work / 'project'
@@ -460,12 +510,8 @@ class NativeNavigationTest(TerminalBase):
                 idle()
             return saved['id']
 
-        def switch(text, previous):
-            generation = agents.runtime(directory).get('session_generation', 0)
-            offset = len(wire.records)
-            reason = 'resume' if text.startswith('/resume ') else text.removeprefix('/')
+        def complete_switch(previous, generation, offset, reason):
             method = 'thread/resume' if reason == 'resume' else 'thread/start'
-            command(text)
             request = until(lambda: next((row for row in wire.records[offset:]
                 if row['direction'] == 'request' and row['method'] == method and type(row['id']) is int), None), seconds=20)
             props, facts = until(lambda: committed_navigation(directory, launch=launch, previous=previous,
@@ -476,6 +522,13 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(facts.get('native_refusal'))
             self.assertIn((facts.get('usage') or {}).get('native_session_id'), (None, value))
             return value
+
+        def switch(text, previous):
+            generation = agents.runtime(directory).get('session_generation', 0)
+            offset = len(wire.records)
+            reason = 'resume' if text.startswith('/resume ') else text.removeprefix('/')
+            command(text)
+            return complete_switch(previous, generation, offset, reason)
 
         try:
             callback('NAV_A_SEED', original)
@@ -489,10 +542,11 @@ class NativeNavigationTest(TerminalBase):
             with self.assertRaises(transcripts.Changed) as replaced:
                 read_transcript(lambda: transcripts.rows(self.root, directory, after=initial.start))
             self.assertEqual(replaced.exception.reason, 'replaced')
-            earlier = next(row for row in read_transcript(lambda: transcripts.info(self.root, directory)).earlier
-                           if row.native_id == original)
-            self.assertEqual(read_transcript(lambda: transcripts.info(
-                self.root, directory, generation=earlier.generation)).native_id, original)
+            earlier_info = read_transcript(lambda: transcripts.info(self.root, directory))
+            self.assertIn(original, {row.native_id for row in earlier_info.earlier}, earlier_info)
+            earlier = next(row for row in earlier_info.earlier if row.native_id == original)
+            original_info = read_transcript(lambda: transcripts.info(self.root, directory, generation=earlier.generation))
+            self.assertEqual(original_info.native_id, original, original_info)
             hold = message('NAV_HOLD', second, wait=False)
             callback('NAV_HOLD', second)
             queued = message('NAV_QUEUED', second, wait=False)
@@ -582,14 +636,17 @@ class NativeNavigationTest(TerminalBase):
             until(lambda: 'Resume a previous session' in capture(), seconds=10)
             backend.run('send-keys', '-t', pane, '-l', 'NAV_THIRD')
             until(lambda: capture().count('NAV_THIRD') >= 2, seconds=10)
+            generation = agents.runtime(directory).get('session_generation', 0)
+            offset = len(wire.records)
             backend.run('send-keys', '-t', pane, 'Enter')
-            until(lambda: current() == third, seconds=20)
-            idle()
+            # The picker publishes its pointer before commit resets status.
+            # Old idle plus a new pointer does not admit the next command.
+            self.assertEqual(complete_switch(original, generation, offset, 'resume'), third)
             # This one controlled fault exercises the approved RPC boundary,
             # not a claim that the visible widget has acknowledged selection.
             wire.fail_history_target = original
-            command('/resume ' + original)
-            until(lambda: current() == original and wire.history_failed.is_set(), seconds=20)
+            self.assertEqual(switch('/resume ' + original, third), original)
+            until(wire.history_failed.is_set, seconds=20)
             # The failed history hydration leaves the widget on third. A raw
             # shell request there must fail locally rather than execute as it.
             # The checked TUI treats this RPC error as fatal, not a pane notice.
@@ -626,8 +683,8 @@ class NativeNavigationTest(TerminalBase):
             self.assertEqual([(row['from'], row['to'], row['reason']) for row in navigation], [
                 (original, second, 'new'), (second, third, 'clear'),
                 (third, original, 'resume'), (original, third, 'resume'), (third, original, 'resume')])
-            self.assertEqual({row.native_id for row in read_transcript(
-                lambda: transcripts.info(self.root, directory)).earlier}, {second, third})
+            lineage_info = read_transcript(lambda: transcripts.info(self.root, directory))
+            self.assertEqual({row.native_id for row in lineage_info.earlier}, {second, third}, lineage_info)
             # Reattachment keeps native saved grants, which a following /new
             # must inherit even though the resume CLI has no --add-dir flag.
             reattached = switch('/new', original)
@@ -665,6 +722,21 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(directory.is_relative_to(work))
             for row in primary_replies:
                 self.assertEqual(grant_set(row), effective_grants, row)
+                if CHECKED_VERSION == (0, 169, 0):
+                    for relation in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'):
+                        self.assertIn(relation, row['thread'], row)
+                        self.assertIsNone(row['thread'][relation], row)
+                    self.assertIn('threadSource', row['thread'], row)
+                    self.assertIn(row['thread']['threadSource'], (None, 'user'), row)
+                    environments = row['thread'].get('environments')
+                    self.assertIsInstance(environments, list, row)
+                    self.assertEqual(len(environments), 1, row)
+                    selected = environments[0]
+                    self.assertEqual(set(selected), {'environmentId', 'cwd', 'runtimeWorkspaceRoots'}, row)
+                    self.assertEqual(selected['environmentId'], 'local', row)
+                    self.assertEqual(selected['cwd'], str(work), row)
+                    self.assertEqual(sorted(set(selected['runtimeWorkspaceRoots'])),
+                                     effective_grants['runtimeWorkspaceRoots'], row)
             starts = [row for row in wire.records if row.get('direction') == 'request'
                       and row.get('method') == 'thread/start' and type(row.get('id')) is int]
             self.assertEqual([row['params'].get('sessionStartSource') for row in starts], [None, 'clear', None, None])

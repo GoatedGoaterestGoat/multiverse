@@ -98,13 +98,22 @@ class MarkerTest(PluginTestCase):
                 host._write_cursor(self.root, "probe", 2, "journal")
             self.assertEqual(marker.stat().st_ino == inode, not lasting)
 
-    def test_session_history_presence_never_infers_a_fresh_home_on_one_miss(self):
-        """A session journal can be the only surviving launch evidence, so one missing stat must not select this HOME."""
+    def test_session_history_presence_reads_append_only_evidence_afresh(self):
+        """Append-only absence must not delay transcript reads or hide later journal evidence; replaced runtime gaps still cannot select this HOME."""
         directory = self.root / "state" / "agents" / "worker"
         directory.mkdir(parents=True, exist_ok=True)
+        runtime = directory / "runtime.json"
+        store.write(runtime, {})
         journal = directory / "sessions.jsonl"
-        journal.write_text('{}\n')
-        with self.missing(journal):
-            self.assertFalse(api._never_launched(directory, {}))
-        with self.missing(journal, lasting=True):
+        with mock.patch.object(store.time, "sleep", side_effect=AssertionError("Append-only absence must not wait")):
             self.assertTrue(api._never_launched(directory, {}))
+            with journal.open("a") as stream:
+                stream.write('{}\n')
+            self.assertFalse(api._never_launched(directory, {}))
+            journal.unlink()
+            self.assertTrue(api._never_launched(directory, {}))
+        # A replaced runtime is a different protocol, including when no journal was ever created.
+        store.write(runtime, {"launch_id": "previous"})
+        with self.missing(runtime) as calls:
+            self.assertFalse(api._never_launched(directory, {}))
+            self.assertGreater(len(calls), 1)

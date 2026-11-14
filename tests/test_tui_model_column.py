@@ -1,12 +1,14 @@
 import contextlib
 import io
+import json
 import sys
+import threading
 import unittest
 from unittest import mock
 
 from multiverse import cli
 from multiverse.plugins.testing import PluginTestCase
-from multiverse.runtime import lifecycle
+from multiverse.runtime import lifecycle, native
 from multiverse.store import read, write
 from textual.widgets import DataTable
 
@@ -109,8 +111,9 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             with self.subTest("with room, the whole name and effort"):
                 line, width = drawn(d)
                 self.assertIn(f"{long_name} (xhigh)", line)
-        write(self.root / "views" / "default.json",
-              {"columns": ["name", "harness", "live", "status", "context", "model", "effort", "phase", "summary"]})
+        write(self.root / "views" / "default.json",  # enough columns that the long name can't have its room
+              {"columns": ["name", "harness", "live", "status", "context", "cost", "id", "model", "effort", "phase",
+                           "summary"]})
         async with self.dashboard(size=(112, 30)) as d:
             with self.subTest("without, the name is shortened and the effort kept whole"):
                 line, width = drawn(d)
@@ -131,6 +134,90 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 lines = [table.render_line(y).text for y in range(table.size.height)]
                 line = next(line for line in lines if "thinker" in line)
                 self.assertIn("… (xhigh)", line)
+
+    async def test_name_and_model_fit_their_widest_cell(self):
+        """Name and Model shrink to their widest cell, so short names and models leave no gap before the next column;
+        fragile because a column that only ever widens looks right in the data and shows only as space on screen."""
+        self.agent("ada", model="opus", effort="xhigh")
+        self.agent("long-named-agent-x")  # wider than the Name header, narrower than the column's usual width
+        write(self.root / "views" / "default.json", {"columns": ["name", "model", "effort", "summary"]})
+        async with self.dashboard(size=(140, 30)) as d:
+            table = d.app.query_one("#agents", DataTable)
+            widths = {column.key.value: column.width for column in table.columns.values()}
+            cells = {field: [table.get_cell(row, field) for row in table.rows] for field in ("name", "model")}
+            for field, usual in (("name", 26), ("model", 18)):
+                with self.subTest(field):
+                    widest = max(max(cell.cell_len for cell in cells[field]), len(table.columns[field].label.plain))
+                    self.assertLess(widest, usual)  # the fixture's names and models are short
+                    self.assertGreater(widest, len(table.columns[field].label.plain))  # set by a cell, not the header
+                    self.assertEqual(widths[field], widest)
+                    self.assertFalse([cell.plain for cell in cells[field] if "…" in cell.plain])
+
+    async def test_a_running_agents_model_cell_follows_its_session_else_the_record_else_the_default(self):
+        """The Model cell follows what a running agent's session reports, else its recorded model, else its harness's
+        default; it is easy to show the launch choice instead and never notice."""
+        settings = self.root / "harnesses" / "claude" / "harness.json"
+        write(settings, {**read(settings), "settings": {"model": "claude-haiku-5-5",
+                                                        "model_names": {"claude-sonnet-5-5": "Sonnet (team)"}}})
+        self.agent("reports", model="opus", effort="xhigh")
+        self.agent("noeffort", model="opus", effort="xhigh")
+        self.agent("stopped", model="opus")
+        self.agent("bare")
+        self.agent("pending")
+        self.agent("effortonly", model="opus", effort="xhigh")
+        rows = {row["name"]: row for row in lifecycle.listing(self.root, usage=False)}
+        opus, default = rows["stopped"]["model_name"], rows["bare"]["default_model_name"]
+        self.assertTrue(opus and default and default != "claude-haiku-5-5", (opus, default))
+        running = {"reports", "noeffort", "pending", "effortonly"}
+        reports = {"reports": ("claude-sonnet-5-5", "high"), "noeffort": ("claude-sonnet-5-5", None),
+                   "stopped": ("claude-sonnet-5-5", "low"), "pending": ("claude-sonnet-5-5", "medium"),
+                   "effortonly": (None, "low")}  # a session can report its effort without its model
+        real_observe, gate = lifecycle.observe, threading.Event()
+        self.addCleanup(gate.set)
+
+        def observe(properties, runtime, snapshots=None):
+            found = real_observe(properties, runtime, snapshots)
+            return {**found, "live": "alive"} if properties.get("name") in running else found
+
+        def usage_snapshot(scope, properties, facts, reconciled=False):
+            gate.wait(30)
+            model, effort = reports.get(properties["name"], (None, None))
+            return {"state": "ok", "value": {"context": {"tokens": 1000, "window": 200000}, "model": model,
+                                             "effort": effort, "observed_at": "2026-11-12T12:00:00+00:00"}}
+
+        before = {"reports": f"{opus} (xhigh)", "noeffort": f"{opus} (xhigh)", "stopped": opus, "bare": default,
+                  "pending": default, "effortonly": f"{opus} (xhigh)"}
+        after = {**before, "reports": "Sonnet (team) (high)", "noeffort": "Sonnet (team) (xhigh)",
+                 "pending": "Sonnet (team) (medium)", "effortonly": f"{opus} (low)"}
+
+        def cells(d):
+            headers, found = d.table()
+            return {row[0].split()[-1]: row[headers.index("Model")].strip() for row in found
+                    if row[0].split()[-1] in before}
+
+        write(self.root / "views" / "default.json", {"columns": ["name", "model", "effort", "summary"]})
+        with mock.patch.object(lifecycle, "observe", observe), mock.patch.object(native, "usage_snapshot", usage_snapshot):
+            async with self.dashboard(size=(160, 30)) as d:
+                with self.subTest("before a running agent's reading lands: its record, else the default"):
+                    await d.until(lambda: d.app.usage_reading, "the usage read")
+                    self.assertEqual(cells(d), before)
+                with self.subTest("then what its session reports; a stopped agent keeps its record"):
+                    gate.set()
+                    await d.until(lambda: cells(d) == after, "the readings")
+            with self.subTest("mv2 list --columns model shows the same"):
+                out = io.StringIO()
+                with mock.patch.object(sys, "argv", ["mv2", "-u", str(self.root), "list", "--columns", "name,model"]), \
+                        contextlib.redirect_stdout(out):
+                    cli.main()
+                listed = {line.split()[0]: line.split(None, 1)[1].strip() for line in out.getvalue().splitlines()}
+                self.assertEqual({name: listed.get(name) for name in after}, after)
+            with self.subTest("mv2 list --json --columns observed_model_name reads the usage it needs"):
+                out = io.StringIO()
+                with mock.patch.object(sys, "argv", ["mv2", "-u", str(self.root), "list", "--json", "--columns",
+                                                     "name,observed_model_name"]), contextlib.redirect_stdout(out):
+                    cli.main()
+                found = {row["name"]: row["observed_model_name"] for row in json.loads(out.getvalue())}
+                self.assertEqual((found["reports"], found["bare"]), ("Sonnet (team)", None))
 
 
 if __name__ == "__main__":

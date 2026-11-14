@@ -43,10 +43,12 @@ class AgentNamesTest(BaseTest):
     def cli(self, *arguments):
         output = io.StringIO()
         with patch.object(sys, 'argv', ['mv2', '-u', str(self.root), *arguments]), \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output), \
-                self.assertRaises(SystemExit) as stopped:
-            cli.main()
-        return stopped.exception.code, output.getvalue()
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                cli.main()
+            except SystemExit as stopped:
+                return stopped.code, output.getvalue()
+        return 0, output.getvalue()
 
     def test_duplicate_name_is_refused_before_side_effects_in_every_end_state(self):
         """A duplicate name is refused before any file or tmux side effect in every end state; fragile because new
@@ -161,15 +163,34 @@ class AgentNamesTest(BaseTest):
         naming each match without saving anything, and old duplicate names still resolve by prefix; fragile because
         the precedence is subtle, and a break silently sends to, kills or resumes the wrong agent (abac381,
         14bc474)."""
-        with self.subTest('leftover or damaged peer folders do not steal a healthy short ID'):
+        with self.subTest('distinct leftover and damaged IDs do not shadow a healthy prefix'):
             valid = self.record('healthy', identifier='77777777-0000-4000-8000-000000000001')
             for suffix, contents in ((2, None), (3, '{broken')):
                 damaged = self.root / 'state/agents' / f'77777777-0000-4000-8000-{suffix:012d}'
                 damaged.mkdir()
                 if contents is not None:
                     (damaged / 'properties.json').write_text(contents)
-            self.assertEqual(agents.directory(self.root, '77777777'), valid)
+            for allow_damaged in (False, True):
+                self.assertEqual(agents.directory(self.root, '77777777', allow_damaged=allow_damaged), valid)
+            self.assertEqual(agents.directory(self.root, valid.name), valid)
             self.assertEqual(agents.directory(self.root, damaged.name, allow_damaged=True), damaged)
+        with self.subTest('a readable stored ID in a damaged record also preserves ambiguity'):
+            valid = self.record('stored-id', identifier='66666666-0000-4000-8000-000000000001')
+            damaged = self.record('bad-id', identifier='99999999-0000-4000-8000-000000000002')
+            write(damaged / 'properties.json', {'id': valid.name, 'harness': []})
+            for reference in (valid.name, valid.name[:8]):
+                with self.assertRaises(agents.AmbiguousAgent):
+                    agents.directory(self.root, reference, allow_damaged=True)
+        with self.subTest('a lone damaged record still needs its exact recovery address'):
+            damaged = self.root / 'state/agents' / '88888888-0000-4000-8000-000000000001'
+            damaged.mkdir()
+            for contents in (None, '{broken'):
+                if contents is not None:
+                    (damaged / 'properties.json').write_text(contents)
+                for allow_damaged in (False, True):
+                    with self.assertRaises(agents.AgentNotFound):
+                        agents.directory(self.root, '88888888', allow_damaged=allow_damaged)
+                self.assertEqual(agents.directory(self.root, damaged.name, allow_damaged=True), damaged)
         with self.subTest('an exact name beats another agent\'s uuid prefix'):
             named = self.record('a', identifier='33333333-0000-4000-8000-000000000003')
             prefix = self.record('b', identifier='ab2ea794-0000-4000-8000-000000000004')
@@ -212,3 +233,35 @@ class AgentNamesTest(BaseTest):
                 for text in (*ids, 'alpha', 'beta'):
                     self.assertIn(text, output)
         self.assertEqual(list(self.root.glob('state/agents/*/inbox.jsonl')), [])
+
+    def test_id_prefixes_cannot_hide_a_recordless_recovery_address(self):
+        """Shortening an ambiguous full ID must never trash, launch or write the real agent beside its orphan folder."""
+        original = self.record('moved')
+        properties = read(original / 'properties.json')
+        properties.pop('native_session_id')  # A genuinely never-launched agent; no native process is involved.
+        write(original / 'properties.json', properties)
+        write(original / 'runtime.json', {})
+        moved = original.with_name(str(uuid4()))
+        original.rename(moved)
+        original.mkdir()
+        (original / '.inbox.lock').touch()
+        before = {path.relative_to(self.root): path.read_bytes()
+                  for path in (self.root / 'state/agents').rglob('*') if path.is_file()}
+        with patch.object(Tmux, 'snapshot', return_value=({}, None)):
+            for reference in (original.name[:8], original.name):
+                for command in (('remove', reference), ('inspect', reference),
+                                ('send', reference, '--delivery', 'inbox-only', '--text', 'must not save'),
+                                ('report', '--agent', reference, '--summary', 'must not write'),
+                                ('inbox', '--agent', reference, '--peek'), ('kill', reference), ('resume', reference)):
+                    code, output = self.cli(*command)
+                    self.assertEqual(code, 1, (command, output))
+                    self.assertIn('found 2', output, (command, output))
+                    self.assertIn(moved.name, output)
+                    self.assertIn(original.name, output)
+        self.assertTrue(moved.is_dir())
+        self.assertTrue(original.is_dir())
+        self.assertEqual({path.relative_to(self.root): path.read_bytes()
+                          for path in (self.root / 'state/agents').rglob('*') if path.is_file()}, before)
+        self.assertEqual(agents.directory(self.root, 'moved'), moved)
+        self.assertEqual(agents.directory(self.root, moved.name), moved)
+        self.backend.create.assert_not_called()

@@ -1,8 +1,29 @@
-"""Measured context from Codex's exact-thread app-server notifications."""
+"""Measured context and latest primary-turn metadata for one exact Codex thread."""
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..types import NativeResult
 from ...store import read, retry_missing
+
+
+# Qualify turn-context observations independently of other versioned features.
+MODEL_VERSIONS = frozenset({'0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'})
+
+
+def observation(session, *, bridge):
+    from . import observation as rollout_observation, transcripts
+    versions = session.native_versions
+    if (not isinstance(versions, Mapping) or not isinstance(versions.get('cli'), str)
+            or versions.get('cli') not in MODEL_VERSIONS
+            or bridge and versions.get('daemon') != versions.get('cli')):
+        return {}
+    try:
+        home = transcripts.reading_home(session)
+        if not home or not session.native_id:
+            return {}
+        return rollout_observation.read(home, session.native_id)
+    except (OSError, ValueError, TypeError):
+        return {}
 
 
 def counter(value):
@@ -67,9 +88,11 @@ def measured(session, *, bridge=True):
                           or isinstance(relay, dict) and relay.get('state') == 'lost')
             return NativeResult('ok', 'Last known context reported by Codex app-server' if last_known
                                 else 'Last measured context reported by Codex app-server', {
+                'native_session_id': usage['native_session_id'],
                 'context': {**usage['context'], **({'last_known': True} if last_known else {})},
                 'context_source': usage['source'],
-                'context_reported_at': usage.get('reported_at')})
+                'context_reported_at': usage.get('reported_at'),
+                **observation(session, bridge=bridge)})
     except (OSError, ValueError, TypeError):
         pass
     return NativeResult('unavailable', 'Codex has no saved context usage for this thread yet')

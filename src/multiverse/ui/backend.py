@@ -10,7 +10,7 @@ from ..store import read
 from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse, unfocus)
 from .. import display, plugins
-from ..runtime import lifecycle, prompts
+from ..runtime import lifecycle, model_choices as model_policy, prompts
 from . import columns, plugin_panels, theme
 from .columns import BLOCKED_ON, COLUMNS, EFFORT, MARKS, UNREAD
 from .panels import error_widget
@@ -31,7 +31,7 @@ def harnesses(root):
     return sorted(available, key=lambda name: ({"codex": 0, "claude": 1}.get(name, 2), name))
 
 
-USAGE_FIELDS = ("usage", "tokens", "usage_detail")
+USAGE_FIELDS = lifecycle.USAGE_FIELDS
 
 
 def usage_key(row):
@@ -223,10 +223,25 @@ class LocalBackend:
         found = lifecycle.model_choices(root, harness)
         if found is None:
             return None
-        return {"models": [{"id": m["id"], "name": m.get("name") or m["id"], "efforts": list(m.get("efforts") or ()),
+        try:  # named as the Model column names them: the universe's own name, else mv2's display name
+            names, overrides = model_policy.display_names(root, harness)
+            # What leaving the model unset records, so its line names it as that agent's Model cell will: a
+            # narrowed list records the canonical ID, otherwise settings.model as written (an alias stays one).
+            from .. import harnesses as adapters  # the module: 'harnesses' here names the configured-harness lister
+            recorded = found["default_model"] if found["narrowed"] else adapters.load(root, harness).default_model
+        except (OSError, ValueError):
+            names, overrides, recorded = {}, {}, None
+
+        def name(model):
+            return overrides.get(model["id"]) or names.get(model["id"]) or model.get("name") or model["id"]
+        default = next((m for m in found["models"] if m["id"] == found["default_model"]), None)
+        # The Model column's own lookup (the exact spelling's custom name, else mv2's for it trimmed).
+        default_label = model_policy.recorded_name(root, {"model": recorded, "harness": harness}, {}) or (
+            name(default) if default else None)
+        return {"models": [{"id": m["id"], "name": name(m), "efforts": list(m.get("efforts") or ()),
                             "effort_unset": m["effort_unset"]} for m in found["models"]],
                 "free_form": found["free_form"], "narrowed": found["narrowed"], "unset": found["unset"],
-                "default_model": found["default_model"],
+                "default_model": found["default_model"], "default_label": default_label,
                 "problems": list(found["problems"])}
 
     def send(self, root, reference, text, delivery='steer', queue_only=False):

@@ -39,19 +39,32 @@ class FleetView:
             widths["name"] = 23
         if self.draft and "harness" in widths:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
+        moving = (("  ⇢ moving", f"italic {theme.YELLOW}"),)
+
+        def extras(row):
+            return moving if self.moving and row["key"] == self.moving["key"] else ()
+
+        # Name fits its widest cell, guides and marks included, never narrower than its header nor wider than its
+        # usual width (a longer name is shortened), so short names leave no gap; a draft row keeps the full width
+        # to type a name in.
+        if "name" in widths and not self.draft:
+            widest = max((COLUMNS["name"].render(row, None, extras(row)).cell_len for row in projected), default=0)
+            widths["name"] = min(widths["name"], max(cell_len(COLUMNS["name"].title), widest))
         flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
                     or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
         # Core's Phase and Model (not a plugin column standing in for one) grow to fit what they show, a blocked
-        # agent's dependency or a long model name and its effort, but only into the room the other columns leave,
+        # agent's report age or a long model name and its effort, but only into the room the other columns leave,
         # the flexible one keeping its least width; what still doesn't fit is shortened by the column itself.
-        growing = ((COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or "")),
-                   (COLUMNS["model"], MODEL_WIDE, COLUMNS["model"].label))
-        for column, bound, shown in growing:
+        # Model also shrinks to its widest label (never narrower than its header), so short models leave no gap.
+        growing = ((COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or ""), False),
+                   (COLUMNS["model"], MODEL_WIDE, COLUMNS["model"].label, True))
+        for column, bound, shown, fits in growing:
             for key in [key for key in widths if lookup(key) is column]:
                 room = (available - 2 * len(fields) - (6 if flexible else 0)
                         - sum(w for k, w in widths.items() if k not in (key, flexible)))
-                widths[key] = max(widths[key], min(bound, room, max(
-                    (cell_len(shown(row)) for row in projected if row["kind"] == "agent"), default=0)))
+                widest = max((cell_len(shown(row)) for row in projected if row["kind"] == "agent"), default=0)
+                least = min(widths[key], max(cell_len(column.title), widest)) if fits else widths[key]
+                widths[key] = max(least, min(bound, room, widest))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -75,14 +88,12 @@ class FleetView:
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        moving = (("  ⇢ moving", f"italic {theme.YELLOW}"),)
 
         def cell(row, field):
             if row["kind"] == "draft":
                 return self.draft_cell(row, field)
             if field == "name":  # its marks stay in view: a long name is shortened to the column's width instead
-                return COLUMNS["name"].render(row, widths["name"],
-                                              moving if self.moving and row["key"] == self.moving["key"] else ())
+                return COLUMNS["name"].render(row, widths["name"], extras(row))
             column = lookup(field)
             if column is COLUMNS["phase"] or column is COLUMNS["model"] or isinstance(column, PluginColumn):
                 return column.render(row, widths[field])

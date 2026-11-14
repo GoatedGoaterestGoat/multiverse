@@ -12,6 +12,9 @@ from multiverse import harnesses
 from test_multiverse import BaseTest
 
 
+ABSENT = object()
+
+
 class ClaudeUsageTest(BaseTest):
     def setUp(self):
         super().setUp()
@@ -110,10 +113,10 @@ class ClaudeUsageTest(BaseTest):
             project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0),
                                       self.built('2026-10-04T00:10:00.500Z'), self.built('2026-10-04T00:10:00.501Z'))
             with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}):
-                self.assertEqual(context_reading(native_id), (150010, '2026-10-04T00:00:00Z'))
+                self.assertEqual(context_reading(native_id)[:2], (150010, '2026-10-04T00:00:00Z'))
                 with (project / f'{native_id}.jsonl').open('a') as handle:
                     handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
-                self.assertEqual(context_reading(native_id), (32005, '2026-10-04T00:11:00Z'))
+                self.assertEqual(context_reading(native_id)[:2], (32005, '2026-10-04T00:11:00Z'))
 
     def stamped(self, id, stamp, input_tokens=1, read=0, written=0):
         usage = {'input_tokens': input_tokens, 'output_tokens': 7, 'cache_read_input_tokens': read,
@@ -126,6 +129,124 @@ class ClaudeUsageTest(BaseTest):
         usage = {'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}
         return json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
             'id': str(uuid4()), 'model': '<synthetic>', 'usage': usage, 'content': [{'type': 'text', 'text': 'kept'}]}}) + '\n'
+
+    def turn(self, id, stamp, model, usage=1, sidechain=False, **effort):
+        """A main-thread response with its model (ABSENT: no model key), effort fields as given, and usage."""
+        row = {'type': 'assistant', 'timestamp': stamp, **effort, 'message': {
+            'id': id, 'model': model, 'content': [{'type': 'text'}],
+            'usage': {'input_tokens': usage, 'output_tokens': usage, 'cache_read_input_tokens': 0,
+                      'cache_creation_input_tokens': 0}}}
+        if model is ABSENT:
+            del row['message']['model']
+        return json.dumps({**row, 'isSidechain': True} if sidechain else row) + '\n'
+
+    def test_the_observed_turn_is_the_latest_real_main_thread_response(self):
+        """A wrong row or effort field in the latest-turn reading shows a plausible model the session isn't using."""
+        old = self.turn('msg_1', '2026-11-12T10:00:00Z', 'claude-opus-5-5', effort='high', perTurnEffort='high')
+        sonnet = self.turn('msg_2', '2026-11-12T10:05:00Z', 'claude-sonnet-5-5', effort='low', perTurnEffort='low')
+        cases = [
+            ('the latest real response wins', [old, sonnet], ('claude-sonnet-5-5', 'low', '2026-11-12T10:05:00Z')),
+            ("Claude's own rows (API errors, an install) never count",
+             # Every synthetic row seen has zero usage; the model alone must still keep one out.
+             [sonnet, self.turn('msg_3', '2026-11-12T10:06:00Z', '<synthetic>', usage=1, perTurnEffort='xhigh'),
+              self.built('2026-11-12T10:07:00Z')], ('claude-sonnet-5-5', 'low', '2026-11-12T10:05:00Z')),
+            ('a sidechain row never counts',
+             [sonnet, self.turn('msg_4', '2026-11-12T10:06:00Z', 'claude-haiku-5-5', sidechain=True, effort='medium')],
+             ('claude-sonnet-5-5', 'low', '2026-11-12T10:05:00Z')),
+            ("a compaction's kept copy (zero usage) never counts",
+             [sonnet, self.turn('msg_1', '2026-11-12T10:06:00Z', 'claude-opus-5-5', usage=0, effort='high')],
+             ('claude-sonnet-5-5', 'low', '2026-11-12T10:05:00Z')),
+            ('perTurnEffort, when present, is the effort', [self.turn('msg_5', '2026-11-12T10:08:00Z',
+             'claude-opus-5-5', effort='high', perTurnEffort='max')], ('claude-opus-5-5', 'max', '2026-11-12T10:08:00Z')),
+            ('a null perTurnEffort is no effort, whatever effort says', [self.turn('msg_6', '2026-11-12T10:08:00Z',
+             'claude-haiku-4-5-20251001', effort='high', perTurnEffort=None)], ('claude-haiku-4-5-20251001', None, '2026-11-12T10:08:00Z')),
+            ('without perTurnEffort, effort is', [self.turn('msg_7', '2026-11-12T10:08:00Z', 'claude-opus-5',
+             effort='xhigh')], ('claude-opus-5', 'xhigh', '2026-11-12T10:08:00Z')),
+            ('no effort recorded', [self.turn('msg_8', '2026-11-12T10:08:00Z', 'claude-opus-5-5')],
+             ('claude-opus-5-5', None, '2026-11-12T10:08:00Z')),
+            *((f'a latest reply with model {label} keeps its own effort and time, never an older model',
+               [old, self.turn('msg_9', '2026-11-12T10:09:00Z', model, perTurnEffort='low')],
+               (None, 'low', '2026-11-12T10:09:00Z'))
+              for label, model in (('absent', ABSENT), ('null', None), ('empty', ''), ('not a string', 123))),
+        ]
+        adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+        for name, rows, expected in cases:
+            with self.subTest(name):
+                native_id = str(uuid4())
+                project = self.transcript(native_id, *rows)
+                # A subagent's newer turn is its own conversation's.
+                (project / native_id / 'subagents' / 'agent-1.jsonl').write_text(
+                    self.turn('sub_1', '2026-11-12T11:00:00Z', 'claude-haiku-5-5', effort='medium'))
+                value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value
+                self.assertEqual((value.get('model'), value.get('effort'), value.get('observed_at')), expected)
+        def observed(native_id):
+            value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value or {}
+            return value.get('model'), value.get('effort'), value.get('observed_at')
+        mine = ('claude-sonnet-5-5', 'low', '2026-11-12T10:05:00Z')
+        for name, session, expected in (("another conversation's reply", str(uuid4()), mine),
+                                        ('a reply whose sessionId is null', None, mine),
+                                        ("this conversation's reply", 'SELF', ('claude-haiku-5-5', 'medium', '2026-11-12T10:06:00Z'))):
+            with self.subTest(name):
+                native_id = str(uuid4())
+                self.transcript(native_id, sonnet, self.turn('msg_s', '2026-11-12T10:06:00Z', 'claude-haiku-5-5',
+                                effort='medium', sessionId=native_id if session == 'SELF' else session))
+                self.assertEqual(observed(native_id), expected)
+        with self.subTest('a complete unreadable row after the latest reply makes it unknown, until a later reply'):
+            native_id = str(uuid4())
+            project = self.transcript(native_id, sonnet)
+            self.assertEqual(observed(native_id), mine)
+            with (project / f'{native_id}.jsonl').open('a') as handle:
+                handle.write('{"type": "assistant", "message": {"mod')  # unfinished: Claude is still writing it
+            self.assertEqual(observed(native_id), mine)
+            with (project / f'{native_id}.jsonl').open('a') as handle:
+                handle.write('\n')  # now a complete row that can't be read
+            self.assertEqual(observed(native_id), (None, None, None))
+            with (project / f'{native_id}.jsonl').open('a') as handle:
+                handle.write(self.turn('msg_n', '2026-11-12T10:07:00Z', 'claude-opus-5-5', perTurnEffort='high'))
+            self.assertEqual(observed(native_id), ('claude-opus-5-5', 'high', '2026-11-12T10:07:00Z'))
+        with self.subTest('before any turn, nothing is observed'):
+            native_id = str(uuid4())
+            self.transcript(native_id, json.dumps({'type': 'user', 'message': {'content': 'hi'}}) + '\n')
+            value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value
+            self.assertEqual([key for key in ('model', 'effort', 'observed_at') if value and value.get(key)], [])
+
+    def test_usage_reads_keep_no_rows_and_transcript_reads_keep_a_few(self):
+        """The dashboard reads every agent's usage on each listing; an index that kept an entry per row for each
+        transcript, never evicted, held about 1.5 times every transcript in memory (0.7 GB on one machine)."""
+        from multiverse.harnesses.claude import transcripts as t
+        self.enterContext(patch.object(t, '_usage', t.OrderedDict()))
+        self.enterContext(patch.object(t, '_transcripts', t.OrderedDict()))
+        adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+        natives = [str(uuid4()) for _ in range(t.FULL_INDEXES + 3)]
+        for native_id in natives:
+            project = self.transcript(native_id, self.turn('m1', '2026-11-13T10:00:00Z', 'claude-opus-5-5', effort='high'),
+                                      self.turn('m2', '2026-11-13T10:01:00Z', 'claude-sonnet-5-5', effort='low'))
+            (project / native_id / 'subagents' / 'agent-1.jsonl').write_text(self.response('sub_1', 3, 4))
+            value = adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=native_id)).value
+            self.assertEqual((value['total_tokens'], value['model'], value['effort']), (2 + 2 + 7, 'claude-sonnet-5-5', 'low'))
+        self.assertEqual(len(t._usage), 2 * len(natives))  # each main and subagent transcript
+        self.assertEqual([len(index.entries) for index in t._usage.values()], [0] * len(t._usage))
+        self.assertEqual(len(t._transcripts), 0)  # usage builds no full index
+        for native_id in natives:
+            self.assertEqual(len(t.newest_copy(native_id, None, ()).entries), 2)  # a transcript read: every row
+        self.assertEqual(len(t._transcripts), t.FULL_INDEXES)
+        # A full index read as the file grows hashes its rows as a fresh read does (cursors and positions use them).
+        grown = t.newest_copy(natives[0], None, ())
+        path = grown.path
+        with path.open('a') as handle:
+            handle.write(self.turn('m3', '2026-11-13T10:02:00Z', 'claude-opus-5-5'))
+        self.assertEqual([e.chain for e in grown.read().entries], [e.chain for e in t.Transcript(path).read().entries])
+        # An index evicted and built again starts above every version a reader could hold: a history that changed
+        # while no index watched it (a compaction putting rows before ones already read) is never read as grown.
+        held = t.newest_copy(natives[-1], None, ())
+        seen = t.analyse(held).version
+        for native_id in natives[:t.FULL_INDEXES]:
+            t.newest_copy(native_id, None, ())
+        self.assertNotIn(held.path, t._transcripts)
+        self.assertGreater(t.analyse(t.newest_copy(natives[-1], None, ())).version, seen)
+        self.enterContext(patch.object(t, 'USAGE_INDEXES', 4))
+        adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=natives[0]))
+        self.assertEqual(len(t._usage), 4)
 
     def reported(self):
         """An agent whose last response (00:00, 150k) the mod reported at 00:05."""

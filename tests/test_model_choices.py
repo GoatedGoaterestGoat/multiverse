@@ -46,6 +46,21 @@ class RunAdapter(Models, Provider):
 
 
 class ModelChoicesTest(BaseTest):
+    def test_subset_refusals_name_the_configured_keys(self):
+        """Resolved provider IDs can hide which subset key a person can select or edit."""
+        adapter = LaunchAdapter()
+        adapter.settings = {'models': {'quick': {}, 'steady': {}}}
+        for model in (None, 'plain'):
+            with self.subTest(model=model):
+                checked = model_choices.check(self.root, adapter, model, environment={})
+                self.assertFalse(checked.ok)
+                self.assertIn('model from quick, steady', checked.reason)
+                self.assertNotIn('model from fast', checked.reason)
+                self.assertIn('harness.json', checked.reason)
+        self.assertEqual(model_choices.check(self.root, adapter, 'quick', environment={}).model, 'fast')
+        self.assertEqual([item.id for item in model_choices.catalog(self.root, adapter, environment={}).models],
+                         ['fast', 'steady'])
+
     def configure(self, harness, settings):
         path = self.root / 'harnesses' / harness / 'harness.json'
         value = read(path)

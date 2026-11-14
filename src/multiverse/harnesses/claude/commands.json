@@ -1,5 +1,5 @@
 {
-  "claude_code": "2.1.322",
+  "claude_code": "2.1.325",
   "note": "Claude Code's built-in commands that mv2 slash may run, checked by claude-support's version check. For each form, bare and with arguments: runs (acts on this session and prints), prompt (expands into a prompt: the agent answers in a turn), screen (opens an interactive screen, refused), settings (also saves to the person's Claude settings: runs only when a person runs it, and its result says so; an agent or a plugin is refused and pointed at mv2 resume --model or --effort), managed (mv2's own command instead), person (Claude runs it only when the person asks), hidden (its output goes only to the model, as a hidden row). A built-in not listed here, or a form left out, is refused as not classified; plugin, user and MCP commands are not listed and run.",
   "commands": {
     "clear": {

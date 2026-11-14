@@ -93,6 +93,7 @@ class QueueReadTest(unittest.TestCase):
                 observed = self.read(session=replace(self.session, queue_state={'state': 'paused'}),
                     overrides={'thread/read': {'result': {'thread': {'id': self.session.native_id,
                         'cwd': self.session.workspace, 'status': {'type': state}, 'canAcceptDirectInput': False}}}})
+                self.assertEqual(observed.state, 'ok')
                 self.assertEqual(observed.value['coverage'], 'complete')
                 self.assertEqual([r.method for r in self.requests], ['initialize', 'thread/read', 'thread/queue/list'])
 
@@ -108,16 +109,20 @@ class QueueReadTest(unittest.TestCase):
                 {'native_versions': {'cli': '0.166.0', 'daemon': '0.167.1'}},
                 {'native_versions': {'cli': '0.167.1', 'daemon': '0.167.2'}},
                 {'native_versions': {'cli': '0.167.2', 'daemon': '0.167.1'}},
-                {'native_versions': {'cli': '0.167.3', 'daemon': '0.167.3'}}):
+                {'native_versions': {'cli': '0.169.0', 'daemon': '0.167.2'}},
+                {'native_versions': {'cli': '0.167.2', 'daemon': '0.169.0'}},
+                {'native_versions': {'cli': '0.168.0', 'daemon': '0.168.0'}},
+                {'native_versions': {'cli': '0.169.1', 'daemon': '0.169.1'}}):
             with self.subTest(changes=changes):
                 self.specs.clear()
                 observed = self.read(session=replace(self.session, **changes))
                 self.assertEqual(observed.state, 'unavailable')
                 self.assertEqual(self.specs, [])
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0'):
             with self.subTest(version=version):
                 observed = self.read(session=replace(self.session, native_versions={'cli': version, 'daemon': version}),
                     overrides={'initialize': {'result': {'userAgent': 'origin/' + version}}})
+                self.assertEqual(observed.state, 'ok')
                 self.assertEqual(observed.value['coverage'], 'complete')
         for greeting in (None, '', 'codex/0.167.0', 'codex/0.168.0', 'codex/0.167.1-beta',
                          'unverified prefix codex/0.167.1', 'codex/0.167.10'):

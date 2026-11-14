@@ -26,7 +26,7 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from textual.css.query import NoMatches
 from textual.worker import WorkerFailed
 
-from ..display import clean, phase_label, summary_label
+from ..display import clean, model_label, phase_label, summary_label
 from ..plugins import loader
 from . import columns, theme
 from .backend import LocalBackend, usage_identity, usage_key
@@ -308,6 +308,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             if reading and reading[0] == usage_identity(member) and "identity_error" not in member:
                 member.update(reading[1])
                 member.pop("usage_pending", None)
+                if "model_label" in member:  # a running agent's Model cell follows what its session reports
+                    member["model_label"] = model_label(member, effort=columns.EFFORT in self.snapshot.get("columns", ()))
                 changed = True
         if changed:
             self.populate_table()

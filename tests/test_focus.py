@@ -156,6 +156,8 @@ class FocusRecordTest(BaseTest):
         messages back for a turn longer, or none."""
         for status in ('idle', 'waiting'):
             with self.subTest(status=status):
+                if status == 'waiting':
+                    self.status('working')  # a permission prompt or a question waits inside a turn
                 self.status(status)
                 focus.start(self.directory, turn=True)
                 if status == 'idle':
@@ -166,6 +168,65 @@ class FocusRecordTest(BaseTest):
         # The agent runs focus --turn inside its turn, whatever its last reported status says.
         self.status('waiting')
         self.assertEqual(focus.start(self.directory, turn=True, by='agent')['turns'], 2)
+
+    def test_a_dialog_opened_while_idle_is_not_a_turn(self):
+        """A command's dialog the person opens while the agent is idle (Claude's /model picker) reports waiting
+        outside any turn; counting its close as a turn end ended a --turn focus and sent the held note before the
+        person answered."""
+        self.status('working')                                 # the agent's turn, reported
+        focus.start(self.directory, turn=True, by='agent')  # the agent asks, and focuses itself until the answer
+        self.status('idle')                                    # its turn ends
+        for status in ('waiting', 'idle', 'waiting', 'idle'):  # the person opens and closes a dialog, twice
+            self.status(status)
+        self.assertIsNotNone(focus.current(self.directory))
+        self.status('working')                                 # the answer's turn
+        self.status('waiting')                                 # a prompt inside it
+        agents.update_runtime(self.directory, self.launch, observed_model='x')  # a record update while it waits
+        self.status('idle')
+        self.assertIsNone(focus.current(self.directory))
+
+    def test_a_turn_end_counts_once_per_turn(self):
+        """Only a turn's own end counts, once: a repeated idle, a turn that works, waits and works again, and a status
+        of unknown in between; a break ends a --turn focus early or late."""
+        cases = [  # (case, statuses after a turns=2 focus starts mid-turn, focus still on at the end)
+            ('one turn end, then idle again', ('idle', 'idle'), True),
+            ('working, waiting, working: one turn', ('idle', 'working', 'waiting', 'working', 'idle'), False),
+            ('unknown in between never counts', ('unknown', 'idle', 'working', 'unknown', 'idle'), True),
+        ]
+        for case, statuses, held in cases:
+            with self.subTest(case):
+                self.status('working')
+                focus.end(self.directory)
+                focus.start(self.directory, turn=True, by='agent')
+                for status in statuses:
+                    self.status(status)
+                self.assertEqual(focus.current(self.directory) is not None, held)
+
+    def test_a_record_written_before_the_turn_flag_ends_a_working_turn_only(self):
+        """A runtime record from before mv2 kept `in_turn`: a turn running at the upgrade still ends, and a wait whose
+        start mv2 never saw doesn't count; a break ends a focus on an idle-time dialog, or never ends the running turn."""
+        for before, left in (('working', 1), ('waiting', 1)):  # working: 2 turns, one counted; waiting: 1, none counted
+            with self.subTest(before=before):
+                store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': before})
+                focus.end(self.directory)
+                started = focus.start(self.directory, turn=True)['turns']
+                self.status('idle')
+                self.assertEqual((started, focus.current(self.directory)['turns']), (2 if before == 'working' else 1, left))
+        with self.subTest('working, then a prompt in that turn'):  # the saved working proves the wait's turn
+            store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'working'})
+            focus.end(self.directory)
+            self.status('waiting')
+            focus.start(self.directory, turn=True)  # the person's, while it waits on them: one turn
+            self.status('idle')
+            self.assertIsNone(focus.current(self.directory))
+        for flag in ('false', 1, ['x']):  # a damaged flag proves nothing
+            with self.subTest(flag=flag):
+                store.write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'waiting',
+                                                               'in_turn': flag})
+                focus.end(self.directory)
+                focus.start(self.directory, turn=True)
+                self.status('idle')
+                self.assertIsNotNone(focus.current(self.directory))
 
     def test_a_turn_end_saved_before_a_turn_focus_never_counts_against_it(self):
         """A focus --turn that starts just after a turn end was saved is not consumed by that turn end; a break ends
@@ -553,6 +614,57 @@ class FocusCommandTest(BaseTest):
         self.output('send', 'asker', '--text', 'only', '--delivery', 'inbox-only')
         self.assertEqual(self.output('unfocus', agent='asker'), 'Unfocused; messages reach you normally again. You '
                          'have 1 unread inbox message, sent while you were focused: read it now with mv2 inbox.\n')
+
+    def test_focus_says_which_follow_ups_its_harness_already_holds(self):
+        """mv2 focus says when follow-ups were queued before it, which it won't stop, and for --turn that their turn
+        will likely end it; without the note an agent waits for an answer while its focus is used up."""
+        from multiverse.harnesses.types import QueuedPrompt, QueueReport
+        from multiverse.runtime import queued_prompts
+        from multiverse.ui.backend import LocalBackend
+        def complete(*modes):
+            entries = tuple(QueuedPrompt(message_id=str(uuid4()), mode=mode) for mode in modes)
+            return QueueReport(state='ok', coverage='complete', observed_at=store.now(), entries=entries), frozenset(), frozenset()
+        def unknown(unconfirmed):
+            return QueueReport(state='unavailable', reason='Reading the harness queue took longer than 2 s.',
+                               observed_at=store.now()), frozenset(), unconfirmed
+        rows = [
+            (complete('follow-up', 'steer', 'follow-up'), ['--turn'], 'asker',
+             "2 follow-up messages were already queued for you before this focus, and it won't stop them: they arrive "
+             "when your turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
+             "turn, before the user answers. To stay focused until the user answers, run mv2 focus instead, and mv2 "
+             "unfocus once they have."),
+            (complete('follow-up'), [], 'asker',
+             "1 follow-up message was already queued for you before this focus, and it won't stop it: it arrives when "
+             "your turn ends. The focus holds only messages sent from now on."),
+            (complete('follow-up', 'follow-up'), ['asker', '--turn'], None,
+             "2 follow-up messages were already queued for asker before this focus, and it won't stop them: they arrive "
+             "when its turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
+             "turn."),
+            (complete('steer'), [], 'asker', None),
+            (unknown(frozenset({'some sender'})), [], 'asker',
+             "mv2 couldn't check whether follow-up messages are already queued for you: Reading the harness queue took "
+             "longer than 2 s. If any are, this focus won't stop them."),
+            (unknown(None), ['asker'], None, "mv2 couldn't check whether follow-up messages are already queued for asker"),
+            (unknown(frozenset()), [], 'asker', None),
+        ]
+        directory = self.directories['asker']
+        agents.update_runtime(directory, self.launch, status='working')
+        for report, arguments, caller, note in rows:
+            with self.subTest(arguments=arguments, caller=caller, note=note), \
+                    patch.object(queued_prompts, 'for_send', return_value=report) as read:
+                focus.end(directory)
+                output = self.output('focus', *arguments, agent=caller)
+                read.assert_called_once()
+                self.assertEqual(read.call_args.args[1], directory.name)
+                if note is None:
+                    self.assertEqual(output.count('\n'), 1, output)
+                else:
+                    self.assertIn('\n' + note, output)
+                record = json.loads(self.output('focus', '--json', *arguments, agent=caller))
+                self.assertEqual(record['queue_note'] is None, note is None)
+        focus.end(directory)
+        with patch.object(queued_prompts, 'for_send', side_effect=AssertionError('the dashboard read the queue')):
+            self.assertNotIn('queue_note', LocalBackend().focus(self.root, 'asker'))
 
     def test_agents_change_only_their_own_focus(self):
         """An agent can focus and unfocus only itself while the person can change any agent; otherwise one agent could

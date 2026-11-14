@@ -34,7 +34,9 @@ def tool(action, root=None):
     """The module (or, for a plugin's command, an object shaped like one) that runs `action`."""
     if not builtin(action):
         from . import plugins
-        command = plugins.command(universe.resolve(root), action, RESERVED, guarded=True)
+        selected = universe.resolve(root, search_parents=root is None)
+        with universe.selection(selected):
+            command = plugins.command(selected, action, RESERVED, guarded=True)
         return SimpleNamespace(__doc__=None, configure=command.configure, run=command.run,
                                **({"cli_run": command.cli_run} if command.cli_run else {}))
     action = {"status": "report"}.get(action, action)
@@ -72,9 +74,10 @@ def plugin_commands(argv):
     """
     root = _selection(argv)[0]
     try:
-        selected = universe.resolve(root)
+        selected = universe.resolve(root, search_parents=root is None)
         from . import plugins
-        return selected, plugins.commands(selected, RESERVED)
+        with universe.selection(selected):
+            return selected, plugins.commands(selected, RESERVED)
     except Exception:
         return None, {}
 
@@ -99,13 +102,16 @@ def parser(argv=None):
             command = commands.add_parser(name, help=f"{text} (plugin {plugin})")
             # Help asked for before the command is the top-level help: manifests only.
             if name == invoked and not wants_help:
-                tool(name, selected).configure(command)
+                with universe.selection(selected):
+                    tool(name, selected).configure(command)
     return result
 
 
 def run(args, *, cli=False):
     values = vars(args).copy()
     action = values.pop("action")
+    if values['root'] is not None:
+        values['root'] = universe.resolve(values['root'], search_parents=False)
     if action is None:
         action = "tui"
         if values["root"] is None and not os.environ.get("MV2_UNIVERSE"):
@@ -115,11 +121,12 @@ def run(args, *, cli=False):
                 cwd = Path.cwd()
                 values["root"] = templates.create(cwd / ".multiverse", cwd.name,
                                                  template=str(templates.TEMPLATES / "base"), workdir=cwd)
-    if not builtin(action):
-        values["root"] = universe.resolve(values["root"])
-    module = tool(action, values["root"])
-    handler = getattr(module, 'cli_run', module.run) if cli else module.run
-    return handler(**values)
+    with universe.selection(values['root']):
+        if not builtin(action):
+            values["root"] = universe.resolve(values["root"])
+        module = tool(action, values["root"])
+        handler = getattr(module, 'cli_run', module.run) if cli else module.run
+        return handler(**values)
 
 
 # Commands that never convert a universe's pre-plugin settings first: init makes a universe, update converts
@@ -132,7 +139,7 @@ def first_use_migration(root):
     stderr. Never fails the command: a universe that does not resolve, or a conversion that fails, leaves it
     to run as it would have."""
     try:
-        resolved = universe.resolve(root)
+        resolved = universe.resolve(root, search_parents=root is None)
     except (OSError, ValueError):
         return
     try:
@@ -162,27 +169,37 @@ def main():
     argv = sys.argv[1:]
     try:
         args = parser(argv).parse_args(argv)
-        module = tool(args.action or 'tui', args.root)
     except ValueError as error:  # a plugin's command that cannot load says why
         print(f"mv2: {error}", file=sys.stderr)
         sys.exit(1)
     absent = frozenset()
     diagnostic = (args.action in ('list', 'doctor', 'inspect') or
                   args.action == 'plugins' and args.plugin_action in ('list', 'info'))
-    if diagnostic:
+    explicit = args.root is not None
+    if diagnostic or explicit:
         try:
             recursive = args.action == 'doctor' or getattr(args, 'recursive', False)
             args.root, absent = universe.resolution(
-                args.root, observe=lambda root: _diagnostic_paths(root, recursive=recursive))
-        except (OSError, ValueError):
+                args.root, observe=(lambda root: _diagnostic_paths(root, recursive=recursive)) if diagnostic else None,
+                search_parents=not explicit)
+        except (OSError, ValueError, RuntimeError) as error:
+            if explicit:
+                print(f"mv2: {error}", file=sys.stderr)
+                sys.exit(1)
             pass  # The command reports its normal resolution error.
-    if (args.action or 'tui') not in NO_FIRST_USE_MIGRATION:
-        resolved = first_use_migration(args.root)
-        if resolved is not None:
-            args.root = resolved
-    render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
-    with observations(absent):
-        output(lambda: run(args, cli=True), render=render)
+    with universe.selection(args.root):
+        try:
+            module = tool(args.action or 'tui', args.root)
+        except ValueError as error:
+            print(f"mv2: {error}", file=sys.stderr)
+            sys.exit(1)
+        if (args.action or 'tui') not in NO_FIRST_USE_MIGRATION:
+            resolved = first_use_migration(args.root)
+            if resolved is not None:
+                args.root = resolved
+        render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
+        with observations(absent):
+            output(lambda: run(args, cli=True), render=render)
 
 
 if __name__ == "__main__":

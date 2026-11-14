@@ -92,4 +92,12 @@ def main(configure, run):
     configure(parser)
     module = sys.modules[run.__module__]
     render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
-    output(getattr(module, 'cli_run', run), render=render, **vars(parser.parse_args()))
+    values = vars(parser.parse_args())
+
+    def selected():
+        if values['root'] is not None:
+            values['root'] = universe.resolve(values['root'], search_parents=False)
+        with universe.selection(values['root']):
+            return getattr(module, 'cli_run', run)(**values)
+
+    output(selected, render=render)

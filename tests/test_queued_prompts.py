@@ -480,3 +480,37 @@ class QueueTest(BaseTest):
                         worker.join(5)
                         self.assertFalse(worker.is_alive())
                 self.assertEqual(queued_prompts.report(self.root, directory.name).coverage, 'complete')
+
+    def test_focus_reads_its_target_queue_and_sees_a_person_s_unconfirmed_follow_up(self):
+        """Focus reads its target's own queue and flags a person's unconfirmed follow-up; a break gives wrong advice."""
+        from types import SimpleNamespace
+        from multiverse.tools import focus as focus_command
+        from multiverse.universe import focus, mailbox
+        directory = self.directories['a']
+        properties, facts = store.read(directory / 'properties.json'), store.read(directory / 'runtime.json')
+        for kind in ('user', 'plugin'):
+            with self.subTest(sender=kind):
+                message = mailbox.append_message(directory, 'answer', {'name': kind, 'agent_id': None}, 'follow-up')
+                mailbox.update_message(directory, message['id'], submission_state='accepted', attempts=[{
+                    'launch_id': facts['launch_id'], 'native_session_id': properties['native_session_id'],
+                    'state': 'native_queued', 'mode': 'follow-up'}])
+                self.entries[:] = [{'message_id': message['id']}]
+                self.reply_state = 'ok'
+                self.assertEqual(focus_command.cli_run(self.root, agent='a', as_user=True, json=True)['queued_follow_ups'], 1)
+                focus.end(directory)
+                self.reply_state, self.reason = 'unavailable', 'Fixture queue unavailable'
+                note = focus_command.cli_run(self.root, agent='a', as_user=True, json=True)['queue_note']
+                self.assertTrue(note and note.startswith("mv2 couldn't check"), note)
+                focus.end(directory)
+                mailbox.update_message(directory, message['id'], transcript_confirmed_at=store.now())
+        # An agent focusing itself with another universe selected: the focus and the read are both its own.
+        self.entries.clear()
+        self.reply_state = 'ok'
+        self.queued()
+        other = self.work / 'other-universe'
+        store.write(other / 'universe.json', {'schema': 1, 'id': store.uid(), 'name': 'other', 'workspace': str(self.work)})
+        (other / 'state/agents').mkdir(parents=True)
+        with patch.object(focus_command, 'caller', return_value=SimpleNamespace(directory=directory)):
+            result = focus_command.cli_run(other, json=True)
+        self.assertIsNotNone(focus.current(directory))
+        self.assertEqual(result['queued_follow_ups'], 1, result)

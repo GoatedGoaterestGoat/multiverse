@@ -95,10 +95,15 @@ def connection_logger(launch, *, started=_UNSET):
         path = launch / 'roles' / ('connection-' + identifier + '.json')
         try:
             with _connections_lock(launch):
-                try:
-                    previous = _read_record(path)
-                except FileNotFoundError:
+                # Every opening is a fresh UUID minted by the RPC transport, not a lookup or reopen.
+                # Its first publication has no previous record to wait for; later updates keep fresh reads.
+                if value['state'] == 'opening':
                     previous = {}
+                else:
+                    try:
+                        previous = _read_record(path)
+                    except FileNotFoundError:
+                        previous = {}
                 write(path, {**previous, 'schema': 1, 'launch_id': launch.name, 'role': value['role'],
                              'endpoint': value['endpoint'], 'state': 'closed' if value['state'] == 'closed' else 'active',
                              'pid': os.getpid(), 'pid_started': started, 'at': previous.get('at') or now(),
@@ -301,7 +306,7 @@ def attested_running(facts):
     return None
 
 
-def problem(directory, facts):
+def problem(directory, facts, *, cleanup_hint=False):
     launch_id = facts.get('launch_id')
     if not launch_id:
         return None
@@ -316,7 +321,7 @@ def problem(directory, facts):
     exited = isinstance(facts.get('exit_code'), int) and not isinstance(facts.get('exit_code'), bool)
     exit_at = facts.get('stopped_at') or facts.get('dormant_at') or (facts.get('observed_at') if exited else None)
     try:
-        record = _read_record(path)
+        record = read(path) if cleanup_hint else _read_record(path)
     except FileNotFoundError:
         record = _UNSET
     except (OSError, ValueError):
@@ -338,6 +343,8 @@ def problem(directory, facts):
             return _blocked('older runner (no cleanup record)', directory / 'runtime.json', runner['pid'], runner['pid_started'], observations)
         if runner['pid'] and facts.get('pid') and not gone(facts, exit_at):
             return _blocked('older child (no cleanup record)', directory / 'runtime.json', facts['pid'], facts.get('pid_started'), observations)
+    if cleanup_hint:
+        return None  # Tentative only: wait() still runs the full role scan before returning or timing out.
     try:
         with _connections_lock(launch, create=False):
             for path in (launch / 'roles').glob('*.json'):
@@ -371,9 +378,14 @@ def wait(directory, launch_id, timeout):
         facts = agents.runtime(directory)
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting for terminal cleanup; refusing a replacement')
-        reason = problem(directory, facts)
+        # A poll may postpone work from a direct read. Returning or refusing at the deadline
+        # still needs a fresh retrying check; a replacement gap never authorizes a new launch.
+        reason = problem(directory, facts, cleanup_hint=True)
+        expired = time.monotonic() >= deadline
+        if reason is None or expired:
+            reason = problem(directory, facts)
         if reason is None:
             return
-        if time.monotonic() >= deadline:
+        if expired:
             raise RuntimeError(reason + '; wait briefly, then retry. Attachment cleanup is not complete.')
         time.sleep(min(.05, max(0, deadline - time.monotonic())))

@@ -7,9 +7,11 @@ the agent directory holds the focus while it lasts:
     {"id": ..., "since": ISO time, "until": ISO time or null, "turns": 1, 2 or null, "by": "agent" or "user"}
 
 `until` ends it at a time. `turns` counts the turn ends still to come: when the
-harness status goes from working or waiting to idle, `turn_ended` counts one, and
-the last removes the file. With neither, it lasts until `end`. Readers never
-remove an expired record; the next `start` or `end` replaces it.
+harness status goes to idle from working, or from waiting that began inside a turn,
+`turn_ended` counts one, and the last removes the file. A command's dialog opened
+while the agent is idle waits outside any turn and doesn't count. With neither, it
+lasts until `end`. Readers never remove an expired record; the next `start` or `end`
+replaces it.
 
 A steer or follow-up sent during the focus is saved as an inbox-only message that
 names the focus (`hold`). `focus-last.json` outlives the focus, however it ends:
@@ -90,12 +92,13 @@ def active(record, at=None):
         return False
 
 
-def _read(agent_dir, name=FILE):
+def _read(agent_dir, name=FILE, *, retry=True):
     """The focus record, or None for anything but a small JSON object in a regular file."""
     try:
         # Non-blocking, so a FIFO in its place never hangs a reader. The descriptor is closed here: wrapping
         # a directory's would fail and leak it.
-        descriptor = retry_missing(lambda: os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK))
+        open_record = lambda: os.open(agent_dir / name, os.O_RDONLY | os.O_NONBLOCK)
+        descriptor = retry_missing(open_record) if retry else open_record()
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 return None
@@ -114,6 +117,12 @@ def current(agent_dir, *, observed_missing=()):
     if agent_dir / FILE in observed_missing:
         return None
     record = _read(agent_dir)
+    return record if active(record) else None
+
+
+def hint(agent_dir):
+    """One optimistic polling read; never authorizes output or a focus mutation."""
+    record = _read(agent_dir, retry=False)
     return record if active(record) else None
 
 

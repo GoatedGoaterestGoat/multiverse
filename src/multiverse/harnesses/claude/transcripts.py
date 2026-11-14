@@ -11,7 +11,9 @@ it, so more than one copy is an anomaly, which the transcript reads check (`newe
 Every file is opened through `open_regular`, and any part of the storage that could hold the session but can't
 be read raises `Unreadable` rather than read as absence.
 """
+from collections import OrderedDict
 from dataclasses import dataclass
+import itertools
 import hashlib
 import json
 import os
@@ -230,14 +232,17 @@ PROOF_INTERVAL = 60  # seconds: a file that keeps growing is proved in full at l
 
 
 class Transcript:
-    """One copy's index, read once and then as it grows: an Entry per complete line (metadata only, never bodies),
-    and the usage readers' totals from it.
+    """One copy's index, read once and then as it grows: an Entry per complete line (metadata only, never bodies;
+    none for a usage index), and the usage readers' totals from it.
 
     Claude writes one record per content block of a response, each with the response's usage, so usage is counted
     once per response ID. A row with zero usage is never a response: a compaction that keeps a row stores it again
     with zero usage, and an installed compaction's rows arrive as new IDs with zero usage (Claude's `<synthetic>`
     model). Neither replaces a real response's usage or becomes the latest request, so `last` stays the latest real
-    response.
+    response, and `observed` its model, effort and time: the latest main-thread turn's, as Claude recorded them.
+    Only this conversation's turn counts: never a sidechain row, nor one whose sessionId names another conversation
+    (null included; a row without the field is this one's, as the delivery and prompt readers hold). A complete row
+    that can't be read after it may be the newer reply, so it makes `observed` unknown (None) until a later reply.
 
     Claude isn't append-only: it truncates a file at a tombstoned row and writes the rest back in place, and can
     rewrite a whole file. The index starts over on a new inode or a smaller file, and otherwise, when the file
@@ -251,12 +256,14 @@ class Transcript:
     append never changes an earlier row's position.
     """
 
-    def __init__(self, path):
-        self.path, self.rewrites = path, 0
+    def __init__(self, path, rows=True):
+        # rows=False: a usage index, which keeps the totals and the latest turn but no Entry per row.
+        self.path, self.rewrites, self.rows = path, 0, rows
         self._reset(None)
 
     def _reset(self, inode):
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
+        self.observed, self.chain = None, ''
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
         self.proven_at = None  # monotonic() at the last full proof (or whole read)
         self.views = {}  # the adapter's views of this index as read, by tip and what they were built from
@@ -310,18 +317,26 @@ class Transcript:
         end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
         # Parse the new lines first and change nothing until all of them parsed: a failure leaves the index as it
         # was, so the next read starts from the same place and never counts a row twice.
-        added, responses, last, position = [], {}, self.last, self.offset
-        chain = self.entries[-1].chain if self.entries else ''
+        added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
+        conversation = self.path.stem  # a main transcript is named after its session
+        chain = self.chain
         for line in data[:end].split(b'\n')[:-1]:
             item = entry(position, line + b'\n', chain)
-            added.append(item)
+            if self.rows:
+                added.append(item)
+            if item.kind == 'unreadable':
+                observed = None
             if item.kind == 'assistant' and item.usage is not None and item.response:
-                responses[item.response] = item.usage
+                responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
                 last = item.at or last
+                if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
+                    # The latest reply's own fields, even when its model is missing: never an older turn's.
+                    observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
             position, chain = position + item.size, item.chain
         self.entries.extend(added)
+        self.chain = chain
         self.responses.update(responses)
-        self.last = last
+        self.last, self.observed = last, observed
         self.prefix.update(data[:end])
         self.tail = (self.tail + data[:end])[-TAIL:]
         self.offset += end
@@ -333,8 +348,32 @@ class Transcript:
         return self
 
 
-_transcripts = {}
+# Indexes by path. Usage reads every agent's transcripts on each listing, so its indexes keep no Entry per row (a
+# full index holds about 1.5 times its file); the transcript reads' full indexes are kept for the most recently read
+# transcripts only.
+USAGE_INDEXES = 256
+FULL_INDEXES = 8
+_usage = OrderedDict()
+_transcripts = OrderedDict()
 _transcripts_lock = threading.Lock()
+# History versions come from one counter that only grows, for every transcript: a full index built again after its
+# eviction starts above any version a reader holds from before, so the reader parses again rather than trusting a
+# cursor into a history that changed while no index watched it.
+_versions = itertools.count(1)
+
+
+def _index(path, rows):
+    """The kept index for `path` (a full one when `rows`), the most recently used last; under _transcripts_lock."""
+    cache, limit = (_transcripts, FULL_INDEXES) if rows else (_usage, USAGE_INDEXES)
+    index = cache.get(path)
+    if index is None:
+        index = cache[path] = Transcript(path, rows)
+        if rows:
+            index.history_version = next(_versions)
+    cache.move_to_end(path)
+    while len(cache) > limit:
+        cache.popitem(last=False)
+    return index
 
 
 def counted(usage, key):
@@ -343,21 +382,24 @@ def counted(usage, key):
 
 
 def context_reading(native_id, workspaces=(), environment=None):
-    """(tokens, timestamp) of the latest main-thread request, or None.
+    """(tokens, timestamp, observed) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
-    excluded: they have their own context windows.
+    excluded: they have their own context windows. `observed` is {'model',
+    'effort', 'observed_at'} of the latest main-thread turn, as Claude recorded
+    them, or None before one.
     """
     mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     with _transcripts_lock:
-        transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
-        responses, stamp = transcript.responses, transcript.last
+        transcript = _index(mains[-1], rows=False).read()
+        responses, stamp, observed = transcript.responses, transcript.last, transcript.observed
     if not responses:
         return None
     latest = list(responses.values())[-1]
-    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')), stamp
+    tokens = sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+    return tokens, stamp, dict(observed) if observed else None
 
 
 def context_usage(native_id):
@@ -374,7 +416,7 @@ def measured_usage(native_id, workspaces=(), environment=None):
         return None
     paths = [mains[-1], *subagent_transcripts(mains[-1])]
     with _transcripts_lock:
-        transcripts = [_transcripts.setdefault(path, Transcript(path)).read() for path in paths]
+        transcripts = [_index(path, rows=False).read() for path in paths]
     responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
     cached = sum(counted(usage, 'cache_read_input_tokens') for usage in responses)
     written = sum(counted(usage, 'cache_creation_input_tokens') for usage in responses)
@@ -432,6 +474,10 @@ class Entry:
     stop: str | None = None
     preserved: tuple = ()           # a boundary's preservedMessages, in Claude's order
     companion: str | None = None    # a skill's instructions: the tool call they belong to
+    model: str | None = None        # an assistant row's model, as Claude recorded it (`<synthetic>` for its own rows)
+    effort: str | None = None       # the effort that row's request used, as Claude recorded it
+    session: str | None = None      # the row's sessionId, when it is a string
+    has_session: bool = False       # whether the row has a sessionId at all (null included)
 
 
 def _text(content):
@@ -490,7 +536,11 @@ def _fields(offset, line, digest, chain, row):
         usage if usage and any(counted(usage, key) for key in USAGE_KEYS) else None,
         string(message.get('stop_reason')) if row.get('type') == 'assistant' else None,
         tuple(uuid for uuid in preserved if isinstance(uuid, str)) if isinstance(preserved, list) else (),
-        string(row.get('sourceToolUseID')) if row.get('isMeta') is True and (row.get('turnCompanion') or row.get('sourceToolUseID')) else None)
+        string(row.get('sourceToolUseID')) if row.get('isMeta') is True and (row.get('turnCompanion') or row.get('sourceToolUseID')) else None,
+        string(message.get('model')) if row.get('type') == 'assistant' else None,
+        # Claude reads a turn's effort as perTurnEffort when the row has the key (null: none), else effort.
+        string(row['perTurnEffort'] if 'perTurnEffort' in row else row.get('effort')) if row.get('type') == 'assistant' else None,
+        string(row.get('sessionId')), 'sessionId' in row)
 
 
 INTERRUPTED = '[Request interrupted by user'  # Claude's marker for an Esc: it ends the turn, and usually no turn_duration follows
@@ -556,8 +606,9 @@ class History:
 
     `gap` is a parent Claude never stored (its writes failed for a while), or a link back into rows the walk already
     passed: an automatic compaction's boundary links to a row Claude stored after its summary. Behind Claude's own
-    compaction a gap doesn't matter, and the history starts at Claude's summary. `tip` is the ref the walk started
-    from.
+    compaction a gap doesn't matter, and the history starts at Claude's summary. The rows a compaction keeps
+    (`preservedMessages`) come right after its summary, as Claude rebuilds the session, though on disk they keep their
+    old parents before the boundary. `tip` is the ref asked for, else the newest leaf the walk started from.
     """
     rows: tuple
     tip: str | None
@@ -580,6 +631,14 @@ def _summaries(by_ref, order):
     return found
 
 
+def _keeping(by_ref, order, summaries, tip):
+    """The latest of Claude's own compactions stored after `tip` that kept it, or None: the live session then holds
+    `tip` after that compaction's summary, so its history is read from the summary."""
+    found = [item for ref, item in by_ref.items() if item.kind == 'system/compact_boundary' and ref in summaries
+             and tip in item.preserved]
+    return max(found, key=lambda item: order[item.ref]) if found else None
+
+
 def walk(entries, tip=None, labelled=None):
     """The history: from `tip` when stored, else the newest leaf of the parent graph (the last stored: a batch of
     rows, such as a compaction's install, can carry older timestamps than a row before it), back through parent links and across a boundary by its logical parent, plus every block of each response it
@@ -600,7 +659,13 @@ def walk(entries, tip=None, labelled=None):
         return History((), None)
     summaries = _summaries(by_ref, order)
     current = tip if tip in by_ref else max(leaves, key=order.get)
-    start, walked, seen, claude, boundaries = current, [], set(), None, []
+    start = current
+    # A tip a later compaction kept (its kept reply, right after an idle or automatic compaction): read from that
+    # compaction's summary, so the boundary and the summary are on the history and rows stored after it aren't.
+    keeping = _keeping(by_ref, order, summaries, tip) if tip in by_ref else None
+    if keeping is not None:
+        current = summaries[keeping.ref]
+    walked, seen, claude, boundaries = [], set(), None, []
     while current in by_ref and current not in seen:
         seen.add(current)
         walked.append(current)
@@ -618,16 +683,30 @@ def walk(entries, tip=None, labelled=None):
     if gap and claude is not None:
         count, boundary = claude
         summary = summaries[boundary.ref]
-        kept = [ref for ref in boundary.preserved if ref in by_ref]
-        seen = set(walked[:count]) | set(kept)
-        for index, ref in enumerate(kept, 1):  # after the summary, as Claude delivers them
-            position[ref] = order[summary] + index / (len(kept) + 1)
+        seen = set(walked[:count]) | {ref for ref in boundary.preserved if ref in by_ref}
         gap = None
+    else:
+        seen = set(walked)
+    # A compaction's kept rows are in the live session, wherever their old parents lead.
+    for boundary in boundaries:
+        if summaries.get(boundary.ref) in seen:
+            seen |= {ref for ref in boundary.preserved if ref in by_ref}
     responses = {by_ref[ref].response for ref in seen} - {None}
     seen |= {ref for ref, item in by_ref.items() if item.response in responses
              and (summary is None or position[ref] > position[summary] or ref in seen)}
     calls = {call for ref in seen for call in by_ref[ref].calls}
     seen |= {ref for ref, item in by_ref.items() if item.kind == 'user' and set(item.answers) & calls}
+    # A compaction's kept rows come right after its summary, as Claude delivers them: once every row is in (a response's
+    # other blocks and parallel results join after the walk), and the newest compaction first, as the live session
+    # holds a row kept twice after the later summary.
+    placed = set()
+    for boundary in boundaries:
+        note = summaries.get(boundary.ref)
+        kept = [ref for ref in boundary.preserved if ref in seen and ref not in placed]
+        if note in seen and kept:
+            for index, ref in enumerate(kept, 1):
+                position[ref] = order[note] + index / (len(kept) + 1)
+            placed.update(kept)
     for boundary in boundaries:  # the typed /compact row the boundary answers stays: the person typed it
         if boundary.ref not in seen:
             continue
@@ -679,7 +758,7 @@ def newest_copy(native_id, environment, workspaces=()):
         return None
     with _transcripts_lock:
         try:
-            indexes = [_transcripts.setdefault(path, Transcript(path)).read(prove=True) for path in paths]
+            indexes = [_index(path, rows=True).read(prove=True) for path in paths]
         except (OSError, Unreadable) as error:
             raise CantTell(f"Claude's transcript can't be read: {error}") from error
         newest = indexes[-1]
@@ -690,7 +769,7 @@ def newest_copy(native_id, environment, workspaces=()):
                 raise CantTell(f'Copies of this session disagree: {older.path} is not part of {newest.path}')
         if getattr(newest, 'copies', None) != paths:  # a change of newest copy is a rewrite for readers
             if getattr(newest, 'copies', None) is not None:
-                newest.history_version = getattr(newest, 'history_version', 0) + 1
+                newest.history_version = next(_versions)
             newest.copies = paths
         return newest
 
@@ -702,7 +781,7 @@ class Analysis:
     history: History
     on: frozenset          # entry indexes on the history
     context: frozenset     # entry indexes in context
-    version: int           # rises when the history changes other than by growing
+    version: int           # rises when the history changes other than by growing at its end
 
 
 def analyse(index, tip=None):
@@ -721,8 +800,10 @@ def analyse(index, tip=None):
     previous = getattr(index, 'history_refs', None)
     if tip is None:
         if previous is not None and (getattr(index, 'history_rewrites', index.rewrites) != index.rewrites
-                                     or not set(previous) <= set(refs)):
-            version += 1  # a rewrite, or a rewind that left rows of the history behind
+                                     or refs[:len(previous)] != previous):
+            # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones
+            # already read (its boundary and summary come before the rows it kept).
+            version = next(_versions)
         index.history_version, index.history_refs, index.history_rewrites = version, refs, index.rewrites
     result = Analysis(len(entries), labelled, history, on, context, version)
     index.analysis = (key, result)

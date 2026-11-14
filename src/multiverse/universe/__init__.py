@@ -7,11 +7,29 @@ Submodules hold the rest of what lives in a universe directory: agent records
 """
 import os
 import errno
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 import re
 import stat
 
 from ..store import read, retry_missing, is_file_replaced, missing_records
+
+
+_selected_root = ContextVar('selected_universe', default=None)
+
+
+@contextmanager
+def selection(root):
+    """Keep nested readers at an already selected directory without caching its marker or granting authority."""
+    if root is None:
+        yield
+        return
+    token = _selected_root.set(Path(root).resolve())
+    try:
+        yield
+    finally:
+        _selected_root.reset(token)
 
 
 def slug(name):
@@ -21,20 +39,25 @@ def slug(name):
 
 
 class UniverseNotFoundError(ValueError):
-    """No universe exists at the selected path or its ancestors."""
+    """No universe exists within the requested selection or discovery scope."""
 
 
-def resolve(path=None):
-    return resolution(path)[0]
+def resolve(path=None, *, search_parents=True):
+    return resolution(path, search_parents=search_parents)[0]
 
 
-def resolution(path=None, observe=None):
-    """Resolve in precedence order with one missing-marker batch and optional diagnostic observations."""
-    path = Path(path or os.environ.get("MV2_UNIVERSE", Path.cwd())).resolve()
+def resolution(path=None, observe=None, *, search_parents=True):
+    """Resolve with one missing-marker batch; an exact selection checks only the path and its .multiverse."""
+    if path == '' and not search_parents:
+        raise UniverseNotFoundError('Universe path must not be empty; omit -u to use automatic discovery')
+    path = Path(path if path is not None else (os.environ.get("MV2_UNIVERSE") or Path.cwd())).resolve()
+    selected_here = path == _selected_root.get()
+    if selected_here:
+        search_parents = False
     candidates = []
     found = False
-    for directory in (path, *path.parents):
-        for candidate in (directory, directory / '.multiverse'):
+    for directory in (path, *path.parents) if search_parents else (path,):
+        for candidate in (directory,) if selected_here else (directory, directory / '.multiverse'):
             candidates.append(candidate)
             try:
                 found = stat.S_ISREG((candidate / 'universe.json').stat().st_mode)
@@ -53,6 +76,8 @@ def resolution(path=None, observe=None):
             if retry_missing(lambda: read(candidate / 'universe.json')).get('schema') != 1:
                 raise ValueError(f"Unsupported universe schema: {candidate}")
             return candidate, absent
+    if not search_parents:
+        raise UniverseNotFoundError(f"Not a universe or workspace containing .multiverse: {path}")
     raise UniverseNotFoundError(f"No universe found at or above {path}; run mv2 init")
 
 

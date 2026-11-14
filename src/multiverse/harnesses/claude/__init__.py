@@ -1684,7 +1684,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             return None
 
     def get_usage(self, session, executor=None):
-        """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
+        """Transcript totals and the model and effort of the latest main-thread turn, plus the mod's context/cost/rate
+        limits while they belong to this launch."""
         if not session.native_id:
             return NativeResult('unavailable', 'No Claude session ID recorded')
         reported = {}
@@ -1717,11 +1718,14 @@ class ClaudeAdapter(ConfiguredAdapter):
             context['responded_at'] = reading[1]
         if context:
             reported['context'] = context
+        # The model and effort the latest main-thread turn used, as Claude recorded them, with that turn's time: core
+        # keeps them only for a turn of the current launch.
+        observed = reading[2] if reading and len(reading) > 2 and isinstance(reading[2], dict) else {}
         if usage is None:
             if reported:
                 return NativeResult('ok', 'Reported by the multiverse mod', {'native_session_id': session.native_id, **reported})
             return NativeResult('unavailable', 'Claude has not written a transcript for this session yet')
-        return NativeResult('ok', 'Measured from the Claude session transcript', {**asdict(usage), **reported})
+        return NativeResult('ok', 'Measured from the Claude session transcript', {**asdict(usage), **observed, **reported})
 
     def send(self, session, message, executor):
         mode = MODES.get(message.delivery)

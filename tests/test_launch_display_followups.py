@@ -54,7 +54,10 @@ class LaunchDisplayFollowupTest(BaseTest):
                     light = lifecycle.listing(self.root, usage=False)[0]
                     reader.assert_not_called()
                 self.assertEqual(light, {key: value for key, value in full.items()
-                                         if key not in ('usage', 'tokens', 'usage_detail')})
+                                         if key not in lifecycle.USAGE_FIELDS})
+                self.assertNotIn('observed_model_name', light)
+                if state != 'damaged':
+                    self.assertIsNone(full['observed_model_name'])
                 self.assertLessEqual(full.keys(), lifecycle.ROW_FIELDS)
                 if state == 'healthy':
                     self.assertEqual(full['usage'], measured)
@@ -78,9 +81,12 @@ class LaunchDisplayFollowupTest(BaseTest):
         with patch.object(harnesses, 'load', return_value=SimpleNamespace(get_usage=usage)), \
                 patch.object(native, 'session_snapshot', side_effect=AssertionError('usage must never reconcile')) as reconcile:
             result = lifecycle.row_usage(row)
-            self.assertEqual(result['usage'], measured.to_dict())
+            self.assertEqual(result['usage'], {**measured.to_dict(), 'value': {
+                **measured.value, 'model': None, 'effort': None, 'observed_at': None,
+            }})
             self.assertEqual(result['tokens'], '456')
-            self.assertEqual(set(result), {'usage', 'tokens', 'usage_detail'})
+            self.assertEqual(set(result), set(lifecycle.USAGE_FIELDS))
+            self.assertIsNone(result['observed_model_name'])
             self.assertEqual(len(calls), 1)
             self.assertEqual(lifecycle.row_usage({**row, 'damaged': {'reason': 'broken'}}), {})
             error = lifecycle.row_usage({**row, 'identity_error': 'Cannot read the session journal'})

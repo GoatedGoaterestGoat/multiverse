@@ -9,6 +9,7 @@ import { registerUsage } from './usage'
 import { closeAll, closeKeys, form, hold as holdPrompt, sweep } from './prompts'
 import { publishQueue, reloaded } from './queue'
 import type { QueueView } from './queue'
+import { dialogIn, watch } from './dialog'
 
 // Multiverse sends each message over this session's peer inbox at `next`
 // priority, its text between `<<MV2 steer id=UUID>>` (or `follow-up`) and
@@ -85,9 +86,12 @@ let interrupted = false
 let sessionId: string | undefined
 
 // What waits on the person, by key (`question:<id>`, `permission:<id>`,
-// `elicitation:<id>`), with the tool it waits for. Any entry makes the session
-// `waiting`.
+// `elicitation:<id>`, `dialog:<n>`), with the tool or command it waits for. Any
+// entry makes the session `waiting`.
 const waiting = new Map<string, string>()
+
+// Commands run so far: each one's dialog, while open, is `dialog:<n>` (hooks/dialog.ts).
+let dialogs = 0
 
 // Tool calls the permission check answered `ask`, by tool_use_id, with the
 // check's reason and the call's input, until a prompt opens for one of them
@@ -756,9 +760,10 @@ export const register: Register = (on) => {
         }
         if (republish) queueChanged($)
       })
-      // An ended turn has closed its prompts and questions.
+      // An ended turn has closed its prompts and questions. A command's dialog is the command's, not the turn's (an
+      // immediate command runs mid-turn): it ends when the dialog closes or the command does.
       closeAll($, e.isAborted ? "interrupted" : "turn_ended")
-      waiting.clear()
+      for (const key of [...waiting.keys()]) if (!key.startsWith("dialog:")) waiting.delete(key)
       asked.clear()
       void report($)
       void refreshStatus($)
@@ -806,6 +811,24 @@ export const register: Register = (on) => {
     const below = await next(e)
     if (below?.decision !== undefined) return below
     return holdPrompt($, e, below, { toolUseId: id, key, reason: found?.[1].reason }, next.signal)
+  })
+
+  // A command's own dialog waits on the person for as long as it is open; the command's run lasts until it closes.
+  on("command.run", async ($, e, next) => {
+    dialogs += 1
+    const key = `dialog:${dialogs}`
+    const stop = watch(async () => dialogIn(await $.prompt.fill({ text: "", mode: "insert" })),
+      (ms, run) => $.clock.after(ms, run), (open) => {
+        if (open) waiting.set(key, e.command)
+        else waiting.delete(key)
+        void report($)
+      })
+    try {
+      return await next(e)
+    } finally {
+      stop()
+      if (waiting.delete(key)) void report($)
+    }
   })
 
   on("classic.PermissionDenied", async ($, e, next) => {

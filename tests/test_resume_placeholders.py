@@ -17,10 +17,9 @@ from test_multiverse import TerminalBase, until
 
 
 class ResumePlaceholderTest(TerminalBase):
-    def test_wake_values_and_task_file_both_contain_only_wake_prompt(self):
-        """On resume a custom recipe's {task} and {task_file} carry only the wake prompt, or nothing without one, while
-        properties keep the original task; a break goes unnoticed because a resumed agent redoes its whole task, which
-        looks like work (797bfec, qa Q3)."""
+    def recorder(self):
+        """A declared harness that writes the {task} and {task_file} it was launched with, and launched(), which
+        starts it with wait=True and returns (result, task, task file)."""
         folder = self.root / 'harnesses' / 'recorder'
         folder.mkdir()
         output = self.work / 'seen-task'
@@ -42,7 +41,13 @@ class ResumePlaceholderTest(TerminalBase):
             self.assertTrue(result['ready'], result)
             until(lambda: output.exists() and file_output.exists())
             return result, output.read_text(), file_output.read_text()
+        return adapter, launched
 
+    def test_wake_values_and_task_file_both_contain_only_wake_prompt(self):
+        """On resume a custom recipe's {task} and {task_file} carry only the wake prompt, or nothing without one, while
+        properties keep the original task; a break goes unnoticed because a resumed agent redoes its whole task, which
+        looks like work (797bfec, qa Q3)."""
+        adapter, launched = self.recorder()
         first, task, task_file = launched(name='recorded', task='ORIGINAL', harness='recorder')
         self.assertEqual((task, task_file), ('ORIGINAL', 'ORIGINAL'))
         for prompt, expected in ((None, ''), ('ONLY-WAKE', 'ONLY-WAKE')):
@@ -54,177 +59,191 @@ class ResumePlaceholderTest(TerminalBase):
                 self.assertEqual(read(self.root / 'state' / 'agents' / first['id'] / 'properties.json')['task'],
                                  'ORIGINAL')
 
-        # A wake must survive a swept legacy default without silently moving a
-        # custom, isolated server onto the operator's default server.
+    def wake_socket_case(self, case):
+        """One case of SOCKET_CASES: a wake must survive a swept legacy default without silently moving a
+        custom, isolated server onto the operator's default server."""
+        adapter, launched = self.recorder()
+        output, file_output = self.work / 'seen-task', self.work / 'seen-file'
         self.kill_server()
-        for case in ('legacy swept', 'legacy retry', 'legacy live', 'legacy recover', 'legacy peer recover', 'legacy peer unknown',
-                     'legacy changed tmp', 'legacy operator', 'default operator',
-                     'custom present', 'custom live', 'custom swept', 'explicit resume', 'operator custom'):
-            with self.subTest(socket_selection=case):
-                run_root = self.work / 'run'
-                legacy_root = self.work / 'old-tmp'
-                old = (legacy_root / f'tmux-{os.getuid()}' / 'multiverse-v2' if case.startswith('legacy')
-                       else run_root / 'tmux.sock' if case == 'default operator' else self.work / 'custom' / 'tmux.sock')
-                old.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                self.socket, self.backend = str(old), type(self.backend)(str(old))
-                environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
-                environment.update(MV2_RUN_DIR=str(run_root), TMUX_TMPDIR=str(legacy_root), MV2_TMUX_SOCKET=str(old))
-                with patch.dict(os.environ, environment, clear=True), patch.object(harnesses, 'load', return_value=adapter):
-                    first, _, _ = launched(name='socket-' + case.replace(' ', '-'), task='ORIGINAL', harness='recorder')
-                    directory = self.root / 'state/agents' / first['id']
-                    pid = self.backend.run('display-message', '-p', '#{pid}')
-                    live = case in ('legacy live', 'legacy recover', 'legacy peer recover', 'legacy peer unknown', 'custom live')
-                    peer_facts = None
-                    if live:
-                        if case.startswith('legacy peer'):
-                            peer, _, _ = launched(name=case.replace(' ', '-'), task='KEEPER', harness='recorder')
-                            peer_dir = self.root / 'state/agents' / peer['id']
-                            peer_facts = read(peer_dir / 'runtime.json')
-                            peer_facts.pop('run_directory', None)
-                            peer_facts['tmux'].pop('server', None)
-                            peer_facts['tmux'].pop('server_identity', None)
-                            write(peer_dir / 'runtime.json', peer_facts)
-                        else:
-                            self.backend.create('keeper', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
-                        lifecycle.kill(self.root, first['id'])
+        with self.subTest(socket_selection=case):
+            run_root = self.work / 'run'
+            legacy_root = self.work / 'old-tmp'
+            old = (legacy_root / f'tmux-{os.getuid()}' / 'multiverse-v2' if case.startswith('legacy')
+                   else run_root / 'tmux.sock' if case == 'default operator' else self.work / 'custom' / 'tmux.sock')
+            old.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.socket, self.backend = str(old), type(self.backend)(str(old))
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+            environment.update(MV2_RUN_DIR=str(run_root), TMUX_TMPDIR=str(legacy_root), MV2_TMUX_SOCKET=str(old))
+            with patch.dict(os.environ, environment, clear=True), patch.object(harnesses, 'load', return_value=adapter):
+                first, _, _ = launched(name='socket-' + case.replace(' ', '-'), task='ORIGINAL', harness='recorder')
+                directory = self.root / 'state/agents' / first['id']
+                pid = self.backend.run('display-message', '-p', '#{pid}')
+                live = case in ('legacy live', 'legacy recover', 'legacy peer recover', 'legacy peer unknown', 'custom live')
+                peer_facts = None
+                if live:
+                    if case.startswith('legacy peer'):
+                        peer, _, _ = launched(name=case.replace(' ', '-'), task='KEEPER', harness='recorder')
+                        peer_dir = self.root / 'state/agents' / peer['id']
+                        peer_facts = read(peer_dir / 'runtime.json')
+                        peer_facts.pop('run_directory', None)
+                        peer_facts['tmux'].pop('server', None)
+                        peer_facts['tmux'].pop('server_identity', None)
+                        write(peer_dir / 'runtime.json', peer_facts)
                     else:
-                        self.kill_server()
-                    if case not in ('legacy live', 'custom live', 'custom present', 'operator custom'):
-                        old.unlink(missing_ok=True)
-                        old.parent.rmdir()
-                    # A main-era launch has no saved run_directory, but its
-                    # request still exported the old server socket.
-                    if case.startswith('legacy'):
+                        self.backend.create('keeper', self.work, [sys.executable, '-c', 'import time; time.sleep(60)'])
+                    lifecycle.kill(self.root, first['id'])
+                else:
+                    self.kill_server()
+                if case not in ('legacy live', 'custom live', 'custom present', 'operator custom'):
+                    old.unlink(missing_ok=True)
+                    old.parent.rmdir()
+                # A main-era launch has no saved run_directory, but its
+                # request still exported the old server socket.
+                if case.startswith('legacy'):
+                    facts = read(directory / 'runtime.json')
+                    facts.pop('run_directory', None)
+                    if peer_facts is not None:
+                        facts['tmux'].pop('server', None)
+                        facts['tmux'].pop('server_identity', None)
+                        request_path = directory / 'launches' / facts['launch_id'] / 'request.json'
+                        request = read(request_path)
+                        request['env'].pop('MV2_RUN_DIR', None)
+                        write(request_path, request)
+                        recovery.registry(old.resolve()).unlink(missing_ok=True)
+                        self.assertEqual(recovery.runner_server(peer_facts)['pid'], int(pid))
+                    write(directory / 'runtime.json', facts)
+                for path in (output, file_output):
+                    path.unlink(missing_ok=True)
+                os.environ.pop('MV2_TMUX_SOCKET')
+                if case == 'legacy changed tmp':
+                    os.environ['TMUX_TMPDIR'] = str(self.work / 'new-tmp')
+                expected = str(old) if live or case in ('custom present', 'operator custom') else str(run_root / 'tmux.sock')
+                expected_run = run_root
+                if case == 'operator custom':
+                    os.environ['MV2_TMUX_SOCKET'] = str(old)
+                elif case in ('legacy operator', 'default operator'):
+                    expected = str(self.work / 'chosen.sock')
+                    expected_run = self.work / 'next'
+                    os.environ.update(MV2_TMUX_SOCKET=expected, MV2_RUN_DIR=str(expected_run))
+                elif live:
+                    # A live/recoverable recorded server wins over the
+                    # operator's different current placement.
+                    os.environ.update(MV2_TMUX_SOCKET=str(self.work / 'other.sock'), MV2_RUN_DIR=str(self.work / 'next'))
+                advice = []
+                try:
+                    if case in ('explicit resume', 'operator custom'):
+                        result = lifecycle.start(self.root, resume=first['id'], wait=True)
+                    elif case == 'legacy retry':
+                        with patch.object(lifecycle, 'start', side_effect=ValueError('retry fixture')):
+                            failed = send.run(self.root, agent=first['id'], text='WAKE:' + case)
+                        self.assertFalse(failed['ok'])
+                        result = deliver.run(self.root, agent=first['id'], retry=True)
+                    elif case == 'legacy peer unknown':
+                        # Earlier rows can leave a socket inode after their
+                        # server exits. Start this refusal check with absent
+                        # candidates, after independently proving each gone.
+                        for candidate in (run_root / 'tmux.sock', Path(os.environ['MV2_TMUX_SOCKET'])):
+                            self.assertEqual(type(self.backend)(str(candidate)).snapshot(), ({}, None))
+                            candidate.unlink(missing_ok=True)
+                        observed = recovery.process_snapshot
+                        def unreadable(peer_pid):
+                            return None if peer_pid == peer_facts['runner_pid'] else observed(peer_pid)
+                        with patch.object(recovery, 'process_snapshot', side_effect=unreadable), \
+                                patch.object(recovery.os, 'kill', wraps=os.kill) as signals, \
+                                patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Unknown peer permitted creation')) as create:
+                            result = send.run(self.root, agent=first['id'], text='WAKE:' + case)
+                        self.assertFalse(result['ok'], result)
+                        self.assertIn(str(peer_facts['runner_pid']), result['native_delivery']['reason'])
+                        create.assert_not_called()
+                        self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
+                        self.assertFalse(old.exists())
+                        self.assertFalse((run_root / 'tmux.sock').exists())
+                        self.assertFalse(Path(os.environ['MV2_TMUX_SOCKET']).exists())
+                        return
+                    else:
+                        guard = (patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('A refused wake created a server'))
+                                 if case == 'custom swept' else nullcontext())
+                        with guard:
+                            result = send.run(self.root, agent=first['id'], text='WAKE:' + case, _present=advice.append)
+                    if case == 'custom swept':
+                        self.assertFalse(result['ok'], result)
+                        self.assertIn('recorded tmux socket folder', result['native_delivery']['reason'])
+                        self.assertIn('MV2_TMUX_SOCKET', result['native_delivery']['reason'])
+                        self.assertFalse(old.parent.exists())
+                        self.assertEqual(type(self.backend)(str(run_root / 'tmux.sock')).snapshot(), ({}, None))
+                        # Following the resume advice does not deliver the
+                        # saved prompt: retry needs a bridge, while a plain
+                        # agent can only receive manual inbox delivery.
+                        os.environ['MV2_TMUX_SOCKET'] = expected
+                        resumed = lifecycle.start(self.root, resume=first['id'], wait=True)
+                        self.assertTrue(resumed['ready'], resumed)
+                        plain = deliver.run(self.root, agent=first['id'], retry=True)
+                        self.assertFalse(plain['ok'], plain)
+                        self.assertIn('launch-only', plain['messages'][0]['reason'])
+                        manual = send.run(self.root, agent=first['id'], text='MANUAL', delivery='inbox-only')
+                        self.assertTrue(manual['saved'])
+                        self.assertEqual(manual['state'], 'queued')
+                        capabilities = {**adapter.capabilities(None), 'send_steer': Capability('supported')}
+                        with patch.object(adapter, 'capabilities', return_value=capabilities), \
+                                patch.object(adapter, 'send', return_value=NativeResult('native_queued')) as submit:
+                            bridged = deliver.run(self.root, agent=first['id'], retry=True)
+                            self.assertTrue(bridged['ok'], bridged)
+                            submit.assert_called_once()
+                            self.assertIn('WAKE:' + case, submit.call_args.args[1].text)
+                        self.assertIn('With a working bridge', advice[0])
+                        self.assertIn('For a launch-only agent', advice[0])
+                        self.assertIn('--delivery inbox-only', advice[0])
+                    else:
+                        self.assertTrue(result['ok'] if 'ok' in result else result['ready'], result)
+                        until(lambda: output.exists() and file_output.exists())
                         facts = read(directory / 'runtime.json')
-                        facts.pop('run_directory', None)
-                        if peer_facts is not None:
-                            facts['tmux'].pop('server', None)
-                            facts['tmux'].pop('server_identity', None)
-                            request_path = directory / 'launches' / facts['launch_id'] / 'request.json'
-                            request = read(request_path)
-                            request['env'].pop('MV2_RUN_DIR', None)
-                            write(request_path, request)
-                            recovery.registry(old.resolve()).unlink(missing_ok=True)
-                            self.assertEqual(recovery.runner_server(peer_facts)['pid'], int(pid))
-                        write(directory / 'runtime.json', facts)
-                    for path in (output, file_output):
-                        path.unlink(missing_ok=True)
-                    os.environ.pop('MV2_TMUX_SOCKET')
-                    if case == 'legacy changed tmp':
-                        os.environ['TMUX_TMPDIR'] = str(self.work / 'new-tmp')
-                    expected = str(old) if live or case in ('custom present', 'operator custom') else str(run_root / 'tmux.sock')
-                    expected_run = run_root
-                    if case == 'operator custom':
-                        os.environ['MV2_TMUX_SOCKET'] = str(old)
-                    elif case in ('legacy operator', 'default operator'):
-                        expected = str(self.work / 'chosen.sock')
-                        expected_run = self.work / 'next'
-                        os.environ.update(MV2_TMUX_SOCKET=expected, MV2_RUN_DIR=str(expected_run))
-                    elif live:
-                        # A live/recoverable recorded server wins over the
-                        # operator's different current placement.
-                        os.environ.update(MV2_TMUX_SOCKET=str(self.work / 'other.sock'), MV2_RUN_DIR=str(self.work / 'next'))
-                    advice = []
-                    try:
-                        if case in ('explicit resume', 'operator custom'):
-                            result = lifecycle.start(self.root, resume=first['id'], wait=True)
-                        elif case == 'legacy retry':
-                            with patch.object(lifecycle, 'start', side_effect=ValueError('retry fixture')):
-                                failed = send.run(self.root, agent=first['id'], text='WAKE:' + case)
-                            self.assertFalse(failed['ok'])
-                            result = deliver.run(self.root, agent=first['id'], retry=True)
-                        elif case == 'legacy peer unknown':
-                            # Earlier rows can leave a socket inode after their
-                            # server exits. Start this refusal check with absent
-                            # candidates, after independently proving each gone.
-                            for candidate in (run_root / 'tmux.sock', Path(os.environ['MV2_TMUX_SOCKET'])):
-                                self.assertEqual(type(self.backend)(str(candidate)).snapshot(), ({}, None))
-                                candidate.unlink(missing_ok=True)
-                            observed = recovery.process_snapshot
-                            def unreadable(peer_pid):
-                                return None if peer_pid == peer_facts['runner_pid'] else observed(peer_pid)
-                            with patch.object(recovery, 'process_snapshot', side_effect=unreadable), \
-                                    patch.object(recovery.os, 'kill', wraps=os.kill) as signals, \
-                                    patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Unknown peer permitted creation')) as create:
-                                result = send.run(self.root, agent=first['id'], text='WAKE:' + case)
-                            self.assertFalse(result['ok'], result)
-                            self.assertIn(str(peer_facts['runner_pid']), result['native_delivery']['reason'])
-                            create.assert_not_called()
-                            self.assertFalse(any(call.args[1] == signal.SIGUSR1 for call in signals.call_args_list))
-                            self.assertFalse(old.exists())
-                            self.assertFalse((run_root / 'tmux.sock').exists())
-                            self.assertFalse(Path(os.environ['MV2_TMUX_SOCKET']).exists())
-                            continue
-                        else:
-                            guard = (patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('A refused wake created a server'))
-                                     if case == 'custom swept' else nullcontext())
-                            with guard:
-                                result = send.run(self.root, agent=first['id'], text='WAKE:' + case, _present=advice.append)
-                        if case == 'custom swept':
-                            self.assertFalse(result['ok'], result)
-                            self.assertIn('recorded tmux socket folder', result['native_delivery']['reason'])
-                            self.assertIn('MV2_TMUX_SOCKET', result['native_delivery']['reason'])
-                            self.assertFalse(old.parent.exists())
-                            self.assertEqual(type(self.backend)(str(run_root / 'tmux.sock')).snapshot(), ({}, None))
-                            # Following the resume advice does not deliver the
-                            # saved prompt: retry needs a bridge, while a plain
-                            # agent can only receive manual inbox delivery.
-                            os.environ['MV2_TMUX_SOCKET'] = expected
-                            resumed = lifecycle.start(self.root, resume=first['id'], wait=True)
-                            self.assertTrue(resumed['ready'], resumed)
-                            plain = deliver.run(self.root, agent=first['id'], retry=True)
-                            self.assertFalse(plain['ok'], plain)
-                            self.assertIn('launch-only', plain['messages'][0]['reason'])
-                            manual = send.run(self.root, agent=first['id'], text='MANUAL', delivery='inbox-only')
-                            self.assertTrue(manual['saved'])
-                            self.assertEqual(manual['state'], 'queued')
-                            capabilities = {**adapter.capabilities(None), 'send_steer': Capability('supported')}
-                            with patch.object(adapter, 'capabilities', return_value=capabilities), \
-                                    patch.object(adapter, 'send', return_value=NativeResult('native_queued')) as submit:
-                                bridged = deliver.run(self.root, agent=first['id'], retry=True)
-                                self.assertTrue(bridged['ok'], bridged)
-                                submit.assert_called_once()
-                                self.assertIn('WAKE:' + case, submit.call_args.args[1].text)
-                            self.assertIn('With a working bridge', advice[0])
-                            self.assertIn('For a launch-only agent', advice[0])
-                            self.assertIn('--delivery inbox-only', advice[0])
-                        else:
-                            self.assertTrue(result['ok'] if 'ok' in result else result['ready'], result)
-                            until(lambda: output.exists() and file_output.exists())
-                            facts = read(directory / 'runtime.json')
-                            self.assertEqual(facts['tmux']['socket'], expected)
-                            self.assertEqual(read(directory / 'launches' / facts['launch_id'] / 'request.json')['env']['MV2_TMUX_SOCKET'], expected)
-                            # Main-era records have no run root to retain.
-                            self.assertEqual(facts['run_directory'], str(self.work / 'next' if live and case.startswith('legacy') else expected_run))
-                            if live:
-                                self.assertEqual(self.backend.run('display-message', '-p', '#{pid}'), pid)
-                            if case not in ('explicit resume', 'operator custom'):
-                                self.assertIn('WAKE:' + case, output.read_text())
-                                self.assertEqual(output.read_text(), file_output.read_text())
-                    finally:
-                        if peer_facts is not None:
-                            # A mutation may skip the peer proof and leave the
-                            # old server hidden. Recover through that same proof
-                            # before cleanup, never through an unchecked PID.
-                            recovery.observe(self.backend, facts=peer_facts)
-                        # End both private candidates before the fixture waits
-                        # for runners, even when a mutation chose the wrong one.
-                        for candidate in {expected, str(old), str(run_root / 'tmux.sock'),
-                                          str(lifecycle.paths.run_directory() / 'tmux.sock'),
-                                          os.environ.get('MV2_TMUX_SOCKET')} - {None}:
-                            try:
-                                type(self.backend)(candidate).run('kill-server')
-                            except (OSError, RuntimeError):
-                                pass
-                        self.backend = type(self.backend)(str(old))
-                        self.kill_server()
+                        self.assertEqual(facts['tmux']['socket'], expected)
+                        self.assertEqual(read(directory / 'launches' / facts['launch_id'] / 'request.json')['env']['MV2_TMUX_SOCKET'], expected)
+                        # Main-era records have no run root to retain.
+                        self.assertEqual(facts['run_directory'], str(self.work / 'next' if live and case.startswith('legacy') else expected_run))
+                        if live:
+                            self.assertEqual(self.backend.run('display-message', '-p', '#{pid}'), pid)
+                        if case not in ('explicit resume', 'operator custom'):
+                            self.assertIn('WAKE:' + case, output.read_text())
+                            self.assertEqual(output.read_text(), file_output.read_text())
+                finally:
+                    if peer_facts is not None:
+                        # A mutation may skip the peer proof and leave the
+                        # old server hidden. Recover through that same proof
+                        # before cleanup, never through an unchecked PID.
+                        recovery.observe(self.backend, facts=peer_facts)
+                    # End both private candidates before the fixture waits
+                    # for runners, even when a mutation chose the wrong one.
+                    for candidate in {expected, str(old), str(run_root / 'tmux.sock'),
+                                      str(lifecycle.paths.run_directory() / 'tmux.sock'),
+                                      os.environ.get('MV2_TMUX_SOCKET')} - {None}:
+                        try:
+                            type(self.backend)(candidate).run('kill-server')
+                        except (OSError, RuntimeError):
+                            pass
+                    self.backend = type(self.backend)(str(old))
+                    self.kill_server()
 
+
+    def test_an_unknown_recorded_server_cannot_select_another_socket(self):
+        """An unknown recorded tmux server stops a wake instead of selecting another socket; a break goes unnoticed
+        because the agent wakes on a second server beside its own (5d0a2851)."""
+        self.socket = str(self.work / 'custom' / 'tmux.sock')  # as the socket table left it
+        Path(self.socket).parent.mkdir(mode=0o700)
         with self.subTest('an unknown recorded server cannot select another socket'), \
                 patch.object(recovery, 'observe', side_effect=recovery.Unreachable('Recorded server is unknown')), \
                 patch.object(lifecycle.Tmux, 'create', side_effect=AssertionError('Created an unverified replacement')):
             with self.assertRaisesRegex(recovery.Unreachable, 'Recorded server is unknown'):
                 lifecycle._wake_socket(self.root, {}, self.work / 'run', self.socket)
 
+    def test_a_recordless_wake_uses_only_the_operators_or_a_verified_senders_placement(self):
+        """A wake with no runtime record uses the operator's current choice or a verified same-tree sender's
+        placement, and refuses cross-tree and unprovable callers; a break goes unnoticed because the agent wakes on
+        another universe's or the operator's default server (6216d52d)."""
+        adapter, launched = self.recorder()
+        first, _, _ = launched(name='recordless', task='ORIGINAL', harness='recorder')
+        directory = self.root / 'state/agents' / first['id']
+        self.kill_server()
         # Recordless wakes use an operator's current choice or a verified
         # same-tree sender's placement. No cross-tree or unprovable fallback.
         for caller in ('operator default', 'operator custom', 'operator legacy', 'same tree', 'cross tree', 'unprovable',
@@ -292,6 +311,11 @@ class ResumePlaceholderTest(TerminalBase):
                         self.backend = type(self.backend)(expected)
                         self.kill_server()
 
+    def test_a_reply_only_server_blocks_migration_until_its_exit_is_proven(self):
+        """A tmux server recorded without OS signal bookkeeping still blocks migration after its socket is swept,
+        until its exit is proven, while its records are active; a break goes unnoticed because a wake starts a
+        second server while the first still runs (e2141919)."""
+        adapter, launched = self.recorder()
         # An answering creation can legitimately lack OS signal bookkeeping.
         # Its retained native reply must still block migration after a sweep.
         old_root, next_root = self.work / 'reply-run', self.work / 'reply-next'
@@ -370,23 +394,48 @@ class ResumePlaceholderTest(TerminalBase):
                         pass
                 self.kill_server()
 
-        with self.subTest('a dormant reply-only PID cannot block unrelated launches'):
-            self.socket = str(self.work / 'reused-run' / 'tmux.sock')
-            self.backend = type(self.backend)(self.socket)
-            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-            try:
-                # This unrelated child stands in for a PID reused after reboot.
-                old = {'launch_id': uid(), 'state': 'dormant', 'run_directory': str(self.work / 'reused-run'),
-                       'tmux': {'socket': self.socket, 'session': '$0', 'pane': '%0', 'server': None,
-                                'server_identity': {'pid': child.pid, 'epoch': 1}}}
-                write(self.root / 'state/agents' / uid() / 'runtime.json', old)
-                with self.assertRaisesRegex(recovery.Unreachable, 'operator with MV2_TMUX_SOCKET'):
-                    lifecycle._wake_socket(self.root, old, self.work / 'reused-run', self.socket)
-                Path(self.socket).parent.mkdir(mode=0o700)
-                fresh, _, _ = launched(name='unrelated-after-reuse', task='FRESH', harness='recorder')
-                self.assertTrue(fresh['ready'], fresh)
-                self.assertIsNone(child.poll())
-            finally:
-                child.terminate()
-                child.wait(timeout=5)
-                self.kill_server()
+    def test_a_dormant_reply_only_pid_cannot_block_unrelated_launches(self):
+        """A dormant record's reply-only PID, possibly reused after a reboot, never blocks an unrelated launch; a
+        break shows only as launches refused for a server long gone (e2141919)."""
+        adapter, launched = self.recorder()
+        self.socket = str(self.work / 'reused-run' / 'tmux.sock')
+        self.backend = type(self.backend)(self.socket)
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        try:
+            # This unrelated child stands in for a PID reused after reboot.
+            old = {'launch_id': uid(), 'state': 'dormant', 'run_directory': str(self.work / 'reused-run'),
+                   'tmux': {'socket': self.socket, 'session': '$0', 'pane': '%0', 'server': None,
+                            'server_identity': {'pid': child.pid, 'epoch': 1}}}
+            write(self.root / 'state/agents' / uid() / 'runtime.json', old)
+            with self.assertRaisesRegex(recovery.Unreachable, 'operator with MV2_TMUX_SOCKET'):
+                lifecycle._wake_socket(self.root, old, self.work / 'reused-run', self.socket)
+            Path(self.socket).parent.mkdir(mode=0o700)
+            fresh, _, _ = launched(name='unrelated-after-reuse', task='FRESH', harness='recorder')
+            self.assertTrue(fresh['ready'], fresh)
+            self.assertIsNone(child.poll())
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+            self.kill_server()
+
+
+SOCKET_CASES = ('legacy swept', 'legacy retry', 'legacy live', 'legacy recover', 'legacy peer recover',
+                'legacy peer unknown', 'legacy changed tmp', 'legacy operator', 'default operator', 'custom present',
+                'custom live', 'custom swept', 'explicit resume', 'operator custom')
+
+
+def _socket_test(case):
+    def test(self):
+        self.wake_socket_case(case)
+    test.__doc__ = (f"A wake picks the tmux server its record proves ({case}): it survives a swept legacy default, "
+                    "never moves a custom, isolated server onto the operator's default, and refuses rather than "
+                    "guess; a break goes unnoticed because the woken agent runs, on the wrong server or a second one "
+                    "(5d0a2851, b34e1ce2, 6216d52d, c3510249, e2141919).")
+    return test
+
+
+# One test per case, so the runner spreads the table over its workers.
+for _case in SOCKET_CASES:
+    setattr(ResumePlaceholderTest, 'test_a_wake_picks_the_proven_server_' + _case.replace(' ', '_'),
+            _socket_test(_case))
+del _case

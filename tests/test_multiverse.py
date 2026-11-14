@@ -113,9 +113,12 @@ class TerminalBase(BaseTest):
         # Runners finish receipt/queue cleanup after tmux tears down a pane.
         # Detached wrapper cleanup can remove its pane before its last runtime
         # write. Track all core processes in this fixture, not just live panes.
-        def core_processes():
-            output = subprocess.run(['ps', '-axo', 'pid=,args='], text=True,
-                                    capture_output=True, check=True, timeout=5).stdout
+        def core_processes():  # None: ps outlasted its timeout under load, so nothing was seen yet
+            try:
+                output = subprocess.run(['ps', '-axo', 'pid=,args='], text=True,
+                                        capture_output=True, check=True, timeout=5).stdout
+            except subprocess.TimeoutExpired:
+                return None
             runner = str(ROOT / 'src/multiverse/runtime/runner.py') + ' '
             workspace = ' ' + str(self.work) + '/'
             return {int(fields[0]) for line in output.splitlines()
@@ -123,7 +126,8 @@ class TerminalBase(BaseTest):
                     and runner in fields[1] and workspace in fields[1]}
 
         panes, _ = self.backend.snapshot()
-        pids = core_processes() | {int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')}
+        listed = until(lambda: (found := core_processes()) is not None and [found], seconds=15)[0]
+        pids = listed | {int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')}
         try:
             self.backend.run("kill-server")
         except (OSError, RuntimeError):
@@ -148,7 +152,7 @@ class TerminalBase(BaseTest):
                 detail = f'Process inspection unavailable: {error}'
             raise AssertionError(f'Terminal processes did not exit within 15 s: {remaining}\n{detail}') from None
         # A runner can spawn the detached helper while it is exiting above.
-        until(lambda: not core_processes(), seconds=15)
+        until(lambda: core_processes() == set(), seconds=15)
 
     def spawn(self):
         result = lifecycle.start(self.root, "tester", "a task", "fake", socket_path=self.socket)
@@ -159,25 +163,44 @@ class TerminalBase(BaseTest):
 
 class TerminalCleanupTest(BaseTest):
     def test_cleanup_waits_for_running_processes_but_not_unreaped_exits(self):
-        """Teardown must wait for live or unknown processes and identify their full command; only a proven exit can stop writing fixture state."""
+        """Teardown must wait for live or unknown processes and identify their full command; only a proven exit can stop
+        writing fixture state, and a process listing too slow under load is retried within the wait, never an error."""
         original_until = until
+        real_run = subprocess.run
         marker = 'mv2-cleanup-survivor-' + 'x' * 160
-        for state in ('running', 'uninspectable', 'exited but unreaped'):
+        runner = [str(ROOT / 'src/multiverse/runtime/runner.py'), str(self.work) + '/agent']
+        for state in ('running', 'uninspectable', 'exited but unreaped',
+                      'a slow ps, nothing left', 'a slow ps, a runner left'):
             with self.subTest(state=state):
-                child = subprocess.Popen([sys.executable, '-c', 'pass' if state == 'exited but unreaped'
-                                           else 'import time; time.sleep(60)', marker],
-                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                slow = state.startswith('a slow ps')
+                finished = state in ('exited but unreaped', 'a slow ps, nothing left')
+                code = 'pass' if finished else 'import time; time.sleep(60)'
+                child = subprocess.Popen([sys.executable, '-c', code, marker]
+                                         + (runner if state == 'a slow ps, a runner left' else []),
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                listings = []
+                def slow_ps(argv, *args, **options):  # every other full listing outlasts its timeout
+                    if argv[:2] == ['ps', '-axo']:
+                        listings.append(argv)
+                        if len(listings) % 2:
+                            raise subprocess.TimeoutExpired(argv, options.get('timeout'))
+                    return real_run(argv, *args, **options)
                 try:
                     if state == 'exited but unreaped':
                         original_until(lambda: (info := process_snapshot(child.pid)) and info[1].startswith('Z'))
                     self.backend = Mock()
-                    self.backend.snapshot.return_value = ({'%1': {'pane_pid': str(child.pid)}}, None)
+                    self.backend.snapshot.return_value = ({} if slow else {'%1': {'pane_pid': str(child.pid)}}, None)
                     observe = patch(__name__ + '.process_snapshot', return_value=None) if state == 'uninspectable' else nullcontext()
-                    with observe, patch(__name__ + '.until', side_effect=lambda predicate, seconds=15:
-                                        original_until(predicate, seconds=.25)):
-                        if state == 'exited but unreaped':
+                    with observe, patch.object(subprocess, 'run', side_effect=slow_ps) if slow else nullcontext(), \
+                            patch(__name__ + '.until', side_effect=lambda predicate, seconds=15:
+                                  original_until(predicate, seconds=2 if slow else .25)):
+                        if finished:
                             TerminalBase.kill_server(self)
-                            self.assertIsNone(child.returncode, 'The helper observes an exit; the parent still owns reaping it')
+                            if slow:
+                                self.assertGreaterEqual(len(listings), 4, 'Both listings were retried after a timeout')
+                            else:
+                                self.assertIsNone(child.returncode,
+                                                  'The helper observes an exit; the parent still owns reaping it')
                         else:
                             with self.assertRaises(AssertionError) as caught:
                                 TerminalBase.kill_server(self)
