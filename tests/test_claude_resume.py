@@ -113,7 +113,10 @@ if flag == '--session-id' and transcript.is_file():
 if '--' in args and args[args.index('--') + 1:]:
     transcript.parent.mkdir(parents=True, exist_ok=True)
     transcript.write_text(json.dumps({{'type': 'user', 'sessionId': session}}) + '\\n')
-Path(os.environ['MV2_AGENT_DIR'], 'seen.json').write_text(json.dumps({{'argv': args}}))
+seen = Path(os.environ['MV2_AGENT_DIR'], 'seen.json')
+pending = seen.with_suffix('.tmp')
+pending.write_text(json.dumps({{'argv': args}}))
+pending.replace(seen)
 print('HARNESS READY', flush=True)
 while True:
     time.sleep(1)
