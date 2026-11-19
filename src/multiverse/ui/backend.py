@@ -1,5 +1,6 @@
 """Dashboard data/actions, separate from rendering so the UI can run headlessly."""
 from dataclasses import asdict
+import os
 from pathlib import Path
 import threading
 
@@ -71,6 +72,9 @@ def inbox_stamp(directory):
             tuple((path.name, _file_stamp(path)) for path in records))
 
 
+CHANGE_FILES = ("properties.json", "runtime.json", "focus.json", "inbox.jsonl", "inbox.cursor")
+
+
 ANSWER_WAIT = 15  # seconds the dashboard waits for an answer's outcome; later, it says how to read it
 
 
@@ -120,6 +124,26 @@ class LocalBackend:
             return None
         self._unread[key] = (stamp, count)  # the stamp from before the read: a change during it is read next time
         return count
+
+    def change_stamp(self, root):
+        """A stat of what a status change writes: each scope's agents folder and each agent's records. Cheap enough
+        to take a few times a second (a stat per file, nothing parsed), so the dashboard lists again soon after a
+        change instead of on its next timer tick. A change it misses still shows on the timer's listing."""
+        def stat(path):  # a record that can't be stat'ed is part of the stamp, never an error: this is only a hint
+            try:
+                return _file_stamp(path)
+            except OSError as error:
+                return type(error).__name__
+        stamp = []
+        for scope in universe.tree(root):
+            folder = scope / "state" / "agents"
+            try:  # only folders are agents: a stray file here (.DS_Store) is not one
+                names = sorted(entry.name for entry in os.scandir(folder) if entry.is_dir(follow_symlinks=False))
+            except OSError:
+                names = []
+            stamp.append((str(folder), stat(folder)))
+            stamp.extend(stat(folder / name / record) for name in names for record in CHANGE_FILES)
+        return tuple(stamp)
 
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)

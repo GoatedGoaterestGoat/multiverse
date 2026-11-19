@@ -209,6 +209,90 @@ class UsageLaterTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(in_flight[0], 0, "a listing outlived the dashboard")
             self.assertNoUsageRead()
 
+    async def test_a_changed_agent_record_lists_again_within_a_tick_even_during_the_first_usage_read(self):
+        """A write to an agent's records (its runtime, properties, focus or inbox) starts a listing within a tick,
+        also while the first usage read holds the timer back, and unchanged records start none; the check is only a
+        hint, so a stray file among the agents never stops a listing, and a slow check is never restarted alongside
+        itself; fragile because the dashboard otherwise shows a stop or resume's outcome only on its next timer
+        listing, seconds later in the first seconds of a dashboard, and nothing says the status it shows is stale."""
+        ada = self.agent("ada")
+        (ada.parent / ".DS_Store").write_bytes(b"Finder's own file, not an agent")
+        gate, calls, listings = threading.Event(), [], []
+        leaving = threading.Event()
+        self.addCleanup(gate.set)
+
+        def usage_snapshot(scope, properties, facts, reconciled=False):  # a first read that never lands: the hold holds
+            calls.append(properties["name"])
+            gate.wait(30)
+            return reading(82000)["usage"]
+
+        with mock.patch.object(native, "usage_snapshot", usage_snapshot), \
+                mock.patch.object(appmod, "FIRST_USAGE_PATIENCE", 300), mock.patch.object(appmod, "CHANGE_CHECK", 0.05):
+            d = self.dashboard()
+            d.app.refresh_interval = 0.2  # the driver runs without a timer; this test is about the timers
+            listing, check, tick = d.app.backend.snapshot, d.app.check_changes, d.app.timed_refresh
+
+            def snapshot(root):
+                listings.append(time.monotonic())
+                return listing(root)
+
+            def check_changes():
+                if not leaving.is_set():  # leaving: no check or tick starts a listing that could outlive the dashboard
+                    check()
+
+            def timed_refresh():
+                if not leaving.is_set():
+                    tick()
+
+            # Before the timers are set up.
+            d.app.backend.snapshot, d.app.check_changes, d.app.timed_refresh = snapshot, check_changes, timed_refresh
+            async with d:
+                await d.until(lambda: calls, "the first usage read")
+                with self.subTest("unchanged records start no listing"):
+                    before = len(listings)
+                    await asyncio.sleep(1.0)  # 20 change checks and 5 timer ticks, all inside the hold
+                    self.assertEqual(len(listings), before)
+                for record, change, shown in (
+                        ("runtime.json", {"status": "working"}, lambda row: row["runtime"].get("status")),
+                        ("properties.json", {"summary": "reading the view code"}, lambda row: row.get("summary"))):
+                    with self.subTest("a changed record lists again within a tick", record=record):
+                        before = len(listings)
+                        write(ada / record, {**json.loads((ada / record).read_text()), **change})
+                        await d.until(lambda: len(listings) > before, f"a listing after {record} changed")
+                        value = next(iter(change.values()))
+                        await d.until(lambda: any(shown(row) == value for row in d.app.snapshot["agents"]),
+                                      f"the row showing {value!r}")
+                with self.subTest("a slow check is never restarted while its stat still runs"):
+                    held, entered, active, lock = threading.Event(), threading.Event(), [0, 0], threading.Lock()
+                    self.addCleanup(held.set)
+                    stamp = d.app.change_stamp
+
+                    def slow(root):
+                        with lock:
+                            active[0] += 1
+                            active[1] = max(active[1], active[0])
+                        entered.set()
+                        try:
+                            held.wait(10)
+                            return stamp
+                        finally:
+                            with lock:
+                                active[0] -= 1
+
+                    with mock.patch.object(d.app.backend, "change_stamp", slow):
+                        deadline = time.monotonic() + 10  # d.until joins the workers, the held one included
+                        while not entered.is_set() and time.monotonic() < deadline:
+                            await asyncio.sleep(0.02)
+                        self.assertTrue(entered.is_set(), "no change check reached its stat")
+                        await asyncio.sleep(0.5)  # ten more ticks while that stat is held
+                        held.set()
+                        await d.until(lambda: not d.app.stamping, "the held check to finish")
+                    self.assertEqual(active[1], 1, "a tick started a second stat while the first still ran")
+                await self.release(d, gate)
+                leaving.set()
+                await d.until(lambda: not d.app.scanning, "the last listing")
+            self.assertNoUsageRead()
+
     def test_quitting_never_waits_for_a_usage_read(self):
         """q ends the process while a usage read is still running, leaving that read behind; fragile because a read
         run where Python waits for it at exit (asyncio's executor, a non-daemon thread) makes every quit wait for a

@@ -48,7 +48,7 @@ mv2 has no daemon of its own. State is kept in files in the universe. Processes 
 | Process | Started by | Does |
 | --- | --- | --- |
 | `mv2 COMMAND` | You, a script or an agent's shell | Runs one tool and exits. `spawn` and `resume` return once the pane is set up, or wait with `--wait`. |
-| Dashboard (`mv2`, `mv2 tui`) | You | Reads the universe and tmux every 1.5 s and calls tools. Agents keep running when it quits. |
+| Dashboard (`mv2`, `mv2 tui`) | You | Reads the universe and tmux every 1.5 s, and again within about a quarter of a second when an agent's records change, and calls tools. Agents keep running when it quits. |
 | Runner (`runtime/runner.py LAUNCH_DIR`) | `lifecycle.start`, as the command of a new tmux pane | One per launch. Starts the native process and any relay, delivers held messages, watches status, and records the exit. |
 | Native process (`claude`, `codex`, `pi`) | The runner | The agent. The Claude mod and the Pi extension run inside it. |
 | Codex app-server daemon | `codex app-server daemon start`, from `lifecycle` | Shared by Codex agents using the same Codex home. mv2 starts or reuses it, and never stops or restarts it. |
