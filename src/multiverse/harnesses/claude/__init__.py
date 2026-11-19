@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ...runtime.process import process_snapshot, process_started, start_matches
+from ...runtime.process import process_snapshot, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read, retry_missing
@@ -93,10 +93,10 @@ def peer_token(socket_path, home=None):
     return token if isinstance(token, str) and TOKEN.match(token) else None
 
 
-# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux,
-# `ps -o lstart=` in UTC elsewhere (macOS), the same form as the runner's pid_started there.
+# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux, the
+# ticks mv2's own start token ends in (`linux:<boot>:<ticks>`), and `ps -o lstart=` in UTC elsewhere (macOS), the
+# same form as the runner's pid_started there.
 LINUX = sys.platform.startswith('linux')
-PROC = Path('/proc')
 
 
 def process_file(session):
@@ -116,37 +116,19 @@ def process_file(session):
     return record if isinstance(record, dict) and isinstance(record.get('procStart'), str) else None
 
 
-def _proc_start(pid):
-    """Linux: (state, start in clock ticks) from /proc/<pid>/stat, or None.
-
-    Fields are counted after the last ')', since the command name can hold spaces and parentheses.
-    """
-    try:
-        stat = (PROC / str(pid) / 'stat').read_text()
-    except (OSError, ValueError):
-        return None
-    fields = stat[stat.rfind(')') + 2:].split(' ') if ')' in stat else []
-    if len(fields) < 20 or not fields[19].isdigit():
-        return None
-    return fields[0], fields[19]
-
-
 def same_process(record, pid):
     """mv2's start of `pid` (as the runner records pid_started) when Claude's file `record` is this live,
     non-zombie process, else None.
 
-    One ps on macOS. On Linux, /proc first and ps only when the file's ticks match it.
+    One observation of the process (process_snapshot): one ps on macOS, one read of /proc/<pid>/stat on Linux,
+    whose start token ends in the clock ticks Claude writes.
     """
     claimed = ' '.join(record['procStart'].split())
-    if LINUX:
-        proc = _proc_start(pid)
-        if proc is None or proc[0] == 'Z' or proc[1] != claimed:
-            return None
-        return process_started(pid)
     snapshot = process_snapshot(pid)
-    if snapshot is None or snapshot[1].startswith('Z') or snapshot[0] != claimed:
+    if snapshot is None or snapshot[1].startswith('Z'):
         return None
-    return snapshot[0]
+    start = snapshot[0].rsplit(':', 1)[-1] if LINUX else snapshot[0]
+    return snapshot[0] if start == claimed else None
 
 
 def process_record(session):

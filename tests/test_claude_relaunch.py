@@ -14,6 +14,7 @@ import shutil
 import socket
 import sys
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ TOKEN = '0123456789abcdef0123456789abcdef'
 # whose field 22, the start in clock ticks since boot, is that procStart.
 FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'claude'
 LINUX_START = '1334113325'
+BOOT = '0b8d9a3e-6f1c-4d2a-9e7b-5c4f3a2d1e0f'  # a stand-in /proc's boot ID
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
 
 
@@ -108,14 +110,26 @@ class ClaudeRelaunchTest(BaseTest):
         self.claude_start, self.other_start = self.started, 'Thu Jan  1 00:00:00 1970'
 
     def on_linux(self, *, state='S', ticks=LINUX_START, name='claude', line=None):
-        """Run the adapter's Linux reader, with this process's /proc/<pid>/stat from the Linux fixture."""
+        """Run the Linux reader (core's, which the adapter reads through), on any host: this process's
+        /proc/<pid>/stat from the Linux fixture and a boot ID in a stand-in /proc, and the runner's record of this
+        launch as a Linux start token."""
         fields = (FIXTURES / 'proc-stat-linux.txt').read_text().split(' ')
         fields[0], fields[1], fields[2], fields[21] = str(os.getpid()), f'({name})', state, ticks
         proc = self.work / 'proc'
         (proc / str(os.getpid())).mkdir(parents=True, exist_ok=True)
         (proc / str(os.getpid()) / 'stat').write_text(' '.join(fields) if line is None else line)
+        (proc / 'sys/kernel/random').mkdir(parents=True, exist_ok=True)
+        (proc / 'sys/kernel/random/boot_id').write_text(BOOT + '\n')
+        real, self.stat_reads = process.Path, []
+
+        def stand_in(path):
+            if str(path).endswith(f'/{os.getpid()}/stat'):
+                self.stat_reads.append(path)
+            return real(str(proc) + str(path)[len('/proc'):] if str(path).startswith('/proc/') else path)
+        self.enterContext(patch.object(process, 'Path', stand_in))
+        self.enterContext(patch.object(process, 'sys', SimpleNamespace(platform='linux')))
         self.enterContext(patch('multiverse.harnesses.claude.LINUX', True))
-        self.enterContext(patch('multiverse.harnesses.claude.PROC', proc))
+        self.started = f'linux:{BOOT}:{LINUX_START}'
         self.claude_start, self.other_start = ticks, str(int(LINUX_START) + 1)
 
     def counted(self):
@@ -263,8 +277,8 @@ class ClaudeRelaunchTest(BaseTest):
             if not sys.platform.startswith('linux'):
                 self.skipTest("reads this host's own /proc")
             self.enterContext(patch('multiverse.harnesses.claude.LINUX', True))
-            from multiverse.harnesses.claude import _proc_start
-            state, ticks = _proc_start(os.getpid())
+            token, state = process.process_snapshot(os.getpid())  # the read the adapter makes
+            ticks = token.rsplit(':', 1)[-1]
             self.assertTrue(ticks.isdigit() and state not in ('Z', 'X'))
             self.record(proc_start=ticks)
             self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
@@ -274,6 +288,7 @@ class ClaudeRelaunchTest(BaseTest):
             self.claude_file('sessions-linux.json')
             self.assertEqual(self.adapter.observed_binding(self.session()), ObservedBinding(
                 native_id=self.native, home=str(self.config), evidence='claude-process-file'))
+            self.assertEqual(len(self.stat_reads), 1)  # one read of /proc/<pid>/stat per check, for both starts
             # The /restart heal and the advice work there too.
             self.listening(self.theirs)
             self.key(self.theirs)
