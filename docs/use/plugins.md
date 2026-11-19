@@ -118,6 +118,8 @@ mv2 plugins secret notifier api_key --clear
 - **When the keychain refuses.** Setting or clearing one fails with the keychain tool's exit status, never its output. A secret the keychain refused to remove stays set, and `--clear` says so.
 - **Disabling** keeps them, so turning the plugin on again needs nothing; a disabled plugin can't read them. `--clear` removes one, and `mv2 doctor` names a secret whose plugin no longer declares it, with the command that clears it.
 
+In the dashboard, press `P`, select the plugin and press `Enter`; for a plugin with settings too, choose Secrets. Each secret says whether it is set here, comes from a parent universe, or is missing, and never shows a value. `Enter` on one asks for its value in the terminal, as `mv2 plugins secret` does: the dashboard steps aside, typing is hidden, and an empty line or `Ctrl+C` keeps it as it is. A terminal that can't hide typing is asked nothing; the screen names the command to run in one that can. The value never passes through the dashboard, so its logs can't hold it. `Ctrl+D` clears the selected one here, after asking. The Plugins screen follows a secret set or cleared in another terminal, so a plugin missing a required one shows it within a second. A secret that comes from a parent universe is cleared there; a value set here overrides it here.
+
 ## Change a plugin's settings
 
 ```sh

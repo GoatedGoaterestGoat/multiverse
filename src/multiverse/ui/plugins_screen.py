@@ -24,6 +24,7 @@ from ..plugins.settings import DELETE
 from .columns import COLUMNS
 from .plugin_service import universe_name
 from .screens import ChoiceScreen
+from .secrets_screen import SecretsScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
@@ -170,6 +171,7 @@ class PluginsScreen(ModalScreen):
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
         self.items, self.problems, self.host = [], [], None
         self.changed = self.busy = self.opening = self.installing = False
+        self.reads = 0  # list reads started: only the latest shows what it read
         self.note = None  # a status line a plugin screen left
 
     def compose(self):
@@ -185,19 +187,28 @@ class PluginsScreen(ModalScreen):
         self.service = self.service or self.app.plugin_service
         self.query_one("#plugins-table", DataTable).add_columns("Plugin", "Here", "State", "Version", "Errors")
         self.generation, self.stamp = loader.generation(), file_stamp(self.root / "plugins.json")
+        self.secrets_stamp = self.read_secrets_stamp()
         self.load()
         self.set_interval(1.0, self.follow)
 
     def follow(self):
-        """Read the list again when a plugin finished loading (or failed to), or plugins.json changed from outside
-        (a grant, an access_ceiling, a plugin turned on or off), since it was read. Never while a chooser or a
-        screen of its own is open on top, or a change it started is under way: the next tick catches up."""
+        """Read the list again when a plugin finished loading (or failed to), plugins.json changed from outside
+        (a grant, an access_ceiling, a plugin turned on or off), or a secret was set or cleared anywhere (another
+        terminal's mv2 plugins secret), since it was read. Never while a chooser or a screen of its own is open on
+        top, or a change it started is under way: the next tick catches up."""
         if self.busy or self.opening or self.app.screen is not self:
             return
-        stamp = file_stamp(self.root / "plugins.json")
-        if loader.generation() != self.generation or stamp != self.stamp:
-            self.generation, self.stamp = loader.generation(), stamp
-            self.load(keep=(self.selected() or {}).get("name"))
+        stamp, secrets_stamp = file_stamp(self.root / "plugins.json"), self.read_secrets_stamp()
+        if loader.generation() != self.generation or stamp != self.stamp or secrets_stamp != self.secrets_stamp:
+            self.generation, self.stamp, self.secrets_stamp = loader.generation(), stamp, secrets_stamp
+            self.load()
+
+    def read_secrets_stamp(self):
+        """The secret store's stamp (a stat, never a value), or None when it can't be read."""
+        try:
+            return self.service.secrets_stamp(self.root)
+        except Exception:
+            return None
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))
@@ -212,23 +223,37 @@ class PluginsScreen(ModalScreen):
     @work(group="plugins-load", exit_on_error=False)
     async def load(self, keep=None):
         """The list first, then the universe's plugin problems and the host: each shows as soon as it is read, so a
-        plugin still loading (whose problems are only known once it has) never keeps the list from showing."""
+        plugin still loading (whose problems are only known once it has) never keeps the list from showing. Reads
+        can overlap (a follow tick, an action's reread): only the latest started shows what it read, so an older
+        one finishing last never draws over a newer state."""
+        self.reads += 1
+        mine = self.reads
         try:
             items = await asyncio.to_thread(self.service.listing, self.root)
             await asyncio.to_thread(self.read_packages, items)
         except Exception as error:
-            self.query_one("#plugin-details", Static).update("Plugins unavailable.")
-            self.error(str(error))
+            if mine == self.reads:
+                self.query_one("#plugin-details", Static).update("Plugins unavailable.")
+                self.error(str(error))
+            return
+        if mine != self.reads:
             return
         self.items = items
         self.fill(keep)
         try:
-            self.problems = await asyncio.to_thread(self.service.problems, self.root)
+            problems = await asyncio.to_thread(self.service.problems, self.root)
+            if mine != self.reads:
+                return
+            self.problems = problems
             self.describe_selected()
-            self.host = await asyncio.to_thread(self.service.host_state, self.root)
+            host = await asyncio.to_thread(self.service.host_state, self.root)
+            if mine != self.reads:
+                return
+            self.host = host
             self.describe_selected()
         except Exception as error:
-            self.error(str(error))
+            if mine == self.reads:
+                self.error(str(error))
 
     def read_packages(self, items):
         """Each plugin's Python packages and whether they're installed (cheap: a file read and a stat each)."""
@@ -427,6 +452,42 @@ class PluginsScreen(ModalScreen):
             self.busy = True
             self.ask_packages(item, lambda: self.installed(item["name"]))
             return
+        self.opening = True
+        self.configure(item)
+
+    @work(group="plugins-screen", exit_on_error=False)
+    async def configure(self, item):
+        """Enter: the plugin's settings, its secrets, or a choice of the two when it has both. Its secrets are read
+        only now, off the event loop: reading them asks the keychain."""
+        try:
+            secrets = await asyncio.to_thread(self.service.secrets_view, self.root, item["name"])
+        except Exception:
+            secrets = []  # the settings still open; a plugin whose manifest can't be read says so there
+        self.opening = False
+        if not secrets:
+            self.open_settings(item)
+            return
+        if not item.get("settings"):
+            self.open_secrets(item, secrets)
+            return
+        missing = sum(1 for secret in secrets if secret.get("required") and not secret.get("set"))
+
+        def chosen(choice):
+            if choice == "secrets":
+                self.open_secrets(item, secrets)
+            elif choice == "settings":
+                self.open_settings(item)
+
+        self.app.push_screen(ChoiceScreen(f"Configure {item['name']}", [
+            ("settings", "Settings"),
+            ("secrets", f"Secrets ({len(secrets)}" + (f", {missing} required not set)" if missing else ")"))]),
+            chosen)
+
+    def open_secrets(self, item, secrets):
+        self.app.push_screen(SecretsScreen(self.root, self.service, item["name"], secrets, self.scope_name),
+                             self.edited)
+
+    def open_settings(self, item):
         settings = item.get("settings")
         if not settings:
             self.error(f"{item['name']} has no settings.")

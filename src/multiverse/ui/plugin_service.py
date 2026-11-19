@@ -162,6 +162,20 @@ class PluginService:
         folder name of the list they were shown, so a list changed since installs nothing."""
         return plugins.install_packages(Path(root), name, approved=approved)
 
+    def secrets_view(self, root, name):
+        """A plugin's declared secrets here and whether each is set; never a value (1.20)."""
+        return plugins.secrets_view(Path(root), name)
+
+    def secrets_stamp(self, root):
+        """Changes whenever any plugin's secret is set or cleared, by any process; never a value (1.20)."""
+        return plugins.secrets_stamp(Path(root))
+
+    def set_secret(self, root, name, key, value):
+        return plugins.set_secret(Path(root), name, key, value)
+
+    def clear_secret(self, root, name, key):
+        return plugins.clear_secret(Path(root), name, key)
+
     def packages_prompt(self, name, state):
         """The same words `mv2 plugins packages NAME` asks with."""
         from ..tools.plugins import packages_prompt

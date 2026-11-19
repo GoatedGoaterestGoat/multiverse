@@ -5,7 +5,9 @@ with a fake, so they need no plugin code, no filesystem and no tmux. FakeService
 is also the base of the fakes in GOAT's dashboard tests (plugins/compaction).
 """
 import asyncio
+import contextlib
 import os
+import signal
 import json
 from pathlib import Path
 import sys
@@ -23,6 +25,7 @@ from multiverse.plugins.settings import DELETE
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, schema_fields
 from multiverse.ui.screens import ChoiceScreen
+from multiverse.ui.secrets_screen import SecretsScreen
 from tui_demo import DemoBackend
 
 SCHEMA = {"type": "object", "properties": {
@@ -58,7 +61,9 @@ class FakeService:
         self.host = {"needed": False, "running": False, "stopped": {}, "pid": None, "workers": []}
         self.host_start_error = None
         self.packages = {}  # name -> packages_state's answer
-        self.listing_gate = None
+        self.secrets = {}  # name -> secrets_view's answer
+        self.secret_error, self.secret_gate = None, None
+        self.listing_gate, self.listing_held = None, False
         self.install_error, self.install_gate = None, None
 
     def host_state(self, root):
@@ -76,9 +81,11 @@ class FakeService:
         self.host["running"] = False
 
     def listing(self, root):
-        if self.listing_gate:
+        found = [dict(entry) for entry in self.items]  # what this read saw, before it is held
+        if self.listing_gate and not self.listing_held:  # one read is held, the first once the gate is set up
+            self.listing_held = True
             self.listing_gate.wait(10)
-        return [dict(entry) for entry in self.items]
+        return found
 
     def problems(self, root):
         return []
@@ -116,6 +123,28 @@ class FakeService:
             if entry["name"] == name:
                 entry["on"], entry["state"] = on, "loaded" if on else "off"
         return {"name": name, "on": on, "installed": []}
+
+    def secrets_stamp(self, root):
+        return None
+
+    def secrets_view(self, root, name):
+        self.calls.append(("secrets_view", Path(root), name))
+        return [dict(secret) for secret in self.secrets.get(name, ())]
+
+    def set_secret(self, root, name, key, value):
+        self.calls.append(("set_secret", Path(root), name, key, value))
+        if self.secret_gate:
+            self.secret_gate.wait(10)
+        if self.secret_error:
+            raise plugins.PluginError(self.secret_error)
+        for secret in self.secrets[name]:
+            if secret["key"] == key:
+                secret.update({"set": True, "inherited": False, "from": str(root)})
+        return "keychain"
+
+    def clear_secret(self, root, name, key):
+        self.calls.append(("clear_secret", Path(root), name, key))
+        return True
 
     def packages_state(self, root, name):
         found = self.packages.get(name)
@@ -368,6 +397,295 @@ class PackagesTests(DashboardCase):
                 await self.until(pilot, lambda: not screen.busy and "Installed alpha" in str(
                     screen.query_one(".cerror", Static).render()), "the install to finish")
                 self.assertEqual((self.called("install"), self.called("enable")), (["alpha"], []))  # already on
+
+
+class SecretsTests(DashboardCase):
+    VALUE = "sk-live-0123456789abcdef"
+
+    def setUp(self):
+        super().setUp()
+        parent = self.backend.root / "parent-universe"
+        self.service.items[1] = item("beta", on=False, state="unusable", problem="beta needs its API key")
+        self.service.items[0]["settings"] = {"path": "plugin-settings/alpha.json", "values": {}, "schema": {
+            "type": "object", "properties": {"greeting": {"type": "string"}}}}
+        self.service.secrets = {
+            "beta": [{"key": "api_key", "label": "API key", "help": "From the provider's console.", "required": True,
+                      "set": False, "from": None, "inherited": False},
+                     {"key": "token", "label": "Webhook token", "help": "", "required": False, "set": True,
+                      "from": str(parent), "inherited": True},
+                     {"key": "region", "label": "Region key", "help": "", "required": False, "set": True,
+                      "from": str(self.backend.root), "inherited": False}],
+            "alpha": [{"key": "api_key", "label": "API key", "help": "", "required": True, "set": False,
+                       "from": None, "inherited": False}]}
+        # Textual's own log of every event and message, on for the whole test: no value may reach it.
+        import tempfile
+        handle, self.log_path = tempfile.mkstemp(prefix="textual-log-", suffix=".txt")
+        os.close(handle)
+        self.addCleanup(os.unlink, self.log_path)
+        import textual.constants
+        patcher = mock.patch.object(textual.constants, "LOG_FILE", self.log_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.asked = []
+        self.answers = []
+
+        def ask(prompt=""):
+            self.asked.append(prompt)
+            answer = self.answers.pop(0) if self.answers else ""
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        patcher = mock.patch("multiverse.ui.secrets_screen.getpass.getpass", ask)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def calls(self, name):
+        return [call[2:] for call in self.service.calls if call[0] == name]
+
+    def shown(self):
+        """Every piece of text on show, on every screen of the stack."""
+        texts = []
+        for screen in self.app.screen_stack:
+            for widget in screen.query("*"):
+                try:
+                    texts.append(str(widget.render()))
+                except Exception:
+                    pass
+            for table in screen.query(DataTable):
+                texts.extend(str(cell) for row in range(table.row_count) for cell in table.get_row_at(row))
+        return "\n".join(texts)
+
+    def logged(self):
+        return Path(self.log_path).read_text(errors="replace")
+
+    async def open_secrets(self, pilot, name):
+        self.app.action_plugins()
+        await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.items,
+                         "the Plugins screen")
+        plugins_screen = self.app.screen
+        table = plugins_screen.query_one("#plugins-table", DataTable)
+        table.move_cursor(row=[entry["name"] for entry in plugins_screen.items].index(name))
+        await pilot.pause()
+        await pilot.press("enter")
+        return plugins_screen
+
+    async def pick(self, pilot, screen, key):
+        screen.query_one("#secrets-table", DataTable).move_cursor(
+            row=[secret["key"] for secret in screen.secrets].index(key))
+        await pilot.pause()
+
+    async def test_secrets_are_set_replaced_and_cleared_but_never_pass_through_the_dashboard(self):
+        """Enter on a plugin with secrets opens their screen, which says set, inherited or missing, asks for a value
+        in the terminal (suspended, hidden typing) and sets it from there, clears after asking, and refuses what it
+        can't; fragile because a value typed into the dashboard becomes Textual events its logs record, and a slip
+        shows an API key, logs it, or sends it through the settings file."""
+        self.app.suspend = contextlib.nullcontext  # the terminal the prompt runs in, as attach does
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            plugins_screen = await self.open_secrets(pilot, "beta")
+            await self.until(pilot, lambda: isinstance(self.app.screen, SecretsScreen), "the Secrets screen")
+            screen = self.app.screen
+            with self.subTest("each secret says whether it is set, and where"):
+                text = self.shown()
+                self.assertIn("Not set · required", text)
+                self.assertIn("Set in parent-universe, used here too", text)
+                self.assertIn("From the provider's console.", text)
+
+            with self.subTest("Enter asks in the terminal, once, and sets the value from there"):
+                self.answers = [self.VALUE]
+                await self.pick(pilot, screen, "api_key")
+                await pilot.press("enter")
+                await self.until(pilot, lambda: self.calls("set_secret"), "the secret to be set")
+                self.assertEqual(self.asked, ["API key: "])  # once, and the prompt holds no value
+                self.assertEqual(self.calls("set_secret"), [("beta", "api_key", self.VALUE)])
+                self.assertEqual(self.calls("edit"), [])  # never through the settings file
+                await self.until(pilot, lambda: "Set here" in self.shown(), "the row to say set")
+                self.assertNotIn(self.VALUE, self.shown())  # right away, before anything else is drawn over it
+                self.assertNotIn(self.VALUE, self.logged())
+
+            with self.subTest("a terminal that can't hide typing is refused before anything is read"):
+                self.service.calls.clear()
+                read = []
+
+                def echoing(prompt=""):  # what getpass does where it can't turn echo off: warn, then read echoed
+                    import getpass
+                    import warnings
+                    warnings.warn("Can not control echo on the terminal.", getpass.GetPassWarning, stacklevel=2)
+                    read.append(prompt)
+                    return self.VALUE
+
+                with mock.patch("multiverse.ui.secrets_screen.getpass.getpass", echoing):
+                    await pilot.press("enter")
+                    await self.until(pilot, lambda: "can't hide typing" in str(
+                        screen.query_one(".cerror", Static).render()), "the refusal")
+                self.assertEqual((read, self.calls("set_secret")), ([], []))
+                self.assertIn("run mv2 plugins secret beta api_key", str(screen.query_one(".cerror", Static).render()))
+
+            with self.subTest("Ctrl+C at the prompt comes back, setting nothing"):
+                self.service.calls.clear()
+                swallowed = []
+                # As asyncio's runner does: its handler only cancels the main task, so a read goes on.
+                def swallow(*args):
+                    swallowed.append(args[0])
+
+                previous = signal.signal(signal.SIGINT, swallow)
+                self.addCleanup(signal.signal, signal.SIGINT, previous)
+
+                def interrupted(prompt=""):
+                    os.kill(os.getpid(), signal.SIGINT)  # the person presses Ctrl+C while it reads
+                    time.sleep(0.05)  # the handler runs here
+                    return self.VALUE
+
+                with mock.patch("multiverse.ui.secrets_screen.getpass.getpass", interrupted):
+                    await pilot.press("enter")
+                    await self.until(pilot, lambda: "nothing set" in str(screen.query_one(".cerror", Static).render()),
+                                     "the screen to come back")
+                self.assertIs(self.app.screen, screen)
+                self.assertEqual((self.calls("set_secret"), swallowed), ([], []))
+                self.assertIs(signal.getsignal(signal.SIGINT), swallow)  # the handler before the prompt, restored
+                signal.signal(signal.SIGINT, previous)
+
+            with self.subTest("an empty answer sets nothing"):
+                self.service.calls.clear()
+                self.answers = [""]
+                await pilot.press("enter")
+                await self.until(pilot, lambda: "nothing set" in str(screen.query_one(".cerror", Static).render()),
+                                 "the note")
+                self.assertEqual(self.calls("set_secret"), [])
+
+            with self.subTest("a failed set says why"):
+                self.service.secret_error = "beta's API key was not set: the keychain is locked"
+                self.answers = [self.VALUE]
+                await pilot.press("enter")
+                await self.until(pilot, lambda: "the keychain is locked" in str(
+                    screen.query_one(".cerror", Static).render()), "the reason")
+                self.service.secret_error = None
+
+            with self.subTest("an inherited secret can't be cleared here; one set here is, after asking"):
+                await self.pick(pilot, screen, "token")
+                await pilot.press("ctrl+d")
+                self.assertIn("comes from parent-universe: clear it there",
+                              str(screen.query_one(".cerror", Static).render()))
+                await self.pick(pilot, screen, "region")
+                await pilot.press("ctrl+d")
+                await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen), "the question")
+                await pilot.press("enter")
+                await self.until(pilot, lambda: self.calls("clear_secret"), "the clear")
+                self.assertEqual(self.calls("clear_secret"), [("beta", "region")])
+
+            with self.subTest("the value is nowhere on screen or in Textual's log"):
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the clear to end")
+                self.assertTrue(self.logged())  # the log was on
+                self.assertNotIn(self.VALUE, self.logged())
+                self.assertNotIn(self.VALUE, self.shown())
+
+            with self.subTest("Esc closes, and the status line says what changed"):
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is plugins_screen, "the screen to close")
+                await pilot.press("escape")
+                await self.until(pilot, lambda: not isinstance(self.app.screen, PluginsScreen), "the Plugins screen")
+                self.assertIn("beta: set api_key", str(self.app.query_one("#status", Static).render()))
+                self.assertIn("cleared region", str(self.app.query_one("#status", Static).render()))
+                self.assertNotIn(self.VALUE, self.logged())
+
+            with self.subTest("a terminal that can't suspend names the command instead"):
+                from textual.app import SuspendNotSupported
+
+                def refuse():
+                    raise SuspendNotSupported("no terminal")
+
+                self.app.suspend = refuse
+                await self.open_secrets(pilot, "beta")
+                await self.until(pilot, lambda: isinstance(self.app.screen, SecretsScreen), "the Secrets screen")
+                screen = self.app.screen
+                self.asked.clear()
+                await pilot.press("enter")
+                self.assertIn("run mv2 plugins secret beta api_key", str(screen.query_one(".cerror", Static).render()))
+                self.assertEqual(self.asked, [])
+                self.app.suspend = contextlib.nullcontext
+                await pilot.press("escape")
+                await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen), "the Plugins screen")
+                await pilot.press("escape")
+
+            with self.subTest("a plugin with settings and secrets asks which to open"):
+                await self.open_secrets(pilot, "alpha")
+                await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen), "the choice")
+                options = self.app.screen.query_one("#choices", OptionList)
+                self.assertEqual([str(options.get_option_at_index(i).prompt) for i in range(options.option_count)],
+                                 ["Settings", "Secrets (1, 1 required not set)"])
+                await pilot.press("down", "enter")
+                await self.until(pilot, lambda: isinstance(self.app.screen, SecretsScreen), "the Secrets screen")
+
+
+KEEPER = {"api": "1.20", "module": "plugin", "access": {"request": "observe"},
+          "secrets": {"api_key": {"label": "API key", "required": True}}}
+
+
+class OverlappingReadsTests(DashboardCase):
+    async def test_an_older_list_read_finishing_last_never_draws_over_a_newer_one(self):
+        """When list reads overlap, only the latest started shows what it read; fragile because a slow read that
+        finishes last would put back a state already gone (a plugin shown usable after its key was cleared), and the
+        follow tick, having seen the change, would not read again."""
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            self.app.action_plugins()
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.items,
+                             "the Plugins screen")
+            screen = self.app.screen
+            self.service.listing_gate = threading.Event()
+            self.addCleanup(self.service.listing_gate.set)
+            screen.load()  # the older read: it saw alpha on, and is held
+            for _ in range(50):
+                if self.service.listing_held:
+                    break
+                await pilot.pause(0.02)
+            self.service.items[0] = {**self.service.items[0], "state": "unusable"}  # changed meanwhile
+            screen.load()  # the newer read sees it
+            for _ in range(100):
+                if screen.items and screen.items[0]["state"] == "unusable":
+                    break
+                await pilot.pause(0.02)
+            self.service.listing_gate.set()  # the older read now finishes, last
+            await self.until(pilot, lambda: True, "the reads to finish")
+            self.assertEqual([item["state"] for item in screen.items][0], "unusable")
+            table = screen.query_one("#plugins-table", DataTable)
+            self.assertEqual(str(table.get_row("alpha")[2]), "unusable")
+
+
+class OutsideSecretTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_the_plugins_screen_follows_a_secret_set_or_cleared_by_another_terminal(self):
+        """The Plugins screen shows a plugin unusable as soon as another terminal clears its required secret, in a
+        subverse reading its parent's too, and usable again once it is set; fragile because the screen's list is
+        cached in this process, which never hears of another's change, and it would show a plugin working that
+        can't (BUG-DASHBOARD-016)."""
+        from multiverse.plugins import secrets
+        self.write_plugin("keeper", KEEPER, {"plugin.py": "def register(mv):\n    pass\n"})
+        self.enable("keeper")
+        sub = self.subverse("ops")
+        self.enable("keeper", root=sub)
+        secrets.set_secret(self.root, "keeper", "api_key", "sk-test-not-shown")  # past this process's cache
+
+        def state(screen):
+            table = screen.query_one("#plugins-table", DataTable)
+            return str(table.get_row("keeper")[2])
+
+        async with self.dashboard(size=(140, 40)) as d:
+            screen = await d.open_plugins()
+            self.assertEqual(state(screen), "on")
+            with self.subTest("cleared elsewhere while the screen is open"):
+                secrets.clear_secret(self.root, "keeper", "api_key")  # as `mv2 plugins secret --clear` would
+                await d.until(lambda: state(screen) == "unusable", "the screen to follow the clear")
+            with self.subTest("set again elsewhere"):
+                self.assertEqual(state(screen), "unusable")  # from the clear: the set has to be seen, not stayed
+                secrets.set_secret(self.root, "keeper", "api_key", "sk-test-not-shown")
+                await d.until(lambda: state(screen) == "on", "the screen to follow the set")
+            await d.close_screen()
+            with self.subTest("reopened in a subverse reading its parent's, after a clear"):
+                secrets.clear_secret(self.root, "keeper", "api_key")
+                d.select("ops")
+                screen = await d.open_plugins()
+                await d.until(lambda: state(screen) == "unusable", "the subverse's screen")
 
 
 class LiveDemo(DemoBackend):
