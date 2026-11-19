@@ -11,8 +11,8 @@ from .launch import LaunchProtocol, navigation_environments
 from .protocol import object_field, result
 from .side import local_error
 
-VERSION = (0, 169, 0)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), VERSION))
+VERSION = (0, 170, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), VERSION))
 # Pinned app-server-protocol common.rs reads. New thread-scoped methods fail
 # closed instead of accidentally granting stale-widget mutation authority.
 READ_ONLY = frozenset(('thread/goal/get', 'thread/queue/list', 'thread/attachment/list',
@@ -117,7 +117,7 @@ class Selection:
         if (self.root.current_grants is None or self.root.grant_ceiling is None
                 or self.root.grants_native_id != self.root.native_id):
             raise local_error(self.root.grants_error, identifier)
-        if (self.connection.version == (0, 169, 0) and method == 'thread/resume'
+        if (self.connection.version in ((0, 169, 0), (0, 170, 0)) and method == 'thread/resume'
                 and params.get('environments') is not None):
             try:
                 navigation_environments(params, required=True, policy=self.root.current_grants,

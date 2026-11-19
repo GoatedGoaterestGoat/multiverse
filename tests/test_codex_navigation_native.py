@@ -722,7 +722,7 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(directory.is_relative_to(work))
             for row in primary_replies:
                 self.assertEqual(grant_set(row), effective_grants, row)
-                if CHECKED_VERSION == (0, 169, 0):
+                if CHECKED_VERSION in ((0, 169, 0), (0, 170, 0)):
                     for relation in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'):
                         self.assertIn(relation, row['thread'], row)
                         self.assertIsNone(row['thread'][relation], row)

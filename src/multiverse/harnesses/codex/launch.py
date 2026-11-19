@@ -367,7 +367,7 @@ class LaunchProtocol:
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         if method == 'thread/start' and self.settings.get('navigation_grants') is not None:
             apply_grants(params, self.settings['navigation_grants'],
-                         local=self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0)))
+                         local=self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0), [0, 170, 0], (0, 170, 0)))
         self.pending = value['id']
         self.pending_method = method
         return {**value, 'params': params}
@@ -419,7 +419,7 @@ class LaunchProtocol:
             if thread.get('attachedToThreadId') is not None:
                 raise ValueError('An attached side conversation cannot establish primary navigation grants')
             policy = grant_policy(observed)
-            local = self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0))
+            local = self.settings.get('navigation_cli') in ([0, 169, 0], (0, 169, 0), [0, 170, 0], (0, 170, 0))
             if local:
                 navigation_root(thread)
             navigation_environments(thread, required=local, policy=policy, cwd=self.settings['workspace'])
