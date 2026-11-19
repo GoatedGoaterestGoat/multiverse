@@ -254,7 +254,7 @@ mv2 unfocus                   # end it, and say what waits in the inbox
 
 While an agent is focused:
 
-- `steer` and `follow-up` messages from agents are saved as `inbox-only` messages, and the sender is told so. A person's and a plugin's reach the agent as usual. Whatever runs inside an agent's session counts as that agent, a plugin's command included, whatever sender it names.
+- `steer` and `follow-up` messages from agents are saved as `inbox-only` messages, and the sender is told so. A person's and a plugin's reach the agent as usual. Whatever runs inside an agent's session counts as that agent, a plugin's command and a shell in its own tmux pane included, whatever sender it names. A pane is its own only on the tmux server that created it: after tmux restarts, a new pane that reuses a stopped agent's pane ID is not that agent's.
 - `inbox-only` messages are saved as usual.
 - `listen` is refused, and a `listen` already running [reports nothing until the focus ends](#listen-for-quiet-messages).
 - `deliver --retry` to it retries a person's and a plugin's failed messages, and leaves agents' until it unfocuses, saying how many. Run by an agent, it retries none of them until then. `deliver --check` still works.

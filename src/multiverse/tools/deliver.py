@@ -1,5 +1,4 @@
 """Check deliveries, retry failures, or dismiss failures and uncertainty without resending."""
-import os
 import sys
 from ..plugins import access
 from .. import display, harnesses, store, universe
@@ -49,7 +48,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                  and message['tracking']['submission_state'] in ('failed', 'launch-only')] if held else []
     # A focus holds only agents' messages: a person's or a plugin's is retried, an agent's waits for the unfocus.
     # An agent running the retry is an agent sending: everything waits.
-    by_agent = bool(os.environ.get('MV2_AGENT_ID') or os.environ.get('MV2_AGENT_DIR'))
+    from ..runtime.agent_identity import runs_in_agent
+    by_agent = runs_in_agent(root=root)
     holds = (lambda message: True) if by_agent else (lambda message: focus.holds(message.get('from')))
     if retryable and all(holds(message) for message in retryable):
         return _focused(name, held, [], _present_error or _present, waiting=len(retryable), by_agent=by_agent)

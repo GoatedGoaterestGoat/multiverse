@@ -206,7 +206,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             cleared = plugins.clear_secret(root, name, level)
             return {"universe": str(root), "name": name, "key": level, "cleared": cleared,
                     "secrets": plugins.secrets_view(root, name)}
-        if secret_value is None and plugins.from_agent():
+        if secret_value is None and plugins.from_agent(root):
             plugins.set_secret(root, name, level, "")  # refuses, saying only the person sets one
         if secret_value is None:
             raise ValueError(f"No value given: mv2 plugins secret {name} {level} asks for it on a terminal, or reads "
@@ -242,7 +242,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         if plugin_action == "enable" and grant is None:
             # No terminal asked (cli_run asks on one): its minimum, raised later with mv2 plugins grant.
             wanted = plugins.entry(root, name).manifest
-            if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent():
+            if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent(root):
                 grant, defaulted = wanted.access.minimum, True
         result = plugins.set_enabled(root, name, plugin_action == "enable", grant=grant)
         found = plugins.entry(root, name)
@@ -430,9 +430,17 @@ def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), remov
     return text(plugin_action, result)
 
 
+def _selected(root):
+    """The universe these words name, for the person-only checks; None when there is none to find."""
+    try:
+        return universe.resolve(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def _read_secret(root, name, key):
     """The value, from a hidden prompt on a terminal or else stdin (one trailing newline dropped); never echoed."""
-    if plugins.from_agent():
+    if plugins.from_agent(_selected(root)):
         return None  # run() refuses it, naming who can
     if sys.stdin.isatty():
         import getpass
@@ -462,7 +470,7 @@ def _ask_packages(root, name, action):
     """On a terminal, for a person, when plugin `name` needs packages that aren't installed: list them and ask.
     The shown list's folder name (yes: install exactly that list), False (they said no: nothing done), or None
     (nothing to ask: no terminal, an agent, none needed)."""
-    if plugins.from_agent() or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     try:
         packages = plugins.packages_state(universe.resolve(root), name)
@@ -496,7 +504,7 @@ def packages_prompt(name, packages):
 def _ask_grant(root, name):
     """On a terminal, for a person: the level to grant, asked from the plugin's request down to its minimum.
     None (no terminal, an agent, or nothing to choose): run() decides."""
-    if plugins.from_agent() or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     found = plugins.entry(universe.resolve(root), name)
     if found.manifest is None:

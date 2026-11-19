@@ -51,7 +51,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     # Whom a focus holds is decided by who calls, never by the sender a caller names: a process with an agent's
     # identity is an agent, whatever sender it passes. The person's terminal, and a plugin in the dashboard or the
     # host, have none.
-    holds = focus.holds(sender) or bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+    from ..runtime.agent_identity import runs_in_agent
+    holds = focus.holds(sender) or runs_in_agent(root=root)
     if holds and isinstance(sender, dict) and not focus.holds(sender):
         # Saved with the message, so a later retry under a focus holds it too, whatever sender it names.
         sender = {**sender, "agent_process": True}

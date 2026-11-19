@@ -895,7 +895,7 @@ def install_packages(root, name, approved=None):
     `approved`: the folder name of the list they were shown (packages_state's `folder`), so a changed list never
     installs on an old yes."""
     from . import packages
-    if from_agent():
+    if from_agent(root):
         raise PluginError(f"Only the person can approve installing a plugin's Python packages: ask them to run "
                           f"mv2 plugins packages {name}")
     found = entry(Path(root), name)
@@ -952,7 +952,7 @@ def set_secret(root, name, key, value):
     """Keep `value` as this universe's secret `key` of plugin `name` (the person only); the store's name. Errors
     never hold the value."""
     from . import secrets
-    if from_agent():
+    if from_agent(root):
         raise PluginError(f"Only the person sets a plugin's secrets: ask them to run mv2 plugins secret {name} {key}")
     secret = _declared_secret(root, name, key)
     try:
@@ -966,7 +966,7 @@ def set_secret(root, name, key, value):
 def clear_secret(root, name, key):
     """Remove this universe's own secret `key` of plugin `name` (the person only): True if it was set here."""
     from . import secrets
-    if from_agent():
+    if from_agent(root):
         raise PluginError(f"Only the person clears a plugin's secrets: ask them to run "
                           f"mv2 plugins secret {name} {key} --clear")
     if (name, key) not in _orphan_secrets(root):  # one its plugin no longer declares can always be cleared
@@ -979,10 +979,11 @@ def clear_secret(root, name, key):
     return cleared
 
 
-def from_agent():
-    """Whether this process runs for an agent: its launches and their children carry MV2_AGENT_ID or MV2_AGENT_DIR.
-    A guard against mistakes, not against an agent that unsets them."""
-    return bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+def from_agent(root=None):
+    """Whether this process runs for an agent (agent_identity.runs_in_agent): mv2's launch markers, or, given the
+    universe `root`, a tmux pane one of its tree's agents records. A guard against mistakes."""
+    from ..runtime.agent_identity import runs_in_agent
+    return runs_in_agent(root=root)
 
 
 def _grant_for(root, found, grant):
@@ -998,7 +999,7 @@ def _grant_for(root, found, grant):
         if levels.rank(grant) < levels.rank(wanted.minimum):
             raise PluginError(f"{found.name} needs at least {wanted.minimum} access"
                               + (f": {wanted.why}" if wanted.why else ""))
-    if from_agent():
+    if from_agent(root):
         if grant is not None and levels.rank(grant) > levels.rank(wanted.minimum):
             raise PluginError(f"An agent can turn {found.name} on with at most {wanted.minimum} access. "
                               f"For more, a person runs: mv2 plugins grant {found.name} {grant}")
@@ -1021,7 +1022,7 @@ def set_grant(root, name, level):
     try:
         # From an agent, compared with the grant recorded now and written in one locked step: a person who lowers
         # it meanwhile is never overwritten.
-        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent() else None)
+        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent(root) else None)
     except config.WouldRaise as error:
         raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
                           f"mv2 plugins grant {name} {level}") from None
@@ -1114,7 +1115,7 @@ def set_enabled(root, name, on, grant=None):
         raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
     try:
         config.set_enabled(root, name, bool(on), grant=grant if on else None,
-                           no_raise_from=found.manifest.access.request if on and from_agent() and found.manifest
+                           no_raise_from=found.manifest.access.request if on and from_agent(root) and found.manifest
                            else None)
     except config.WouldRaise as error:
         raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "

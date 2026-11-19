@@ -40,13 +40,20 @@ def _id(value):
     return value
 
 
-def _caller(caller):
+def _caller(caller, root=None):
     if caller is not None and (not isinstance(caller, dict) or set(caller) != {'kind', 'name'}
                               or caller['kind'] != 'plugin' or not isinstance(caller['name'], str)
                               or not caller['name']):
         raise ValueError('An explicit prompt caller must name its plugin')
-    # Do not turn a stale or partial agent identity into permission to answer as a person.
-    if any(os.environ.get(key) for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_IDENTITY_MODE')):
+    # Do not turn a stale or partial agent identity, or an agent's pane, into permission to answer as a person.
+    from .agent_identity import runs_in_agent
+    if runs_in_agent():
+        return None  # a marker refuses before any universe is looked up
+    try:
+        selected = universe.resolve(root)
+    except (OSError, ValueError, RuntimeError):
+        selected = None  # no universe to find agents' panes in: the call fails on its own after this
+    if selected is not None and runs_in_agent(root=selected):
         return None
     return caller or {'kind': 'person'}
 
@@ -146,7 +153,7 @@ def _catalog(adapter, session, executor):
 
 def waiting(root, agent, *, caller=None):
     effects.require('waiting_prompts', agent)
-    who = _caller(caller)
+    who = _caller(caller, root)
     if who is None:
         return PromptList(state='refused', reason=AGENT_REASON)
     root = universe.resolve(root)
@@ -571,7 +578,7 @@ def pending_inputs(directory, launch_id, native_id, generation):
 
 def result(root, agent, id, *, caller=None):
     effects.require('prompt_outcome', agent)
-    if _caller(caller) is None:
+    if _caller(caller, root) is None:
         return _refused(id, AGENT_REASON, 'agent_caller')
     id = _id(id)
     root = universe.resolve(root)
@@ -707,7 +714,7 @@ def _closed(adapter, session, executor, id, found):
 
 def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=None, timeout=30, wait=True, caller=None):
     effects.require('answer_prompt', agent)
-    who = _caller(caller)
+    who = _caller(caller, root)
     if who is None:
         return _refused(id, AGENT_REASON, 'agent_caller')
     id = _id(id)

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -18,7 +19,9 @@ from test_multiverse import BaseTest
 from isolation import track
 from multiverse import cli, harnesses, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
-from multiverse.runtime import agent_identity, focus_note, native
+from multiverse.runtime import agent_identity, focus_note, native, prompts
+
+SERVER = {'pid': 1, 'epoch': 100}  # the tmux server the fixture agents' panes were created on
 from multiverse.terminal import statusline
 from multiverse.tools import focus as focus_tool, listen, send, unfocus
 from multiverse.universe import agents, focus, mailbox, templates
@@ -290,8 +293,14 @@ class FocusCommandTest(BaseTest):
                 'summary': 'Waiting on the user', 'harness': 'claude', 'workspace': str(self.work),
                 'universe_id': store.read(self.root / 'universe.json')['id'], 'native_session_id': str(uuid4())})
             store.write(directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'idle',
-                'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
+                'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1',
+                         'server_identity': SERVER}})
             (directory / '.launch.lock').touch()   # a launched agent's; held and listen never create it
+        # The tmux server these records name, as it would answer: the one that created their panes.
+        # What it says of a pane: the server pair, and the tags lifecycle put on it (here, asker's on %1).
+        self.panes = {'%1': (SERVER['pid'], SERVER['epoch'], '%1', self.directories['asker'].name,
+                             store.read(self.root / 'universe.json')['id'], self.launch)}
+        self.enterContext(patch.object(agent_identity, '_pane', side_effect=lambda socket, pane: self.panes.get(pane)))
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
@@ -364,6 +373,121 @@ class FocusCommandTest(BaseTest):
                                      (delivery, [(self.directories['asker'].name, delivery)]))
                     self.assertNotIn('intended', self.history('asker')[-1])
         self.assertEqual(focus.last(self.directories['asker'])['held'], 4)  # only the agents' were held
+        # What an agent's launch leaves behind besides its identity marks it an agent too: its control socket, or
+        # its own tmux pane (qa-claude F1, the user's "harden a bit"); a sibling pane on that server stays a person.
+        socket = str(self.work / 'absent.sock')
+        elsewhere = templates.create(self.work / 'elsewhere' / '.multiverse', 'elsewhere', workdir=self.work)
+        store.write(elsewhere / 'state/agents' / str(uuid4()) / 'runtime.json',
+                    {'launch_id': self.launch,
+                     'tmux': {'socket': socket, 'session': '$5', 'pane': '%5', 'server_identity': SERVER}})
+        commas = str(self.work / 'a,b' / 'tmux,1.sock')  # tmux allows it; TMUX then holds more commas
+        universe = store.read(self.root / 'universe.json')['id']
+
+        def recorded(pane, socket, folder=None, server=SERVER):  # an agent of this universe on `pane`, tagged there
+            identity = str(uuid4())
+            directory = self.root / 'state/agents' / (folder or identity)
+            store.write(directory / 'properties.json', {'id': identity, 'name': f'agent{pane[1:]}',
+                                                        'universe_id': universe})
+            store.write(directory / 'runtime.json', {'launch_id': self.launch, 'tmux': {
+                'socket': socket, 'session': '$' + pane[1:], 'pane': pane,
+                **({'server_identity': server} if server else {})}})
+            self.panes[pane] = (SERVER['pid'], SERVER['epoch'], pane, identity, universe, self.launch)
+            return directory
+        recorded('%7', commas)
+        recorded('%8', socket, folder='recovered')  # a moved folder: tagged by the agent's id, not the folder's name
+        for shell, held_ in (({'MV2_CONTROL_SOCKET': str(self.work / 'control.sock')}, True),
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}, True),  # an agent's pane, markers gone
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%9'}, False),  # a sibling pane on its server
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%5'}, False),  # an agent's of another tree
+                             ({'TMUX': f'{self.work / "other.sock"},1,0', 'TMUX_PANE': '%1'}, False),
+                             ({'TMUX': f'{commas},1,0', 'TMUX_PANE': '%7'}, True),  # a socket path with commas
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%8'}, True)):  # an agent in a moved folder
+            with self.subTest(shell=shell), patch.dict(os.environ, shell):
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='from a shell', delivery='steer')
+                self.assertEqual(record['state'] == 'held', held_, record)
+                self.assertEqual(bool(self.calls), not held_)
+                # Answering a prompt as the person goes by the same check.
+                from multiverse.runtime import prompts
+                self.assertEqual(prompts._caller(None, self.root), None if held_ else {'kind': 'person'})
+        # The pane counts only on the server that created it, while it has its agent's tags (Shao, PR #43): after a
+        # restart a new pane reuses a stopped agent's %1; a reused PID starts at another time, or in the same second
+        # with a new, untagged pane; an old record has no server; a server may not answer. Each leaves a person.
+        recorded('%3', socket, server=None)  # recorded before server identity, tagged all the same
+        stray = recorded('%4', socket)  # an agent whose record names another universe, and whose pane says so
+        store.write(stray / 'properties.json', {**store.read(stray / 'properties.json'), 'universe_id': 'elsewhere'})
+        self.panes['%4'] = (*self.panes['%4'][:4], 'elsewhere', self.launch)
+        recorded('%1;kill-server', socket)  # a damaged record's pane, which must never reach tmux
+        asker = self.panes['%1']
+        for case, shell, answer in (('a restarted server', {'TMUX': f'{socket},2,0', 'TMUX_PANE': '%1'},
+                                     (2, 200, '%1', '', '', '')),
+                                    ('a reused PID', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'},
+                                     (1, 999, *asker[2:])),
+                                    ('a reused PID in the same second', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'},
+                                     (1, 100, '%1', '', '', '')),
+                                    ('no server recorded', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%3'},
+                                     self.panes['%3']),
+                                    ('no answer', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}, None),
+                                    ("another universe's agent", {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%4'},
+                                     self.panes['%4']),
+                                    ('a TMUX PID too long to be one', {'TMUX': f'{socket},{"1" * 5000},0',
+                                                                      'TMUX_PANE': '%1'}, asker),
+                                    ('not a pane ID', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1;kill-server'},
+                                     asker)):
+            with self.subTest(case), patch.dict(os.environ, shell), \
+                    patch.object(agent_identity, '_pane', return_value=answer) as asked:
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='from a shell', delivery='steer')
+                self.assertNotEqual(record['state'], 'held', record)
+                self.assertEqual(prompts._caller(None, self.root), {'kind': 'person'})
+                if case == 'not a pane ID':
+                    self.assertFalse(asked.called)  # never handed to tmux
+        pane = {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}
+        with self.subTest('a record caught being replaced'), patch.dict(os.environ, pane):
+            real, missed, armed = agent_identity.read, [], []
+            identity = self.directories['asker'] / 'properties.json'
+
+            def replaced_once(path):  # each record read reads as missing once, as while it is replaced
+                if path == identity and path in missed:
+                    armed.append(path)  # the matching agent's universe record is read next: it misses once too
+                if ((path.name == 'runtime.json' or path == identity or path.name == 'universe.json' and armed)
+                        and path not in missed):
+                    missed.append(path)
+                    raise FileNotFoundError(2, 'No such file or directory', str(path))
+                return real(path)
+            with patch.object(agent_identity, 'read', side_effect=replaced_once):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+            self.assertEqual({path.name for path in missed}, {'runtime.json', 'properties.json', 'universe.json'})
+            # Once the scan's retries are spent, a record read missing proves nothing: it counts as an agent's
+            # (lifecycle, recheck 2); a sibling pane whose scan completes stays the person.
+            missed.clear()
+            with patch.object(agent_identity, 'SCAN_SECONDS', -1), \
+                    patch.object(agent_identity, 'read', side_effect=replaced_once):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+                missed.clear()
+                with patch.dict(os.environ, {'TMUX_PANE': '%9'}):
+                    self.assertTrue(agent_identity.runs_in_agent(root=self.root))  # unsure: never the person
+            with patch.object(agent_identity, 'SCAN_SECONDS', -1), patch.dict(os.environ, {'TMUX_PANE': '%9'}):
+                self.assertFalse(agent_identity.runs_in_agent(root=self.root))  # every record read: a person
+            # The deadline passing during the read that then misses counts too (lifecycle, recheck 3).
+            slow_missed = []
+
+            def slow_then_missing(path):
+                if path.name == 'runtime.json' and not slow_missed:  # only the first record read: the crossing
+                    slow_missed.append(path)
+                    threading.Event().wait(0.1)  # past SCAN_SECONDS below, while this read runs
+                    raise FileNotFoundError(2, 'No such file or directory', str(path))
+                return real(path)
+            with patch.object(agent_identity, 'SCAN_SECONDS', 0.05), patch.dict(os.environ, {'TMUX_PANE': '%9'}), \
+                    patch.object(agent_identity, 'read', side_effect=slow_then_missing):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+        selected = {**pane, 'MV2_UNIVERSE': str(self.root)}
+        with self.subTest('prompts without a root find the pane'), patch.dict(os.environ, selected):
+            from multiverse.runtime import prompts
+            self.assertIsNone(prompts._caller(None, None))
+        with patch.dict(os.environ, {'MV2_LAUNCH_ID': self.launch}), \
+                self.assertRaisesRegex(ValueError, 'identity is incomplete'):  # partial: refused, never the person
+            send.run(self.root, agent='asker', text='from a shell', delivery='steer')
         # Inside an agent's process, a sender it names is still the agent's: the person's or a plugin's look, or
         # none at all, gets nothing past the focus (reviewer, 178021d0).
         for named in ({'name': 'user', 'agent_id': None}, plugin, {}):
@@ -975,6 +1099,53 @@ class FocusCommandTest(BaseTest):
                                              'until': (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()})
         self.assertNotIn('focused', statusline.render(self.root, directory.name, self.launch, 'claude'))
         self.assertNotIn('Focused', self.output('list'))
+
+
+@unittest.skipUnless(shutil.which('tmux'), 'needs tmux')
+class TmuxRestartTest(BaseTest):
+    def test_a_pane_reusing_a_stopped_agents_id_on_a_restarted_server_is_not_that_agent(self):
+        """Pane IDs start again at %0 when tmux restarts; matched by ID alone, the person's shell or the plugin host there is refused as a stopped agent."""
+        socket = str(self.work / 't.sock')
+        track(tmux_socket=socket)
+
+        def tmux(*args):
+            return subprocess.run(['tmux', '-S', socket, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, check=True, timeout=10).stdout.strip()
+
+        def server(session):
+            tmux('new-session', '-d', '-s', session, 'sleep 60')
+            return tmux('display-message', '-p', '-t', session, '#{pid}\t#{start_time}\t#{pane_id}').split('\t')
+        self.addCleanup(lambda: subprocess.run(['tmux', '-S', socket, 'kill-server'], stdin=subprocess.DEVNULL,
+                                               capture_output=True, timeout=10))
+        pid, epoch, pane = server('agent')
+        agent, launch = self.root / 'state/agents' / str(uuid4()), str(uuid4())
+        properties = {'id': agent.name, 'name': 'stopped', 'universe_id': store.read(self.root / 'universe.json')['id']}
+        store.write(agent / 'properties.json', properties)
+        for key, value in (('agent_id', properties['id']), ('universe_id', properties['universe_id']),
+                           ('launch_id', launch)):  # tagged as lifecycle tags an agent's pane
+            tmux('set-option', '-p', '-t', pane, f'@mv2_{key}', value)
+        store.write(agent / 'runtime.json',
+                    {'state': 'running', 'launch_id': launch,
+                     'tmux': {'socket': socket, 'session': '$0', 'pane': pane,
+                              'server_identity': {'pid': int(pid), 'epoch': int(epoch)}}})
+        live = {'TMUX': f'{socket},{pid},0', 'TMUX_PANE': pane}
+        self.assertTrue(agent_identity.runs_in_agent(live, self.root))  # its agent, markers gone, still counts
+        real = subprocess.run
+
+        def garbled(*args, **kwargs):  # a tmux answering with bytes that aren't text, in either mode
+            if kwargs.get('text'):
+                raise UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
+            return subprocess.CompletedProcess(args, 0, b'\xff\xfe\n', b'')
+        with patch.object(agent_identity.subprocess, 'run', side_effect=garbled):
+            self.assertFalse(agent_identity.runs_in_agent(live, self.root))  # unproven, never an error
+        self.assertIs(subprocess.run, real)
+        tmux('kill-server')
+        again, _, reused = server('person')
+        self.assertEqual((reused, again != pid), (pane, True))  # the same pane ID on a new server
+        for shell in ({'TMUX': f'{socket},{again},0', 'TMUX_PANE': reused}, live):  # the new pane, or an old TMUX
+            with self.subTest(shell=shell), patch.dict(os.environ, shell):
+                self.assertFalse(agent_identity.runs_in_agent(root=self.root))
+                self.assertEqual(prompts._caller(None, self.root), {'kind': 'person'})
 
 
 if __name__ == '__main__':
