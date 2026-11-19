@@ -1,5 +1,7 @@
 """Each agent's message log: appended messages, the read position and per-message delivery tracking."""
+from contextlib import ExitStack
 from datetime import datetime, timezone
+import errno
 import json
 import os
 from pathlib import Path
@@ -128,6 +130,86 @@ def unread(agent_dir, *, blocking=True):
         _empty_history(agent_dir)
         return []
     return inbox(agent_dir, limit=None, peek=True, blocking=blocking)['messages']
+
+
+# Leave descriptor headroom for history and ledger reads while batching inbox locks.
+UNREAD_BATCH_SIZE = 16
+
+
+def unread_many(directories):
+    """Non-consuming fleet peek in bounded groups, with fresh per-lock absence checks.
+
+    Locks never wait. Each group shares one absence window while its available locks stay held. Descriptor
+    pressure releases the whole group before retrying sequential peeks, without reusing its absence snapshot.
+    """
+    directories = tuple(dict.fromkeys(map(Path, directories)))
+    results = {}
+    for offset in range(0, len(directories), UNREAD_BATCH_SIZE):
+        group = directories[offset:offset + UNREAD_BATCH_SIZE]
+        try:
+            results.update(_unread_group(group))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            if not _descriptor_pressure(error):
+                raise
+            # _unread_group released every lock. Each ordinary peek now acquires its own lock and fresh window.
+            for directory in group:
+                try:
+                    results[directory] = unread(directory, blocking=False)
+                except (OSError, ValueError, KeyError, TypeError) as failure:
+                    results[directory] = failure
+    return results
+
+
+def _descriptor_pressure(error):
+    """Recognize typed resource errors even when a record reader wrapped the OSError as damage."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, OSError) and error.errno in (errno.EMFILE, errno.ENFILE):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
+def _unread_group(directories):
+    """One small group, with all locks released before a resource-error fallback or cancellation escapes."""
+    results, locked, empty = {}, {}, []
+    with ExitStack() as held:
+        for directory in directories:
+            try:
+                try:
+                    (directory / 'inbox.jsonl').stat()
+                except FileNotFoundError:
+                    empty.append(directory)
+                    continue  # A never-messaged agent needs no lock file, as in unread().
+                guard = ExitStack()
+                held.callback(guard.close)
+                guard.enter_context(lock(directory / '.inbox.lock', blocking=False, create_parent=False))
+                locked[directory] = guard
+            except (OSError, ValueError) as error:
+                if _descriptor_pressure(error):
+                    raise
+                results[directory] = error
+        absent = missing_records(directory / name for directory in (*locked, *empty) for name in INBOX_EVIDENCE)
+        for directory in empty:
+            try:
+                _empty_history(directory, observed_missing=absent)
+                results[directory] = []
+            except (OSError, ValueError) as error:
+                if _descriptor_pressure(error):
+                    raise
+                results[directory] = error
+        for directory, guard in locked.items():
+            try:
+                page, _ = _inbox_locked(directory, observed_missing=absent, limit=None, peek=True)
+                results[directory] = page['messages']
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                if _descriptor_pressure(error):
+                    raise
+                results[directory] = error
+            finally:
+                guard.close()
+    return results
 
 
 def _ledger_damage(path, reason):
@@ -335,77 +417,86 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
         # These optional records share the inbox lock, so one absence snapshot covers this read/consume.
         observed_missing = missing_records(agent_dir / name for name in
             ('inbox.cursor', 'inbox-state.json', 'native-delivery.json', 'inbox-read.json'))
-        data, read_cursor, records = _messages(agent_dir, observed_missing=observed_missing)
-        states = _states(agent_dir, observed_missing=observed_missing)
-        marks = _read_marks(agent_dir, observed_missing=observed_missing)
-        if after is not None:
-            _validate_cursor(data, after)
-            if not all_messages and after > read_cursor:
-                raise ValueError('Ordinary inbox reads advance automatically; use --all to browse ahead')
-        start = (after or 0) if all_messages else read_cursor
-        def recent(message):
-            if since is None:
-                return True
-            try:
-                timestamp = datetime.fromisoformat(message.get('at', ''))
-                if timestamp.tzinfo is None:
-                    timestamp = timestamp.replace(tzinfo=timezone.utc)
-                return timestamp >= since
-            except (ValueError, TypeError):
-                return False  # Undated legacy records cannot match a time filter.
-        if last is not None:
-            records = [(offset, message) for offset, message in records if recent(message)][-last:]
-        cursor = start
-        messages, cursors = [], []
-        copies = []
-        for offset, message in records:
-            state = states.get(message['id'], {})
-            unread_copy = inbox_copy(message, state) and not _dated(state.get('inbox_copy_read_at'))
-            # Native rows may have been skipped before their evidence changed. Their original inbox input
-            # remains unread independently of the cursor; no second message or native attempt is created.
-            if offset <= start and (all_messages or not unread_copy):
-                continue
-            if limit is not None and len(messages) >= limit:
-                break
-            cursor = max(cursor, offset)
-            if not recent(message):
-                continue
-            if all_messages:
-                messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
-                                                         **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
-            elif unread_copy:
-                messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
-                copies.append(message['id'])
-            elif _manual(message) and message['id'] not in marks:
-                messages.append(message)
-            else:
-                continue
-            cursors.append(offset)
-        result = {'messages': messages, 'cursor': cursor}
-        if after is not None:
-            result.update(start_cursor=start, read_cursor=read_cursor, message_cursors=cursors,
-                          has_more=b'\n' in data[cursor:])
-        # A CLI reader presents and flushes while holding the inbox lock. Failed
-        # output leaves the page unread; concurrent consumers cannot overtake it.
-        if present is not None:
-            present(result)
-        consumed = not all_messages and not peek and (cursor > read_cursor or bool(copies))
-        if consumed:
-            if copies:
-                stamp = now()
-                for identifier in copies:
-                    states[identifier] = {**states.get(identifier, {}), 'inbox_copy_read_at': stamp}
-                write(agent_dir / 'inbox-state.json', states)
-            write(agent_dir / 'inbox.cursor', cursor)
-            if marks:
-                ahead = {message['id'] for offset, message in records if offset > cursor}
-                if any(identifier not in ahead for identifier in marks):
-                    write(agent_dir / 'inbox-read.json',
-                          {identifier: stamp for identifier, stamp in marks.items() if identifier in ahead})
-    if consumed and messages:
+        result, consumed = _inbox_locked(agent_dir, observed_missing=observed_missing, limit=limit,
+                                         after=after, all_messages=all_messages, peek=peek,
+                                         last=last, since=since, present=present)
+    if consumed and result['messages']:
         # Inbox-only messages read and marked read, after a successful present.
-        _event(agent_dir, "message.read", {"count": len(messages)})
+        _event(agent_dir, "message.read", {"count": len(result["messages"])})
     return result
+
+
+def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_messages=False, peek=False,
+                  last=None, since=None, present=None):
+    """Read/consume a page under an already-held inbox lock; batch peeks always use peek=True."""
+    data, read_cursor, records = _messages(agent_dir, observed_missing=observed_missing)
+    states = _states(agent_dir, observed_missing=observed_missing)
+    marks = _read_marks(agent_dir, observed_missing=observed_missing)
+    if after is not None:
+        _validate_cursor(data, after)
+        if not all_messages and after > read_cursor:
+            raise ValueError('Ordinary inbox reads advance automatically; use --all to browse ahead')
+    start = (after or 0) if all_messages else read_cursor
+    def recent(message):
+        if since is None:
+            return True
+        try:
+            timestamp = datetime.fromisoformat(message.get('at', ''))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return timestamp >= since
+        except (ValueError, TypeError):
+            return False  # Undated legacy records cannot match a time filter.
+    if last is not None:
+        records = [(offset, message) for offset, message in records if recent(message)][-last:]
+    cursor = start
+    messages, cursors = [], []
+    copies = []
+    for offset, message in records:
+        state = states.get(message['id'], {})
+        unread_copy = inbox_copy(message, state) and not _dated(state.get('inbox_copy_read_at'))
+        # Native rows may have been skipped before their evidence changed. Their original inbox input
+        # remains unread independently of the cursor; no second message or native attempt is created.
+        if offset <= start and (all_messages or not unread_copy):
+            continue
+        if limit is not None and len(messages) >= limit:
+            break
+        cursor = max(cursor, offset)
+        if not recent(message):
+            continue
+        if all_messages:
+            messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
+                                                     **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
+        elif unread_copy:
+            messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
+            copies.append(message['id'])
+        elif _manual(message) and message['id'] not in marks:
+            messages.append(message)
+        else:
+            continue
+        cursors.append(offset)
+    result = {'messages': messages, 'cursor': cursor}
+    if after is not None:
+        result.update(start_cursor=start, read_cursor=read_cursor, message_cursors=cursors,
+                      has_more=b'\n' in data[cursor:])
+    # A CLI reader presents and flushes while holding the inbox lock. Failed
+    # output leaves the page unread; concurrent consumers cannot overtake it.
+    if present is not None:
+        present(result)
+    consumed = not all_messages and not peek and (cursor > read_cursor or bool(copies))
+    if consumed:
+        if copies:
+            stamp = now()
+            for identifier in copies:
+                states[identifier] = {**states.get(identifier, {}), 'inbox_copy_read_at': stamp}
+            write(agent_dir / 'inbox-state.json', states)
+        write(agent_dir / 'inbox.cursor', cursor)
+        if marks:
+            ahead = {message['id'] for offset, message in records if offset > cursor}
+            if any(identifier not in ahead for identifier in marks):
+                write(agent_dir / 'inbox-read.json',
+                      {identifier: stamp for identifier, stamp in marks.items() if identifier in ahead})
+    return result, consumed
 
 
 def held(agent_dir, focus_id, *, peek=False, present=None):

@@ -110,6 +110,24 @@ def unread(root, agent, *, blocking=True):
             for message in mailbox.unread(directory, blocking=blocking)]
 
 
+def unread_many(root, references):
+    """Read-only nonblocking fleet peek; return each reference's messages or its local read error."""
+    access.require('observe', 'read inbox')
+    root = universe.resolve(root)
+    directories, result = {}, {}
+    for reference in references:
+        try:
+            directories[reference] = agents.directory(root, reference, allow_damaged=True)
+        except (OSError, ValueError) as error:
+            result[reference] = error
+    readings = mailbox.unread_many(directories.values())
+    for reference, directory in directories.items():
+        value = readings[directory]
+        result[reference] = (value if isinstance(value, Exception) else
+                             [{key: message[key] for key in FIELDS if key in message} for message in value])
+    return result
+
+
 def timeout_seconds(value):
     if value is None:
         return None

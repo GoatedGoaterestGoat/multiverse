@@ -370,16 +370,17 @@ class UnreadInNameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.refresh()
                 self.assertEqual(names(d)[1]["bob"], ["✉2"])
             with self.subTest("a read that failed is tried again on the next refresh"):
-                real, failed = backend_module.inbox.unread, []
+                real, failed = backend_module.inbox.unread_many, []
 
-                def unread(root, agent, **kwargs):
-                    if agent == bob.name and not failed:  # bob's first read fails; ada's damaged one is read each time
-                        failed.append(agent)
-                        raise OSError("a passing I/O error")
-                    return real(root, agent, **kwargs)
+                def unread(root, references):
+                    readings = real(root, references)
+                    if bob.name in references and not failed:  # one failed count, others retain their own result
+                        failed.append(bob.name)
+                        readings[bob.name] = OSError("a passing I/O error")
+                    return readings
 
                 mailbox.append_message(bob, "third", {"name": "lead"})
-                with mock.patch.object(backend_module.inbox, "unread", unread):
+                with mock.patch.object(backend_module.inbox, "unread_many", unread):
                     await d.refresh()
                     self.assertEqual((names(d)[1]["bob"], len(failed)), ([], 1))
                     await d.refresh()  # no file changed since

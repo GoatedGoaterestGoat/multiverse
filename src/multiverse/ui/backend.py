@@ -96,9 +96,9 @@ class LocalBackend:
                                      message=values.get("message"), answers=values.get("answers") or None,
                                      notes=values.get("notes") or None, timeout=ANSWER_WAIT))
 
-    def unread_count(self, row):
+    def unread_count(self, row, *, _reading=None):
         """The agent's unread inbox count, as the inspector and mv2 inbox count them, or None when its inbox can't be
-        read now. Read through inbox.unread, which never marks anything read and never blocks on what is in an
+        read now. Read through the shared inbox peek, which never marks anything read and never blocks on what is in an
         inbox's place (a FIFO is a failed read), and only when one of the files it depends on changed since the last
         read, so a refresh costs a few stat calls per agent. It never waits for the inbox's lock either (a reader may
         hold it while its output is blocked): then the last count shows, and the next refresh reads again. A failed
@@ -106,17 +106,26 @@ class LocalBackend:
         key = (str(row["universe"]), str(row["id"]))
         cached = self._unread.get(key)
         try:
-            directory = Path(row["universe"]) / "state" / "agents" / str(row["id"])
-            if not directory.is_dir():  # a folder named other than its id: found the way the read finds it
-                directory = agents.directory(Path(row["universe"]), row["id"], allow_damaged=True)
-            stamp = inbox_stamp(directory)
+            if _reading is None:
+                directory = Path(row["universe"]) / "state" / "agents" / str(row["id"])
+                if not directory.is_dir():  # a folder named other than its id: found the way the read finds it
+                    directory = agents.directory(Path(row["universe"]), row["id"], allow_damaged=True)
+                stamp = inbox_stamp(directory)
+            else:
+                stamp = _reading[0]
         except Exception:
             self._unread.pop(key, None)
             return None
         if cached is not None and cached[0] == stamp:
             return cached[1]
         try:
-            count = len(inbox.unread(Path(row["universe"]), row["id"], blocking=False))
+            if _reading is None:
+                value = inbox.unread(Path(row["universe"]), row["id"], blocking=False)
+            else:
+                value = _reading[1]
+                if isinstance(value, Exception):
+                    raise value
+            count = len(value)
         except BlockingIOError:
             return cached[1] if cached is not None else None
         except Exception:  # a damaged inbox shows no count; mv2 doctor says what is wrong with it
@@ -124,6 +133,35 @@ class LocalBackend:
             return None
         self._unread[key] = (stamp, count)  # the stamp from before the read: a change during it is read next time
         return count
+
+    def unread_counts(self, rows):
+        """Cold/changed inboxes share bounded groups of locked observations; cached counts need only their stamps."""
+        counts, pending, scopes = [None] * len(rows), [], {}
+        for index, row in enumerate(rows):
+            key = (str(row['universe']), str(row['id']))
+            try:
+                directory = Path(row['universe']) / 'state/agents' / str(row['id'])
+                if not directory.is_dir():
+                    directory = agents.directory(Path(row['universe']), row['id'], allow_damaged=True)
+                stamp = inbox_stamp(directory)
+            except Exception:
+                self._unread.pop(key, None)
+                continue
+            cached = self._unread.get(key)
+            if cached is not None and cached[0] == stamp:
+                counts[index] = cached[1]
+                continue
+            pending.append((index, row, stamp))
+            scopes.setdefault(str(row['universe']), []).append(row['id'])
+        readings = {}
+        for root, references in scopes.items():
+            try:
+                readings[root] = inbox.unread_many(Path(root), references)
+            except Exception as error:
+                readings[root] = dict.fromkeys(references, error)
+        for index, row, stamp in pending:
+            counts[index] = self.unread_count(row, _reading=(stamp, readings[str(row['universe'])][row['id']]))
+        return counts
 
     def change_stamp(self, root):
         """A stat of what a status change writes: each scope's agents folder and each agent's records. Cheap enough
@@ -168,9 +206,9 @@ class LocalBackend:
             if isinstance(member.get("damaged"), dict) and member["damaged"].get("recover") == "remove":
                 member["summary"] = "damaged: a leftover folder with no agent records · d moves it to the trash"
         if UNREAD in config["columns"]:  # only where the view shows it: it reads each changed inbox
-            for member in members:
-                if not isinstance(member.get("damaged"), dict):
-                    member[UNREAD] = self.unread_count(member)
+            readable = [member for member in members if not isinstance(member.get("damaged"), dict)]
+            for member, count in zip(readable, self.unread_counts(readable)):
+                member[UNREAD] = count
         if any(columns.core_key(key) == "model" or key == "model" for key in config["columns"]):
             effort = EFFORT in config["columns"]  # effort shows only inside the Model cell
             for member in members:
