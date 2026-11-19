@@ -15,6 +15,7 @@ directory it loads (tsconfig.json, types) lands in the copy, never changing the
 trusted plugin.
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -29,6 +30,7 @@ FINGERPRINTS = "plugin-fingerprints.json"
 UNUSED_DAYS = 14  # a copy nothing trusts and nothing used for this long is removed
 STAGING_HOURS = 1  # a copy still being made after this long was left by a process that died  # each trusted directory's fingerprint, by the signature of its files
 COMPLETE = ".mv2-complete"
+LISTED = ".mv2-files"  # in a copy: the files it was made with, which must stay exactly as trusted
 # Not part of a plugin: version control, and the caches Python and test tools write while a plugin is developed or
 # its tests run. None of it runs: mv2 runs a trusted plugin from a copy that leaves these out too, and Python
 # compiles that copy's own bytecode. Everything else is part of the plugin, whether it runs from source or not.
@@ -159,6 +161,10 @@ def cached(directory, value):
     is used only once complete."""
     target = cache_directory(value)
     if (target / COMPLETE).is_file():
+        if not _copy_intact(target, value):
+            # Its trusted files changed after it was made: an edit there is tampering, and never runs.
+            raise ValueError(f"the cached copy of this plugin at {target} was edited after it was trusted, so it "
+                             f"won't run: remove that folder, and mv2 makes it again from the trusted plugin")
         try:
             os.utime(target / COMPLETE)  # used: kept while anything uses it (prune_cache)
         except OSError:
@@ -177,6 +183,7 @@ def cached(directory, value):
             os.chmod(copy, path.stat().st_mode & 0o777)
         if "sha256:" + digest.hexdigest() != value:
             raise ValueError(f"{directory} changed while it was copied; review it, then trust it again")
+        (staging / LISTED).write_text(json.dumps([relative.as_posix() for relative, _ in _files(staging)]) + "\n")
         (staging / COMPLETE).write_text(value + "\n")
         try:
             staging.rename(target)
@@ -187,6 +194,93 @@ def cached(directory, value):
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _bookkeeping(target, relative):
+    """Whether `relative`, a file added to a copy, is what Claude Code writes into a plugin directory it loads, at
+    an interactive start (checked on 2.1.327-2.1.328): `tsconfig.json` beside the directory's `.claude-plugin/`, and
+    anything under `.claude-plugin/types/`, whose bytes follow the running Claude version. None of it runs."""
+    parts = relative.parts
+    for index in range(len(parts) - 2):
+        if parts[index] == ".claude-plugin" and parts[index + 1] == "types":
+            return True
+    return relative.name == "tsconfig.json" and (Path(target) / relative.parent / ".claude-plugin").is_dir()
+
+
+def _digest(target, names):
+    digest = hashlib.sha256()
+    for name in names:
+        path = Path(target) / name
+        if path.is_symlink() or not path.is_file():
+            return None
+        _add(digest, Path(name), path.read_bytes())
+    return "sha256:" + digest.hexdigest()
+
+
+def _present(target):
+    """Every file in a copy that Python or Claude could load, as relative names: what _files lists, and bytecode
+    too, since Python imports a lone `module.pyc` or `package/__init__.pyc` as it is, wherever it sits. A copy's
+    `__pycache__` folders are removed first: mv2 writes none there (loader._keep_bytecode_out), and one that stays
+    counts as added. Only folders no import can name (`.git` and test caches) and the copy's own records are left
+    out."""
+    for folder in sorted(target.rglob("__pycache__"), reverse=True):
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder, ignore_errors=True)
+    found = []
+    for path in sorted(target.rglob("*")):
+        relative = path.relative_to(target)
+        if relative.as_posix() in (COMPLETE, LISTED) or relative.name in SKIPPED_FILES:
+            continue
+        if any(part in SKIPPED and part != "__pycache__" for part in relative.parts):
+            continue
+        if path.is_symlink() or path.is_file():
+            found.append(relative.as_posix())
+    return sorted(found)
+
+
+def _copy_intact(target, value):
+    """Whether a copy is still exactly what was trusted as `value`: every file it was made with (`.mv2-files`) the
+    trusted bytes, and nothing added but Claude's bookkeeping (_bookkeeping), since an added module could run. A
+    copy with no list (made before it was kept, or with it removed) must hash to `value` over its files, Claude's
+    additions left out or not, and is then given its list. The listed files' stats are kept, so an unchanged copy
+    is hashed once."""
+    target = Path(target)
+    present = _present(target)
+    try:
+        listed = json.loads((target / LISTED).read_text())
+    except FileNotFoundError:
+        listed = None
+    except (OSError, ValueError):
+        return False
+    if listed is None:
+        own = [name for name in present if not _bookkeeping(target, Path(name))]
+        for names in (own, present):
+            if _digest(target, names) == value:
+                try:
+                    (target / LISTED).write_text(json.dumps(names) + "\n")  # checked now: kept from here on
+                except OSError:
+                    pass
+                return True
+        return False
+    if not isinstance(listed, list) or not all(isinstance(item, str) for item in listed):
+        return False
+    if not set(listed) <= set(present):
+        return False  # a trusted file is gone
+    if any(not _bookkeeping(target, Path(name)) for name in set(present) - set(listed)):
+        return False  # something added that could run
+    stats = hashlib.sha256()
+    for name in sorted(listed):
+        status = os.lstat(target / name)
+        stats.update(f"{name}\0{status.st_size}\0{status.st_mtime_ns}\0{status.st_ctime_ns}\0"
+                     f"{status.st_ino}\0{status.st_mode}\n".encode())
+    key = "copy:" + str(target.resolve())
+    record = _fingerprints().get(key)
+    if isinstance(record, dict) and record.get("signature") == stats.hexdigest():
+        return record.get("fingerprint") == value
+    found = _digest(target, sorted(listed))
+    if found is not None:
+        _remember(key, stats.hexdigest(), found)
+    return found == value
 
 
 def prune_cache():

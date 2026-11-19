@@ -1413,7 +1413,21 @@ is about consent and blast radius:
      staging directories a process left behind. It is
      hashed while copied and left out if anything changed meanwhile, and what
      the hash leaves out is not copied either, so a `.pyc` planted beside a
-     reviewed `.py` never runs: Python compiles the copy's own. The plugin is imported from that copy and its Claude
+     reviewed `.py` never runs: Python compiles the copy's own. The copy keeps
+     the list of files it was made with (`.mv2-files`), and each use checks
+     those files still hash to the trusted value (by their stats, rehashed only
+     when they change): an edited copy is tampering, so the plugin is listed
+     as changed and never runs until the copy is removed and made again. A file
+     added since counts as an edit too, since an added module could run,
+     except what Claude Code writes into a plugin directory at an interactive
+     start: `tsconfig.json` beside `.claude-plugin/`, and anything under
+     `.claude-plugin/types/` (checked on 2.1.327-2.1.328). A copy with no list
+     is checked over all its files and given its list if they match. Bytecode
+     for a trusted copy goes to `~/.multiverse/pycache`, and the copy's own
+     `__pycache__` is removed, so none placed there is read; a `.pyc` anywhere
+     else in the copy, which Python would import as it is, counts as added. A process that already loaded the plugin keeps what it
+     loaded. This guards against an edit by mistake: whatever can write the
+     cache can also write the trust list itself. The plugin is imported from that copy and its Claude
      directory loaded from it, so what Claude writes there (`tsconfig.json`,
      types) never touches the trusted plugin. `mv2 plugins check --load` uses
      the copy too, and a process that imports from a universe's plugin

@@ -150,7 +150,7 @@ A repository can carry plugins in its `.multiverse/plugins/`, and cloning the re
 - `trust NAME` trusts the universe's own copy, even when a bundled, checkout or personal plugin has the same name. It says which copy it trusted and what that copy now overrides. Use this to run your own fork of a plugin such as compaction.
 - Python bytecode and test-tool caches are left out of the hash and never run, so running a plugin's own tests keeps it trusted.
 - Any change to the files makes the plugin `changed`, and you must trust it again.
-- mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`.
+- mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`. If that copy's files are edited, the plugin is listed as changed and doesn't run; the problem names the copy to remove, and mv2 then makes it again from the trusted plugin.
 - Only universe plugins need trust. The other sources hold code that you or mv2 installed.
 
 Trust and permissions are not a sandbox. A plugin runs with your permissions. The permissions that `enable` lists are what the plugin asked for. Anything running as you, including an agent, can run `mv2 plugins trust`.

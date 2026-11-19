@@ -913,8 +913,11 @@ def _keep_bytecode_out(directory):
     """Importing from a universe's own plugin directory (a developer's MV2_PLUGIN_PATH, check --load) never
     writes __pycache__ there, which would change what was trusted: this process's bytecode goes to
     ~/.multiverse/pycache instead. Python reads the prefix at every import, lazy ones included."""
-    if sys.pycache_prefix is None and directory.parent.name == "plugins" \
-            and is_file_replaced(directory.parent.parent / "universe.json"):
+    in_universe = directory.parent.name == "plugins" and is_file_replaced(directory.parent.parent / "universe.json")
+    # A trusted copy too: then only the prefix's bytecode is read, never a __pycache__ placed in the copy, which
+    # Python would prefer to the trusted source.
+    in_cache = Path(directory).resolve().parent == (trust.user_directory() / trust.CACHE).resolve()
+    if sys.pycache_prefix is None and (in_universe or in_cache):
         sys.pycache_prefix = str(trust.user_directory() / "pycache")
 
 
