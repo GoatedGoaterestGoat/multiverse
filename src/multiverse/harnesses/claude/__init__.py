@@ -49,7 +49,7 @@ from .transcripts import (  # every transcript reader reads through this one row
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
     has_saved_conversation, Transcript, _transcripts, _transcripts_lock, counted, context_reading, context_usage,
-    measured_usage, DAMAGED, raw_rows, USAGE_KEYS)
+    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE)
 
 MOD = Path(__file__).parent / 'mod'
 # The mod acts only on text between these tags and removes them. The opening
@@ -1702,8 +1702,10 @@ class ClaudeAdapter(ConfiguredAdapter):
             # The launch's own storage (session.home, pinned before it started), not this process's: a dashboard
             # or CLI with another CLAUDE_CONFIG_DIR would read another storage (LC-26).
             storage = launch_storage(session, None)
-            usage = measured_usage(session.native_id, (session.workspace,), storage)
-            reading = context_reading(session.native_id, (session.workspace,), storage)
+            # The agent's saved usage indexes, so a new process parses only what Claude wrote since (USAGE_STORE).
+            store = Path(session.session_file).parent / USAGE_STORE if session.session_file else None
+            usage = measured_usage(session.native_id, (session.workspace,), storage, store)
+            reading = context_reading(session.native_id, (session.workspace,), storage, store)
         except Unreadable as error:
             return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}

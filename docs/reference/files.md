@@ -262,6 +262,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `sessions.jsonl` | The agent's session lineage: verified native session changes, such as Claude's `/clear`, and explicit missing-conversation retirements. A retirement keeps the old ID owned and records the replacement storage before properties change; reported IDs remain unbound until the new conversation binds. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
+| `claude-usage.json` | Claude only: the agent's usage indexes, so a new process parses only what Claude wrote since (per transcript its inode, the offset read to, a SHA-256 of those bytes, the latest time and turn, each response's counted usage; no transcript text). Written by any process that reads usage; taken over only when the digest matches. Safe to delete. |
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
 

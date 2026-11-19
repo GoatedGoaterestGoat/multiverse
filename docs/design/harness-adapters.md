@@ -1687,6 +1687,18 @@ eight most recently read transcripts. History versions come from one counter
 that only grows, so an index built again after its eviction never reuses a
 version a reader holds.
 
+A new process would parse every transcript from its start, about a second per
+large agent, so each agent's usage indexes are also kept in its folder
+(`claude-usage.json`): per transcript, the inode, how far it was read and a
+SHA-256 of those bytes, the latest time and turn, and each response's counted
+usage, never transcript text. A new process takes one over only after hashing
+the file's bytes up to that point and finding the same digest, which costs no
+parse, then parses only what Claude wrote since; another inode, a shorter file,
+another digest or a damaged entry means a read from the start, as before. Any
+process that reads usage writes it, whole and moved over the old one, at most
+every few seconds, for the session's current transcripts only; past 32 MiB it is
+neither written nor read.
+
 An accepted `send` means written to the Claude session inbox; the receipt
 confirms delivery. The mod was tested against Claude Code 2.1.325; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with

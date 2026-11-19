@@ -248,6 +248,118 @@ class ClaudeUsageTest(BaseTest):
         adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=natives[0]))
         self.assertEqual(len(t._usage), 4)
 
+    def test_a_new_process_takes_over_saved_usage_only_where_it_proves(self):
+        """A new dashboard parsed every transcript from its start (about a second per large agent); a saved index
+        taken without proof would count a rewritten transcript's old usage, plausibly, and unnoticed."""
+        from multiverse.harnesses.claude import transcripts as t
+        adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+        agent, directory = self.agent()
+        native_id = str(uuid4())
+        session = SessionHandle(agent, 'claude', str(self.work), native_id=native_id,
+                                session_file=str(directory / 'session.jsonl'))
+        store = directory / t.USAGE_STORE
+        prompt = json.dumps({'type': 'user', 'message': {'content': 'SECRET-PROMPT-TEXT'}}) + '\n'
+        rows = [prompt, self.turn('msg_1', '2026-11-13T10:00:00Z', 'claude-opus-5-5', 10, effort='high'),
+                self.turn('msg_2', '2026-11-13T10:01:00Z', 'claude-sonnet-5-5', 20, effort='low')]
+        project = self.transcript(native_id, *rows)
+        main, sub = project / f'{native_id}.jsonl', project / native_id / 'subagents' / 'agent-1.jsonl'
+        sub.write_text(self.response('sub_1', 3, 4))
+
+        def fresh_process(**patches):
+            """Usage read as by a new process: no index in memory, nothing written yet; (value, lines parsed)."""
+            parsed = []
+            real = t.entry
+            with patch.object(t, '_usage', t.OrderedDict()), patch.object(t, '_saved_at', {}), \
+                    patch.object(t, 'entry', lambda *a: parsed.append(1) or real(*a)), \
+                    patch.multiple(t, **patches) if patches else patch.object(t, 'TAIL', t.TAIL):
+                return adapter.get_usage(session).value, len(parsed)
+
+        def truth():
+            """The total read from nothing saved."""
+            with patch.object(t, '_usage', t.OrderedDict()):
+                return measured_usage(native_id, (str(self.work),)).total_tokens
+
+        def lines():
+            return main.read_text().count('\n')  # the subagent's transcript, unchanged, proves and isn't parsed
+
+        def facts(value):
+            return value['total_tokens'], value['model'], value['effort'], value['context']['tokens']
+
+        first, parsed = fresh_process()
+        self.assertEqual((facts(first), parsed), ((10 * 2 + 20 * 2 + 3 + 4, 'claude-sonnet-5-5', 'low', 20), 4))
+        saved = store.read_text()
+        self.assertNotIn('SECRET-PROMPT-TEXT', saved)  # positions, digests and counts only
+        self.assertEqual(sorted(json.loads(saved)['transcripts']), sorted([str(main), str(sub)]))
+        with main.open('a') as handle:
+            handle.write(self.turn('msg_3', '2026-11-13T10:02:00Z', 'claude-opus-5-5', 30, effort='max'))
+        grown, parsed = fresh_process()
+        self.assertEqual((facts(grown), parsed), ((first['total_tokens'] + 60, 'claude-opus-5-5', 'max', 30), 1))
+        content = main.read_text()
+        changed = {
+            'an earlier row rewritten in place, the same size': content.replace('"input_tokens": 10', '"input_tokens": 90'),
+            'a file moved over it, the same bytes': None,
+            'a shorter file': ''.join(content.splitlines(keepends=True)[:-1]),
+        }
+        for case, text in changed.items():
+            with self.subTest(case):
+                fresh_process()  # the store is current for the file as it is now
+                try:
+                    if text is None:
+                        copy = main.with_name('copy.jsonl')
+                        copy.write_text(content)
+                        os.replace(copy, main)
+                    else:
+                        main.write_text(text)
+                    value, parsed = fresh_process()
+                    self.assertEqual((value['total_tokens'], parsed), (truth(), lines()))  # every line again
+                finally:
+                    main.write_text(content)
+        damaged = {
+            'not JSON': '{', 'another schema': {'schema': 2, 'transcripts': {}},
+            'a prefix that is not a digest': {'prefix': 'x' * 64}, 'a negative count': {'responses': {'msg_1': [-1, 0, 0, 0]}},
+            'a count list of the wrong length': {'responses': {'msg_1': [1, 2]}}, 'a field missing': {'chain': None},
+        }
+        for case, damage in damaged.items():
+            with self.subTest(case):
+                fresh_process()
+                data = json.loads(store.read_text())
+                if isinstance(damage, dict) and 'schema' not in damage:
+                    data['transcripts'][str(main)].update(damage)
+                    store.write_text(json.dumps(data))
+                else:
+                    store.write_text(damage if isinstance(damage, str) else json.dumps(damage))
+                value, parsed = fresh_process()
+                whole = not (isinstance(damage, dict) and 'schema' not in damage)  # the subagent's entry goes too
+                self.assertEqual((value['total_tokens'], parsed), (grown['total_tokens'], lines() + whole))
+        with self.subTest('a store is read no further than its bound, on the opened file'):
+            large = directory / 'large.json'
+            large.write_text(json.dumps({'schema': 1, 'transcripts': {'x': 'y' * 512}}))
+            opened, asked = t.open_regular, []
+
+            def counting(path):
+                handle = opened(path)
+                read = handle.read
+                handle.read = lambda size=-1: asked.append(size) or read(size)
+                return handle
+            with patch.object(t, 'STORE_BYTES', 128), patch.object(t, 'open_regular', side_effect=counting):
+                self.assertEqual(t._load_store(large), {})
+            self.assertEqual(asked, [129])  # one read, of the bound plus one byte: never the whole file
+        with self.subTest('a write never goes through a link at a temporary name'):
+            outside = self.work / 'unrelated.txt'
+            outside.write_text('keep')
+            for name in (f'{store.name}.{os.getpid()}.0.tmp', f'{store.name}.{os.getpid()}.tmp'):
+                (directory / name).symlink_to(outside)
+            with patch.object(t.threading, 'get_ident', return_value=0):
+                self.assertTrue(t._save_store(store, {}))
+            self.assertEqual((outside.read_text(), store.is_symlink()), ('keep', False))
+        with self.subTest('a store past its bound is neither written nor read'):
+            store.unlink()
+            fresh_process(STORE_BYTES=64)
+            self.assertFalse(store.exists())
+            fresh_process()
+            _, parsed = fresh_process(STORE_BYTES=64)
+            self.assertEqual(parsed, lines() + 1)  # the subagent's too: nothing was read
+
     def reported(self):
         """An agent whose last response (00:00, 150k) the mod reported at 00:05."""
         agent, directory = self.agent()
