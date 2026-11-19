@@ -290,7 +290,7 @@ When a focus ends with held messages unread, the agent is told in these cases:
 | The focus ends | The agent is told |
 | --- | --- |
 | The agent runs `mv2 unfocus` | In its output: `You received 2 steer or follow-up messages during your focus. Use mv2 held to check only those messages.` |
-| A `--turn` focus ends with a turn, whoever set it | The same text, in a `follow-up` from mv2 that starts a turn. A `listen` that is running reports instead |
+| A `--turn` focus ends with a turn, whoever set it | The same text, as a `follow-up` that starts a turn. It reaches the agent as that one line, without a `Message from` line; `mv2 inbox --all` lists it as from mv2. A `listen` that is running reports instead |
 
 A timed focus that runs out, and a focus the user ends, tell the agent nothing. The held messages still wait for `held` and `inbox`.
 

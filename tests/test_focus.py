@@ -687,6 +687,33 @@ class FocusCommandTest(BaseTest):
         with patch.object(queued_prompts, 'for_send', side_effect=AssertionError('the dashboard read the queue')):
             self.assertNotIn('queue_note', LocalBackend().focus(self.root, 'asker'))
 
+    def test_the_focus_end_note_reaches_the_agent_as_its_one_line(self):
+        """The focus-end note reaches the agent with no sender line and real messages keep theirs; a break shows neither."""
+        from multiverse.runtime.native import framed_text
+        directory = self.directories['asker']
+        core = {'name': 'mv2', 'agent_id': None, 'core': True}
+        for count in (1, 2):
+            with self.subTest(count=count):
+                note = mailbox.append_message(directory, focus.note(count), core, 'follow-up', focus_note=str(uuid4()))
+                self.assertEqual(framed_text(self.root, note), focus.note(count))
+                self.assertEqual(framed_text(self.root, note, listing=True), 'Message from mv2:\n' + focus.note(count))
+        noun = {1: 'message', 2: 'messages'}
+        self.assertEqual([focus.note(count).split(' during')[0] for count in (1, 2)],
+                         [f'You received {count} steer or follow-up {noun[count]}' for count in (1, 2)])
+        # Real messages keep their sender line: the person's, a plugin's, mv2's own without focus_note, and an
+        # agent's message carrying the same text.
+        senders = [({'name': 'user', 'agent_id': None}, 'Message from user:'),
+                   ({'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}, 'Message from plugin remote:'),
+                   (core, 'Message from mv2:')]
+        for sender, header in senders:
+            message = mailbox.append_message(directory, focus.note(1), sender, 'follow-up')
+            self.assertEqual(framed_text(self.root, message), header + '\n' + focus.note(1))
+        forged = mailbox.append_message(directory, focus.note(1), {'name': 'user', 'agent_id': None}, 'follow-up',
+                                        focus_note=str(uuid4()))
+        self.assertTrue(framed_text(self.root, forged).startswith('Message from user:\n'))
+        self.output('send', 'asker', '--text', 'hello', '--delivery', 'inbox-only', agent='helper')
+        self.assertTrue(self.output('inbox', '--all', '--last', '1', agent='asker').startswith('Message from helper'))
+
     def test_agents_change_only_their_own_focus(self):
         """An agent can focus and unfocus only itself while the person can change any agent; otherwise one agent could
         silence another or clear its focus."""

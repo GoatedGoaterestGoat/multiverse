@@ -157,7 +157,7 @@ def readable(root, result, empty='No unread messages.'):
         sender = message.get('from') or {}
         if not sender.get('agent_id') and sender.get('core') is not True:
             sender = {**sender, 'name': 'user'}
-        blocks.append(framed_text(root, {**message, 'from': sender}))
+        blocks.append(framed_text(root, {**message, 'from': sender}, listing=True))
     return '\n\n'.join(blocks) if blocks else empty
 
 
