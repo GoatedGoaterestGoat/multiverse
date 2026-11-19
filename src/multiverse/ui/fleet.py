@@ -9,7 +9,7 @@ from textual.widgets import DataTable, Input, Static
 from ..display import clean, phase_label
 from . import theme
 from .columns import COLUMNS, COMPACT_WIDTH, MARKS, MODEL_WIDE, PHASE_WIDE, PluginColumn, lookup
-from .drafts import HINT
+from .drafts import HINT, ModelDraft
 from .tree import group_key, hierarchy
 from .widgets import DraftMenu
 
@@ -25,6 +25,12 @@ class FleetView:
         if self.draft:
             data = self.draft.add_to(data)
         projected = hierarchy(data, self.collapsed, search)
+        if (isinstance(self.draft, ModelDraft) and not self.operating
+                and all(row["key"] != self.draft.key for row in projected)):
+            # The agent left the list (removed, or moved elsewhere) while its model was being chosen.
+            name, self.draft = clean(self.draft.values["name"]), None
+            self.set_class(False, "drafting")
+            self.set_status(f"{name} is no longer listed here, so its model wasn't changed.", error=True)
         for row in projected:
             if self.draft and row["key"] == self.draft.key:
                 row["kind"] = "draft"
@@ -121,6 +127,8 @@ class FleetView:
             self.inspector.update_row(self.visible_rows.get(self.inspector.row["key"]))
 
     def draft_cell(self, row, field):
+        if field == "name" and isinstance(self.draft, ModelDraft):  # an existing agent's row: its name as usual
+            return COLUMNS["name"].render(row)
         if field == "name":
             label = COLUMNS["name"].render(row)[:sum(len(guide) for guide, _color in row["guides"])]
             label.append("+ ", style=theme.TEAL)
@@ -153,7 +161,11 @@ class FleetView:
         if field != "harness":  # under its own words in the "Model: … · Effort: …" cell
             cell = draft.column_cell("summary").plain
             x += table.cell_padding + (cell.index("Effort: ") + 8 if field == "effort" else 7)
-        row_y = table.content_region.y + table.header_height + list(table.rows).index(draft.key) - int(table.scroll_y)
+        rows = list(table.rows)
+        if draft.key not in rows:  # its row isn't drawn (yet): no menu to place
+            menu.display = False
+            return
+        row_y = table.content_region.y + table.header_height + rows.index(draft.key) - int(table.scroll_y)
         if not table.content_region.y + table.header_height <= row_y < table.content_region.bottom:
             menu.display = False
             return
@@ -225,7 +237,7 @@ class FleetView:
             return None
         label.append(draft.option_label(draft.active, draft.values[draft.active]) + " ▾")
         label.append(f" · ↑↓ choose{' or type a model ID' if draft.active == 'model' and draft.typed() else ''}"
-                     f" · Enter create · Tab {after}", style=HINT)
+                     f" · Enter {draft.saves} · Tab {after}", style=HINT)
         if draft.active == "model" and isinstance(found, dict):
             if found.get("narrowed"):
                 label.append(" · narrowed in this universe's harness settings", style=HINT)

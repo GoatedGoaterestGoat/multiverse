@@ -31,7 +31,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `phase`, `summary` | What the agent last reported with `mv2 report`. A `working` or `blocked` phase also says how long ago it was reported, so how current the summary is, such as `working (10m)` or `blocked (2h)` |
 | `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |
-| `model` | The agent's model by its display name, such as `Opus 5.5` or `GPT 6.1 Sol`: the universe's own name for it from its harness settings, else the one mv2 ships in its model tables (which follow new releases, so an alias such as `opus` can later name a newer model). A running agent shows the model its session last reported, so a switch with `/model` shows after its next reply. Otherwise, and until the first reading lands, it shows the model the agent was launched with, else its harness's default model (`settings.model`), the one it would resume on, else `-`. A model neither names shows as recorded (off by default) |
+| `model` | The agent's model by its display name, such as `Opus 5.5` or `GPT 6.1 Sol`: the universe's own name for it from its harness settings, else the one mv2 ships in its model tables (which follow new releases, so an alias such as `opus` can later name a newer model). A running agent shows the model its session last reported, so a switch with `/model` shows after its next reply. Otherwise, and until the first reading lands, it shows the model the agent was launched with, else its harness's default model (`settings.model`), the one it would resume on, else `-`. After its saved model or effort is changed for the next resume (`e`, or `mv2 set-model`), a running agent with no reading yet keeps showing the model and effort it was launched with; it shows the saved choice once it's stopped and resumed. A model neither names shows as recorded (off by default) |
 | `effort` | Not a column of its own: with `model` also listed, the agent's effort in parentheses in the Model cell, such as `Opus 5.5 (xhigh)`. It is the effort a running agent's session reports where its harness records one, else the effort it was launched with; nothing when neither is known. Without `model` it shows nowhere (off by default) |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
@@ -57,6 +57,7 @@ Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A
 | `f` | Focus the selected agent, or unfocus it |
 | `K` or `s` | Kill the selected agent, after confirming |
 | `r` | Resume a stopped or dormant agent |
+| `e` | Choose the selected agent's model and effort for its next resume |
 | `p` | Show or hide the inspector |
 | `v` | Show full details of an agent or folder |
 | `i` | Read the selected agent's unread inbox messages; they stay unread for the agent |
@@ -84,6 +85,10 @@ Press `n` to add a draft row in the selected folder. Type the name, then press `
 `status` and `phase` are separate. `status` is the harness's own state (`working`, `waiting` or `idle`). `phase` is what the agent last reported with `mv2 report`, and reads `starting` until it reports.
 
 Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and starts from a copy of its parent's definitions, as `mv2 subverse` does without `--template`. For another workspace or a clean template, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
+
+## Change an agent's model
+
+Press `e` on an agent to choose the model and effort it launches with next time, as `mv2 set-model` does. Its row turns into the new-agent picker for its harness, starting from the saved choice: `↑`/`↓` choose, `Tab` moves between Model and Effort, `Enter` saves and `Esc` discards. Only the models the harness's settings allow are offered. A saved model they no longer allow is named, and you choose another. A model with no efforts sends none, so a saved effort the model still takes is kept. A running agent's session keeps its current model until it's stopped and resumed, and nothing restarts. The Model column still shows what the session uses.
 
 ## Message, focus, kill and resume
 

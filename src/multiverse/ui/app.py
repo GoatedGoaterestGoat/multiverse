@@ -114,7 +114,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("a", "answer", "Answer", show=False),
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
         Binding("r", "resume", "Resume", show=False), Binding("P", "plugins", "Plugins", show=False),
-        Binding("C", "columns", "Columns", show=False),
+        Binding("C", "columns", "Columns", show=False), Binding("e", "set_model", "Model", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -782,6 +782,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
         yield SystemCommand("Columns", "Choose and order the agent list's columns", self.action_columns)
+        yield SystemCommand("Model", "Choose the selected agent's model and effort for its next resume",
+                            self.action_set_model)
 
     def plugin_palette(self):
         """[(title, help, callback)] of what plugins add to the command palette, in a stable order.

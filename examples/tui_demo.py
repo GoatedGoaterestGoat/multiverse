@@ -80,10 +80,22 @@ class DemoBackend:
         if harness != "claude":
             return None
         return {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5", "efforts": ["low", "medium", "high", "xhigh"],
-                            "default": True, "effort_unset": True},
+                            "aliases": ["opus"], "default": True, "effort_unset": True},
                            {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "efforts": [], "default": False,
                             "effort_unset": True}],
                 "free_form": False, "narrowed": False, "unset": True, "default_model": None, "problems": []}
+
+    def set_model(self, root, reference, model, effort):
+        """The saved model and effort for the next resume; None keeps the saved effort, as core does."""
+        with self.lock:
+            agent = self.find(root, reference)
+            agent["model"] = model or None
+            if effort is not None:
+                agent["effort"] = effort or None
+            notices = (["Its session keeps its current model until it's stopped and resumed."]
+                       if agent["live"] == "alive" else [])
+            return {"ok": True, "id": agent["id"], "name": agent["name"], "model": agent["model"],
+                    "effort": agent.get("effort"), "notices": notices}
 
     def send(self, root, reference, text, delivery="steer", queue_only=False):
         with self.lock:

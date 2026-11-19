@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from threading import Event
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual import events
@@ -12,12 +13,12 @@ from textual.widgets import OptionList, Static
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import read, write
 from multiverse.ui.app import MultiverseApp
-from multiverse.ui.tree import group_key
+from multiverse.ui.tree import agent_key, group_key
 from isolation import isolate
 from tui_demo import DemoBackend
 
 
-class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
+class PickerCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         isolate(self)
         self.backend = DemoBackend()
@@ -62,6 +63,8 @@ class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("down")
         self.assertEqual(self.app.draft.values["harness"], harness)
 
+
+class ModelPickerTests(PickerCase):
     async def test_n_offers_the_harness_list_and_sends_exactly_what_was_picked(self):
         """With a model list, n's model is picked from it (neither typed nor pasted), an Effort field appears only for a model that takes one,
         what is created is exactly the picked model and effort, a harness or model change clears what no longer
@@ -232,6 +235,86 @@ class ModelPickerTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+class SetModelTests(PickerCase):
+    async def test_e_saves_the_model_and_effort_picked_in_the_agents_own_row(self):
+        """e edits a running or stopped agent's saved model and effort with the new-agent picker, starting from the
+        saved choice; fragile because it reuses n's draft machinery, where a slip would save to the wrong agent, add
+        a row, drop the saved effort, or write without a change."""
+        agent = next(a for a in self.backend.agents if a["name"] == "reviewer")  # claude, running
+        agent.update(model="opus", effort="high")  # an alias, read into the first snapshot
+        calls = []
+        real = self.backend.set_model
+        self.backend.set_model = lambda *args: calls.append(args) or real(*args)
+        async with self.app.run_test(size=(140, 36)) as pilot:
+            await self.settle(pilot)
+
+            async def edit():
+                self.app.select_key(agent_key(agent))
+                await self.settle(pilot)
+                await pilot.press("e")
+                await self.until(pilot, lambda: self.app.draft and not self.app.draft.reading(), "claude's models")
+                await self.settle(pilot)
+
+            with self.subTest("its own row, its harness's list, the saved alias picked as its ID, and a running note"):
+                rows = len(self.app.query_one("#agents").rows)
+                await edit()
+                self.assertEqual(self.app.draft.key, agent_key(agent))
+                self.assertEqual(len(self.app.query_one("#agents").rows), rows)
+                self.assertEqual(self.menu(), ["default", "Opus 5.5 (claude-opus-5-5)", "Haiku 4.5 (claude-haiku-4-5)"])
+                self.assertEqual((self.app.draft.values["model"], self.app.draft.values["effort"]),
+                                 ("claude-opus-5-5", "high"))
+                self.assertIn("keeps its model until it's stopped and resumed",
+                              str(self.app.query_one("#status").render()))
+            with self.subTest("Enter with nothing changed saves nothing"):
+                await pilot.press("enter")
+                await self.settle(pilot)
+                self.assertIsNone(self.app.draft)
+                self.assertEqual(calls, [])
+                self.assertIn("unchanged", str(self.app.query_one("#status").render()))
+            with self.subTest("Tab moves to Effort; Enter saves exactly the pick, for that agent"):
+                await edit()
+                await pilot.press("tab", "down", "enter")  # effort high -> xhigh
+                await self.settle(pilot)
+                self.assertEqual(calls[-1][1:], (agent["id"], "claude-opus-5-5", "xhigh"))
+                self.assertEqual((agent["model"], agent["effort"]), ("claude-opus-5-5", "xhigh"))
+                self.assertIn("keeps its current model", str(self.app.query_one("#status").render()))
+            with self.subTest("a model taking no effort sends none, so core keeps or drops the saved one"):
+                await edit()
+                await pilot.press("down", "enter")  # Haiku 4.5, no efforts
+                await self.settle(pilot)
+                self.assertEqual(calls[-1][1:], (agent["id"], "claude-haiku-4-5", None))
+            with self.subTest("Esc cancels, saving nothing"):
+                before = len(calls)
+                await edit()
+                await pilot.press("up", "escape")
+                await self.settle(pilot)
+                self.assertIsNone(self.app.draft)
+                self.assertEqual(len(calls), before)
+                self.assertEqual(agent["model"], "claude-haiku-4-5")
+            with self.subTest("a click on its name keeps a field the editor has, so Tab still moves"):
+                await edit()
+                table = self.app.query_one("#agents")
+                row = list(table.rows).index(agent_key(agent))
+                await pilot.click("#agents", offset=(3, table.header_height + row - int(table.scroll_y)))
+                await self.settle(pilot)
+                self.assertIn(self.app.draft.active, self.app.draft.fields)
+                await pilot.press("tab")
+                self.assertIn(self.app.draft.active, self.app.draft.fields)
+                await pilot.press("escape")
+                await self.settle(pilot)
+            with self.subTest("the agent leaving the list ends the editor, saving nothing, and nothing raises"):
+                before, errors = len(calls), []
+                await edit()
+                with patch.object(self.app, "_handle_exception", side_effect=errors.append):
+                    self.backend.agents.remove(agent)
+                    self.app.refresh_snapshot()
+                    await self.settle(pilot)
+                self.assertEqual(errors, [])
+                self.assertIsNone(self.app.draft)
+                self.assertIn("no longer listed", str(self.app.query_one("#status").render()))
+                self.assertEqual(len(calls), before)
+
+
 class NarrowedSettingsTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     async def test_n_offers_what_the_universes_harness_settings_allow(self):
         """On a real universe, n's model list is exactly the harness settings' subset, in table order, with no
@@ -316,3 +399,56 @@ class NarrowedSettingsTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetModelSettingsTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_e_offers_the_subset_and_saves_through_core(self):
+        """On a real universe with a model subset, e picks a saved alias as its listed ID, names a saved model the
+        subset no longer allows and makes it chosen again, and saves through core's set-model to the record; fragile
+        because the saved spelling, the subset and the record meet across core and the dashboard."""
+        settings = self.root / "harnesses" / "claude" / "harness.json"
+        subset = {"sonnet": {"efforts": ["low", "medium"]}, "haiku": {}}
+        write(settings, {**read(settings), "settings": {"models": subset}})
+        aliased = self.agent("aliased", model="sonnet", effort="low")
+        outside = self.agent("outside", model="claude-opus-5-5", effort="xhigh")
+        async with self.dashboard(size=(130, 30)) as d:
+            def menu():
+                widget = d.app.query_one("#draft-menu", OptionList)
+                if not widget.display:
+                    return []
+                return [str(widget.get_option_at_index(i).prompt) for i in range(widget.option_count)]
+
+            def saved(directory):
+                found = read(directory / "properties.json")
+                return found.get("model"), found.get("effort")
+
+            async def edit(name):
+                d.select(name)
+                await d.press("e")
+                await d.until(lambda: d.app.draft and not d.app.draft.reading(), "claude's models")
+                await d.settle()
+
+            with self.subTest("a saved alias is picked as its listed ID, with its effort"):
+                await edit("aliased")
+                self.assertEqual(menu(), ["Haiku 5.5 (claude-haiku-5-5)", "Sonnet 5.5 (claude-sonnet-5-5)"])
+                picked = (d.app.draft.values["model"], d.app.draft.values["effort"])
+                self.assertEqual(picked, ("claude-sonnet-5-5", "low"))
+            with self.subTest("Tab to Effort and Enter saves the pick to the record"):
+                await d.press("tab", "down", "enter")  # medium
+                await d.settle()
+                self.assertIsNone(d.app.draft)
+                self.assertEqual(saved(aliased), ("claude-sonnet-5-5", "medium"))
+            with self.subTest("a saved model outside the subset is named, nothing is picked, and Enter asks for one"):
+                await edit("outside")
+                self.assertEqual(d.app.draft.values["model"], "")
+                self.assertIn("claude-opus-5-5: not allowed here", str(d.app.query_one("#selection").render()))
+                await d.press("enter")
+                await d.settle()
+                self.assertIsNotNone(d.app.draft)
+                self.assertIn("isn't allowed here any more", str(d.app.query_one("#status").render()))
+                self.assertEqual(saved(outside), ("claude-opus-5-5", "xhigh"))
+            with self.subTest("choosing one saves it; a model with no efforts listed leaves the effort to core"):
+                await d.press("down", "enter")  # Haiku: {} lists no efforts of its own here
+                await d.settle()
+                self.assertIsNone(d.app.draft)
+                self.assertEqual(saved(outside)[0], "claude-haiku-5-5")

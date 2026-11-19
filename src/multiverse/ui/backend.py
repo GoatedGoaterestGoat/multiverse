@@ -301,7 +301,8 @@ class LocalBackend:
         default_label = model_policy.recorded_name(root, {"model": recorded, "harness": harness}, {}) or (
             name(default) if default else None)
         return {"models": [{"id": m["id"], "name": name(m), "efforts": list(m.get("efforts") or ()),
-                            "effort_unset": m["effort_unset"]} for m in found["models"]],
+                            "aliases": list(m.get("aliases") or ()), "effort_unset": m["effort_unset"]}
+                           for m in found["models"]],
                 "free_form": found["free_form"], "narrowed": found["narrowed"], "unset": found["unset"],
                 "default_model": found["default_model"], "default_label": default_label,
                 "problems": list(found["problems"])}
@@ -350,6 +351,11 @@ class LocalBackend:
 
     def resume(self, root, reference):
         return resume.run(root, agent=reference)
+
+    def set_model(self, root, reference, model, effort):
+        """The agent's saved model and effort for its next resume: None keeps a field as saved, "" clears it."""
+        from ..tools import set_model
+        return set_model.run(root, agent=reference, model=model, effort=effort)
 
     def stop(self, root, reference):
         return stop.run(root, agent=reference)
