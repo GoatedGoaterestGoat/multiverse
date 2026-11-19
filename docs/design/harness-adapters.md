@@ -904,8 +904,10 @@ and so is an inherited `CLAUDE_CODE_CHILD_SESSION` (Claude Code sets it for its 
 tool subprocesses, and a Claude that inherits it saves no transcript), and a
 parent Claude's `CLAUDE_CODE_SSE_PORT` (its IDE connection) and
 `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` (its inbox and
-its secret), which an agent spawned from inside Claude inherits; a harness that
-sets one in `env` keeps its value.
+its secret), which an agent spawned from inside Claude inherits, and since Claude
+Code 2.1.328 `CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS` and `CLAUDE_CODE_CHILD_NOTES_DIR`
+(the sessions that launched it, which a Claude records itself as derived from,
+and their notes folder); a harness that sets one in `env` keeps its value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
