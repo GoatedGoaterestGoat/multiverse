@@ -83,7 +83,7 @@ Press `n` to add a draft row in the selected folder. Type the name, then press `
 
 `status` and `phase` are separate. `status` is the harness's own state (`working`, `waiting` or `idle`). `phase` is what the agent last reported with `mv2 report`, and reads `starting` until it reports.
 
-Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and the `base` template. For anything else, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
+Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and starts from a copy of its parent's definitions, as `mv2 subverse` does without `--template`. For another workspace or a clean template, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
 
 ## Message, focus, kill and resume
 

@@ -84,7 +84,7 @@ mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] [--json] name
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `name` |  |  |  |
-| `--template` | `TEMPLATE` |  | `base` |
+| `--template` | `TEMPLATE` | Use a clean template instead of copying the parent's definitions |  |
 | `--workspace` | `WORKSPACE` |  |  |
 | `--json` |  | Print the subverse's record as JSON |  |
 

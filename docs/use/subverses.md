@@ -12,7 +12,11 @@ Press `Enter` on the subverse to open it as its own view, and `Backspace` to go 
 
 ![Making a subverse with g, moving an agent into it with x, and opening it](../media/subverse.gif)
 
-A subverse made this way uses the `base` setup. To start from a different one, make it from a template.
+A subverse copies its immediate parent's setup, including edited harnesses, views, skills, prompts, commands, enabled plugins, plugin settings and `.gitignore`. It also copies other template-managed files, such as blank report forms. Generated artifacts, notes and plugin code not installed by a template stay out, along with agents, inboxes, runtime records, plugin trust and secrets. It is a copy at creation: later parent edits do not flow into it.
+
+Plugin secrets remain in their separate store. If the subverse has no value of its own, it reads its nearest parent's value live; creating a subverse never copies a secret.
+
+Refresh keeps the parent's template base and treats inherited edits and deletions as local changes. The parent needs a readable install record and an available template. If either is missing or damaged, repair it or create a clean subverse with `mv2 subverse NAME --template NAME`.
 
 ## Example: a bug hunt
 
@@ -24,7 +28,7 @@ This example sets up a subverse where agents explore mv2 and file each bug with 
 mv2 subverse bug-hunt
 ```
 
-This makes `.multiverse/subverses/bug-hunt/` with the base setup. Replace its `bootstrap.md`, which every agent here reads at each start and resume:
+This makes `.multiverse/subverses/bug-hunt/` with the parent's current setup. Replace its `bootstrap.md`, which every agent here reads at each start and resume:
 
 ```markdown
 You hunt bugs in mv2; you never fix them. Work in a scratch universe: `mv2 init "$(mktemp -d)"`.

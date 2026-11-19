@@ -384,6 +384,6 @@ class LocalBackend:
         return remove.run(universe.parent(path), target=str(path), subverse=True)
 
     def subverse(self, root, values):
-        result = subverse.run(root, name=values["name"], template=values.get("template") or "base",
+        result = subverse.run(root, name=values["name"], template=values.get("template") or None,
                               workspace=values.get("workspace") or None)
         return Path(result["universe"])
