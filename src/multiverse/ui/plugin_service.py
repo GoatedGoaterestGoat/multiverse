@@ -153,6 +153,20 @@ class PluginService:
     def edit_settings(self, root, name, changes):
         return plugins.edit_settings(Path(root), name, changes)
 
+    def packages_state(self, root, name):
+        """What a plugin declares of Python packages and whether they're installed here, or None (1.20)."""
+        return plugins.packages_state(Path(root), name)
+
+    def install_packages(self, root, name, approved=None):
+        """Install a plugin's Python packages; only after the person has said yes to the list. `approved`: the
+        folder name of the list they were shown, so a list changed since installs nothing."""
+        return plugins.install_packages(Path(root), name, approved=approved)
+
+    def packages_prompt(self, name, state):
+        """The same words `mv2 plugins packages NAME` asks with."""
+        from ..tools.plugins import packages_prompt
+        return packages_prompt(name, state)
+
     def host_top(self, root):
         """The top-level universe the plugin host runs for."""
         top = Path(root)

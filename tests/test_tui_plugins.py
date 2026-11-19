@@ -9,6 +9,7 @@ import os
 import json
 from pathlib import Path
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -56,6 +57,9 @@ class FakeService:
         self.off = set()
         self.host = {"needed": False, "running": False, "stopped": {}, "pid": None, "workers": []}
         self.host_start_error = None
+        self.packages = {}  # name -> packages_state's answer
+        self.listing_gate = None
+        self.install_error, self.install_gate = None, None
 
     def host_state(self, root):
         self.calls.append(("host_state", Path(root)))
@@ -72,6 +76,8 @@ class FakeService:
         self.host["running"] = False
 
     def listing(self, root):
+        if self.listing_gate:
+            self.listing_gate.wait(10)
         return [dict(entry) for entry in self.items]
 
     def problems(self, root):
@@ -110,6 +116,25 @@ class FakeService:
             if entry["name"] == name:
                 entry["on"], entry["state"] = on, "loaded" if on else "off"
         return {"name": name, "on": on, "installed": []}
+
+    def packages_state(self, root, name):
+        found = self.packages.get(name)
+        return dict(found) if found else None
+
+    def install_packages(self, root, name, approved=None):
+        self.calls.append(("install", Path(root), name, approved))
+        if self.install_gate:
+            self.install_gate.wait(10)
+        if self.install_error:
+            raise plugins.PluginError(self.install_error)
+        if approved != Path(self.packages[name]["folder"]).name:  # as core refuses a list changed since it was shown
+            raise plugins.PluginError(
+                f"{name}'s requirements changed after you were shown them, so nothing was installed")
+        self.packages[name] = {**self.packages[name], "installed": True, "problem": None}
+
+    def packages_prompt(self, name, state):
+        from multiverse.tools.plugins import packages_prompt
+        return packages_prompt(name, state)
 
     def edit_settings(self, root, name, changes):
         self.calls.append(("edit", Path(root), name, dict(changes)))
@@ -186,6 +211,163 @@ class DashboardCase(unittest.IsolatedAsyncioTestCase):
 
     def text(self, selector):
         return str(self.app.query_one(selector, Static).render())
+
+
+class PackagesTests(DashboardCase):
+    def setUp(self):
+        super().setUp()
+        missing = {"packages": ["fastrelay[bold red]==1.2.3 --hash=sha256:" + "a" * 64], "installed": False,
+                   "folder": "/home/x/.multiverse/plugin-packages/beta-1", "problem": "beta needs Python packages"}
+        self.service.packages = {"beta": dict(missing), "alpha": {**missing, "folder": "/f/alpha"}}
+
+    def called(self, name):
+        return [call[2] for call in self.service.calls if call[0] in name]
+
+    async def open_screen(self, pilot, name):
+        self.app.action_plugins()
+        await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.items,
+                         "the Plugins screen")
+        screen = self.app.screen
+        table = screen.query_one("#plugins-table", DataTable)
+        table.move_cursor(row=[item["name"] for item in screen.items].index(name))
+        await pilot.pause()
+        return screen
+
+    async def asked(self, pilot):
+        await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen), "the packages question")
+        return str(self.app.screen.query_one("#dialog-description", Static).render())
+
+    async def test_a_plugin_with_python_packages_is_asked_about_before_they_install(self):
+        """Turning on a plugin whose Python packages aren't installed, or Enter on one that is on without them, shows
+        the CLI's words with Install or Cancel, installs only on Install, turns it on only once installed, and holds
+        Esc while installing; fragile because packages are code the person must approve, and a slip installs them
+        unasked, turns on a plugin that can't load, or loses an install that is still running."""
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            with self.subTest("Cancel installs nothing and leaves it off"):
+                screen = await self.open_screen(pilot, "beta")
+                self.assertIn("Python packages: 1, not installed (Space asks", str(
+                    screen.query_one("#plugin-details", Static).render()))
+                await pilot.press("space")
+                text = await self.asked(pilot)
+                self.assertIn("beta needs 1 Python package, pinned to one version and hashed:", text)
+                self.assertIn("fastrelay[bold red]==1.2.3", text)  # the plugin's own words, never markup
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+                self.assertEqual((self.called("install"), self.called("enable")), ([], []))
+                self.assertIn("weren't installed; it stays off", str(screen.query_one(".cerror", Static).render()))
+
+            with self.subTest("a failed install says why and leaves it off"):
+                self.service.install_error = "beta's packages could not be installed: no index reachable"
+                await pilot.press("space")
+                await self.asked(pilot)
+                await pilot.press("enter")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the install to fail")
+                self.assertEqual((self.called("install"), self.called("enable")), (["beta"], []))
+                note = str(screen.query_one(".cerror", Static).render())
+                self.assertIn("could not be installed: no index reachable", note)
+                self.assertEqual(note.count("could not be installed"), 1, note)  # core's reason, not said twice
+                self.service.install_error = None
+
+            with self.subTest("a row moved to while the list is read again stays selected"):
+                table = screen.query_one("#plugins-table", DataTable)
+                self.service.install_error = "beta's packages could not be installed: no index reachable"
+                await pilot.press("space")
+                await self.asked(pilot)
+                self.service.listing_gate = gate = threading.Event()
+                self.addCleanup(gate.set)
+                await pilot.press("enter")  # Install: it fails, and the list is read again, held here
+                for _ in range(100):
+                    if "could not be installed" in str(screen.query_one(".cerror", Static).render()):
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("up")  # from beta to alpha, while the list is being read
+                gate.set()
+                self.service.listing_gate = None
+                await self.until(pilot, lambda: not screen.busy, "the list to be read again")
+                self.assertEqual(screen.selected()["name"], "alpha")
+                self.service.install_error = None
+                await pilot.press("down")
+
+            with self.subTest("the question shows the list as it is now, not as the screen first read it"):
+                original = dict(self.service.packages["beta"])
+                self.service.packages["beta"] = {**original, "packages": ["newrelay==2.0.0 --hash=sha256:" + "b" * 64],
+                                                 "folder": "/home/x/.multiverse/plugin-packages/beta-2"}
+                await pilot.press("space")
+                text = await self.asked(pilot)
+                self.assertIn("newrelay==2.0.0", text)
+                self.assertNotIn("fastrelay", text)
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+
+            with self.subTest("a list that changes after the question installs nothing and says so"):
+                self.service.calls.clear()
+                await pilot.press("space")
+                await self.asked(pilot)
+                self.service.packages["beta"] = original  # changed between the question and Install
+                await pilot.press("enter")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the refusal")
+                self.assertEqual(self.called("enable"), [])
+                self.assertEqual([call[3] for call in self.service.calls if call[0] == "install"], ["beta-2"])
+                self.assertIn("changed after you were shown them", str(screen.query_one(".cerror", Static).render()))
+
+            with self.subTest("Install installs, then turns it on"):
+                self.service.calls.clear()
+                await pilot.press("space")
+                await self.asked(pilot)
+                await pilot.press("enter")
+                await self.until(pilot, lambda: self.called("enable"), "beta to be turned on")
+                self.assertEqual([call[0] for call in self.service.calls if call[0] in ("install", "enable")],
+                                 ["install", "enable"])
+                self.assertEqual([call[3] for call in self.service.calls if call[0] == "install"], ["beta-1"])
+
+            with self.subTest("once installed, Esc at the access question and Space again asks only for access"):
+                self.service.calls.clear()
+                self.service.packages["gamma"] = {**self.service.packages["alpha"], "folder": "/f/gamma-1"}
+                self.service.items.append(item("gamma", on=False, state="off",
+                                               access={"request": "act", "minimum": "observe"}))
+                screen.load()
+                await self.until(pilot, lambda: any(entry["name"] == "gamma" for entry in screen.items), "gamma")
+                table = screen.query_one("#plugins-table", DataTable)
+                table.move_cursor(row=[entry["name"] for entry in screen.items].index("gamma"))
+                await pilot.pause()
+                await pilot.press("space")
+                await self.asked(pilot)
+                await pilot.press("enter")  # Install
+                await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen)
+                                 and "Turn on gamma" in str(self.app.screen.query_one("#dialog-title").render()),
+                                 "the access question")
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy,
+                                 "the access question to close")
+                await pilot.press("space")
+                await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen), "a question")
+                self.assertIn("Turn on gamma", str(self.app.screen.query_one("#dialog-title").render()))
+                self.assertEqual(self.called("install"), ["gamma"])  # installed once, never asked again
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+
+            with self.subTest("Enter on a plugin that is on without its packages installs them, and Esc waits"):
+                self.service.calls.clear()
+                table = screen.query_one("#plugins-table", DataTable)
+                table.move_cursor(row=[item["name"] for item in screen.items].index("alpha"))
+                await pilot.pause()
+                self.service.install_gate = gate = threading.Event()
+                self.addCleanup(gate.set)
+                await pilot.press("enter")
+                await self.asked(pilot)
+                await pilot.press("enter")
+                for _ in range(100):  # until() would wait for the held install itself
+                    if self.called("install"):
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("escape")
+                self.assertIs(self.app.screen, screen)
+                self.assertIn("wait for it to finish", str(screen.query_one(".cerror", Static).render()))
+                gate.set()
+                await self.until(pilot, lambda: not screen.busy and "Installed alpha" in str(
+                    screen.query_one(".cerror", Static).render()), "the install to finish")
+                self.assertEqual((self.called("install"), self.called("enable")), (["alpha"], []))  # already on
 
 
 class LiveDemo(DemoBackend):
