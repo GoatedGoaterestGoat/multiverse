@@ -316,8 +316,10 @@ remain internal. Local adapters rely on termination of their native process and
 report that nothing was running for stopped or dormant sessions.
 
 Core then sends SIGTERM only to the recorded native child after checking its
-parent against the owned tmux runner. If it has not exited after two seconds,
+parent against the owned tmux runner. If it has not exited after ten seconds,
 core rechecks ownership and sends SIGKILL, with another five-second exit bound.
+The wait polls, so a process that exits sooner is never kept waiting; the ten
+seconds let a busy Claude finish writing its transcript instead of being cut off.
 No text or control keys are injected into the pane. Core releases the launch
 lock while waiting, so the runner's binding and shutdown callbacks can finish.
 Every later mutation checks the original launch again; a concurrent replacement

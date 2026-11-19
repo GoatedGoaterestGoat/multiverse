@@ -24,6 +24,11 @@ from . import effects, native, paths, attachments, agent_identity, registration,
 from . import model_choices as model_policy
 
 TEARDOWN_TIMEOUT = 10
+# Seconds a stopped native process has to exit after SIGTERM before it gets SIGKILL. Claude takes about a second, more
+# on a loaded machine, and SIGKILL mid-shutdown can cut off its last transcript write. The wait polls, so a process
+# that exits sooner is not kept waiting.
+STOP_GRACE = 10
+KILL_GRACE = 5  # and after SIGKILL
 
 
 def model_choices(root, harness):
@@ -1411,10 +1416,10 @@ def kill(root, reference, *, attachment_only=False):
         if observe(properties, current())['live'] in ('alive', 'ending'):
             backend.signal_child(properties, current(), signal.SIGTERM)
             try:
-                wait_for_exit(2)
+                wait_for_exit(STOP_GRACE)
             except TimeoutError:
                 backend.signal_child(properties, current(), signal.SIGKILL)
-                wait_for_exit(5)
+                wait_for_exit(KILL_GRACE)
         attachments.wait(agent_dir, launch_id, TEARDOWN_TIMEOUT)
         with lock(agent_dir / '.launch.lock'):
             latest = current()
