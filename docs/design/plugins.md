@@ -655,7 +655,11 @@ plugin (1.13).
   measured `context`: changes to it are dropped, and the rest of what an
   adjuster returns applies as before. A plugin shows an estimate of its own in
   a column of its own (`replaces="context"`), never in place of what mv2
-  measured.
+  measured. 1.20 makes one more, also the user's: a plugin's `agent.send`
+  steer or follow-up reaches a focused agent, as the person's does, where
+  before it was saved inbox-only with `state` `"held"`. A focus holds only
+  agents' messages. A plugin that wants its message to wait sends it
+  inbox-only.
 - mv2 supports the current major and the one before it for at least one
   release. A plugin on the old major loads with a deprecation note in
   `mv2 plugins`.

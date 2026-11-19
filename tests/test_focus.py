@@ -327,10 +327,9 @@ class FocusCommandTest(BaseTest):
     def history(self, name):
         return mailbox.inbox(self.directories[name], all_messages=True, limit=None)['messages']
 
-    def test_steer_and_follow_up_to_a_focused_agent_wait_in_its_inbox(self):
-        """Steer and follow-up to a focused agent are saved inbox-only, naming the focus and what they were meant to
-        be, and never reach its harness, while other recipients are not held up; a break loses the message or buries
-        the question the focus protects."""
+    def test_only_agents_steer_and_follow_up_to_a_focused_agent_wait_in_its_inbox(self):
+        """An agent's steer and follow-up to a focused agent are saved inbox-only, naming the focus and what they were
+        meant to be, while a person's and a plugin's reach it; a break buries the question, or holds back its answer."""
         self.output('focus', 'asker', '--for', '20m')
         held = focus.current(self.directories['asker'])
         line = 'asker is currently focused. Your message has been delivered as an inbox message instead.\n'
@@ -338,7 +337,7 @@ class FocusCommandTest(BaseTest):
             with self.subTest(delivery=delivery):
                 self.assertEqual(self.output('send', 'asker', '--text', 'start the benchmark', '--delivery', delivery,
                                              agent='helper'), line)
-        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json'))
+        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json', agent='helper'))
         self.assertEqual((record['state'], record['saved'], record['ok'], record['delivery'], record['intended']),
                          ('held', True, True, 'inbox-only', 'steer'))
         self.assertEqual([(m['delivery'], m['intended'], m['focus']) for m in self.history('asker')],
@@ -351,6 +350,28 @@ class FocusCommandTest(BaseTest):
         self.assertEqual([agent for agent, _ in self.calls], [self.directories['other'].name])
         self.output('send', 'asker', '--text', 'also this', '--queue-only', agent='helper')
         self.assertNotIn('intended', self.history('asker')[-1])
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        for who, send_it in (('the person', lambda delivery: json.loads(self.output(
+                                 'send', 'asker', '--text', 'yes, go', '--delivery', delivery, '--json'))),
+                             ('a plugin', lambda delivery: send.run(self.root, agent='asker', text='yes, go',
+                                                                    sender=plugin, delivery=delivery))):
+            for delivery in ('steer', 'follow-up'):
+                with self.subTest(sender=who, delivery=delivery):
+                    self.calls.clear()
+                    record = send_it(delivery)
+                    self.assertNotEqual(record['state'], 'held', record)
+                    self.assertEqual((record['delivery'], self.calls),
+                                     (delivery, [(self.directories['asker'].name, delivery)]))
+                    self.assertNotIn('intended', self.history('asker')[-1])
+        self.assertEqual(focus.last(self.directories['asker'])['held'], 4)  # only the agents' were held
+        # Inside an agent's process, a sender it names is still the agent's: the person's or a plugin's look, or
+        # none at all, gets nothing past the focus (reviewer, 178021d0).
+        for named in ({'name': 'user', 'agent_id': None}, plugin, {}):
+            with self.subTest(named_by_an_agent=named), patch.dict(os.environ, self.agent_environment('helper')):
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='slip past', sender=named, delivery='steer')
+                self.assertEqual((record['state'], self.calls), ('held', []))
+        self.assertEqual(focus.current(self.directories['asker']), held)
 
     def test_held_reads_only_what_the_last_focus_held_and_the_note_goes_to_the_agent_that_unfocuses(self):
         """mv2 held reads and marks read only the unread messages the last focus held, however it ended, leaving
@@ -635,7 +656,7 @@ class FocusCommandTest(BaseTest):
              "unfocus once they have."),
             (complete('follow-up'), [], 'asker',
              "1 follow-up message was already queued for you before this focus, and it won't stop it: it arrives when "
-             "your turn ends. The focus holds only messages sent from now on."),
+             "your turn ends. The focus holds only agents' messages sent from now on."),
             (complete('follow-up', 'follow-up'), ['asker', '--turn'], None,
              "2 follow-up messages were already queued for asker before this focus, and it won't stop them: they arrive "
              "when its turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
@@ -807,31 +828,66 @@ class FocusCommandTest(BaseTest):
         self.assertIn('Focused until your next turn ends.', output)
         self.assertIn('It ends by itself', output)
         self.assertEqual(focus.current(directory)['turns'], 2)
-        for status in ('idle', 'working', 'idle'):
-            self.assertIn('currently focused', self.output('send', 'asker', '--text', 'ping'))
+        for status in ('idle', 'working'):
+            self.assertIn('currently focused', self.output('send', 'asker', '--text', 'ping', agent='helper'))
             agents.update_runtime(directory, self.launch, status=status)
+        # A plugin's follow-up isn't held: it reaches the agent, and the turn it starts ends the focus.
+        self.calls.clear()
+        plugin = {'name': 'plugin notifier', 'plugin': 'notifier', 'agent_id': None}
+        send.run(self.root, agent='asker', text='the build passed', sender=plugin, delivery='follow-up')
+        self.assertEqual(self.calls, [(directory.name, 'follow-up')])
+        self.assertIsNotNone(focus.current(directory))
+        agents.update_runtime(directory, self.launch, status='idle')
         self.assertIsNone(focus.current(directory))
-        self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping'))
+        self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping', agent='helper'))
         self.assertEqual(len(senders), 1)
 
     def test_retry_waits_for_unfocus_but_check_does_not(self):
-        """deliver --retry is refused while focused and works after unfocus, and --check is never held back; a retry
-        would otherwise slip a steer past the focus."""
+        """deliver --retry leaves an agent's failed steer until the unfocus but retries a person's and a plugin's, and
+        --check is never held back; a break slips an agent's steer past the focus, or holds the person's back."""
         self.output('focus', 'asker')
         self.assertEqual(self.output('deliver', 'asker', '--retry'), 'asker: no messages to retry.\n')
         self.output('unfocus', 'asker')
-        self.output('send', 'asker', '--text', 'before')
+        self.output('send', 'asker', '--text', 'before', agent='helper')
         mailbox.update_message(self.directories['asker'], self.history('asker')[0]['id'], submission_state='failed')
         self.output('focus', 'asker', '--for', '1h')
         with patch.object(native, 'finalize_launch_only', side_effect=AssertionError('up-front focus must avoid delivery work')):
             self.assertEqual(self.output('deliver', 'asker', '--retry', code=1), '')
-        self.assertTrue(self.stderr.startswith('Not retried: asker is focused until '), self.stderr)
+            self.assertTrue(self.stderr.startswith('1 message from agents not retried: asker is focused until '),
+                            self.stderr)
+            self.assertEqual(json.loads(self.output('deliver', 'asker', '--retry', '--json', code=1))['waiting'], 1)
         self.assertEqual(len(self.calls), 1)
         # --check is not held back: it reports the definite failure (exit 1) instead of the focus.
         self.output('deliver', 'asker', '--check', code=1)
         self.assertIn('Not delivered to asker', self.stderr)
         self.assertNotIn('focused', self.stderr)
+        # One an agent's process sent before the focus, naming another sender, still waits (reviewer, f105bd85).
         self.output('unfocus', 'asker')
+        with patch.dict(os.environ, self.agent_environment('helper')):
+            send.run(self.root, agent='asker', text='named as the person', sender={'name': 'user', 'agent_id': None})
+        mailbox.update_message(self.directories['asker'], self.history('asker')[-1]['id'], submission_state='failed')
+        self.output('focus', 'asker', '--for', '1h')
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1)
+        self.assertEqual(self.calls, [])
+        self.assertIn('2 messages from agents not retried', self.stderr)
+        # A person's and a plugin's failed messages are retried while focused; the agent's still wait. An agent
+        # running the retry is an agent sending, so all wait (focus-mode, f105bd85).
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        self.output('send', 'asker', '--text', 'from the person')
+        send.run(self.root, agent='asker', text='from a plugin', sender=plugin)
+        for message in self.history('asker')[1:]:
+            mailbox.update_message(self.directories['asker'], message['id'], submission_state='failed')
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1, agent='other')
+        self.assertEqual(self.calls, [])
+        self.assertIn('4 messages not retried, since an agent is retrying: asker is focused', self.stderr)
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn('2 messages from agents not retried: asker is focused until ', self.stderr)
+        self.output('unfocus', 'asker')
+        self.calls.clear()
         self.output('deliver', 'asker', '--retry')
         self.assertEqual(len(self.calls), 2)
 
@@ -840,7 +896,7 @@ class FocusCommandTest(BaseTest):
         submitted; a break slips steers past a focus that was already in effect."""
         directory = self.directories['asker']
         for text in ('first', 'second'):
-            self.output('send', 'asker', '--text', text)
+            self.output('send', 'asker', '--text', text, agent='helper')
         for message in self.history('asker'):
             mailbox.update_message(directory, message['id'], submission_state='failed')
         submit = native.send_or_wake
@@ -854,7 +910,7 @@ class FocusCommandTest(BaseTest):
         with patch.object(native, 'send_or_wake', side_effect=focus_after_first):
             self.output('deliver', 'asker', '--retry', code=1)
         self.assertEqual(len(self.calls), 1)
-        self.assertIn('The rest were not retried: asker is focused until unfocused', self.stderr)
+        self.assertIn('1 message from agents not retried: asker is focused until unfocused', self.stderr)
 
     def test_the_dashboard_backend_reads_a_damaged_focus_as_none(self):
         """The dashboard's real backend lists an agent whose focus.json has a far-future until as not focused, and

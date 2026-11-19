@@ -1,4 +1,4 @@
-"""An agent's focus: while it lasts, steer and follow-up messages wait in the agent's inbox.
+"""An agent's focus: while it lasts, steer and follow-up messages from agents wait in the agent's inbox.
 
 An agent focuses when its answer needs the person's attention, so that steer and
 follow-up messages cannot start other work and bury the question. `focus.json` in
@@ -177,6 +177,13 @@ def start(agent_dir, *, duration=None, turn=False, by="user"):
             write(agent_dir / LAST, {"id": record["id"], "since": record["since"], "held": 0, "report": None})
         write(agent_dir / FILE, record)
     return record
+
+
+def holds(sender):
+    """Whether a focus holds this sender's steer and follow-up: an agent's (its `agent_id` is set, or it was sent
+    from an agent's process, `agent_process`), or a sender that can't be read. A person's and a plugin's reach the
+    agent as usual, as what is typed in its terminal does."""
+    return not isinstance(sender, dict) or bool(sender.get("agent_id")) or sender.get("agent_process") is True
 
 
 def hold(agent_dir, save):

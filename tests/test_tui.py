@@ -125,10 +125,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.backend.messages[0]["to"], original)
             self.assertIn("\n", self.backend.messages[0]["text"])
 
-    async def test_focus_toggle_marks_the_agent_and_its_messages_go_to_the_inbox(self):
+    async def test_focus_toggle_marks_the_agent_and_the_persons_message_still_reaches_it(self):
         """f focuses the selected agent for a chosen length, marks it in the table, header, status line and inspector,
-        and m on it sends inbox-only, then f unfocuses it; a break goes unnoticed because a dashboard message would
-        otherwise be refused as a steer, or bury the question the focus protects."""
+        and m on it still sends a steer, since a focus holds only agents' messages, then f unfocuses it; a break goes
+        unnoticed because the person's answer to the question the focus protects would wait in an inbox instead."""
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             agent = dict(self.app.selected)
@@ -158,8 +158,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.app.screen.query_one("#field-text", TextArea).load_text("Answer when you can")
             await pilot.press("ctrl+enter")
             await self.settle(pilot)
-            self.assertEqual(self.backend.messages[-1]["delivery"], "inbox-only")
-            self.assertIn("Saved to its inbox", str(self.app.query_one("#status", Static).render()))
+            self.assertEqual(self.backend.messages[-1]["delivery"], "steer")
+            status = str(self.app.query_one("#status", Static).render())
+            self.assertIn("Message saved", status)
+            self.assertNotIn("inbox", status)
             await pilot.press("f")
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[key].get("focus"))
@@ -176,9 +178,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
 
-    async def test_a_message_sent_as_the_agent_focuses_goes_to_its_inbox(self):
-        """If the agent focuses while the message form is open, the message is saved to its inbox and the status says
-        so, without an error; a break reports a saved message as failed, so the person sends it again."""
+    async def test_a_message_sent_as_the_agent_focuses_still_reaches_it_and_a_held_one_says_so(self):
+        """A focus that starts while the message form is open doesn't hold the person's message back, and a message
+        mv2 does hold (a dashboard run in an agent's shell sends as that agent) is reported saved, not failed; a break
+        either keeps the person's answer from the agent or reports a saved message as failed, so it is sent twice."""
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             agent = dict(self.app.selected)
@@ -188,8 +191,17 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+enter")
             await self.settle(pilot)
             self.assertNotIsInstance(self.app.screen, Form)
-            self.assertEqual([(m["text"], m["delivery"], m["intended"]) for m in self.backend.messages],
-                             [("Here is the answer", "inbox-only", "steer")])
+            self.assertEqual([(m["text"], m["delivery"]) for m in self.backend.messages],
+                             [("Here is the answer", "steer")])
+            self.assertNotIn("inbox", self.status())
+
+            held = {"delivery": "inbox-only", "intended": "steer", "state": "held", "saved": True, "ok": True,
+                    "focus": self.backend.find(Path(agent["universe"]), agent["id"])["focus"]}
+            with patch.object(self.backend, "send", lambda *args, **kwargs: held):
+                await pilot.press("m")
+                self.app.screen.query_one("#field-text", TextArea).load_text("From the agent's shell")
+                await pilot.press("ctrl+enter")
+                await self.settle(pilot)
             self.assertIn("saved to its inbox instead", self.status())
             self.assertNotIn("rror", self.status())
 

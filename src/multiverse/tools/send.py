@@ -48,6 +48,13 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
         caller = sender_actor()
         sender = caller.sender() if caller else {"agent_id": os.environ.get("MV2_AGENT_ID"), "universe": os.environ.get("MV2_UNIVERSE"),
                   "name": "agent" if os.environ.get("MV2_AGENT_ID") else "user"}
+    # Whom a focus holds is decided by who calls, never by the sender a caller names: a process with an agent's
+    # identity is an agent, whatever sender it passes. The person's terminal, and a plugin in the dashboard or the
+    # host, have none.
+    holds = focus.holds(sender) or bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+    if holds and isinstance(sender, dict) and not focus.holds(sender):
+        # Saved with the message, so a later retry under a focus holds it too, whatever sender it names.
+        sender = {**sender, "agent_process": True}
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
@@ -98,7 +105,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 continue
             if unread_senders is None:
                 unread_senders = _unread_senders(caller) if _present or _present_error else set()
-            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
+            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             if result.get('upgrade_damaged'):
@@ -175,7 +182,7 @@ def _skipped(sender, text, delivery, reason):
              'reason': reason}, {})
 
 
-def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None):
+def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None, holds=True):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
@@ -183,7 +190,7 @@ def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None
                     and blocked.matches(records.properties(directory / 'properties.json'), sender))
         if upgraded:
             delivery = 'follow-up'
-        result, receipt = _deliver_one(root, directory, text, sender, delivery, note_for,
+        result, receipt = _deliver_one(root, directory, text, sender, delivery, note_for, holds,
                                        upgraded=upgraded)
         if upgraded and result.get('saved') and (result['delivery'] == 'follow-up' or result['state'] == 'held'):
             result['upgraded_from'] = 'inbox-only'
@@ -209,15 +216,16 @@ def _upgrade_unavailable(root, directory, properties):
         return True  # No native attempt happened; keep the original inbox-only message.
 
 
-def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=False):
+def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, *, upgraded=False):
     """The send lock covers the dependency decision, focus hold, save and native admission."""
     # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
     if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
         return _skipped(sender, text, delivery, 'a newer focus began')
     held = focus.hold(directory, lambda focus_id: append_message(directory, text, sender, 'inbox-only', intended=delivery,
-                                                                 focus=focus_id)) if delivery != 'inbox-only' and note_for is None else None
+                                                                 focus=focus_id)) if (
+        delivery != 'inbox-only' and note_for is None and holds) else None
     if held:
-        # Saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
+        # An agent's: saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
         record, message = held
         return ({**{key: message[key] for key in ('at', 'from', 'text', 'delivery', 'intended')}, 'state': 'held',
                  'saved': True, 'ok': True, 'focus': record,

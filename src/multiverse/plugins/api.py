@@ -1896,7 +1896,9 @@ class Agent:
     def send(self, text, delivery="steer"):
         """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
 
-        steer and follow-up wake a stopped or dormant agent; inbox-only never does."""
+        steer and follow-up wake a stopped or dormant agent; inbox-only never does. They reach a focused agent too,
+        as the person's do (1.20): a focus holds only agents' messages, so one sent inside an agent's session (a
+        command of this plugin's that an agent runs) is held as that agent's."""
         self._plugin._need("messages.send")
         from ..tools import send
         sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
