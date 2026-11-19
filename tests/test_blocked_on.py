@@ -93,7 +93,7 @@ class BlockedOnTest(BaseTest):
             relocate.move_agent(self.root, 'helper', other_root)
         result = self.report('helper', blocked_on_universe='qa')
         self.assertEqual(result['blocked_on']['universe'], str(other_root))
-        with patch.object(lifecycle, '_listing_observation', side_effect=lambda p, f, s: (f, {'live': 'dormant'})):
+        with patch.object(lifecycle, '_listing_observation', side_effect=lambda p, f, s, refreshed: (f, {'live': 'dormant'})):
             rows = lifecycle.listing(self.root, usage=False)
         shown = next(row for row in rows if row['name'] == 'asker')['blocked_on']
         self.assertEqual(shown, {'kind': 'agent', 'id': result['blocked_on']['id'],
@@ -207,7 +207,7 @@ class BlockedOnTest(BaseTest):
                 self.assertEqual(found.get('reported_at'), stamp)
                 self.assertEqual(store.read(directory / 'properties.json').get('reported_at'), stamp)
         self.assertIn('reported_at', lifecycle.ROW_FIELDS)
-        with patch.object(lifecycle, '_listing_observation', side_effect=lambda p, f, s: (f, {'live': 'dormant'})):
+        with patch.object(lifecycle, '_listing_observation', side_effect=lambda p, f, s, refreshed: (f, {'live': 'dormant'})):
             rows = list_agents.cli_run(self.root, json=True, columns='name,reported_at')
         self.assertEqual(next(row for row in rows if row['name'] == 'asker')['reported_at'], stamp)
         launch = store.read(directory / 'runtime.json')['launch_id']

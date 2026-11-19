@@ -70,13 +70,17 @@ def text_defaults(row):
     return row
 
 
-def _listing_observation(properties, facts, snapshots):
+def _listing_observation(properties, facts, snapshots, refreshed):
     terminal = facts.get('tmux') or {}
     cached = terminal.get('socket') in snapshots
     observation = observe(properties, facts, snapshots)
-    if cached and observation['live'] == 'dormant' and facts.get('state') in ('starting', 'running'):
-        # Another row may have captured the server before this pane was tagged.
-        snapshots.pop(terminal.get('socket'), None)
+    socket = terminal.get('socket')
+    if (cached and observation['live'] == 'dormant' and facts.get('state') in ('starting', 'running')
+            and socket not in refreshed):
+        # Another row may have captured the server before this pane was tagged. Refresh once per server, not
+        # once per absent pane; the whole listing is an observation, and the next listing starts fresh.
+        refreshed.add(socket)
+        snapshots.pop(socket, None)
         observation = observe(properties, facts, snapshots)
     if facts.get('preparing') is True and facts.get('state') == 'starting':
         if observation['live'] == 'dormant':
@@ -163,7 +167,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
     if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
                              or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
         raise ValueError(f"Not an agent ID: {only!r}")
-    rows, snapshots, dependencies, model_names = [], {}, {}, {}
+    rows, snapshots, dependencies, model_names, refreshed = [], {}, {}, {}, set()
     scopes = []
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
@@ -187,7 +191,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                 rows.append((path.parent, damaged_row(scope, error, properties)))
                 continue
             try:
-                facts, observation = _listing_observation(properties, facts, snapshots)
+                facts, observation = _listing_observation(properties, facts, snapshots, refreshed)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
                 observed_key = observation_key(properties, facts)
@@ -203,7 +207,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                 if preparing_launch and facts.get('launch_id') == preparing_launch and facts.get('state') == 'starting':
                     facts = {**facts, 'preparing': True}  # Reconciliation may reread the same launch without this display hint.
                 if observation_key(properties, facts) != observed_key:
-                    facts, observation = _listing_observation(properties, facts, snapshots)
+                    facts, observation = _listing_observation(properties, facts, snapshots, refreshed)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
                 identity_fields = {'identity_error': identity_problem} if identity_problem is not None else {}
