@@ -357,6 +357,17 @@ class LaunchConnection:
     def usage(self, value):
         return self.root.usage(value) if self.primary_frame else None
 
+    def delivery_observation(self, value):
+        from . import receipt_events
+        cli = self.root.settings.get('navigation_cli')
+        if (self.ended or self.root.bound is not True or self.owns_primary() is not True
+                or self.root.launch_refusal is not None
+                or not isinstance(cli, (list, tuple)) or any(type(part) is not int for part in cli)
+                or tuple(cli) not in receipt_events.VERSIONS or self.version != tuple(cli)):
+            return None
+        observed = receipt_events.observation(value, self.root.native_id)
+        return {'kind': 'user_message', **observed} if observed is not None else None
+
     def closed(self):
         self.ended = True
         self.fork_request = self.side_id = self.initializing = None

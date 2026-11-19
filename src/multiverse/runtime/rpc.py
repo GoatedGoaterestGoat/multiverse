@@ -6,6 +6,7 @@ answer native requests; the launch relay can carry adapter-validated answers
 over the owning terminal's existing connection.
 """
 import asyncio
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import json
 from uuid import uuid4
@@ -160,11 +161,12 @@ class LaunchProxy:
     MAX_QUEUE = 2
     POST_BIND_TIMEOUT = 3
     RELAY_CLOSE_TIMEOUT = 1
+    MAX_DELIVERY_OBSERVATIONS = 128
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
                  record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None,
-                 navigation=None, relay_context=None):
+                 navigation=None, relay_context=None, record_delivery_observation=None, record_delivery_error=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -175,6 +177,12 @@ class LaunchProxy:
         self.record_primary_event = record_primary_event
         self.navigation = navigation
         self.relay_context = dict(relay_context or {})
+        self.record_delivery_observation = record_delivery_observation
+        self.record_delivery_error = record_delivery_error
+        self.delivery_observations = OrderedDict()
+        self.delivery_overflow_reported = False
+        self.delivery_error_pending = None
+        self.delivery_observation_error = None
         self.owner = None
         self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
@@ -221,11 +229,75 @@ class LaunchProxy:
 
     async def _serve(self):
         from websockets.asyncio.server import unix_serve
-        async with unix_serve(self._connection, self.spec['socket_path'], compression=None,
-                              close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE, max_queue=self.MAX_QUEUE):
-            self.ready.set()
-            while not self.stopped.is_set():
-                await asyncio.sleep(.1)
+        worker = (asyncio.create_task(self._publish_deliveries())
+                  if self.record_delivery_observation is not None else None)
+        try:
+            async with unix_serve(self._connection, self.spec['socket_path'], compression=None,
+                                  close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE, max_queue=self.MAX_QUEUE):
+                self.ready.set()
+                while not self.stopped.is_set():
+                    await asyncio.sleep(.1)
+        finally:
+            if worker is not None:
+                try:
+                    await asyncio.wait_for(worker, self.RELAY_CLOSE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    pass  # Unpublished positives keep the existing bounded lookup fallback.
+
+    def _observe_delivery(self, protocol, value):
+        if self.record_delivery_observation is None:
+            return
+        observe = getattr(protocol, 'delivery_observation', None)
+        if observe is None:
+            return
+        from .delivery_observations import metadata
+        try:
+            event = metadata(observe(value))
+            if event is None:
+                return
+            key = tuple(event[field] for field in ('native_session_id', 'client_message_id', 'turn_id', 'item_id'))
+            if key not in self.delivery_observations and len(self.delivery_observations) >= self.MAX_DELIVERY_OBSERVATIONS:
+                if not self.delivery_overflow_reported:
+                    self.delivery_overflow_reported = True
+                    self._delivery_error('capacity')
+                return
+            self.delivery_observations[key] = event
+        except Exception:
+            self._delivery_error('unavailable')
+
+    def _delivery_error(self, code):
+        from .delivery_observations import DIAGNOSTICS
+        self.delivery_observation_error = DIAGNOSTICS[code]
+        self.delivery_error_pending = code  # One fixed code, never I/O on incoming forwarding.
+
+    async def _publish_deliveries(self):
+        while not self.stopped.is_set() or self.delivery_observations or self.delivery_error_pending:
+            code = self.delivery_error_pending
+            if code is not None:
+                try:
+                    recorded = (await asyncio.to_thread(self.record_delivery_error, code)
+                                if self.record_delivery_error is not None else True)
+                except Exception:
+                    recorded = True  # Even a diagnostic must not disable this optional observer.
+                if recorded is not False and self.delivery_error_pending == code:
+                    self.delivery_error_pending = None
+            if not self.delivery_observations:
+                if self.stopped.is_set():
+                    break
+                await asyncio.sleep(.05)
+                continue
+            key, event = next(iter(self.delivery_observations.items()))
+            try:
+                published = await asyncio.to_thread(self.record_delivery_observation, event)
+            except Exception:
+                self._delivery_error('save_failed')
+                published = True
+            if published is not False:
+                self.delivery_observations.pop(key, None)
+            elif self.stopped.is_set():
+                break
+            else:
+                await asyncio.sleep(.05)
 
     async def _connection(self, client):
         if self.lost is not None:
@@ -409,6 +481,7 @@ class LaunchProxy:
                                     self.publish_usage(usage)
                             except (OSError, ValueError, TypeError, KeyError):
                                 pass  # Optional telemetry must not disrupt the TUI.
+                        self._observe_delivery(protocol, value)
                     if value is not original:
                         encoded = json.dumps(value, ensure_ascii=False)
                         if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:

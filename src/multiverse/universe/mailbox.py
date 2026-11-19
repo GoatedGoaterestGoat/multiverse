@@ -5,6 +5,7 @@ import errno
 import json
 import os
 from pathlib import Path
+from functools import partial
 
 from ..store import lock, now, open_regular, open_replaced, exists_replaced, missing_records, read, uid, write
 from . import records
@@ -56,19 +57,28 @@ def _event(agent_dir, kind, data):
         pass
 
 
-def _bytes(path):
+def _bytes(path, *, max_bytes=None):
     with open_regular(path) as stream:
         # A growing file cannot extend this read indefinitely; writers normally hold the inbox lock.
-        return stream.read(os.fstat(stream.fileno()).st_size)
+        size = os.fstat(stream.fileno()).st_size
+        if max_bytes is not None and size > max_bytes:
+            raise ValueError('The delivery observation history exceeds its bound')
+        raw = stream.read(size if max_bytes is None else max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise ValueError('The delivery observation history exceeds its bound')
+        return raw
 
 
-def _cursor(agent_dir, *, observed_missing=()):
+def _cursor(agent_dir, *, observed_missing=(), max_bytes=None):
     path = agent_dir / "inbox.cursor"
     if path in observed_missing:
         return 0
     try:
         with open_replaced(path) as stream:
-            return int(stream.read(os.fstat(stream.fileno()).st_size).decode())
+            raw = stream.read(os.fstat(stream.fileno()).st_size if max_bytes is None else max_bytes + 1)
+            if max_bytes is not None and len(raw) > max_bytes:
+                raise ValueError('The inbox cursor exceeds the observation bound')
+            return int(raw.decode())
     except FileNotFoundError:
         return 0
 
@@ -78,14 +88,15 @@ def _validate_cursor(data, cursor):
         raise ValueError("Invalid inbox cursor; refusing to skip messages")
 
 
-def _messages(agent_dir, *, observed_missing=()):
+def _messages(agent_dir, *, observed_missing=(), max_bytes=None):
     path = agent_dir / 'inbox.jsonl'
     try:
-        data = _bytes(path)
+        data = _bytes(path) if max_bytes is None else _bytes(path, max_bytes=max_bytes)
     except FileNotFoundError:
         _empty_history(agent_dir, observed_missing=observed_missing)
         data = b''
-    cursor = _cursor(agent_dir, observed_missing=observed_missing)
+    cursor = (_cursor(agent_dir, observed_missing=observed_missing) if max_bytes is None else
+              _cursor(agent_dir, observed_missing=observed_missing, max_bytes=4096))
     _validate_cursor(data, cursor)
     offset = 0
     messages = []
@@ -93,7 +104,8 @@ def _messages(agent_dir, *, observed_missing=()):
         if not line.endswith(b'\n'):
             break
         offset += len(line)
-        messages.append((offset, json.loads(line)))
+        message = json.loads(line) if max_bytes is None else json.loads(line, object_pairs_hook=records._unique)
+        messages.append((offset, message))
     return data, cursor, messages
 
 
@@ -217,21 +229,22 @@ def _ledger_damage(path, reason):
                       'then check delivery before retrying')
 
 
-def _ledger(path, *, observed_missing=()):
+def _ledger(path, *, observed_missing=(), budget=None):
     if path in observed_missing:
         return {}
     try:
-        return records.ledger(path)
+        return records.ledger(path) if budget is None else records.ledger(path, budget=budget)
     except records.RecordError as error:
         raise _ledger_damage(error.file, error.reason) from error
 
 
-def _states(agent_dir, *, observed_missing=None):
+def _states(agent_dir, *, observed_missing=None, budget=None):
     # All callers hold the inbox lock; independent acquisitions take a fresh snapshot.
     if observed_missing is None:
         observed_missing = missing_records(agent_dir / name for name in ('inbox-state.json', 'native-delivery.json'))
     path = agent_dir / 'inbox-state.json'
-    states = _ledger(path, observed_missing=observed_missing)
+    reader = _ledger if budget is None else partial(_ledger, budget=budget)
+    states = reader(path, observed_missing=observed_missing)
     for identifier, state in states.items():
         if (not isinstance(state, dict)
                 or ('submission_state' in state and (not isinstance(state['submission_state'], str)
@@ -246,7 +259,7 @@ def _states(agent_dir, *, observed_missing=None):
               for identifier, state in states.items()}
     states = {identifier: state for identifier, state in states.items() if state}
     legacy = agent_dir / 'native-delivery.json'
-    for identifier, attempts in _ledger(legacy, observed_missing=observed_missing).items():
+    for identifier, attempts in reader(legacy, observed_missing=observed_missing).items():
         if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
                 or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
                        for attempt in attempts)):
@@ -267,7 +280,7 @@ def _states(agent_dir, *, observed_missing=None):
             state['submission_state'] = 'failed'
             state.pop('final_reason', None)
     for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
-        failed = _ledger(proof)
+        failed = reader(proof)
         identifier = failed.get('message_id')
         if (failed.get('schema') != 1 or identifier != proof.stem
                 or not isinstance(identifier, str) or not isinstance(failed.get('reason'), str)):
@@ -657,6 +670,71 @@ def update_message(agent_dir, message_id, **changes):
         _event(agent_dir, "message.failed", {"id": message_id,
                "reason": (after.get('last_receipt') or {}).get('reason'), "lost_when_stopped": True})
     return after
+
+
+def _observation_records(agent_dir):
+    """Caller holds the inbox lock; every opened read, including final CAS, is bounded."""
+    names = ('inbox.jsonl', 'inbox-state.json', 'native-delivery.json', 'inbox.cursor')
+    observed_missing = missing_records(agent_dir / name for name in names)
+    _, _, messages = _messages(agent_dir, observed_missing=observed_missing, max_bytes=records.MAX_BYTES)
+    identifiers, seen = set(), set()
+    for _, message in messages:
+        identifier = message.get('id') if isinstance(message, dict) else None
+        if not isinstance(identifier, str) or not identifier or identifier in seen:
+            raise ValueError('The delivery observation history has ambiguous message identities')
+        seen.add(identifier)
+        if message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up'):
+            identifiers.add(identifier)
+    states = _states(agent_dir, observed_missing=observed_missing,
+                     budget=records.ReadBudget(3 * records.MAX_BYTES))
+    return states, identifiers
+
+
+def delivery_observation_snapshot(agent_dir):
+    """A bounded canonical delivery snapshot; no raw-state/canonical-state CAS mismatch."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock', create_parent=False, blocking=False):
+        states, identifiers = _observation_records(agent_dir)
+        return {identifier: states.get(identifier, {}) for identifier in identifiers}
+
+
+def confirm_delivery_attempt(agent_dir, message_id, expected, index, event, *, current_index):
+    """Commit one scoped observation only while its exact attempt snapshot is current."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock', create_parent=False, blocking=False):
+        states, identifiers = _observation_records(agent_dir)
+        if message_id not in identifiers:
+            return True
+        current = states.get(message_id)
+        if current != expected:
+            return False
+        attempts = list(current.get('attempts') or [])
+        attempt = attempts[index]
+        latest = (index == current_index and not current.get('dismissed_at')
+                  and not current.get('uncheckable_reported_at')
+                  and current.get('submission_state') not in ('cancelled', 'launch-only', 'manual'))
+        previous = attempt.get('delivery_receipt') or {}
+        current_receipt = current.get('native_receipt') or {}
+        if (isinstance(previous.get('value'), dict) and previous['value'].get('transcript_confirmed') is True
+                and (not latest or current_receipt.get('transcript_confirmed') is True)):
+            return True
+        value = {'transcript_confirmed': True, 'evidence': 'native-user-item',
+                 **{key: event[key] for key in ('native_session_id', 'turn_id', 'item_id', 'client_message_id')}}
+        receipt = {'state': 'native_queued', 'ok': True, 'message_id': message_id,
+                   'reason': 'Message observed in its native conversation', 'value': value}
+        attempts[index] = {**attempt, 'delivery_receipt': receipt}
+        after = {**current, 'attempts': attempts}
+        if latest:
+            after.update(native_receipt=value, last_receipt=receipt,
+                         transcript_confirmed_at=current.get('transcript_confirmed_at') or now())
+            after['submission_state'] = 'accepted'
+        states[message_id] = after
+        write(agent_dir / 'inbox-state.json', states)
+    if after.get('submission_state') == 'accepted' and current.get('submission_state') != 'accepted':
+        _event(agent_dir, 'message.delivered', {'id': message_id, 'stage': 'accepted'})
+    if latest and not _dated(current.get('transcript_confirmed_at')):
+        _event(agent_dir, 'message.delivered', {'id': message_id, 'stage': 'confirmed'})
+    return True
 
 
 def confirm_message_id(agent_dir, message_id, expected):

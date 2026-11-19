@@ -198,10 +198,25 @@ is reported once with the message text and advice to send a new message delibera
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
 lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
+On a verified checked Codex bridge, mv2 also records delivery as it happens:
+starting or completing a native user-message item confirms its exact saved
+submission ID. The receipt is durable in mv2, so future checks omit it without
+reading native history again. Duplicate events do not create another delivery,
+and a receipt for an older attempt never confirms a newer retry. This does not
+mark the inbox read or prove that the model acted on the message.
+
+Messages consumed without an mv2 relay connected, or before this feature, still
+need the existing lookup. Unreadable, oversized or ambiguous delivery records
+(including retries sharing one old client ID), receipt-write failures, bounded
+observation capacity
+and a relay exiting before publication can also leave no saved confirmation.
 Codex checks up to 100 queued entries and the latest 20 full turns, with a 64 MiB
 limit per reply. Large tool output within that limit does not prevent receipt
 confirmation. A missing receipt, larger reply or transport failure leaves
 consumption unconfirmed; checking never resends input or loads an old conversation.
+No paginated full-history search is added. An old message outside the lookup
+window can remain unknown indefinitely; its disappearance from the queue and a
+subsequent turn are not proof that the exact message reached the conversation.
 A message that woke an agent is checked against that launch's own starting
 prompt, with the harness's transcript evidence (Claude Code today), on each
 `mv2 deliver --check` until it settles; listings and the dashboard never read it.

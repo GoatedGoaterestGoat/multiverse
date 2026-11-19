@@ -183,6 +183,37 @@ Core can also meet failures later: starting the shared service, a `BridgeUnavail
 
 An optional relay view's `primary_event(direction, value)` describes exact-primary turn events after protocol validation: `interrupt`, `started`, or `completed`, with `native_session_id` and `turn_id`; completed events also have `status` (`interrupted` or `finished`). Side traffic and stale turn completions must return nothing. Core records an outgoing interrupt before forwarding it. `SessionHandle.queue_state` carries core's exact-conversation pause and explicit restart context to receipt and continuation operations; it grants no additional authority.
 
+An optional pure `delivery_observation(value)` hook runs after incoming protocol
+validation. It returns `None` or `kind: user_message` with four bounded opaque IDs:
+`native_session_id`, `turn_id`, `item_id`, and `client_message_id`. It must qualify
+the owning bound primary and checked CLI/greeting pair, and never return content.
+This is positive user-item evidence, independent of turn pause or prompt policy.
+The runner qualifies the adapter family, retaining its configured harness name;
+custom-named Codex definitions use the same receipt path.
+The publisher requires the agent ID from owned launch context; it never derives
+that identity from a folder name or a refreshed properties record.
+Without that context the optional observer stays disabled; relay startup,
+binding and fallback keep their existing behavior.
+Core coalesces at most 128 observations and publishes through one off-loop worker,
+without waiting for send-held locks on incoming forwarding. Publication rechecks
+the current launch, primary, navigation and exact saved attempt/storage scope.
+Only the matched attempt receives the receipt; current tracking changes only for
+the latest native attempt, including legacy logical-ID submissions and ignoring
+later pre-submission diagnostics. Admission and the final CAS both use canonical
+ledger states, including legacy merging.
+Busy locks retry within the bounded worker, while optional
+write failures, overflow or shutdown leave the existing receipt lookup fallback.
+Admission and commit both bound each ledger file at 8 MiB; canonical JSON reads
+also share a 24 MiB / 1,024-file budget per pass. Observer-only JSON reads reject
+duplicate fields at every object level; ordinary ledger defaults are unchanged.
+Oversized or damaged records leave receipt lookup available without adopting an
+unproven ID. Optional
+diagnostics queue a fixed code; their worker callback publishes with a
+nonblocking runtime lock. Incoming forwarding never invokes a diagnostic writer.
+Accepted/confirmed events retain the existing best-effort transition convention,
+without promising a crash-atomic exactly-once event log.
+No event adds a submission, read mark, queue restart or history read.
+
 A bridged launch takes messages once it is ready. Until then, core holds them as `pending`, and the runner delivers them in order. Readiness comes from the integration registering itself, or from the relay validating the binding:
 
 ```sh

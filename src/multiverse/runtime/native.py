@@ -904,8 +904,14 @@ def _receipt_attempt(tracking):
     """Pre-submission diagnostic attempts do not replace the last native submission's identity."""
     attempts = tracking.get('attempts') or []
     for index in range(len(attempts) - 1, -1, -1):
-        if 'native_message_id' in attempts[index]:
-            return index, attempts[index]
+        attempt = attempts[index]
+        # Older adapters used the logical message ID on the wire. Their real
+        # submission still carries these markers; a pre-submission diagnostic does not.
+        legacy = (attempt.get('mode') in ('steer', 'follow-up')
+                  and all(isinstance(attempt.get(key), str) and attempt[key]
+                          for key in ('message_id', 'native_session_id', 'launch_id')))
+        if 'native_message_id' in attempt or legacy:
+            return index, attempt
     return len(attempts) - 1, attempts[-1] if attempts else {}
 
 
