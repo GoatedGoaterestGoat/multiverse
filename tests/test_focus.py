@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -496,6 +497,66 @@ class FocusCommandTest(BaseTest):
                 record = send.run(self.root, agent='asker', text='slip past', sender=named, delivery='steer')
                 self.assertEqual((record['state'], self.calls), ('held', []))
         self.assertEqual(focus.current(self.directories['asker']), held)
+
+    def test_a_held_message_names_its_plugin_and_whose_session_sent_it_never_the_person(self):
+        """A message sent from a plugin or an agent's session never reads as the person's; a break makes an agent take it as the user's word."""
+        from multiverse.tools import inbox
+        self.output('focus', 'asker')
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        pane = {'TMUX': f"{self.work / 'absent.sock'},1,0", 'TMUX_PANE': '%1'}
+        rows = (({}, plugin, 'plugin remote', False),
+                (self.agent_environment('helper'), plugin, 'plugin remote, run by agent helper', True),
+                (pane, plugin, "plugin remote, run in an agent's session", True),
+                (self.agent_environment('helper'), {'name': 'user', 'agent_id': None}, 'agent helper', True),
+                (pane, {'name': 'user', 'agent_id': None}, "an agent's session", True),
+                # A flag and a name the caller passes are never taken on trust, for the hold either.
+                (self.agent_environment('helper'), {'name': 'lead', 'agent_id': None, 'agent_process': True},
+                 'agent helper', True),
+                ({}, {'name': 'lead', 'agent_id': None, 'agent_process': True}, 'user', False),
+                ({}, {'name': 'plugin remotex', 'plugin': 'remote', 'agent_id': None}, 'plugin remote', False),
+                # A plugin's own name can't claim an agent, and an agent's session can't pass its own id as the user.
+                ({}, {'name': 'plugin remote, run by agent lead', 'plugin': 'remote', 'agent_id': None},
+                 'plugin remote', False),
+                (self.agent_environment('helper'), {'name': 'user', 'agent_id': self.directories['helper'].name},
+                 'helper', True),
+                ({}, {'name': 'lead', 'agent_id': None}, 'user', False),
+                # mv2's own mark is trusted only outside an agent's session (focus-mode).
+                (self.agent_environment('helper'), {'name': 'lead', 'agent_id': None, 'core': True},
+                 'agent helper', True))
+        for shell, named, expected, held_ in rows:
+            with self.subTest(expected=expected, named=named.get('name')), patch.dict(os.environ, shell):
+                record = send.run(self.root, agent='asker', text='a note', sender=named)
+                self.assertEqual(record['state'] == 'held', held_, record)
+            saved = self.history('asker')[-1]
+            if not saved['from'].get('agent_id'):  # what a live delivery shows too
+                self.assertEqual(saved['from']['name'], expected)
+            shown = inbox.readable(self.root, {'messages': [saved]})
+            self.assertRegex(shown, f'^Message from {re.escape(expected)}[ :]')
+            if expected != 'user':
+                self.assertNotIn('Message from user', shown)
+        # A record saved flagged but named by its caller, as before this check, reads as an agent's session.
+        # The focus-end note's process carries no agent's marks or pane, whatever its parent's report had, so the
+        # note reads as mv2's.
+        started = []
+        reported = {**self.agent_environment('asker'), 'MV2_CONTROL_SOCKET': str(self.work / 'control.sock'), **pane}
+        with patch.dict(os.environ, reported), \
+                patch.object(focus.subprocess, 'Popen', side_effect=lambda *a, **k: started.append(k['env'])):
+            focus._spawn(self.directories['asker'], 'focus-id')
+        self.assertFalse(agent_identity.runs_in_agent(started[0], root=self.root))
+        with patch.dict(os.environ, started[0], clear=True):
+            send.run(self.root, agent='asker', text='You received 1 held message.', sender=focus_note.SENDER)
+        saved = self.history('asker')[-1]
+        self.assertEqual((saved['from']['name'], saved['from'].get('core')), ('mv2', True))
+        self.assertTrue(inbox.readable(self.root, {'messages': [saved]}).startswith('Message from mv2'))
+        for name in ('user', 'agent lead'):
+            older = {**self.history('asker')[-1], 'from': {'name': name, 'agent_id': None, 'agent_process': True}}
+            shown = inbox.readable(self.root, {'messages': [older]})
+            self.assertTrue(shown.startswith("Message from an agent's session"), shown)
+        self.output('unfocus', 'asker')
+        self.calls.clear()
+        with patch.dict(os.environ, self.agent_environment('helper')):
+            send.run(self.root, agent='asker', text='live', sender=plugin)  # delivered: the same name
+        self.assertEqual(self.history('asker')[-1]['from']['name'], 'plugin remote, run by agent helper')
 
     def test_held_reads_only_what_the_last_focus_held_and_the_note_goes_to_the_agent_that_unfocuses(self):
         """mv2 held reads and marks read only the unread messages the last focus held, however it ended, leaving

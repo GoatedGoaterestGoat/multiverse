@@ -352,9 +352,10 @@ def after_turn(agent_dir, record):
 
 def _spawn(agent_dir, focus_id):
     from .. import source_environment
-    # The note comes from mv2, not from the agent whose status report got here.
+    from ..runtime.agent_identity import AGENT_MARKERS
+    # The note comes from mv2, not from the agent whose status report got here: no agent's marker or pane.
     environment = {key: value for key, value in os.environ.items()
-                   if key not in ("MV2_AGENT_ID", "MV2_LAUNCH_ID", "MV2_AGENT_DIR", "MV2_IDENTITY_MODE")}
+                   if key not in (*AGENT_MARKERS, "TMUX", "TMUX_PANE")}
     subprocess.Popen([sys.executable, "-m", "multiverse.runtime.focus_note", str(agent_dir), focus_id],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True, env=source_environment(environment))

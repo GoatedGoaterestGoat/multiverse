@@ -87,7 +87,10 @@ class InboxDeliveryTest(DeliveryFixture):
         write(origin / 'universe.json', {'name': 'review'})
         for scope, suffix in ((self.root, ''), (origin, ' (in universe review)')):
             with self.subTest(sender_universe=str(scope)):
-                self.send('sender context', sender={'name': 'auditor', 'universe': str(scope)})
+                # An agent sender, as mv2 names one; a name alone, with no agent behind it, reads as the person.
+                auditor = str(uuid4())
+                write(scope / 'state/agents' / auditor / 'properties.json', {'id': auditor, 'name': 'auditor'})
+                self.send('sender context', sender={'agent_id': auditor, 'name': 'auditor', 'universe': str(scope)})
                 self.assertEqual(self.calls[-1][1].framed, f'Message from auditor{suffix}:\nsender context')
         sender_id = str(uuid4())
         sender_record = origin / 'state/agents' / sender_id / 'properties.json'

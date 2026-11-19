@@ -150,13 +150,28 @@ def nothing(all_messages=False, since=None):
             else f'No messages since {since}.')
 
 
+def _shown_name(sender):
+    """Who a sender with no agent of its own reads as: the name send saved for an agent's session, only when it
+    marked it as its own (`labelled`); an older flagged record, as an agent's session; a plugin's, as that plugin;
+    anyone else, as the person."""
+    from ..plugins import manifest
+    if sender.get('agent_process') is True:
+        return str(sender.get('name')) if sender.get('labelled') is True else "an agent's session"
+    plugin = sender.get('plugin')
+    if isinstance(plugin, str) and manifest.NAME.fullmatch(plugin):
+        return f'plugin {plugin}'
+    return 'user'
+
+
 def readable(root, result, empty='No unread messages.'):
     from ..runtime.native import framed_text
     blocks = []
     for message in result['messages']:
         sender = message.get('from') or {}
+        # A sender with no agent of its own reads as the person, unless it is mv2's, a plugin's (its name says so),
+        # or was sent from inside an agent's session (its name says whose, never the person's).
         if not sender.get('agent_id') and sender.get('core') is not True:
-            sender = {**sender, 'name': 'user'}
+            sender = {**sender, 'name': _shown_name(sender)}
         blocks.append(framed_text(root, {**message, 'from': sender}, listing=True))
     return '\n\n'.join(blocks) if blocks else empty
 

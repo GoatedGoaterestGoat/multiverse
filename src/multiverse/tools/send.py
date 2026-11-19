@@ -52,10 +52,9 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     # identity is an agent, whatever sender it passes. The person's terminal, and a plugin in the dashboard or the
     # host, have none.
     from ..runtime.agent_identity import runs_in_agent
-    holds = focus.holds(sender) or runs_in_agent(root=root)
-    if holds and isinstance(sender, dict) and not focus.holds(sender):
-        # Saved with the message, so a later retry under a focus holds it too, whatever sender it names.
-        sender = {**sender, "agent_process": True}
+    in_agent = runs_in_agent(root=root)
+    sender = _normalized(sender, in_agent)  # saved as it will be shown, live and in the inbox
+    holds = focus.holds(sender) or in_agent  # from the sender as it will be saved, so a retry decides the same
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
@@ -162,6 +161,41 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     blocked_names = [name for result in results for name in result.get('blocked_recipients', [])]
     return {'recipients': results, 'ok': all(result.get('ok', True) for result in results),
             **({'blocked_recipients': blocked_names} if blocked_names else {})}
+
+
+def _normalized(sender, in_agent):
+    """The sender as it is saved and shown, whatever name, id or flags the caller passed: nothing a caller writes
+    names a sender by itself, so no message reads as the person's, or as another's, unless it is.
+
+    Inside an agent's session it is that agent: its own verified sender, or, for anything else, whose session sent
+    it ("plugin notes, run by agent worker", "plugin notes, run in an agent's session", "agent worker", "an
+    agent's session"), marked `labelled` so a later reader knows mv2 wrote that name, a core sender included.
+    Outside one, a plugin's is "plugin NAME", any other with no agent of its own is the person's, and those marks
+    are dropped; mv2's own (core) senders are left as they are."""
+    if not isinstance(sender, dict) or (sender.get("core") is True and not in_agent):
+        return sender  # mv2's own (its focus note runs with no agent's marks); inside an agent's session it's labelled
+    from ..plugins import manifest
+    plugin = sender.get("plugin")
+    plugin = plugin if isinstance(plugin, str) and manifest.NAME.fullmatch(plugin) else None
+    clean = {key: value for key, value in sender.items() if key not in ("agent_process", "labelled")}
+    if in_agent:
+        from ..runtime.agent_identity import sender_actor
+        try:
+            caller = sender_actor()
+        except ValueError:
+            caller = None
+        if caller is not None and not plugin and sender.get("agent_id") == caller.identity:
+            return caller.sender()  # its own, with its own name, whatever name it passed
+        agent = caller.sender().get("name") if caller is not None else None
+        if plugin:
+            name = f"plugin {plugin}, run by agent {agent}" if agent else f"plugin {plugin}, run in an agent's session"
+        else:
+            name = f"agent {agent}" if agent else "an agent's session"
+        return {"name": name, "agent_id": None, "agent_process": True, "labelled": True,
+                **({"plugin": plugin} if plugin else {})}
+    if clean.get("agent_id"):
+        return clean
+    return {**clean, "name": f"plugin {plugin}"} if plugin else {**clean, "name": "user"}
 
 
 def _unread_senders(caller):

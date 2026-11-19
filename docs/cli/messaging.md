@@ -283,7 +283,7 @@ mv2 held
 
 Inside an agent session, `held` shows the unread `steer` and `follow-up` messages that the agent's last focus held, however that focus ended, and marks only those read. Other unread messages stay unread for `mv2 inbox`. `held` is refused while the agent is focused.
 
-A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
+A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. A plugin's message names the plugin, and the agent that ran it, as in `Message from plugin notes, run by agent worker`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
 
 When a focus ends with held messages unread, the agent is told in these cases:
 

@@ -17,6 +17,9 @@ from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
 from test_multiverse import TerminalBase, until
 
+# Another agent's sender, as mv2 names one: a name alone, with no agent behind it, reads as the person's.
+REVIEWER = {'name': 'reviewer', 'agent_id': str(uuid4())}
+
 
 @unittest.skipUnless(shutil.which('pi') and shutil.which('tmux'), 'Pi and tmux required')
 class PiWakePromptTest(TerminalBase):
@@ -40,7 +43,7 @@ class PiWakePromptTest(TerminalBase):
         lifecycle.kill(self.root, first['id'])
         prompt = 'Message from reviewer:\nPI_WAKE_SENTINEL'
         with patch.dict(os.environ, env):
-            sent = send.run(self.root, agent=first['id'], text='PI_WAKE_SENTINEL', sender={'name': 'reviewer'})
+            sent = send.run(self.root, agent=first['id'], text='PI_WAKE_SENTINEL', sender=REVIEWER)
         self.assertTrue(sent['ok'], sent)
         resumed = lifecycle.launch_result(self.root, directory)
         until(lambda: 'PI_WAKE_SENTINEL' in requests.read_text(), seconds=25)
@@ -59,7 +62,7 @@ class PiWakePromptTest(TerminalBase):
         spec['settings']['inbox_bridge'] = True
         write(path, spec)
         with patch.dict(os.environ, env):
-            sent = send.run(self.root, agent=first['id'], text='PI_BRIDGE_WAKE', sender={'name': 'reviewer'})
+            sent = send.run(self.root, agent=first['id'], text='PI_BRIDGE_WAKE', sender=REVIEWER)
             second = send.run(self.root, agent=first['id'], text='PI_AFTER_WAKE', delivery='follow-up')
         self.assertTrue(sent['ok'], sent)
         self.assertTrue(second['ok'], second)
@@ -136,7 +139,7 @@ class ClaudeWakePromptTest(TerminalBase):
             'harness': 'claude', 'model': 'claude-sonnet-4-6', 'native_session_id': native_id})
         prompt = 'Message from reviewer:\nCLAUDE_WAKE_SENTINEL'
         with patch.dict(os.environ, env, clear=True):
-            sent = send.run(self.root, agent=agent_id, text='CLAUDE_WAKE_SENTINEL', sender={'name': 'reviewer'})
+            sent = send.run(self.root, agent=agent_id, text='CLAUDE_WAKE_SENTINEL', sender=REVIEWER)
         self.assertTrue(sent['ok'], sent)
         resumed = lifecycle.launch_result(self.root, directory)
         try:
