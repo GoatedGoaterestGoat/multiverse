@@ -33,6 +33,7 @@ i              The selected agent's unread inbox messages; they stay unread for 
 a              Answer the prompt a waiting agent is stopped at: a permission, a question, a plan
 p              Show / hide the inspector (opens only with this key)
 P              Plugins of the selected group: on / off here, what each adds, and its settings
+C              Columns: turn the agent list's columns on or off and order them; Enter saves, Esc discards
 g              New subverse inside the selected group (inline, name only)
 x              Move the selected agent or subverse: choose a group, then Enter or x
 d              Delete the selected agent or subverse (to trash, with confirmation)

@@ -37,6 +37,8 @@ from .inspector import Inspector, plugin_outcomes
 from .panels import LocalView
 from .stale import CodeWatch
 from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
+from .columns_screen import ColumnsScreen
+from .views import plugin_column_choices, view_file
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, header_counts
@@ -108,6 +110,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("a", "answer", "Answer", show=False),
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
         Binding("r", "resume", "Resume", show=False), Binding("P", "plugins", "Plugins", show=False),
+        Binding("C", "columns", "Columns", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -742,6 +745,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
+        yield SystemCommand("Columns", "Choose and order the agent list's columns", self.action_columns)
 
     def plugin_palette(self):
         """[(title, help, callback)] of what plugins add to the command palette, in a stable order.
@@ -763,6 +767,22 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             root = self.target_scope()
             self.load_plugin_registry()  # a plugin repaired since the last look loads again
             self.push_screen(PluginsScreen(root, self.scope_name(root), self.plugin_service), self.plugins_changed)
+
+    @work(group="columns-screen", exclusive=True, exit_on_error=False)
+    async def action_columns(self):
+        """The Columns screen for the listed universe's view, the file its columns come from; the plugin columns it
+        offers are read off the event loop first, since loading plugins can wait."""
+        if not self.ready():
+            return
+        root = self.root
+        offered = await asyncio.to_thread(plugin_column_choices, root)
+        self.push_screen(ColumnsScreen(root, self.scope_name(root), offered), self.columns_changed)
+
+    def columns_changed(self, saved):
+        if saved:
+            self.set_status(f"Columns saved to {view_file(self.root)}")
+            columns.reset_plugin_caches()  # the plugin columns to resolve may have changed
+            self.refresh_snapshot()
 
     def plugins_changed(self, changed):
         if isinstance(changed, str) and changed:  # a plugin screen left a status line

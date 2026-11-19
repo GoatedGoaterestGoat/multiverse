@@ -37,7 +37,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
 | `blocked_on` | Not a column of its own: a blocked agent's summary starts with what it's waiting for, in its own colour, such as `Waiting for user: decide the model list`, `Waiting for tester in qa: …` or `Waiting for self: tests running, ETA 5 min`, or just `Waiting for lifecycle` with no summary (on in both bundled templates). An agent mv2 can no longer find reads `Waiting for ada (gone)`, and one named `user` or `self` reads `agent user`. A view without `summary` (or `core:summary`) shows it nowhere, the inspector included; a plugin column standing in for Summary shows its own value, and core's summary where it has none |
 
-Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
+Choose columns with `C`, or in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
 Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A plugin's column can also stand in for a core column. Where the view lists that core key, such as `context`, and the plugin is on, the dashboard shows the plugin's column there, and a row the plugin has no value for shows core's cell. To keep core's own column, list it as `core:context`, set `"replace": false` in the view, or name the plugin's column to place it yourself. Name, Live, Status and Focus always show core's own. The Plugins screen says when a plugin's column replaces a core one.
 
@@ -64,6 +64,7 @@ Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A
 | `x` | Move the selected agent or subverse |
 | `d` | Send the selected agent or subverse to the trash, after confirming |
 | `P` | Open the selected universe's plugins: turn each on or off (choosing its access when it can work with less than it asks for), see what it adds and its access, and Configure it; see [plugins](../use/plugins.md) |
+| `C` | Choose the agent list's columns: turn each on or off and order them; see [the Columns screen](#the-columns-screen) |
 | `Tab` | Move between the list, a local view and its links |
 | `F5` | Refresh now |
 | `?` | Show all keys |
@@ -110,6 +111,18 @@ For a Codex agent, the mouse wheel scrolls its transcript. For keyboard scrollba
 ## Subverse portals
 
 `Enter` on a subverse opens it as its own view. Its title, columns and widgets replace the parent's. `Backspace` or the breadcrumb takes you back, and restores folds, selection, search and scroll. You can't go above the universe the dashboard was opened on.
+
+## The Columns screen
+
+`C` (or Columns in the command palette) lists the columns of the universe on show, as its `views/default.json` sets them, and the ones it could show: core's, and those the plugins on here add.
+
+- **Space** turns the selected column on or off. Universe / agent always shows.
+- **Shift+↑ / Shift+↓** moves it. A column that is off waits at its usual place, so turning it on puts it there.
+- **Enter** writes the file and the list follows; **Esc** discards.
+
+Unread, Effort and Blocked on aren't columns of their own, so they sit under the column they add to (Universe / agent, Model, Working on, or core's own of it, such as `core:model`, where that one is shown) and move with it. While that column is off, the mark reads, for example, `(needs Model)`, and stays saved, so turning the column on brings it back.
+
+Enter changes only the file's `columns` value: its other keys and their layout stay as written. If the file changed on disk after the screen read it, nothing is written: the screen reads it again and says so. A file that isn't a regular file of plain UTF-8 JSON, or whose `columns` isn't a list of names, opens read-only, with why. Once you save, the file is the universe's own edit, so `mv2 refresh` keeps it and reports a later template change to it as a conflict.
 
 ## Views
 
