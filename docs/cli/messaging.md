@@ -22,7 +22,7 @@ mv2 send reviewer,tester --text 'The fix is on branch fix-login.'
 
 Separate several recipients with commas. Each one gets the message and its own result line. A failure for one doesn't stop the others. The recipient sees the message as `Message from SENDER:` followed by your text.
 
-When a recipient is missing here but exists in a [related universe](agents.md#find-and-refer-to-agents), its error names the universe and suggests `-u PATH` before `send`. Several matches are listed without selecting one; nothing is sent to them until you choose the universe explicitly.
+When a recipient is missing here but exists in a [related universe](agents.md#find-and-refer-to-agents), its error names the universe and suggests `-u PATH` before `send`. Several matches are listed without selecting one; nothing is sent to them until you choose the universe explicitly. If the quick search reaches its limit before finding a match, the error says so and suggests `mv2 -u TOP list --recursive`, with the top related universe's path, to include parents and siblings as well as subverses. If the top cannot be verified, it asks you to run the listing from the related tree’s top universe instead. Select the match explicitly with `mv2 -u PATH send NAME`.
 
 If the sender's record is unreadable or damaged, the sender line keeps the message's saved name, or `user` if none was saved. An unreadable or damaged sender universe uses its saved path in that line. The message stays readable and deliverable.
 

@@ -16,6 +16,98 @@ from multiverse.universe import agent_hints, agents, templates
 
 
 class RelatedAgentHintsTest(BaseTest):
+    def test_missing_records_across_siblings_share_the_search_retry_budget(self):
+        """One leftover per sibling can otherwise hide a healthy match after the budget is spent waiting again."""
+        qa = self.scope(self.root, 'qa')
+        remote = self.agent(qa, 'remote')
+        siblings = [self.scope(self.root, f'old-{number}') for number in range(12)]
+        for scope in siblings:
+            (scope / 'state/agents/leftover').mkdir()
+        folders, elapsed = agent_hints.Search.folders, [0.]
+        def ordered(search, path):
+            return iter([qa, *siblings]) if path == self.root / 'subverses' else folders(search, path)
+        with chdir(self.work), patch.object(agent_hints.Search, 'folders', ordered), \
+                patch.object(agent_hints.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(agent_hints.time, 'sleep', side_effect=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)):
+            with self.assertRaisesRegex(ValueError, '-u .multiverse/subverses/qa'):
+                send.run(self.root, agent='remote', text='PRIVATE', delivery='inbox-only')
+        self.assertLess(elapsed[0], .03)
+        self.assertFalse((remote / 'inbox.jsonl').exists())
+
+    def test_nested_limit_advice_searches_the_top_universe(self):
+        """Recursive listing from a nested subverse cannot find a parent or sibling without selecting the tree top."""
+        qa = self.scope(self.root, 'qa')
+        deep = self.scope(qa, 'deep')
+        self.agent(qa, 'remote')
+        def limited(search, path):
+            search.deadline = 0
+            search.limited = True
+            return None
+        with chdir(self.work), patch.object(agent_hints.Search, 'record', limited):
+            text = self.missing(deep, 'remote')
+        self.assertIn('mv2 -u .multiverse list --recursive', text)
+        self.assertNotIn('Related matches:', text)
+        with chdir(self.work), patch.object(agent_hints, 'BUDGET', 0):
+            text = self.missing(deep, 'remote')
+        self.assertIn('could not verify its top universe', text)
+        self.assertIn("From the related tree's top universe, run mv2 list --recursive", text)
+        self.assertNotIn('mv2 -u .multiverse/subverses/qa/subverses/deep list --recursive', text)
+
+    def test_a_record_gap_after_the_shared_retry_budget_stays_unverified(self):
+        """A late replacement gap must yield incomplete advice rather than a completed missing-agent claim."""
+        qa = self.scope(self.root, 'qa')
+        old = self.scope(self.root, 'old')
+        (old / 'state/agents/leftover').mkdir()
+        remote = self.agent(qa, 'remote')
+        folders, stat, missed = agent_hints.Search.folders, Path.lstat, []
+        def ordered(search, path):
+            return iter([qa, old]) if path == self.root / 'subverses' else folders(search, path)
+        def gap(path, *args, **kwargs):
+            if path == remote / 'properties.json' and not missed:
+                missed.append(path)
+                raise FileNotFoundError(2, 'replacing', str(path))
+            return stat(path, *args, **kwargs)
+        with chdir(self.work), patch.object(agent_hints.Search, 'folders', ordered), patch.object(Path, 'lstat', gap):
+            with self.assertRaises(ValueError) as raised:
+                send.run(self.root, agent='remote', text='PRIVATE', delivery='inbox-only')
+        self.assertIn('search reached its limit', str(raised.exception))
+        self.assertIn('mv2 -u .multiverse list --recursive', str(raised.exception))
+        self.assertNotIn('Related matches:', str(raised.exception))
+        self.assertEqual(len(missed), 1)
+        self.assertFalse((remote / 'inbox.jsonl').exists())
+
+    def test_recordless_neighbours_do_not_spend_the_hint_budget_one_at_a_time(self):
+        """Missing properties in leftover folders must not exhaust advice time before a healthy subverse match."""
+        qa = self.scope(self.root, 'qa')
+        remote = self.agent(qa, 'remote')
+        for number in range(12):
+            (qa / 'state/agents' / f'leftover-{number}').mkdir()
+        folders, elapsed = agent_hints.Search.folders, [0.]
+        def ordered(search, path):
+            return iter(sorted(folders(search, path), key=lambda directory: directory == remote))
+        with chdir(self.work), patch.object(agent_hints.Search, 'folders', ordered), \
+                patch.object(agent_hints.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(agent_hints.time, 'sleep', side_effect=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay)):
+            with self.assertRaisesRegex(ValueError, '-u .multiverse/subverses/qa'):
+                send.run(self.root, agent='remote', text='PRIVATE', delivery='inbox-only')
+        self.assertFalse((remote / 'inbox.jsonl').exists())
+
+    def test_an_incomplete_search_explains_how_to_look_in_subverses(self):
+        """When optional lookup reaches its bound, a bare not-found message hides the explicit subverse route."""
+        qa = self.scope(self.root, 'qa')
+        remote = self.agent(qa, 'remote')
+        with chdir(self.work), patch.object(agent_hints, 'BUDGET', 0):
+            with self.assertRaises(ValueError) as raised:
+                send.run(self.root, agent='remote', text='PRIVATE', delivery='inbox-only')
+            report_advice = self.missing(self.root, 'remote', universe_option='--blocked-on-universe')
+        self.assertIn('mv2 -u .multiverse list --recursive', str(raised.exception))
+        self.assertIn('-u PATH', str(raised.exception))
+        self.assertIn('related tree', str(raised.exception))
+        self.assertNotIn('Related matches:', str(raised.exception))
+        self.assertIn('--blocked-on-universe PATH', report_advice)
+        self.assertNotIn('-u PATH', report_advice)
+        self.assertFalse((remote / 'inbox.jsonl').exists())
+
     def scope(self, parent, name):
         return templates.create(parent / 'subverses' / name, name, workdir=self.work)
 
