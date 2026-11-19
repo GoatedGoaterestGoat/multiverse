@@ -104,6 +104,22 @@ A `steer` or `follow-up` message to a stopped agent also resumes it (with a harn
 
 For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window or your explicit `--wait-timeout` ends without either, a healthy process that passed its startup check proceeds with a notice that screen startup could not be confirmed. A process that has not passed that check still times out. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
 
+
+## Save a model without resuming
+
+```sh
+mv2 set-model worker --model sonnet --effort high
+mv2 set-model worker --model opus
+mv2 set-model worker --effort default
+mv2 set-model worker --model default --effort default
+```
+
+`set-model` saves the model and effort for the agent's next resume. It works for running and stopped agents. A running session keeps its current choice until you stop and resume it. The command never restarts it or changes the person's harness defaults.
+
+Omitted fields keep their saved values. `--model default` clears the saved model and uses the harness's configured default on resume. `--effort default` clears the saved effort. Changing only the model keeps a compatible saved effort, or drops it with a note when the harness permits an unset effort. A subset that requires a specific effort still requires an allowed choice. The same model-subset rules and access as `resume` apply. An unconfirmed native model or effort command must settle before another choice is saved. Damaged or incomplete agent records must be repaired first.
+
+`mv2 inspect worker` and `mv2 list --json` show the saved `model` and `effort`. The dashboard's Model column continues to show the running session's latest observation. Before an observation arrives, it keeps the model and effort shown before the saved edit, for that launch only. `--json` on `set-model` returns the saved fields and its `notices`.
+
 ## Move and remove
 
 ```sh

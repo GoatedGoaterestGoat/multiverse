@@ -130,6 +130,53 @@ def check(root, adapter, model, *, effort=None, environment):
     return replace(found, effort=effort)
 
 
+
+def saved_choice(root, adapter, properties, *, model=None, effort=None):
+    """Choose the next resume's settings without preparing or changing a native session.
+
+    None keeps a recorded field; an empty string clears it. Unrestricted models without effort keep the same
+    native acceptance policy as resume. A changed model can drop inherited effort only when unset is allowed.
+    """
+    from .run_environment import launch
+    selected = properties.get('model') if model is None else model or None
+    chosen_effort = properties.get('effort') if effort is None else effort or None
+    effective = selected or adapter.default_model
+    changed = model is not None and selected != properties.get('model')
+    narrowed = restricted(adapter)
+    environment = launch(adapter)
+    notices = []
+    if effort == '' and properties.get('effort') is not None:
+        notices.append(f"Cleared recorded effort {properties['effort']!r}; using the harness default.")
+
+    def admitted(level):
+        if level is not None:
+            if getattr(adapter, 'supports_launch_effort', False) is not True:
+                return ModelCheck(ok=False, reason=f'Harness {adapter.name} does not support --effort for an individual launch')
+            if not effective:
+                return ModelCheck(ok=False, reason='Give --model with --effort when there is no recorded or configured model')
+        if not narrowed and level is None:
+            return ModelCheck(ok=True, model=effective)
+        return check(root, adapter, effective, effort=level, environment=environment)
+
+    checked = admitted(chosen_effort)
+    if not checked.ok and changed and effort is None and chosen_effort is not None:
+        without = admitted(None)
+        if without.ok:
+            reason = ('the selected model does not take it' if effective else
+                      'no recorded or configured model can validate it')
+            notices.append(f"Dropped recorded effort {chosen_effort!r}: {reason}. Using the harness default.")
+            chosen_effort, checked = None, without
+    if not checked.ok:
+        reason = checked.reason or 'The model and effort are not allowed by the harness settings'
+        if effort is None and chosen_effort is not None:
+            reason += (f"; effort {chosen_effort!r} came from the agent's record. "
+                       f"Use mv2 set-model {properties['name']} --effort default to clear it when permitted")
+        raise ValueError(reason)
+    if narrowed and selected is not None:
+        selected = checked.model
+    return selected, chosen_effort, notices
+
+
 def for_launch(root, harness):
     """Private dashboard projection; public catalog types keep their existing shape."""
     from .. import harnesses

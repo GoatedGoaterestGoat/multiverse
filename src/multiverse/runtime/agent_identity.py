@@ -204,7 +204,7 @@ def calling_socket(environment=None):
     return calling_paths(environment)[0]
 
 
-def calling_paths(environment=None, *, require_recorded_run=False):
+def calling_paths(environment=None, *, require_recorded_run=False, acting="select the calling agent's tmux server"):
     """Resolve terminal and run directory from the same verified current runtime."""
     from . import paths
     env = os.environ if environment is None else environment
@@ -232,7 +232,7 @@ def calling_paths(environment=None, *, require_recorded_run=False):
     except records.RecordError as error:
         raise ValueError(f"Calling agent's {path}: {error.reason}; restore its runtime record before spawning a child") from None
     if caller is None and facts.get('launch_id') != env['MV2_LAUNCH_ID']:
-        raise ValueError('Outdated launch; cannot select the calling agent\'s tmux server')
+        raise ValueError(f'Outdated launch; cannot {acting}')
     terminal = facts.get('tmux')
     socket = terminal.get('socket') if isinstance(terminal, dict) else None
     if not isinstance(socket, str) or not socket or '\0' in socket:

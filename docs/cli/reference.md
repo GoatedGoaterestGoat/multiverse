@@ -31,6 +31,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`resume`](#resume) | Resume an agent, or explicitly recover its missing native conversation. |
 | [`stop`](#stop) | Alias for kill: end native work, then remove the owned tmux wrapper. |
 | [`kill`](#kill) | End native work and its process, then remove the agent's tmux wrapper. |
+| [`set-model`](#set-model) | Save an agent's model and effort for its next resume, without restarting it. |
 | [`move`](#move) | Move a stopped agent, or a subverse whose agents are all stopped, to another universe. |
 | [`remove`](#remove) | Move a stopped agent, or a subverse whose agents are all stopped, to the trash. |
 | [`trash`](#trash) | List removed agents and subverses and replaced refresh files, or delete them permanently with --empty. |
@@ -195,6 +196,21 @@ mv2 kill [--attachment-only] [--json] agent
 | `agent` |  |  |  |
 | `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
 | `--json` |  | Print the full record as JSON |  |
+
+## set-model
+
+Save an agent's model and effort for its next resume, without restarting it.
+
+```sh
+mv2 set-model [--model MODEL] [--effort EFFORT] [--json] agent
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  | Agent name or ID |  |
+| `--model` | `MODEL` | Model ID or alias; default clears the recorded model |  |
+| `--effort` | `EFFORT` | Effort level; default clears the recorded effort |  |
+| `--json` |  | Print the saved choice and notices as JSON |  |
 
 ## move
 

@@ -34,6 +34,59 @@ KILL_GRACE = 5  # and after SIGKILL
 def model_choices(root, harness):
     return model_policy.for_launch(root, harness)
 
+
+
+def _model_properties(agent_dir):
+    properties = records.properties(agent_dir / 'properties.json')
+    for key in ('id', 'name', 'harness'):
+        if not isinstance(properties.get(key), str) or not properties[key].strip():
+            raise records.RecordError(agent_dir / 'properties.json',
+                                      f'{key} is missing or empty; repair {agent_dir / "properties.json"} before changing its model')
+    return properties
+
+
+def set_model(root, reference, *, model=None, effort=None):
+    """Save the next resume's choice, under the same access and launch serialization as resume.
+
+    None keeps a field and an empty string clears it. No native context, reconciliation, command preparation or
+    terminal operation runs here. A pending native settings command must settle before another choice is saved.
+    """
+    effects.require('resume', reference)
+    if model is None and effort is None:
+        raise ValueError('Give --model or --effort to change the saved choice')
+    if model is not None and (not isinstance(model, str) or '\0' in model):
+        raise ValueError('Model must be a model ID or alias without NUL')
+    if effort is not None and (not isinstance(effort, str) or any(c.isspace() or ord(c) < 32 for c in effort)):
+        raise ValueError('Effort must be one level name, or default to clear it')
+    agent_identity.calling_paths(acting='change the saved model or effort')  # Same caller validation as resume.
+    root = universe.resolve(root)
+    agent_dir = directory(root, reference)
+    original = _model_properties(agent_dir)
+    with lock(agent_dir / '.launch.lock', create_parent=False):
+        facts = records.runtime(agent_dir / 'runtime.json')
+        from . import slash
+        slash.require_settled(agent_dir, original, facts, saved_only=True)
+        with lock(agent_dir / '.properties.lock', create_parent=False):
+            properties = _model_properties(agent_dir)
+            if any(properties.get(key) != original.get(key) for key in ('id', 'universe_id')):
+                raise ValueError('Agent identity changed before saving its model; try again')
+            adapter = harnesses.load(root, properties['harness'])
+            chosen, level, notices = model_policy.saved_choice(root, adapter, properties, model=model, effort=effort)
+            before_edit = properties.get('model_before_edit')
+            if (facts.get('launch_id') and facts.get('state') not in ('stopped', 'dormant')
+                    and (not isinstance(before_edit, dict) or before_edit.get('launch_id') != facts['launch_id'])):
+                # Preserve the running cell's prior fallback, independently of its next-resume choice. A later
+                # resume has a new launch ID and cannot borrow this snapshot.
+                properties['model_before_edit'] = {'launch_id': facts['launch_id'],
+                    'model': properties.get('model') or adapter.default_model, 'effort': properties.get('effort')}
+            properties.update(model=chosen, effort=level, updated_at=now())
+            write(agent_dir / 'properties.json', properties)
+        if facts.get('launch_id') and facts.get('state') not in ('stopped', 'dormant'):
+            notices.append('A running session keeps its current model and effort until you stop and resume it.')
+    return {'ok': True, 'id': properties['id'], 'name': properties['name'], 'harness': properties['harness'],
+            'model': chosen, 'effort': level, 'notices': notices}
+
+
 def damaged_row(scope, error, properties=None):
     """The row of an agent whose record cannot be used: always well formed, never raising.
 
@@ -123,7 +176,7 @@ USAGE_FIELDS = ('usage', 'tokens', 'usage_detail', 'observed_model_name')
 # Built-in fields accepted by JSON projections. Full rows also preserve any
 # additional legacy properties; projecting never changes the stored record.
 ROW_FIELDS = frozenset((
-    'id', 'universe_id', 'name', 'harness', 'model', 'model_name', 'effort', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
+    'id', 'universe_id', 'name', 'harness', 'model', 'model_name', 'effort', 'model_before_edit', 'slash_settings', 'task', 'phase', 'summary', 'blocked_on',
     'workspace', 'created_at', 'updated_at', 'reported_at', 'native_session_id', 'native_session_home',
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
@@ -218,6 +271,9 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                 identity_fields = {'identity_error': identity_problem} if identity_problem is not None else {}
                 usage_fields = row_usage({**properties, **identity_fields, 'universe': str(scope), 'runtime': facts},
                                          model_names=model_names) if usage else {}
+                before_edit = properties.get('model_before_edit')
+                model_fields = ({'model_before_edit': {**before_edit, 'model_name': model_policy.model_name(
+                    scope, properties, before_edit.get('model'), model_names)}} if isinstance(before_edit, dict) else {})
                 relay = facts.get('native_relay') or {}
                 relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
                 if relay_problem and observation['live'] == 'alive':
@@ -231,7 +287,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                         observed_missing=observed_missing)
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
-                rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, "universe": str(scope), **observation,
+                rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, **model_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",

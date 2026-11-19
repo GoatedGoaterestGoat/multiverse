@@ -262,7 +262,7 @@ def reconcile(root, directory, properties, facts, *, adapter=None):
         return agents.session_properties(root, directory, launch_locked=True)
 
 
-def require_settled(directory, properties, facts, *, model=None, effort=None):
+def require_settled(directory, properties, facts, *, model=None, effort=None, saved_only=False):
     """A new launch cannot silently undo a setting whose command outcome is still unknown."""
     if not exists_replaced(directory / 'slash' / 'pending.json'):
         return
@@ -275,6 +275,11 @@ def require_settled(directory, properties, facts, *, model=None, effort=None):
                     or {'model': model, 'effort': effort}[setting] is not None):
                 continue
             name = properties.get('name') or directory.name
+            if saved_only:
+                recovery = (f' For this stopped agent, mv2 resume {name} --{setting} VALUE '
+                            'can choose it explicitly.' if facts.get('state') in ('stopped', 'dormant') else '')
+                raise ValueError(f'Command run {id} has no confirmed {setting} outcome. '
+                                 f'Read mv2 slash {name} --result {id} before retrying mv2 set-model {name}.' + recovery)
             raise ValueError(f'Command run {id} has no confirmed {setting} outcome. '
                              f'Read mv2 slash {name} --result {id}, or use mv2 resume {name} '
                              f'--{setting} VALUE to choose it explicitly')
