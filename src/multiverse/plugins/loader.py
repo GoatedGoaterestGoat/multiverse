@@ -378,6 +378,10 @@ def _signature(root):
         # (harness.check): a change there must run those checks again.
         harness_files = sorted((Path(root) / "harnesses").glob("*/harness.json"))
         parts.append(tuple((path.parent.name, _stat(path)) for path in harness_files))
+        # Which secrets are set (1.20): a required one set or cleared, here or in a parent, by any process, changes
+        # whether the plugin can be used. The index is rewritten on each, whatever store holds the value.
+        from . import secrets as secret_store
+        parts.append(_stat(secret_store.directory() / secret_store.INDEX))
     with _lock:
         failed = {directory: known for directory, known in _loaded.items() if isinstance(known, Failed)}
     for source, directory in _source_directories(root):
@@ -580,7 +584,27 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None,
             if detail.startswith(f"{name}: "):
                 detail = detail[len(name) + 2:]
             entry.state, entry.problem = "unusable", f"{name}: {UNUSABLE}{detail}"
+    if checks and root is not None and found.secrets and entry.state != "unusable":
+        missing = missing_secret(root, found)  # `found` is the plugin's manifest here
+        if missing:
+            entry.state, entry.problem = "unusable", missing
     return entry
+
+
+def missing_secret(root, manifest):
+    """Why the plugin can't work here for want of a required secret (1.20), naming how to set it; or None."""
+    from . import secrets
+    for secret in manifest.secrets:
+        if not secret.required:
+            continue
+        try:
+            found = secrets.where(root, manifest.name, secret.key)
+        except secrets.SecretsError as error:
+            return f"{manifest.name}: its {secret.label} can't be read: {error}"
+        if found is None:
+            return (f"{manifest.name} needs its {secret.label}: set it with mv2 plugins secret {manifest.name} "
+                    f"{secret.key}, or with Enter on the Plugins screen")
+    return None
 
 
 def entry(root, name):

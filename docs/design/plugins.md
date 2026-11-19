@@ -695,6 +695,35 @@ the person's yes again. An install goes into a staging folder renamed into
 place once complete, so a failure leaves nothing that later reads as
 installed.
 
+### Secrets (1.20)
+
+A plugin declares API keys and tokens in its manifest (`secrets`), never in its
+settings schema, so the settings code never shows, saves or copies one. The
+user decided (2026-11-19):
+
+- **Where:** the OS keychain (macOS `security`, Linux `secret-tool`), and a
+  0600 file in a 0700 folder under `~/.multiverse` where neither is there. A
+  value reaches a keychain tool on its stdin, never its argv, where `ps` would
+  show it, and is stored as the hex of its UTF-8 so no quoting can change it.
+  Every name on a `security -i` line is checked first (the universe id is a
+  UUID; the plugin's name and the key are a manifest's), so none can end a
+  quote or start another command. A tool's own output is never repeated, only
+  its exit status, since a tool may echo what it was given. A clear the
+  keychain refuses stays recorded as set, and says so.
+- **Scope:** per universe, keyed by the universe's id, the plugin and the key.
+  A subverse with no value of its own reads its nearest parent's, live.
+  Nothing is copied, so rotating the parent's reaches every subverse that has
+  none of its own.
+- **Disable and remove:** kept on disable, cleared only by hand. `mv2 doctor`
+  names a secret whose plugin no longer declares it.
+
+`index.json` beside the file store records which are set and where, never a
+value, so listing and the Plugins screen never open the keychain. Only the
+plugin that declared a secret reads it, through `universe.secret(key)`, while
+it is on and trusted in that universe. An agent can neither set nor clear one,
+and the command never takes a value as an argument. A missing required secret
+makes the plugin `unusable` in that universe, naming the command.
+
 ### Effect classes and access grants (1.13)
 
 Every operation in the plugin API and the adapter protocol has one effect

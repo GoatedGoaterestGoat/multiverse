@@ -238,7 +238,21 @@ def problems(root, reserved=(), wait=None):
                                  if found.on and found.manifest is not None]).values():
         if not any(why in line for line in found_problems):
             found_problems.append(why)
+    found_problems.extend(f"a secret {key} of {plugin} is set here, but {plugin} doesn't declare it any more: "
+                          f"remove it with mv2 plugins secret {plugin} {key} --clear"
+                          for plugin, key in _orphan_secrets(root))
     return found_problems
+
+
+def _orphan_secrets(root):
+    """This universe's own secrets no plugin found here declares, [(plugin, key)], or [] when they can't be read."""
+    from . import secrets
+    try:
+        declared = {found.name: {secret.key for secret in found.manifest.secrets}
+                    for found in entries(root) if found.manifest is not None}
+        return secrets.orphans(root, declared)
+    except (secrets.SecretsError, PluginError):
+        return []
 
 
 def notes(root):
@@ -891,6 +905,78 @@ def install_packages(root, name, approved=None):
         return packages.install(found.manifest, approved=approved)
     except packages.PackagesError as error:
         raise PluginError(str(error)) from None
+
+
+def secrets_view(root, name):
+    """Plugin `name`'s declared secrets here, never a value (1.20): [{key, label, help, required, set, from}], where
+    `from` is the universe whose value is used (this one, or a parent's), or None."""
+    from . import secrets
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    shown = []
+    for secret in found.manifest.secrets:
+        try:
+            source = secrets.where(root, name, secret.key)
+        except secrets.SecretsError:
+            source = None
+        shown.append({"key": secret.key, "label": secret.label, "help": secret.help, "required": secret.required,
+                      "set": source is not None, "from": str(source) if source is not None else None,
+                      "inherited": source is not None and Path(source).resolve() != Path(root).resolve()})
+    return shown
+
+
+def secrets_stamp(root=None):
+    """Something that changes whenever any plugin's secret is set or cleared, by any process, in any store (1.20):
+    the secrets index's time and size, or None while none was ever set. Never a value. For a screen to watch."""
+    from . import secrets
+    try:
+        stat = (secrets.directory() / secrets.INDEX).stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _declared_secret(root, name, key):
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    declared = {secret.key: secret for secret in found.manifest.secrets}
+    if key not in declared:
+        raise PluginError(f"{name} declares no secret {key!r}"
+                          + (f"; it declares {', '.join(declared)}" if declared else ""))
+    return declared[key]
+
+
+def set_secret(root, name, key, value):
+    """Keep `value` as this universe's secret `key` of plugin `name` (the person only); the store's name. Errors
+    never hold the value."""
+    from . import secrets
+    if from_agent():
+        raise PluginError(f"Only the person sets a plugin's secrets: ask them to run mv2 plugins secret {name} {key}")
+    secret = _declared_secret(root, name, key)
+    try:
+        store = secrets.set_secret(root, name, key, value, label=f"mv2: {name} {secret.label}")
+    except secrets.SecretsError as error:
+        raise PluginError(f"{name}'s {secret.label} was not set: {error}") from None
+    loader._entries.clear()  # its state here may change (a required one now set)
+    return store
+
+
+def clear_secret(root, name, key):
+    """Remove this universe's own secret `key` of plugin `name` (the person only): True if it was set here."""
+    from . import secrets
+    if from_agent():
+        raise PluginError(f"Only the person clears a plugin's secrets: ask them to run "
+                          f"mv2 plugins secret {name} {key} --clear")
+    if (name, key) not in _orphan_secrets(root):  # one its plugin no longer declares can always be cleared
+        _declared_secret(root, name, key)
+    try:
+        cleared = secrets.clear_secret(root, name, key)
+    except secrets.SecretsError as error:
+        raise PluginError(f"{name}'s {key} was not cleared: {error}") from None
+    loader._entries.clear()
+    return cleared
 
 
 def from_agent():

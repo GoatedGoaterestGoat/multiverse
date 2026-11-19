@@ -50,9 +50,10 @@ def subcommands(parser):
 
 
 def options(parser):
-    """Documented actions: everything except -h and subcommand dispatch."""
+    """Documented actions: everything except -h, subcommand dispatch and arguments hidden from --help."""
     return [action for action in parser._actions
-            if not isinstance(action, (argparse._HelpAction, argparse._SubParsersAction))]
+            if not isinstance(action, (argparse._HelpAction, argparse._SubParsersAction))
+            and action.help is not argparse.SUPPRESS]
 
 
 def takes_value(action):

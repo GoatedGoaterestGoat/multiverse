@@ -100,6 +100,24 @@ mv2 plugins grant compaction observe           # changes it later
 
 A call above a plugin's level fails with a reason, such as `planner has observe access here; send needs act`, and a launch addition that needs more is left out, with the reason on the agent's `mv2 inspect` `Note:` line. Each says what holds the plugin back and how to change it: its grant (`mv2 plugins grant`), the universe's `access_ceiling`, or `MV2_EFFECTS` for that process. A plugin that is on but held below the least level it can work with is reported by `mv2 plugins` and `mv2 doctor`.
 
+## Set a plugin's secrets
+
+A plugin that needs an API key or a token declares it as a secret, which mv2 keeps out of its settings:
+
+```sh
+mv2 plugins secrets notifier        # what it declares, and whether each is set
+mv2 plugins secret notifier api_key   # asks for the value; typing is hidden
+some-command | mv2 plugins secret notifier api_key   # or from stdin
+mv2 plugins secret notifier api_key --clear
+```
+
+- **Where they go.** The system keychain: macOS Keychain, or the Secret Service on Linux. Where there is none, a file only you can read, `~/.multiverse/plugin-secrets/secrets.json`, and the command says so. `MV2_SECRET_STORE=file` picks the file anyway, for example in tests or on a machine whose keychain you'd rather not use. Never the universe's folder, a settings file, a log, `mv2 doctor`, a transcript or an agent's environment, and never shown again: only "set" or "not set".
+- **Per universe.** Each universe has its own. A subverse without one of its own uses its nearest parent's, so changing the parent's changes theirs. Set one in the subverse to override it there; clearing it there goes back to the parent's.
+- **Who.** Only you: an agent can't set or clear one, and the value is never taken as an argument, which your shell would keep in its history. On a terminal that can't hide what you type, the command reads nothing and asks you to pipe the value in. Only the plugin that declared a secret reads it, while it is on and trusted in that universe.
+- **Missing.** A plugin missing a required secret is listed with the command that sets it, and acts as off in that universe until it's set.
+- **When the keychain refuses.** Setting or clearing one fails with the keychain tool's exit status, never its output. A secret the keychain refused to remove stays set, and `--clear` says so.
+- **Disabling** keeps them, so turning the plugin on again needs nothing; a disabled plugin can't read them. `--clear` removes one, and `mv2 doctor` names a secret whose plugin no longer declares it, with the command that clears it.
+
 ## Change a plugin's settings
 
 ```sh

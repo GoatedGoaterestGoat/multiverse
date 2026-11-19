@@ -60,6 +60,7 @@ To see the column, add `"shout"` to `columns` in `.multiverse/views/default.json
 | `events` | Event types it subscribes to: `"agent.status"`, `"message.*"`, `"*"`. Needs `events`. |
 | `harnesses` | Harness extensions that need no code; see [launch additions](#launch-additions). |
 | `settings` | `{"version", "schema", "defaults", "legacy"}`; see [settings](#settings). |
+| `secrets` | `{"KEY": {"label": "API key", "help": "...", "required": true}}` (1.20): API keys and tokens it needs, kept apart from its settings; see [secrets](#secrets). |
 | `python` | `{"requirements": "requirements.txt"}` (1.20): a file in the plugin naming the Python packages it needs, each pinned and hashed; see [Python packages](#python-packages). |
 
 `register(mv)` runs once in each process that loads the plugin: a command, the dashboard, a host worker or a helper (`mv.process` is `cli`, `dashboard`, `host` or `helper`). It only declares things. mv2 calls what it registered later, and guards each call.
@@ -354,6 +355,22 @@ A package without a version or a hash, a range such as `>=`, a wildcard such as 
 - **When they're missing.** A plugin that is on but whose packages aren't installed fails to load, saying `run mv2 plugins packages NAME to review and install them`. `mv2 plugins` and `mv2 doctor` show it.
 - **When an install fails.** For example, the network, a hash that doesn't match or a package without a wheel. Nothing is left behind, and the installer's last lines say why. `enable` leaves a plugin that was off off, and one already on stays on but can't load until they install, which it says. mv2 uses `uv` when it is on `PATH`, otherwise this Python's `pip`, with their own index settings.
 - **Disabling.** Disabling keeps the folder, ready for when the plugin is turned on again. A folder no process has used for 14 days is removed at the next install.
+
+## Secrets
+
+API keys and tokens never belong in a plugin's settings, which are plain JSON in the universe. Declare each in `plugin.json` instead (1.20):
+
+```json
+"secrets": {"api_key": {"label": "API key", "help": "From your provider's console.", "required": true}}
+```
+
+- **The key** is lowercase letters, digits and `_`, starting with a letter. **The label** is what the person sees, at most 60 characters, and **help** one line. **required** is `false` unless you say so.
+- **Reading one.** `mv.universe(root).secret("api_key")` returns the value set for that universe, or its nearest parent's. Only your plugin reads its own, only for keys it declares, and only while it is on and trusted there: another plugin, or yours where it is off, gets `api.Error`. Not set: `api.SecretMissing`, whose message says how to set it.
+- **A required one missing** makes your plugin unusable in that universe, like settings that can't be used, with `NAME needs its LABEL: set it with mv2 plugins secret NAME KEY, or with Enter on the Plugins screen`. It still loads, so its screens work.
+- **Where the person sets them.** `mv2 plugins secret NAME KEY` from a hidden prompt or stdin, or the Plugins screen. Never as an argument, and never by an agent. mv2 keeps them in the system keychain, or a file only the user can read where there's no keychain. They are never in the universe, a settings file, a log or an agent's environment.
+- **Your part.** Never log a secret, put it in an error, a record or a settings file, or hand it to an agent. Read it when you need it, rather than keeping it in a module variable.
+- **Changes from elsewhere.** A secret set or cleared by any process changes what every listing says, here and in subverses that read it. `plugins.secrets_stamp()` changes with it, for a screen to watch; it never holds a value.
+- **In tests,** `PluginTestCase` keeps secrets in a file in the test's own home, never the keychain: set one with `tool.run(root, plugin_action="secret", name=NAME, level=KEY, secret_value=VALUE)`.
 
 ## Settings
 

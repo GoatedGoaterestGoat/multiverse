@@ -76,7 +76,8 @@ LEVEL_PERMISSIONS = {
 WHY_CHARACTERS = 300
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access", "python"}
+                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access", "python",
+                "secrets"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -155,6 +156,7 @@ class Manifest:
     events: tuple = ()  # event type patterns it subscribes to: "agent.status", "message.*", "*"
     access: Access = Access()
     python: str | None = None  # its requirements file, relative to its directory (1.20)
+    secrets: tuple = ()  # Secret, in the manifest's order (1.20)
 
     def permitted(self, permission):
         """Whether the manifest asks for `permission`: listed, or, for one with "access" and no "permissions",
@@ -326,7 +328,40 @@ def _parse(directory, data):
         raise ValueError('events needs "events" in extends')
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
                     frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline,
-                    tuple(events), _access(data.get("access")), _python(directory, data.get("python")))
+                    tuple(events), _access(data.get("access")), _python(directory, data.get("python")),
+                    _secrets(data.get("secrets")))
+
+
+@dataclass(frozen=True)
+class Secret:
+    """A secret the plugin declares (1.20): its key, what the person sees, and whether it can't work without it."""
+    key: str
+    label: str
+    help: str = ""
+    required: bool = False
+
+
+def _secrets(value):
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ValueError('secrets must map each key to {"label": "...", "help": "...", "required": true}')
+    found = []
+    from .secrets import KEY
+    for key, spec in value.items():
+        if not isinstance(key, str) or not KEY.fullmatch(key):
+            raise ValueError(f"secrets: {key!r} must be lowercase letters, digits and _, starting with a letter")
+        if not isinstance(spec, dict) or set(spec) - {"label", "help", "required"}:
+            raise ValueError(f'secrets.{key} must be {{"label": "...", "help": "...", "required": true}}')
+        label, text, required = spec.get("label"), spec.get("help", ""), spec.get("required", False)
+        if not isinstance(label, str) or not label.strip() or len(label) > 60:
+            raise ValueError(f"secrets.{key}.label must be a short name, such as \"API key\" (at most 60)")
+        if not isinstance(text, str) or len(text) > 300:
+            raise ValueError(f"secrets.{key}.help must be one line of at most 300 characters")
+        if not isinstance(required, bool):
+            raise ValueError(f"secrets.{key}.required must be true or false")
+        found.append(Secret(key, label.strip(), text.strip(), required))
+    return tuple(found)
 
 
 def _python(directory, value):
