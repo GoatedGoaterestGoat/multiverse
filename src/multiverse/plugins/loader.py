@@ -34,7 +34,7 @@ import types
 from ..store import now, retry_missing, is_file_replaced
 from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 19)
+API_VERSION = (1, 20)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -171,6 +171,18 @@ class Failed:
     source: str
     problem: str
     files: tuple = ()  # the plugin's files when it failed: changed files are tried again
+    packages: str | None = None  # its packages' problem, when that is why: tried again once it changes (1.20)
+
+
+def _still_failed(known, files):
+    """Whether a failed plugin stays failed: its files unchanged, and, if its packages were why, their problem too
+    (installed since, or another plugin's version gone, means trying again; until then it reads as failed)."""
+    if not isinstance(known, Failed) or files is None or known.files != files:
+        return False
+    if known.packages is None:
+        return True
+    from . import packages
+    return packages.problem(known.manifest) == known.packages
 
 
 @dataclass
@@ -367,16 +379,20 @@ def _signature(root):
         harness_files = sorted((Path(root) / "harnesses").glob("*/harness.json"))
         parts.append(tuple((path.parent.name, _stat(path)) for path in harness_files))
     with _lock:
-        failed = {directory: known.files for directory, known in _loaded.items() if isinstance(known, Failed)}
+        failed = {directory: known for directory, known in _loaded.items() if isinstance(known, Failed)}
     for source, directory in _source_directories(root):
         parts.append((source, str(directory), _stat(directory / manifests.FILE)))
         if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
-            parts.append(_files(directory.resolve()) == failed[directory.resolve()])
+            parts.append(_still_failed(failed[directory.resolve()], _files(directory.resolve())))
         if source == "universe":  # trust covers every file but .git, compiled bytecode included
             try:
                 parts.append(trust.signature(directory))
             except OSError:
                 parts.append(None)
+    # A failure for its packages, wherever it runs from (a trusted copy too), is tried again once their problem
+    # changes, not only its files.
+    parts.append(tuple(sorted(str(directory) for directory, known in failed.items()
+                              if known.packages is not None and not _still_failed(known, known.files))))
     return tuple(parts)
 
 
@@ -550,7 +566,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None,
     running = Path(found.directory).resolve()  # where it runs from: its own directory, or a trusted copy
     with _lock:
         known = _loaded.get(running)
-    if isinstance(known, Failed) and known.files == _files(running):
+    if _still_failed(known, _files(running)):
         entry.state, entry.problem = "failed", known.problem
         return entry
     if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
@@ -682,7 +698,7 @@ def load(found, off=False, wait=None):
     if isinstance(known, Loaded):
         return known
     files = _files(directory) if isinstance(known, Failed) else None
-    if isinstance(known, Failed) and known.files == files:
+    if _still_failed(known, files):
         raise PluginError(known.problem)
     if wait is None and _known_slow(found):
         wait = KNOWN_SLOW_WAIT  # it hung before with these files: whoever needs it now is not held up again
@@ -704,7 +720,7 @@ def _start_loading(found, directory, files):
         if running is not None:
             return running
         known = _loaded.get(directory)
-        if isinstance(known, Loaded) or (isinstance(known, Failed) and files is not None and known.files == files):
+        if isinstance(known, Loaded) or _still_failed(known, files):
             done = threading.Event()
             done.set()
             return done, time.monotonic()
@@ -763,7 +779,9 @@ def _load(found, directory, home=None):
             forget_modules()
             problem = f"{found.name} failed to load: {_describe(error)}"
             with _lock:
-                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                # Its packages' problem is kept too: it reads as failed until that changes, then is tried again.
+                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory),
+                                            str(error) if type(error).__name__ == "PackagesError" else None)
                 _changed()
             return problem
         with _lock:
@@ -774,6 +792,8 @@ def _load(found, directory, home=None):
 
     def run():
         try:
+            from . import packages  # its packages first, after mv2's own on the import path (1.20)
+            packages.activate(found.manifest, home)
             _make_package(package, directory)
             module = importlib.import_module(f"{package}.{found.manifest.module}") if found.manifest.module else None
             loaded = Loaded(found.manifest, found.source, package, module, registrations)
@@ -885,10 +905,14 @@ def loaded_by_package(package):
 
 
 def _files(directory):
-    """(path, size, mtime_ns) of a plugin's files, to tell when they changed. Leaves out what Python writes."""
+    """(path, size, mtime_ns) of a plugin's files, to tell when they changed. Leaves out what Python writes, and
+    the trust cache's own marker in a trusted copy, which each use touches though the plugin is unchanged."""
     found = []
-    for path in sorted(Path(directory).rglob("*")):
+    directory = Path(directory)
+    for path in sorted(directory.rglob("*")):
         if "__pycache__" in path.parts or ".git" in path.parts or not path.is_file():
+            continue
+        if path.name == trust.COMPLETE and path.parent == directory:
             continue
         try:
             status = path.stat()
@@ -943,6 +967,8 @@ def active(root, wait=None):
 
 
 def _describe(error):
+    if type(error).__name__ == "PackagesError":
+        return str(error)  # it says what's missing and the command that fixes it
     return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
 
 

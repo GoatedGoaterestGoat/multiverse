@@ -626,7 +626,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 19)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 20)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -664,6 +664,32 @@ plugin (1.13).
 - Results are frozen dataclasses with the fields a plugin needs, plus `.record`,
   the tool's full record, for anything the dataclass leaves out. `.record` is
   not covered by the version, and the docs say so.
+
+### Python packages (1.20)
+
+A plugin can name packages mv2 doesn't have in a requirements file
+(`"python": {"requirements": "..."}`), each pinned with `==` and hashed. The
+user decided both (2026-11-19):
+
+- **A folder of the plugin's own**, `~/.multiverse/plugin-packages/KEY/`, not
+  mv2's environment. `mv2 update` runs `uv sync --locked`, which removes every
+  package the lock doesn't list, and a package installed beside mv2's could
+  replace one mv2 uses. The folder goes on the import path after mv2's own, so
+  mv2's win. A package mv2 has at the same version is left out, and at another
+  version refused. Plugins share one process, so a second plugin needing
+  another version of a package a loaded plugin has is refused, naming the
+  first.
+- **Exact versions and hashes, required**, so what installs is exactly what the
+  person approved, and an upload replaced on the index is refused.
+
+Installing takes only wheels, so it runs no package's code. Importing does run
+it, with the plugin's own trust, so mv2 installs only on the person's yes: at
+`mv2 plugins enable`, or `mv2 plugins packages`, which list each package first.
+An agent can't approve it, and loading never installs. KEY digests the
+plugin's name, its requirements file and the Python, so a changed list needs
+the person's yes again. An install goes into a staging folder renamed into
+place once complete, so a failure leaves nothing that later reads as
+installed.
 
 ### Effect classes and access grants (1.13)
 

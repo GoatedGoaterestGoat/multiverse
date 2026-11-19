@@ -76,7 +76,7 @@ LEVEL_PERMISSIONS = {
 WHY_CHARACTERS = 300
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access"}
+                "permissions", "commands", "settings", "harnesses", "statusline", "events", "access", "python"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -154,6 +154,7 @@ class Manifest:
     statusline: tuple = ()  # Item
     events: tuple = ()  # event type patterns it subscribes to: "agent.status", "message.*", "*"
     access: Access = Access()
+    python: str | None = None  # its requirements file, relative to its directory (1.20)
 
     def permitted(self, permission):
         """Whether the manifest asks for `permission`: listed, or, for one with "access" and no "permissions",
@@ -325,7 +326,30 @@ def _parse(directory, data):
         raise ValueError('events needs "events" in extends')
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
                     frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline,
-                    tuple(events), _access(data.get("access")))
+                    tuple(events), _access(data.get("access")), _python(directory, data.get("python")))
+
+
+def _python(directory, value):
+    """The plugin's requirements file (1.20), checked now: each package pinned with == and hashed."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"requirements"} or not isinstance(value["requirements"], str):
+        raise ValueError('python must be {"requirements": "requirements.txt"}, a file in the plugin')
+    relative = Path(value["requirements"])
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError("python.requirements must be a path inside the plugin")
+    from .packages import PackagesError, parse
+    path = Path(directory) / relative
+    try:
+        text = path.read_text()
+    except OSError as error:
+        raise ValueError(f"python.requirements: {path}: {error.strerror or error}") from None
+    try:
+        if not parse(text, f"python.requirements ({relative})"):
+            raise ValueError(f"python.requirements ({relative}) lists no packages")
+    except PackagesError as error:
+        raise ValueError(str(error)) from None
+    return relative.as_posix()
 
 
 def _access(value):

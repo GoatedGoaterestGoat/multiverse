@@ -233,6 +233,11 @@ def problems(root, reserved=(), wait=None):
         found_problems.extend(item_conflicts(root))
     except Exception:
         pass
+    from . import packages
+    for why in packages.clashes([found.manifest for found in entries(root)
+                                 if found.on and found.manifest is not None]).values():
+        if not any(why in line for line in found_problems):
+            found_problems.append(why)
     return found_problems
 
 
@@ -303,6 +308,8 @@ def listing(root, wait=loader.REFRESH_WAIT):
         current = entries(root)
     recent = loader.errors()
     stopped = host.left_stopped(root)
+    from . import packages
+    clashing = packages.clashes([found.manifest for found in current if found.on and found.manifest is not None])
     result = []
     for found in current:
         manifest = found.manifest
@@ -313,7 +320,9 @@ def listing(root, wait=loader.REFRESH_WAIT):
             # fails closed), and its defaults are never shown as its settings.
             state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
         elif problem is None and state in ("on", "loaded", "loading"):
-            problem = below_minimum(root, found)  # on, but it can't work: said where the listing is read
+            # On, but it can't work: said where the listing is read, whichever plugin a process loaded first.
+            problem = (below_minimum(root, found) or clashing.get(found.name)
+                       or (packages.problem(manifest) if manifest is not None and manifest.python else None))
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
@@ -856,6 +865,32 @@ def below_minimum(root, found):
 def entry_access(root, name):
     """listing()'s access for one plugin, without listing the others."""
     return _access_here(Path(root), entry(Path(root), name))
+
+
+def packages_state(root, name):
+    """What plugin `name` declares of Python packages and whether they are installed here (1.20), or None."""
+    from . import packages
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    return packages.state(found.manifest)
+
+
+def install_packages(root, name, approved=None):
+    """Install plugin `name`'s Python packages, once the person has said yes to the list (packages.install).
+    `approved`: the folder name of the list they were shown (packages_state's `folder`), so a changed list never
+    installs on an old yes."""
+    from . import packages
+    if from_agent():
+        raise PluginError(f"Only the person can approve installing a plugin's Python packages: ask them to run "
+                          f"mv2 plugins packages {name}")
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    try:
+        return packages.install(found.manifest, approved=approved)
+    except packages.PackagesError as error:
+        raise PluginError(str(error)) from None
 
 
 def from_agent():

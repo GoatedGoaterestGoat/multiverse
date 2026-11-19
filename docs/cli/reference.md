@@ -570,12 +570,12 @@ mv2 update [--check] [--json] [--plugin-fetch-timeout SECONDS]
 List, turn on or off, configure, trust and check plugins.
 
 ```sh
-mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--json] [ACTION] [name] [LEVEL]
+mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--install-packages] [--json] [ACTION] [name] [LEVEL]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate or new | `list` |
+| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate, new or packages | `list` |
 | `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name) |  |
 | `LEVEL` |  | grant: observe, spend or act |  |
 | `--grant` | `observe`, `spend`, `act` | enable: the access level to grant it here (otherwise a terminal asks; without one, its minimum) |  |
@@ -586,4 +586,5 @@ mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--pru
 | `--apply` |  | migrate: make the changes (otherwise only show them) |  |
 | `--recursive` |  | migrate: this universe and every subverse |  |
 | `--dir` | `DIRECTORY` | new: where to create it (default: the current directory) |  |
+| `--install-packages` |  | enable, packages: install the plugin's Python packages without asking (the person only) |  |
 | `--json` |  | Print the full result as JSON |  |

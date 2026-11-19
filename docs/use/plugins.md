@@ -61,6 +61,8 @@ mv2 plugins disable notifier
 mv2 -u .multiverse/subverses/ops plugins enable remote   # a subverse
 ```
 
+A plugin can need Python packages that mv2 doesn't have. Enabling it then lists each package with its exact version and asks before installing them. Installing runs none of their code, but the plugin imports them, so their code runs inside mv2 with the plugin's trust: say yes only if you trust the plugin and its packages. They go in a folder of the plugin's own under `~/.multiverse/plugin-packages/`, never into mv2's own environment, and `mv2 update` leaves them alone. `mv2 plugins packages NAME` shows them and installs them when you say yes; `--install-packages` says yes without the question, for scripts. When the plugin's list changes, it asks again. An agent can't approve an install.
+
 `enable` lists what the plugin may do, installs its default settings when the universe has none, and says when the plugin needs the plugin host. In the dashboard, press `P`, select the plugin and press `Space`. If the plugin can work with less access than it asks for, the dashboard asks which access to grant it in that universe; `Esc` leaves it off.
 
 The switch lives in the universe's `plugins.json`, which you can also edit by hand:

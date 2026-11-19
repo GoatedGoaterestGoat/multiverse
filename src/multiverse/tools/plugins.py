@@ -10,15 +10,15 @@ from ..plugins import access as levels, loader, manifest as manifests, settings 
 from ..store import is_file_replaced
 
 ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
-           "install", "migrate", "new")
+           "install", "migrate", "new", "packages")
 HOST_ACTIONS = ("status", "start", "stop")
-NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust")
+NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "packages")
 
 
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
                         help="list (default), info, enable, disable, grant, settings, trust, untrust, check, host, "
-                             "events, install, migrate or new")
+                             "events, install, migrate, new or packages")
     parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
                                                "for new: the new plugin's name)")
     parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act")
@@ -37,6 +37,8 @@ def configure(parser):
     parser.add_argument("--apply", action="store_true", help="migrate: make the changes (otherwise only show them)")
     parser.add_argument("--recursive", action="store_true", help="migrate: this universe and every subverse")
     parser.add_argument("--dir", dest="directory", help="new: where to create it (default: the current directory)")
+    parser.add_argument("--install-packages", action="store_true", dest="install_packages",
+                        help="enable, packages: install the plugin's Python packages without asking (the person only)")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -65,7 +67,9 @@ def _changes(assignments, removals):
 
 
 def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-        recursive=False, directory=None, load=False, level=None, grant=None, json=False):
+        recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, approved=None,
+        json=False):
+    """`approved`: the folder name of the package list the person said yes to on a terminal (cli_run)."""
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
     if level is not None and plugin_action != "grant":
@@ -76,6 +80,8 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         raise ValueError("--apply and --recursive belong to mv2 plugins migrate")
     if directory and plugin_action != "new":
         raise ValueError("--dir belongs to mv2 plugins new")
+    if install_packages and plugin_action not in ("enable", "packages"):
+        raise ValueError("--install-packages belongs to mv2 plugins enable and mv2 plugins packages")
     if plugin_action == "check":
         if isinstance(load, str):  # check --load DIR
             name, load = name or load, True
@@ -175,7 +181,30 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             raise ValueError("mv2 plugins grant takes a plugin's name and a level: observe, spend or act")
         return {"universe": str(root), **plugins.set_grant(root, name, level),
                 "access": plugins.entry_access(root, name)}
+    if plugin_action == "packages":
+        packages = plugins.packages_state(root, name)
+        wanted = install_packages and packages and not packages["installed"] and packages["folder"]
+        installed = plugins.install_packages(root, name, approved=approved) if wanted else None
+        return {"universe": str(root), "name": name, "packages": packages, "install": installed,
+                **({"now": plugins.packages_state(root, name)} if installed else {})}
     if plugin_action in ("enable", "disable"):
+        packages = plugins.packages_state(root, name) if plugin_action == "enable" else None
+        installed = None
+        if packages and packages["problem"] and not packages["folder"]:
+            raise ValueError(packages["problem"])  # a requirements file that can't be read
+        if packages and not packages["installed"]:
+            if not install_packages:
+                raise ValueError(f"{name} needs Python packages that aren't installed: "
+                                 + ", ".join(packages["packages"]) + f". Review them with mv2 plugins packages {name}; "
+                                 f"to install them and turn it on, run mv2 plugins enable {name} --install-packages")
+            # Before it is turned on, so a failure leaves it as it was: off, or on but unable to load.
+            try:
+                installed = plugins.install_packages(root, name, approved=approved)
+            except plugins.PluginError as error:
+                if plugins.entry(root, name).on:
+                    raise plugins.PluginError(f"{error}. {name} stays on here, but can't load until they install"
+                                              ) from None
+                raise
         defaulted = False
         if plugin_action == "enable" and grant is None:
             # No terminal asked (cli_run asks on one): its minimum, raised later with mv2 plugins grant.
@@ -190,6 +219,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             top = universe.parent(top)
         needs_host = bool(found.manifest and host.NEEDS & found.manifest.extends)
         return {"universe": str(root), **result, "state": found.state, "problem": found.problem,
+                **({"packages_installed": installed} if installed else {}),
                 "access": plugins.entry_access(root, name), "defaulted": defaulted,
                 "permissions": found.manifest.permission_texts() if found.manifest else [],
                 "needs_host": needs_host, "host_running": host.running(top) if needs_host else None}
@@ -343,17 +373,59 @@ def check(directory, load=False):
 
 
 def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-            recursive=False, directory=None, load=False, level=None, grant=None, json=False):
+            recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, json=False):
+    approved = None
+    if plugin_action in ("enable", "packages") and not install_packages and not json and name:
+        asked = _ask_packages(root, name, plugin_action)
+        if asked is False:
+            raise SystemExit(1)
+        install_packages, approved = bool(asked), asked or None  # the yes is for the list shown, and only it
     if plugin_action == "enable" and grant is None and not json and name:
         grant = _ask_grant(root, name)
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
-                 apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant)
+                 apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant,
+                 install_packages=install_packages, approved=approved)
     if json:
         return result
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
         print(text(plugin_action, result))
         raise SystemExit(1)  # a failed check, or a migration that did not apply
     return text(plugin_action, result)
+
+
+def _ask_packages(root, name, action):
+    """On a terminal, for a person, when plugin `name` needs packages that aren't installed: list them and ask.
+    The shown list's folder name (yes: install exactly that list), False (they said no: nothing done), or None
+    (nothing to ask: no terminal, an agent, none needed)."""
+    if plugins.from_agent() or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        packages = plugins.packages_state(universe.resolve(root), name)
+    except plugins.PluginError:
+        return None
+    if not packages or packages["installed"] or packages["problem"] and not packages["folder"]:
+        return None
+    print(packages_prompt(name, packages))
+    try:
+        answer = input("Install them? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""  # no answer is a no
+        print()
+    if answer in ("y", "yes"):
+        return Path(packages["folder"]).name
+    print(f"Nothing installed{'; ' + name + ' stays off' if action == 'enable' else ''}.")
+    return False
+
+
+def packages_prompt(name, packages):
+    """The person's view of what installing a plugin's packages means, before they say yes."""
+    one = len(packages["packages"]) == 1
+    return "\n".join([f"{name} needs {len(packages['packages'])} Python {'package' if one else 'packages'}, "
+                      f"{'pinned' if one else 'each pinned'} to one version and hashed:",
+                      *(f"  {line}" for line in packages["packages"]),
+                      f"They go in a folder of {name}'s own ({packages['folder']}), never into mv2's environment.",
+                      f"Installing runs none of their code, but {name} imports them: their code then runs inside mv2 "
+                      f"with {name}'s own trust. Say yes only if you trust {name} and these packages."])
 
 
 def _ask_grant(root, name):
@@ -481,6 +553,10 @@ def text(action, result):
                              + (" (no terminal asked, so it has its minimum)" if result.get("defaulted") else ""))
         if result["permissions"]:
             lines.extend(_permission_lines(result))
+        if result.get("packages_installed"):
+            done = result["packages_installed"]
+            lines.append(f"Installed its Python packages in {done['folder']}"
+                         + (f"; left out, as mv2 has them: {', '.join(done['skipped'])}." if done["skipped"] else "."))
         lines.extend(f"Installed its default settings: {path}" for path in result["installed"])
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
@@ -495,6 +571,23 @@ def text(action, result):
                 + (f'; it has {level} here now.' if level and level != result["granted"]
                    else "." if level else "; it has none while it is off.")
                 + " Agents launched from now on use it; restart running agents to use it there.")
+    if action == "packages":
+        packages, name = result["packages"], result["name"]
+        if packages is None:
+            return f"{name} declares no Python packages."
+        if packages["problem"] and not packages["folder"]:
+            return f"! {packages['problem']}"
+        lines = [f"{name}'s Python packages, in {packages['folder']}:", *(f"  {line}" for line in packages["packages"])]
+        done = result.get("install")
+        if done:
+            lines.append("Installed." + (f" Left out, as mv2 has them: {', '.join(done['skipped'])}." if done["skipped"]
+                                         else ""))
+        elif packages["installed"]:
+            lines.append("Installed.")
+        else:
+            lines.append(f"Not installed. To install them: mv2 plugins packages {name} --install-packages "
+                         f"(or answer the question on a terminal).")
+        return "\n".join(lines)
     if action == "settings":
         lines = [f'{result["name"]} settings: {result["path"]}']
         if result["changed"]:
