@@ -253,6 +253,16 @@ Without `models`, the built-in tables remain unchanged, native defaults remain a
 
 The subset limits choices mv2 submits. Native account policies, model remapping, environment overrides and effort clamps can still affect the settings actually served; it does not police later in-terminal changes. Claude's literal `--model default` is a native computed choice, distinct from omitting `--model`, and cannot be verified against a subset.
 
+The bundled base and Silicon23 templates default new Codex agents to `gpt-6.2-sol`.
+Silicon23 labels `gpt-6.2-sol` as Sol and `gpt-6.2-astra` as Astra. The older
+`gpt-6.1-sol` and `gpt-6-astra` remain allowed, with their table names, GPT 6.1 Sol
+and GPT 6 Astra. Existing universes receive template changes through
+`mv2 refresh --apply`; local settings are merged rather than overwritten.
+
+Changing a default or a display name never rewrites an agent's recorded model.
+An existing agent keeps its model on resume unless you explicitly change it,
+for example with `mv2 resume NAME --model gpt-6.2-sol`.
+
 ### Model display names
 
 Set `settings.model_names` in `harnesses/NAME/harness.json` to override names in the Model column:
