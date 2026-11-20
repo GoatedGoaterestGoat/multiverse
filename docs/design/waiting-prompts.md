@@ -54,15 +54,15 @@ in a fresh read and answerable, the choice is offered (and a rule-saving one com
 question is answered with existing labels, one unless it takes several, typed text only where allowed. A refused
 answer sends nothing. A valid one is written once, exclusively, so a second answer to the same prompt is refused.
 
-A question can take a note beside its answer (Codex's questions). An offered label may carry one; typed text
-plus a note is refused as ambiguous; a note alone answers only a question with no offered labels; a choice
-alone, such as decline, carries none. A note for a secret question comes only through standard input or the
-dashboard, as a secret answer does, and mv2 never records a note it sent.
+A question can take a note beside its answer (Codex's questions). An offered label may carry one; typed text plus a
+note is refused as ambiguous; a note alone answers only a question with no offered labels; a choice alone, such as
+decline, carries none. A note for a secret question comes only through standard input or the dashboard, as a secret
+answer does; a secret answer or note is never recorded.
 
 | Outcome | Meaning |
 | --- | --- |
 | `answered` | mv2's answer took. `saved_rule` when it chose a decision that saves a rule: the harness writes it, and may warn if it can't. |
-| `person` | The prompt was answered in its terminal first: by the person, or, for a Codex question marked not blocking, perhaps by the terminal itself after its countdown; `person_answer` holds their choice, labels and typed answers when the harness shows them: never a secret, never a refusal's message. |
+| `person` | The prompt was answered in its terminal first: by the person, or, for a Codex question marked not blocking, perhaps by the terminal itself after its countdown; `answer` holds their choice, labels and typed answers when the harness shows them: never a secret, never a refusal's message. |
 | `sent_first` | mv2's answer went first from the agent's terminal and nothing seen contradicts it, but the harness doesn't confirm which answer it took (Codex). Counted as success. |
 | `gone` | The prompt closed another way: Esc, the turn ended or was interrupted, the agent stopped. |
 | `submitted` | Sent; the outcome isn't known yet. Read it with `--result`. |
@@ -88,11 +88,20 @@ prompt has closed or been replaced, the answer is `gone` (or `person`), even whi
 prompt: it is never applied to the newer one or retried against it. A fresh `waiting` status, or a question still
 listed, only makes an answer eligible; the prompt's identity is what keeps a late answer off the next prompt.
 
-A sent answer is never sent again: the wait and `--result` only read. After the agent stops, an answer the
-in-session part never took is `gone`, definitely not applied; one it took without writing an outcome is `unknown`. Each answer is recorded in the agent's folder
-with who answered (`person` or `plugin NAME`), the prompt's kind and tool, the choice or the labels chosen, and the
-outcome. Its event, `agent.prompt`, carries only the prompt's ID, kind, tool, caller, state and cause: no
-command, path or answer text.
+A sent answer is never sent again: the wait and `--result` only read. After the agent stops, an answer the in-session
+part never took is `gone`, definitely not applied; one it took without writing an outcome is `unknown`. Each answer
+through mv2 is recorded in the agent's folder before anything is sent, with who answered (the person through mv2, or
+`plugin NAME`), the prompt's kind and tool, the whole nonsecret answer (the choice, a message sent with it, the
+labels, typed text and notes, cut to fit and marked `truncated`) and the outcome; it is kept once the prompt settles.
+An answer given in the terminal is kept as the harness reports it. Its event, `agent.prompt`, carries only the
+prompt's ID, kind, tool, caller, state and cause: no command, path or answer text.
+
+**Who answered, and with what.** A result says whose answer its state describes, `by`: the person in the terminal,
+the person through mv2 (`mv2 answer`, the dashboard), or a plugin by name; null for `gone`, `refused` and `unknown`,
+where no answer is known to have taken. `answer` holds that answer in full, from mv2's record or the harness's
+report: never a secret, which shows only as a marker. The person sees both everywhere a result is shown. A plugin
+sees `by` with `agents.read`, and `answer` (and the older `person_answer`, kept until the next major version) only
+with `transcripts.read` too, since answers are conversation content (the user, 2026-11-20).
 
 ## Events
 

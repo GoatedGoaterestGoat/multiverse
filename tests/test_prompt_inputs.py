@@ -13,6 +13,9 @@ from multiverse.universe import agents
 from test_multiverse import BaseTest
 
 
+TYPED_ANSWER = 'PRIVATE_ANSWER'
+
+
 class PromptInputTest(BaseTest):
     def setUp(self):
         super().setUp()
@@ -48,7 +51,7 @@ class PromptInputTest(BaseTest):
         self.catalog = [self.prompt]
 
     def answer(self):
-        return prompts.answer(self.root, self.agent, self.prompt.id, answers={'q': 'PRIVATE_ANSWER'}, wait=False)
+        return prompts.answer(self.root, self.agent, self.prompt.id, answers={'q': TYPED_ANSWER}, wait=False)
 
     def result(self):
         return prompts.result(self.root, self.agent, self.prompt.id)
@@ -172,6 +175,7 @@ class PromptInputTest(BaseTest):
                 closes = [row['data'] for row in journal['pending']
                           if row['kind'] == 'prompt.closed' and row['data']['id'] == self.prompt.id]
                 self.assertEqual([item['state'] for item in closes], [outcome.state])
+                self.assertNotIn(text, str(journal))
                 self.assertNotEqual(relay.records[self.prompt.id].get('result', {}).get('state'), 'person')
                 if not uncertain:
                     self.assertEqual(self.started[-1:], ['older-native-input' if state == 'paused' else input_id])
@@ -191,10 +195,17 @@ class PromptInputTest(BaseTest):
                 self.assertEqual(after, before)
                 self.queue.clear()
                 self.confirmed.add(input_id)
-                self.assertEqual(self.result().state, 'answered')
+                confirmed = self.result()
+                typed = {'typed': {'answer': [text]}}
+                self.assertEqual((confirmed.state, confirmed.answer), ('answered', typed))
                 self.assertIsNone(prompts.pending_inputs(self.directory, self.launch, self.thread, generation))
+                record_path = self.directory / 'prompts' / (self.prompt.id + '.json')
+                saved = store.read(record_path)
+                self.assertEqual(saved.pop('answer'), typed)
+                self.assertNotIn(text, str(saved))
                 for path in (self.directory / 'prompts').glob('*.json'):
-                    self.assertNotIn(text, path.read_text())
+                    if path != record_path:
+                        self.assertNotIn(text, path.read_text())
                 self.assertNotIn(text, str(self.events.call_args_list))
                 self.assertFalse((self.directory / 'inbox.jsonl').exists())
                 self.assertFalse((self.directory / 'prompts' / (self.prompt.id + '.answer.json')).exists())
@@ -314,7 +325,9 @@ class PromptInputTest(BaseTest):
                 saved = store.read(record)
                 self.assertEqual((saved['input_id'], saved['session_generation'], saved['requires_waiting']),
                                  (input_id, 1, False))
-                self.assertNotIn('PRIVATE', record.read_text())
+                self.assertEqual(saved.pop('answer'), {'typed': {'q': [TYPED_ANSWER]}})
+                self.assertNotIn(TYPED_ANSWER, str(saved))
+                self.assertNotIn('PRIVATE_INPUT:', record.read_text())
                 self.assertFalse((self.directory / 'inbox.jsonl').exists())
                 self.assertFalse(record.with_name(self.prompt.id + '.answer.json').exists())
                 listed = prompts.waiting(self.root, self.agent)
@@ -329,9 +342,33 @@ class PromptInputTest(BaseTest):
                 self.confirmed.add(input_id)
                 confirmed = self.result()
                 self.assertEqual((confirmed.state, confirmed.reason), ('answered', prompts.INPUT_ANSWERED_REASON))
+                self.assertNotIn('PRIVATE_INPUT:', str(confirmed))
                 self.assertTrue((self.directory / 'focus.json').exists())
         self.callback.assert_not_called()
         self.assertNotIn('PRIVATE', str(self.events.call_args_list))
+
+    def test_secret_question_keeps_only_a_marker_for_ordinary_input(self):
+        """Keeping typed answers must never save a secret in the outcome, prompt record or journal."""
+        self.prompt = replace(self.prompt, questions=(replace(self.prompt.questions[0], secret=True),))
+        self.catalog = [self.prompt]
+        secret = 'SECRET_TYPED_INPUT'
+        with patch.object(prompt_events, '_journal_event', return_value='retry'):
+            self.assertEqual(prompts.answer(self.root, self.agent, self.prompt.id,
+                                           answers={'q': secret}, wait=False).state, 'submitted')
+            self.queue.clear()
+            self.confirmed.add('prompt-' + self.prompt.id)
+            result = self.result()
+        kept = {'answers': {'q': {'secret': True}}}
+        self.assertEqual((result.state, result.answer), ('answered', kept))
+        self.assertNotIn(secret, str(result))
+        directory = self.directory / 'prompts'
+        record = directory / (self.prompt.id + '.json')
+        self.assertEqual(store.read(record)['answer'], kept)
+        self.assertNotIn(secret, record.read_text())
+        self.assertNotIn(secret, (directory / 'journal' / 'events.json').read_text())
+        self.assertNotIn(secret, str(self.events.call_args_list))
+        self.assertFalse((directory / (self.prompt.id + '.answer.json')).exists())
+        self.assertFalse((self.directory / 'inbox.jsonl').exists())
 
     def test_uncertainty_and_identity_fences_keep_input_out_of_a_new_conversation(self):
         """Lost native writes and generation changes must neither resend nor authorize a conversation switch."""
@@ -399,14 +436,15 @@ class PromptInputTest(BaseTest):
 
     def test_proved_failure_releases_navigation_but_ambiguous_errors_do_not(self):
         """Definite non-delivery must not strand navigation, while malformed or contradictory proof cannot release it."""
-        cases = [(NativeResult('error', 'PRIVATE', {'definite_failure': True}), 'refused')]
-        cases += [(NativeResult('error', 'PRIVATE', {'definite_failure': flag}), 'unknown')
+        diagnostic = 'PRIVATE_NATIVE_DIAGNOSTIC'
+        cases = [(NativeResult('error', diagnostic, {'definite_failure': True}), 'refused')]
+        cases += [(NativeResult('error', diagnostic, {'definite_failure': flag}), 'unknown')
                   for flag in (False, None, 1, 'true', {})]
-        cases += [(NativeResult(state, 'PRIVATE', {'definite_failure': True}), 'unknown')
+        cases += [(NativeResult(state, diagnostic, {'definite_failure': True}), 'unknown')
                   for state in ('unknown', 'unavailable', 'ok', 'native_queued', 'pending')]
-        cases += [(NativeResult(state, 'PRIVATE', {'definite_failure': True, 'transcript_confirmed': True}), 'unknown')
+        cases += [(NativeResult(state, diagnostic, {'definite_failure': True, 'transcript_confirmed': True}), 'unknown')
                   for state in ('error', 'ok', 'native_queued', 'pending')]
-        cases += [(NativeResult(state, 'PRIVATE', value), expected)
+        cases += [(NativeResult(state, diagnostic, value), expected)
                   for state in ('ok', 'native_queued', 'pending')
                   for value, expected in (({}, 'submitted'), ({'transcript_confirmed': True}, 'answered'),
                                           ({'definite_failure': 1}, 'submitted'))]
@@ -425,7 +463,10 @@ class PromptInputTest(BaseTest):
                             self.assertEqual(outcome.state, 'submitted')
                             outcome = self.result()
                         self.assertEqual(outcome.state, expected)
-                        self.assertNotIn('PRIVATE', str(outcome))
+                        self.assertNotIn(diagnostic, str(outcome))
+                        self.assertNotIn('PRIVATE_INPUT:', str(outcome))
+                        typed = {'typed': {'q': [TYPED_ANSWER]}} if expected in ('submitted', 'answered') else None
+                        self.assertEqual(outcome.answer, typed)
                         pending = prompts.pending_inputs(self.directory, self.launch, self.thread, generation)
                         self.assertEqual(pending, None if expected in ('refused', 'answered') else self.prompt.id)
                         self.assertEqual(self.answer().cause, 'already_answered')

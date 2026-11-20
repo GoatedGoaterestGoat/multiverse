@@ -471,6 +471,10 @@ class PromptResult:
     saved_rule: bool = False
     person_answer: Mapping[str, Any] | None = None
     cause: str | None = None
+    # Whose answer the state describes ({"kind": "person" | "mv2" | "plugin", "name"?}) and that answer in full, as
+    # core kept it; both None when no answer is known to have taken. Never stored in the result record or the journal.
+    by: Mapping[str, Any] | None = None
+    answer: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

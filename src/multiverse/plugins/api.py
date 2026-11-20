@@ -25,7 +25,7 @@ from contextlib import contextmanager, ExitStack
 import copy
 import functools
 import inspect
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 import math
 import os
 from pathlib import Path
@@ -1611,8 +1611,8 @@ def _from_core(kind, value):
     elif kind is PromptQuestion:
         values["options"] = tuple((str(label), str(description)) for label, description in values.get("options") or ())
     elif kind is PromptResult:
-        values["person_answer"] = (copy.deepcopy(dict(values["person_answer"])) if values.get("person_answer")
-                                   else None)
+        for key in ("person_answer", "by", "answer"):
+            values[key] = copy.deepcopy(dict(values[key])) if values.get(key) else None
     elif kind is RunOptions:
         values["reason"] = values.get("reason") or None
         values["formats"] = tuple(values.get("formats") or ())
@@ -1745,11 +1745,18 @@ class PromptResult:
     state: str
     reason: str | None = None
     saved_rule: bool = False
-    # {choice?, answers?: {question id: [offered labels]}, typed?: {question id: [typed text, a note included]},
-    # truncated?: True},
-    # at most 64 KiB; never a message or a secret answer
+    # The person's answer, in `answer`'s shape (from 1.21: choice {id, label, short}, notes in notes, a message only
+    # with a choice that takes one), at most 64 KiB, never a secret answer. Only with transcripts.read (1.21).
     person_answer: dict | None = None
     cause: str | None = None
+    # Who answered (1.21; agents.read): {"kind": "person"} in the terminal, {"kind": "mv2"} (mv2 answer or the
+    # dashboard: a person through mv2) or {"kind": "plugin", "name": NAME}; None when no answer is known to have
+    # taken (gone, refused, unknown).
+    by: dict | None = None
+    # That answer in full (1.21; also needs transcripts.read, else None): choice {id, label, short}, message,
+    # answers {question id: [labels]}, typed {question id: [text]}, notes {question id: text}, truncated. A secret
+    # question's entry is {"secret": True} in place of its answer, which mv2 never keeps.
+    answer: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1920,10 +1927,11 @@ class Agent:
             raise Error("answer_prompt() takes a number of seconds (0 or more) as timeout and True or False as wait")
         from ..runtime import prompts
         with _acting(self._plugin._loaded, "act", self.universe, "answering what it waits on"):
-            return _from_core(PromptResult, _call(prompts.answer, self.universe.path, self.id, id, choice=choice,
-                                                  message=message, answers=None if answers is None else dict(answers),
-                                                  notes=None if notes is None else dict(notes),
-                                                  timeout=timeout, wait=wait, caller=self._prompt_caller()))
+            found = _call(prompts.answer, self.universe.path, self.id, id, choice=choice,
+                          message=message, answers=None if answers is None else dict(answers),
+                          notes=None if notes is None else dict(notes),
+                          timeout=timeout, wait=wait, caller=self._prompt_caller())
+        return self._readable(_from_core(PromptResult, found))
 
     def prompt_result(self, id):
         """The outcome of an earlier answer_prompt() on this agent, by the prompt's id, as it stands now (1.17;
@@ -1933,8 +1941,17 @@ class Agent:
             raise Error("prompt_result() takes a prompt's id")
         from ..runtime import prompts
         with _acting(self._plugin._loaded, "observe", self.universe, "reading an answer's outcome"):
-            return _from_core(PromptResult, _call(prompts.result, self.universe.path, self.id, id,
-                                                  caller=self._prompt_caller()))
+            return self._readable(_from_core(PromptResult, _call(prompts.result, self.universe.path, self.id, id,
+                                                                 caller=self._prompt_caller())))
+
+    def _readable(self, result):
+        """Who answered (`by`) needs agents.read; what was answered is conversation content: `answer` and
+        `person_answer` need transcripts.read too (1.21). The same on every route a result comes back by."""
+        if not self._plugin.can("agents.read"):
+            result = replace(result, by=None)
+        if not (self._plugin.can("agents.read") and self._plugin.can("transcripts.read")):
+            result = replace(result, answer=None, person_answer=None)
+        return result
 
     def _prompt_caller(self):
         return {"kind": "plugin", "name": self._plugin.name}  # never a person: no rule-saving choice

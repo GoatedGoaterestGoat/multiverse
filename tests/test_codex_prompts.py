@@ -1082,9 +1082,9 @@ class PromptTransportTest(unittest.IsolatedAsyncioTestCase):
                         await self.until(lambda: 'question result' in self.result(id).get('reason', ''))
                     except TimeoutError:
                         self.fail('A bounded large typed result must retain the native effect observation')
-                for path in self.directory.rglob('*.json'):
-                    self.assertFalse('PRIVATE_ENVELOPE_VALUE' in path.read_text(),
-                                     'Submitted answer text must not enter retained prompt records')
+                for path in self.directory.rglob('*.json'):  # a secret field's value; a form's free text is kept (1.21)
+                    self.assertFalse(shape != 'mapped-form' and 'PRIVATE_ENVELOPE_VALUE' in path.read_text(),
+                                     'Submitted secret answer text must not enter retained prompt records')
 
     async def test_real_relay_and_private_answer_files_preserve_one_connection_and_the_two_id_namespaces(self):
         """The unit arbiter is insufficient unless real relay forwarding, atomic pickup and result publication agree."""
@@ -1145,8 +1145,7 @@ class PromptTransportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies, [{'jsonrpc': '2.0', 'id': 'question', 'result': {'answers': {
             'pick': {'answers': ['One', 'user_note: PRIVATE_SUBMITTED_NOTE']},
             'secret': {'answers': ['user_note: SECRET_PRIVATE_NOTE']}}}}])
-        for path in self.directory.rglob('*.json'):
-            self.assertNotIn('PRIVATE_SUBMITTED_NOTE', path.read_text())
+        for path in self.directory.rglob('*.json'):  # a secret question's note is never kept; the others are (1.21)
             self.assertNotIn('SECRET_PRIVATE_NOTE', path.read_text())
         await self.upstreams[0].send(json.dumps({'method': 'turn/completed', 'params': {
             'threadId': self.native, 'turn': {'id': 'turn-one', 'status': 'interrupted'}}}))

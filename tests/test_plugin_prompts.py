@@ -46,6 +46,50 @@ class PromptApiTest(PluginTestCase):
         self.directory = self.agent("worker", harness="claude", native_id=str(uuid4()), runtime={"status": "waiting"})
         self.worker = self.loaded_plugin("answerer").universe(self.root).agent("worker")
 
+    def test_a_result_says_who_answered_and_what_only_to_a_plugin_that_reads_conversations(self):
+        """prompt_result says who answered, and what only with transcripts.read, never a secret; else answers leak."""
+        from dataclasses import replace
+        fake = self.fake_prompts([BASH, ASK, replace(BASH, id="perm-2")], {}, {}, {})
+        self.write_plugin("listener", {"extends": ["events"], "events": ["agent.prompt", "prompt.*"]})
+        self.enable("listener")  # so the journal records the answers' events
+        reader = {**ANSWERER, "permissions": [*ANSWERER["permissions"], "transcripts.read"]}
+        self.write_plugin("reader", reader, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("reader")
+        reading = self.loaded_plugin("reader").universe(self.root).agent("worker")
+        done = reading.answer_prompt("ask-1", answers={"colour": "blue", "token": "s3cret", "vault": "open"},
+                                     notes={"colour": "a calm one", "vault": "n0te-secret"})
+        self.assertEqual((done.state, done.by), ("answered", {"kind": "plugin", "name": "reader"}))
+        expected = {"answers": {"colour": ["blue"], "token": {"secret": True}, "vault": {"secret": True}},
+                    "notes": {"colour": "a calm one", "vault": {"secret": True}}}
+        self.assertEqual(done.answer, expected)
+        self.assertEqual(reading.prompt_result("ask-1").answer, expected)  # kept, after it settled
+        found = self.worker.prompt_result("ask-1")  # a plugin without transcripts.read
+        self.assertEqual((found.by, found.answer, found.person_answer),
+                         ({"kind": "plugin", "name": "reader"}, None, None))
+        from multiverse.runtime import prompts
+        mine = prompts.answer(self.root, "worker", "perm-1", choice="deny", message="not now", wait=False)
+        self.assertEqual((mine.by, mine.answer), ({"kind": "mv2"}, {  # the person through mv2 answer
+            "choice": {"id": "deny", "label": "Deny", "short": None}, "message": "not now"}))
+        long = prompts.answer(self.root, "worker", "perm-2", choice="deny", message="m" * 40_000, wait=False).answer
+        self.assertEqual((len(long["message"]), "truncated" in long), (40_000, False))  # fits its record: kept whole
+        record = read(self.directory / "prompts" / "perm-2.json")
+        self.assertLessEqual(len(json.dumps(record, ensure_ascii=False).encode()), prompts.LIMIT)  # the record fits
+        from multiverse.plugins import events
+        journal = json.dumps(events.read(self.root, 0)[0])
+        self.assertIn('"agent.prompt"', journal)
+        for kept_out in ("s3cret", "n0te-secret"):
+            self.assertNotIn(kept_out, (self.directory / "prompts" / "ask-1.json").read_text())
+        for text in ("a calm one", "not now", "blue"):
+            self.assertNotIn(text, journal)  # the journal stays text-free
+        self.assertEqual(len(fake.answers), 3)
+        self.write_plugin("sender", {**ANSWERER, "permissions": ["prompts.answer"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("sender")
+        self.fake_prompts([replace(BASH, id="perm-3")], {})
+        blind = api.Agent(self.worker.record, self.loaded_plugin("sender"))  # prompts.answer only
+        done = blind.answer_prompt("perm-3", choice="deny")
+        self.assertEqual((done.state, done.by), ("answered", None))  # no agents.read: no 'by'
+
     def loaded_plugin(self, name):
         loader.reset()
         return api.Plugin(loader.load(self.entry(name)))
@@ -98,7 +142,7 @@ class PromptApiTest(PluginTestCase):
             self.assertEqual(fake.answers[-1]["answers"], {"colour": ("blue",), "token": ("***",), "vault": ("***",)})
             self.assertEqual(fake.answers[-1]["notes"], {"colour": "a calm one", "vault": "***"})
             stored = (self.directory / "prompts" / "ask-1.json").read_text()
-            for kept_out in ("s3cret", "n0te-secret", "a calm one"):  # no note, nor a secret, is kept
+            for kept_out in ("s3cret", "n0te-secret"):  # no secret answer or note is kept
                 self.assertNotIn(kept_out, stored)
         self.assertEqual([item["id"] for item in fake.answers], ["perm-1", "ask-1"])  # once each, never resent
         with self.subTest("an agent that isn't waiting"):
