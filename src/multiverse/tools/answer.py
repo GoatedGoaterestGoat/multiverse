@@ -25,7 +25,8 @@ def configure(parser):
                         help='Read the answer as JSON on standard input: {"choice", "message", "answers": {QUESTION: '
                              'LABEL or [LABELS]}, "notes": {QUESTION: TEXT}}. Use it for secret answers, which must '
                              'not appear on the command line')
-    parser.add_argument('--result', metavar='ID', help="Read an earlier answer's outcome as it stands now; never sends")
+    parser.add_argument('--result', metavar='ID', help="Read an earlier answer's outcome as it stands now, with who "
+                                                       "answered and the whole answer; never sends")
     parser.add_argument('--timeout', type=float, default=30,
                         help='Seconds to wait for the outcome (default: 30); 0 returns once it is sent')
     parser.add_argument('--json', action='store_true', help='Print the complete result as JSON')
@@ -178,19 +179,51 @@ def run(root=None, *, agent, id=None, choice=None, message=None, answer=(), note
                                  notes=notes or None, timeout=timeout, wait=timeout > 0))
 
 
-def _person_answer(found):
-    """What the person chose, as core gives it: {choice, answers: {question: [labels]}, typed: {question: [text]},
-    truncated}. Never a message or a secret answer, which core leaves out."""
+def _secret(value):
+    return isinstance(value, dict) and value.get('secret') is True
+
+
+def answer_words(found):
+    """The answer in full, as core gives it (`answer`, or an older result's `person_answer`): the choice by its short
+    label and id, the message sent with it, labels, typed text and notes. A secret entry is said to be not kept, as
+    core never keeps one; a cut answer says so. '' when there is none."""
+    from ..display import clean
     if not isinstance(found, dict):
         return ''
-    words = lambda values: ', '.join(values) if isinstance(values, (list, tuple)) else str(values)
-    parts = [f"chose {found['choice']}"] if found.get('choice') else []
+    words = lambda values: ', '.join(clean(str(value)) for value in values) if isinstance(values, (list, tuple)) \
+        else clean(str(values))
+    parts = []
+    choice = found.get('choice')
+    if isinstance(choice, dict):  # {id, label, short}
+        name = clean(choice.get('short') or choice.get('label') or '')
+        ident = clean(str(choice.get('id')))
+        parts.append(f"chose {name} ({ident})" if name else f"chose {ident}")
+    elif choice:  # an older result: the bare id
+        parts.append(f"chose {clean(str(choice))}")
+    if isinstance(found.get('message'), str) and found['message']:
+        parts.append(f"with the message {clean(found['message'])!r}")
     for question, labels in (found.get('answers') or {}).items():
-        parts.append(f"answered {question!r} with {words(labels)}")
+        parts.append(f"answered {question!r} secretly (not kept)" if _secret(labels)
+                     else f"answered {question!r} with {words(labels)}")
     for question, text in (found.get('typed') or {}).items():
         parts.append(f"typed {words(text)!r} for {question!r}")
-    said = '; '.join(parts) + (' (cut short)' if parts and found.get('truncated') else '')
-    return f'They {said}.' if parts else ''
+    for question, text in (found.get('notes') or {}).items():
+        parts.append(f"left a secret note on {question!r} (not kept)" if _secret(text)
+                     else f"noted {words(text)!r} on {question!r}")
+    if not parts:  # core keeps only {"truncated": true} when nothing else fit: say so, not nothing
+        return 'The answer was too long to keep (cut short).' if found.get('truncated') else ''
+    said = '; '.join(parts) + (' (cut short)' if found.get('truncated') else '')
+    # A quoted part that ends its own sentence, as a message often does, takes no second full stop.
+    return f"The answer: {said}" + ("" if said[-2:] in {".'", "!'", "?'", '."', '!"', '?"'} else ".")
+
+
+def answerer(found):
+    """Who gave the answer the state describes, from core's `by`: 'the person, in the terminal', 'a person, through
+    mv2' (mv2 answer or the dashboard), or 'plugin NAME'; None when no answer is known to have taken."""
+    from ..display import clean
+    by = found.get('by') if isinstance(found.get('by'), dict) else {}
+    return {'person': 'the person, in the terminal', 'mv2': 'a person, through mv2',
+            'plugin': f"plugin {clean(str(by.get('name') or '?'))}"}.get(by.get('kind'))
 
 
 # Said when core gives no reason; core and the harness normally say why, as fact when known and as possibilities
@@ -204,18 +237,26 @@ def outcome(found, agent):
     from ..display import clean
     state = found['state']
     reason = '\n'.join(clean(line) for line in (found.get('reason') or '').splitlines()).strip()  # all of it, as given
+    # Who answered and the answer in full, after the outcome: the person sees everything core kept.
+    who, full = answerer(found), answer_words(found.get('answer') or found.get('person_answer'))
+    tail = (f' {full}' if full else '')
     if state == 'answered':  # core's reason, where it gives one, says what is proven (async: delivered, not a card)
-        return 'Answered.' + (f' {reason}' if reason else '') + (
+        return ('Answered' + (f' by {who}' if who else '') + '.' + (f' {reason}' if reason else '') + (
             " It chose a decision that saves a rule to the person's settings; the harness writes the rule."
-            if found.get('saved_rule') else '')
+            if found.get('saved_rule') else '') + tail)
     if state == 'sent_first':  # its reason says the harness doesn't confirm it took the answer
-        return reason or "Sent first, ahead of any answer from the terminal; the harness doesn't confirm it took it."
+        return (reason or "Sent first, ahead of any answer from the terminal; the harness doesn't confirm it took "
+                          "it.") + (f' Sent by {who}.' if who else '') + tail
     if state == 'submitted':
-        return (f"Sent; the outcome isn't known yet. Read it with mv2 answer {agent} --result {found['id']}. "
-                "Don't answer again: the answer was sent.")
+        read = f"Read the outcome with mv2 answer {agent} --result {found['id']}; don't answer again."
+        if who:  # handed to the agent: sent, its outcome not known yet
+            return f"Sent by {who}; the outcome isn't known yet. {read}" + tail
+        # Recorded, but whether it reached the agent isn't known yet: core's reason says how far it got.
+        return (reason or "The answer is being submitted; it isn't known yet whether it reached the agent.") + \
+            f" {read}" + tail
     said = reason or DEFAULT_REASONS.get(state, f'Answer {state}')
-    if state == 'person' and _person_answer(found.get('person_answer')):  # its own sentence after core's reason
-        said = said.rstrip('.') + '. ' + clean(_person_answer(found['person_answer']))
+    if state == 'person' and full:  # its own sentence after core's reason
+        said = said.rstrip('.') + '. ' + full
     if found.get('cause') == 'replaced':  # core's reason names the prompt it waits on now; say how to read it
         said = said.rstrip('.') + f'. Read it with mv2 answer {agent}.'
     raise ValueError(said)

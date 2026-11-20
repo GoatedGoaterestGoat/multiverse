@@ -64,8 +64,12 @@ class AnswerCommandTests(PluginTestCase):
         with mock.patch.object(tool.prompts, "waiting", return_value=PROMPTS), \
                 mock.patch.object(tool.prompts, "answer", side_effect=answer), \
                 mock.patch.object(tool.prompts, "result", side_effect=lambda root, agent, id: reads.append(id) or
-                                  PromptResult(id=id, state="person", person_answer={
-                                      "choice": "deny", "answers": {"Database": ["SQLite"]}, "typed": {"Why?": ["no"]}})):
+                                  PromptResult(id=id, state="person", by={"kind": "person"}, answer={
+                                      "choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                      "message": "use staging",
+                                      "answers": {"Database": ["SQLite"], "Token": {"secret": True}},
+                                      "typed": {"Why?": ["no"]}, "notes": {"Why?": "too slow", "Key": {"secret": True}},
+                                      "truncated": True})):
             with self.subTest("the list shows choices, rule-saving ones and questions by number"):
                 status, out, _ = self.mv2()
                 self.assertEqual(status, 0)
@@ -132,7 +136,9 @@ class AnswerCommandTests(PluginTestCase):
                         (PromptResult(id="mcp1", state="person", cause="person",
                                       reason="The person answered it in the terminal first. Nothing was sent.",
                                       person_answer={"answers": {"Run": ["Allow"]}}),
-                         "The person answered it in the terminal first. Nothing was sent. They answered 'Run' with Allow."),
+                         # an older result's person_answer, when core gives no answer
+                         "The person answered it in the terminal first. Nothing was sent. The answer: answered 'Run' "
+                         "with Allow."),
                         (PromptResult(id="mcp1", state="refused", cause="not_answered",
                                       reason="mv2 sent no answer to prompt mcp1, and it is still open."),
                          "mv2 sent no answer to prompt mcp1, and it is still open."),
@@ -166,12 +172,38 @@ class AnswerCommandTests(PluginTestCase):
                 outcome[0] = PromptResult(id="perm1", state="answered", reason=said)
                 status, out, _ = self.mv2("perm1", "--choice", "allow")
                 self.assertEqual((status, out.strip()), (0, f"Answered. {said}"))
+                for by, who in (({"kind": "mv2"}, "a person, through mv2"), ({"kind": "plugin", "name": "remote"},
+                                                                              "plugin remote")):
+                    outcome[0] = PromptResult(id="perm1", state="answered", reason=said, by=by, answer={
+                        "choice": {"id": "allow", "label": "Yes", "short": "Allow once"}})
+                    status, out, _ = self.mv2("perm1", "--choice", "allow")
+                    self.assertEqual((status, out.strip()),
+                                     (0, f"Answered by {who}. {said} The answer: chose Allow once (allow)."))
             with self.subTest("--timeout 0 returns once sent, and a pending outcome says how to read it"):
                 sent.clear()
                 outcome[0] = PromptResult(id="perm1", state="submitted")
                 status, out, _ = self.mv2("perm1", "--choice", "allow", "--timeout", "0")
                 self.assertEqual((status, sent[0][1]["wait"]), (0, False))
                 self.assertIn("mv2 answer worker --result perm1", out)
+            with self.subTest("a pending answer says whether it reached the agent, never to send it again"):
+                # recorded, the hand-off not known yet: core's reason, not 'sent'
+                reason = "Answer submission is in progress; read --result, do not resend."
+                outcome[0] = PromptResult(id="perm1", state="submitted", reason=reason)
+                status, out, _ = self.mv2("perm1", "--choice", "allow", "--timeout", "0")
+                self.assertEqual(status, 0)
+                self.assertTrue(out.startswith(reason), out)
+                self.assertNotIn("sent", out.replace("resend", ""))
+                self.assertIn("don't answer again", out)
+                # handed over (core says who): sent, its outcome not known yet
+                outcome[0] = PromptResult(id="perm1", state="submitted", by={"kind": "mv2"})
+                status, out, _ = self.mv2("perm1", "--choice", "allow", "--timeout", "0")
+                self.assertTrue(out.startswith("Sent by a person, through mv2; the outcome isn't known yet."), out)
+            with self.subTest("an answer cut to nothing still says it was cut"):
+                outcome[0] = PromptResult(id="perm1", state="answered", by={"kind": "plugin", "name": "notes"},
+                                          answer={"truncated": True})
+                status, out, _ = self.mv2("perm1", "--choice", "allow")
+                self.assertEqual((status, out.strip()),
+                                 (0, "Answered by plugin notes. The answer was too long to keep (cut short)."))
             for state, reason, cause, says in (
                     ("person", None, "person", "The person answered first"),
                     ("gone", "The turn ended before the answer arrived.", "turn_ended",
@@ -192,8 +224,18 @@ class AnswerCommandTests(PluginTestCase):
                 sent.clear()
                 status, _, err = self.mv2("--result", "perm1")
                 self.assertEqual((status, sent, reads), (1, [], ["perm1"]))
-                self.assertIn("The person answered first. They chose deny; answered 'Database' with SQLite; typed 'no' "
-                              "for 'Why?'.", err)
+                # who answered and everything they answered: the person reading it sees it all; a secret entry was
+                # never kept, and a cut answer says so
+                self.assertIn("The person answered first. The answer: chose Deny (deny); with the message "
+                              "'use staging'; answered 'Database' with SQLite; answered 'Token' secretly (not kept); "
+                              "typed 'no' for 'Why?'; noted 'too slow' on 'Why?'; left a secret note on 'Key' (not "
+                              "kept) (cut short).", err)
+            with self.subTest("a quoted answer that ends its own sentence gets one full stop"):
+                for message, ends in (("not in that folder.", "folder.'"), ("Which one?", "one?'"),
+                                      ("don't.", "don't.\""), ("use staging", "staging'.")):
+                    said = tool.answer_words({"choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                              "message": message})
+                    self.assertTrue(said.endswith(ends), said)
 
 
 if __name__ == "__main__":

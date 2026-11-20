@@ -1,4 +1,5 @@
 """Answer a waiting agent's prompt: its choices or questions, as the harness offers them; core checks and sends."""
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -16,6 +17,31 @@ DETAIL_LINES, DETAIL_WIDTH = 12, 200  # what the screen shows of a prompt's deta
 def prompt_line(item):
     """`permission · Bash: rm -rf build` for a prompt as core lists it."""
     return f"{item['kind']} · " + (clean(item['tool']) + ': ' if item.get('tool') else '') + clean(item['summary'])
+
+
+def outcome_shown(said, limit):
+    """An answer's outcome as a place with room for `limit` characters shows it: whole when it fits, else led by
+    where the rest is, then cut to fit, so the pointer shows however narrow the place or few its lines. The whole
+    answer (a long message, say) is kept for `v`, never silently clipped."""
+    if cell_len(said) <= limit:  # terminal cells, not characters: a wide character takes two
+        return said
+    lead = "(v shows the whole answer) "
+    return lead + set_cell_size(said, max(0, limit - cell_len(lead) - 1)).rstrip() + "…"
+
+
+class FittedOutcome:
+    """An answer's outcome on the one status line, fitted to the line's width each time it is drawn, so a resize
+    refits it (outcome_shown) rather than clipping it silently. str() is the whole outcome."""
+
+    def __init__(self, said):
+        self.said = said
+
+    def __str__(self):
+        return self.said
+
+    def __rich_console__(self, console, options):
+        # one line: a reason's line breaks become spaces (clean), as for any status, before fitting
+        yield Text(outcome_shown(clean(self.said), options.max_width), no_wrap=True, overflow="crop")
 
 
 def detail_text(item):

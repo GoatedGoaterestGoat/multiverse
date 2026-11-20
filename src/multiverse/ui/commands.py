@@ -10,7 +10,7 @@ from ..tools.inbox import readable
 from ..tools.unfocus import summary as unfocus_summary
 from ..tools.answer import outcome as answer_outcome
 from .plugin_service import error_text, in_daemon
-from .prompt_screen import AnswerScreen, prompt_line
+from .prompt_screen import AnswerScreen, FittedOutcome, prompt_line
 from .screens import ChoiceScreen, Details, Form
 
 # The focus lengths the dashboard offers: (choice, label, backend arguments).
@@ -179,8 +179,9 @@ class AgentCommands:
                     said, ok = answer_outcome(result, row["name"]), True
                 except ValueError as refused:
                     said, ok = str(refused), False
-                self.prompt_outcomes[agent] = (said, ok)
-                return said, not ok
+                self.prompt_outcomes[agent] = (said, ok)  # whole, for the inspector and v
+                # the one status line: fitted to its width each time it is drawn, the pointer first when wider
+                return FittedOutcome(said), not ok
             self.submit_operation(f"Answer {clean(row['name'])}", self.backend.answer_prompt, Path(row["universe"]),
                                   agent, item["id"], values, describe=describe,
                                   after=lambda result: self.inspector.show_prompts(None) if self.inspector.row else None)

@@ -511,7 +511,7 @@ mv2 answer [--choice CHOICE] [--message MESSAGE] [--answer QUESTION=LABEL] [--no
 | `--answer` | `QUESTION=LABEL` (repeatable) | An answer to one question: its number, header or text, then one of its labels, or typed text where the question allows it. Repeat it for each question, and for each label of a question that allows several |  |
 | `--note` | `QUESTION=TEXT` (repeatable) | A note to go with the answer to a question that takes one, once per question |  |
 | `--stdin` |  | Read the answer as JSON on standard input: {"choice", "message", "answers": {QUESTION: LABEL or [LABELS]}, "notes": {QUESTION: TEXT}}. Use it for secret answers, which must not appear on the command line |  |
-| `--result` | `ID` | Read an earlier answer's outcome as it stands now; never sends |  |
+| `--result` | `ID` | Read an earlier answer's outcome as it stands now, with who answered and the whole answer; never sends |  |
 | `--timeout` | `TIMEOUT` | Seconds to wait for the outcome (default: 30); 0 returns once it is sent | `30` |
 | `--json` |  | Print the complete result as JSON |  |
 

@@ -65,6 +65,8 @@ The answer waits up to 30 seconds for its outcome; change that with `--timeout`,
 | Can't tell which answer took | Sent, but mv2 can't say whether it or the person's answer took |
 | Not sent | The answer was refused, and the reason says why |
 
+An outcome says who gave the answer it describes, where that's known: the person in the terminal, a person through mv2 (`mv2 answer` or the dashboard), or a plugin by name. Then it gives the whole answer: the choice by its short label and ID, the message sent with it, the labels picked, typed text and notes, such as `Answered by plugin remote. The answer: chose Allow once (allow).` A secret answer or note reads as not kept, since mv2 never keeps one, and an answer too long to keep whole says it was cut short. `--json` has the same as `by` and `answer`.
+
 Some Codex question dialogs automatically submit an empty answer when their countdown ends. That response looks the same as submitting no answers yourself. The result says the terminal replied; it cannot identify which happened.
 
 When an answer didn't take, the result says why: as fact when mv2 knows, such as the person answering first, the turn ending, or the agent waiting on another prompt by now (then `mv2 answer NAME` shows that one), and as possible explanations when it doesn't. It never tells you to answer again after an answer was sent.

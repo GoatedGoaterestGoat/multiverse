@@ -68,7 +68,7 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
         return str(widget.render()) if widget.display else ""
 
     def status(self):
-        return str(self.app.query_one("#status", Static).render())
+        return str(self.app.query_one("#status", Static).content)  # an answer's outcome fits itself when drawn
 
     async def open(self, pilot, agent):
         await self.inspect(pilot, agent)
@@ -221,11 +221,150 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                     await self.settle(pilot)
                 finally:
                     self.backend.answer_prompt = answer
-                self.assertIn("The person answered in the terminal first. They answered 'Which parts?' with UI.",
+                self.assertIn("The person answered in the terminal first. The answer: answered 'Which parts?' with UI.",
                               self.status())
                 await self.until(pilot, lambda: "Last answer: The person" in self.line(), "the outcome in the inspector")
                 self.assertIn("Last answer: The person answered", self.line())
+            with self.subTest("a long answer is cut on the dashboard's lines, saying v shows all of it"):
+                self.writer["status"] = "waiting"
+                self.backend.prompts[self.writer["id"]] = [dict(QUESTION, id="long-answer",
+                                                                questions=QUESTION["questions"][:1])]
+                self.app.refresh_snapshot()
+                message = "keep the old build " * 40 + "MESSAGE-END"  # 771 characters, kept whole by core
+                answer = self.backend.answer_prompt
+                self.backend.answer_prompt = lambda root, reference, prompt_id, values: {
+                    "id": prompt_id, "state": "answered", "reason": None, "cause": None, "saved_rule": False,
+                    "by": {"kind": "mv2"}, "answer": {"choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                                      "message": message}}
+                try:
+                    await self.open(pilot, self.writer)
+                    self.app.screen.query_one("#q0", SelectionList).select("API")
+                    await pilot.press("ctrl+enter")
+                    await self.settle(pilot)
+                finally:
+                    self.backend.answer_prompt = answer
+                await self.until(pilot, lambda: "Last answer: (v shows" in self.line(), "the outcome")
+                frame = [strip.text for strip in self.app.screen._compositor.render_strips()]
+                status = self.app.query_one("#status", Static)
+                # on screen, not just in the widgets: the pointer leads, so no width or line count clips it
+                self.assertIn("(v shows the whole answer) Answered by", frame[status.region.y])
+                self.assertIn("Last answer: (v shows the whole answer)", "\n".join(frame))
+                self.assertNotIn("MESSAGE-END", "\n".join(frame))
+                await pilot.press("v")
+                await self.settle(pilot)
+                details = "\n".join(str(widget.render()) for widget in self.app.screen.query(Static))
+                self.assertIn("LAST ANSWER", details)
+                self.assertIn("MESSAGE-END", details)  # all of it
+                await pilot.press("escape")
+                await self.settle(pilot)
 
+
+    async def test_a_long_answers_outcome_points_to_v_on_screen_at_any_size(self):
+        """At 120x36 and 60x20 a long answer's outcome shows 'v shows the whole answer' on the status line and in the
+        inspector as drawn, and v has all of it; fragile because both lines are narrow and the inspector's rows are
+        shared with the prompt, so a pointer at the end is clipped off screen (the reviewer's case on d69b71b)."""
+        cases = [(size, message, end) for size in ((120, 36), (60, 20)) for message, end in (
+            ("keep the old build " * 40 + "MESSAGE-END", "MESSAGE-END"),  # longer than any line: always cut
+            ("keep the old build " * 5 + "MEDIUM-END", "MEDIUM-END"),  # fits some places, not others
+            ("SHORT-END", "SHORT-END"))]  # fits a wide status line, not a narrow one
+        for size, message, end in cases:
+            with self.subTest(size=size, end=end):
+                self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+                self.writer["status"] = "waiting"
+                self.backend.prompts[self.writer["id"]] = [dict(QUESTION, id="long-answer",
+                                                                questions=QUESTION["questions"][:1])]
+                self.backend.answer_prompt = lambda root, reference, prompt_id, values: {
+                    "id": prompt_id, "state": "answered", "reason": None, "cause": None, "saved_rule": False,
+                    "by": {"kind": "mv2"}, "answer": {"choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                                      "message": message}}
+                async with self.app.run_test(size=size) as pilot:
+                    await self.settle(pilot)
+                    await pilot.press("p")
+                    await self.open(pilot, self.writer)
+                    self.app.screen.query_one("#q0", SelectionList).select("API")
+                    await pilot.press("ctrl+enter")
+                    await self.settle(pilot)
+                    await self.until(pilot, lambda: "Answered by" in self.status(), "the outcome")
+                    frame = [strip.text for strip in self.app.screen._compositor.render_strips()]
+                    status = self.app.query_one("#status", Static)
+                    # each line, as drawn, shows the answer to its end or says where the rest is: never cut silently
+                    for where, shown in (("status", frame[status.region.y]),
+                                         ("inspector", "\n".join(frame[:status.region.y]))):
+                        self.assertTrue("v shows the whole answer" in shown or end in shown, (where, shown))
+                    self.assertIn("Answered by", frame[status.region.y])
+                    if end == "MESSAGE-END":
+                        self.assertNotIn(end, "\n".join(frame))
+                    await pilot.press("v")
+                    await self.settle(pilot)
+                    self.assertIn(end, "\n".join(str(widget.render()) for widget in self.app.screen.query(Static)))
+
+    async def test_the_status_line_refits_after_a_resize_and_counts_wide_characters(self):
+        """An answer's outcome on the status line shows its end or the pointer to v after the terminal narrows, and
+        with wide characters that take two cells each; fragile because the line was fitted once, by characters, and
+        clipped silently after a resize or with CJK text (the reviewer's cases on 38bc2f3)."""
+        for name, message, end, sizes in (
+                ("resize", "SHORT-END", "SHORT-END", ((120, 36), (60, 20))),  # fits at 120, not at 60
+                ("wide", "全" * 18 + "WIDE-END", "WIDE-END", ((120, 36),))):  # fits in characters, not in cells
+            with self.subTest(name):
+                self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+                self.writer["status"] = "waiting"
+                self.backend.prompts[self.writer["id"]] = [dict(QUESTION, id=f"{name}-answer",
+                                                                questions=QUESTION["questions"][:1])]
+                self.backend.answer_prompt = lambda root, reference, prompt_id, values, message=message: {
+                    "id": prompt_id, "state": "answered", "reason": None, "cause": None, "saved_rule": False,
+                    "by": {"kind": "mv2"}, "answer": {"choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                                      "message": message}}
+                async with self.app.run_test(size=sizes[0]) as pilot:
+                    await self.settle(pilot)
+                    await pilot.press("p")
+                    await self.open(pilot, self.writer)
+                    self.app.screen.query_one("#q0", SelectionList).select("API")
+                    await pilot.press("ctrl+enter")
+                    await self.settle(pilot)
+                    await self.until(pilot, lambda: "Answered by" in self.status(), "the outcome")
+                    for size in sizes:
+                        await pilot.resize_terminal(*size)
+                        await self.settle(pilot)
+                        status = self.app.query_one("#status", Static)
+                        shown = self.app.screen._compositor.render_strips()[status.region.y].text
+                        self.assertTrue("v shows the whole answer" in shown or end in shown, (size, shown))
+
+    async def test_a_multiline_reason_and_a_resized_inspector_show_the_end_or_the_pointer(self):
+        """A reason with a line break shows on the one status line as one line, its end or the pointer to v; and after
+        the terminal narrows, the inspector's Last answer is cut again for its new room; fragile because the status
+        renderable skipped the cleaning a string status gets, and the inspector kept the cut made for the old width
+        (the reviewer's cases on 77d411d)."""
+        for case in ("multiline status", "resized inspector"):
+            with self.subTest(case):
+                multiline = case == "multiline status"
+                self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+                self.writer["status"] = "waiting"
+                self.backend.prompts[self.writer["id"]] = [dict(QUESTION, id="another-answer",
+                                                                questions=QUESTION["questions"][:1])]
+                self.backend.answer_prompt = lambda root, reference, prompt_id, values, multiline=multiline: {
+                    "id": prompt_id, "state": "answered", "cause": None, "saved_rule": False,
+                    "reason": "First line of the outcome.\nSECOND-LINE" if multiline else None,
+                    "by": {"kind": "mv2"}, "answer": {"choice": {"id": "deny", "label": "No", "short": "Deny"},
+                                                      **({} if multiline else {"message": "Plain text INSPECTOR-END"})}}
+                async with self.app.run_test(size=(120, 36)) as pilot:
+                    await self.settle(pilot)
+                    await pilot.press("p")
+                    await self.open(pilot, self.writer)
+                    self.app.screen.query_one("#q0", SelectionList).select("API")
+                    await pilot.press("ctrl+enter")
+                    await self.settle(pilot)
+                    await self.until(pilot, lambda: "Last answer:" in self.line(), "the outcome")
+                    status = self.app.query_one("#status", Static)
+                    if multiline:
+                        shown = self.app.screen._compositor.render_strips()[status.region.y].text
+                        self.assertTrue("SECOND-LINE" in shown or "v shows the whole answer" in shown, shown)
+                    else:
+                        await pilot.resize_terminal(60, 20)
+                        await self.settle(pilot)
+                        frame = self.app.screen._compositor.render_strips()
+                        shown = "\n".join(row.text for row in frame[:status.region.y])
+                        self.assertIn("Last answer:", shown)
+                        self.assertTrue("INSPECTOR-END" in shown or "v shows the whole answer" in shown, shown)
 
     async def test_a_working_agents_open_questions_show_and_a_answers_them(self):
         """A gate kept, or a failed read taken as "none", hides a question the person can see in the terminal."""
