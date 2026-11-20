@@ -1,11 +1,13 @@
 """An unmanaged native side conversation never replaces the mv2 primary."""
+import asyncio
 from copy import deepcopy
 import unittest
 from uuid import uuid4
 
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex.status import notification as status_notification
-from multiverse.harnesses.types import LocalProtocolError, SessionHandle
+from multiverse.harnesses.codex.turn_events import task_digest
+from multiverse.harnesses.types import LocalProtocolError, SessionHandle, TurnEnded, TurnJoined, TurnStarted
 
 
 # Pinned 0.167 request inventory; production instead permits only known reads.
@@ -1028,6 +1030,88 @@ class CodexSideTest(unittest.TestCase):
         self.assertIsNone(caught.exception.request_id)
         self.assertTrue(self.protocol.bound)
         self.assertEqual(self.primary_state(), before)
+
+    def test_turn_events_require_exact_current_input_and_keep_recovered_ends(self):
+        """Replay or unrelated native traffic must not turn a join into a task or end a different turn."""
+        self.protocol.settings.update(navigation_cli=(0, 166, 0), turn_task_digest=task_digest('PRIVATE TASK'))
+        self.view.relay_context({'notify_turn_transitions': lambda: None, 'task_launch': True})
+
+        def turn(method, identity, **fields):
+            return {'method': 'turn/' + method, 'params': {'threadId': self.main,
+                    'turn': {'id': identity, **fields}}}
+
+        def consumed(item, client=None, *, identity='main-turn', thread=None, phase='completed'):
+            return {'method': 'item/' + phase, 'params': {'threadId': thread or self.main, 'turnId': identity,
+                    'item': {'type': 'userMessage', 'id': item, 'clientId': client,
+                             'content': [{'type': 'text', 'text': 'PRIVATE INPUT'}]}}}
+
+        def read():
+            observed = self.view.relay_turn_transitions()
+            if observed is None:
+                return ()
+            native, edges = observed
+            self.assertEqual(native, self.main)
+            self.assertNotIn('PRIVATE', repr(edges))
+            return edges
+
+        async def send(identifier, method, client, **params):
+            frame = {'id': identifier, 'method': 'turn/' + method,
+                     'params': {'threadId': self.main, 'clientUserMessageId': client, **params}}
+            await self.view.relay_before_send(self.view.outgoing(frame))
+
+        async def check():
+            await send(2, 'start', 'startup', input=[{'type': 'text', 'text': 'PRIVATE TASK'}])
+            self.view.incoming(turn('started', 'main-turn'))
+            self.view.incoming(consumed('item1', 'startup', phase='started'))
+            self.assertEqual(read(), ())
+            self.view.incoming(consumed('side', 'startup', thread=self.side))
+            self.assertEqual(read(), ())
+            self.view.incoming(consumed('item1', 'startup'))
+            self.view.incoming(consumed('item1', 'startup'))
+            self.assertEqual(read(), (TurnStarted(turn='main-turn', kind='prompt', ref='item1', source='person',
+                                                  attempt='startup', first_task=True),))
+
+            await send(3, 'steer', 'manual', expectedTurnId='main-turn')
+            self.view.incoming(consumed('item2', 'manual'))
+            self.view.incoming(consumed('item3', 'external'))
+            self.assertEqual(read(), (
+                TurnJoined(turn='main-turn', ref='item2', source='person', attempt='manual'),
+                TurnJoined(turn='main-turn', ref='item3', source='harness', attempt='external'),
+            ))
+
+            first_end = turn('completed', 'main-turn', status='interrupted', completedAt=100, durationMs=30)
+            self.view.incoming(first_end)
+            self.view.incoming(first_end)
+            self.assertEqual(read(), (TurnEnded(turn='main-turn', kind='prompt', ref='end_100_30',
+                                                state='interrupted'),))
+            self.view.incoming(turn('started', 'main-turn'))
+            self.view.incoming(first_end)  # Recovery must not replay the previous interruption.
+            self.assertEqual(read(), ())
+            self.view.incoming(turn('completed', 'main-turn', status='failed', completedAt=110, durationMs=25))
+            self.assertEqual(read(), (TurnEnded(turn='main-turn', kind='prompt', ref='end_110_25', state='error'),))
+
+            self.view.incoming(consumed('unknown', None, identity='not-observed'))
+            self.assertEqual(read(), ())
+            self.view.incoming(turn('started', 'housekeeping'))
+            await send(4, 'steer', 'typed-mid-turn', expectedTurnId='housekeeping')
+            self.view.incoming(consumed('late-first-seen', 'typed-mid-turn', identity='housekeeping'))
+            self.assertEqual(read(), (TurnJoined(turn='housekeeping', ref='late-first-seen',
+                                                 source='person', attempt='typed-mid-turn'),))
+            self.view.incoming(turn('started', 'model-already-running'))
+            self.view.incoming({'method': 'item/started', 'params': {'threadId': self.main,
+                'turnId': 'model-already-running', 'item': {'type': 'agentMessage'}}})
+            self.view.incoming(consumed('after-model', 'foreign', identity='model-already-running'))
+            self.assertEqual(read(), (TurnJoined(turn='model-already-running', ref='after-model',
+                                                 source='harness', attempt='foreign'),))
+            self.owner = False
+            self.view.incoming(turn('completed', 'unowned', status='completed'))
+            self.owner = True
+            self.view.version = (0, 167, 0)
+            self.view.incoming(turn('completed', 'mixed', status='completed'))
+            self.view.version = (0, 166, 0)
+            self.assertEqual(read(), ())
+
+        asyncio.run(check())
 
     def test_primary_queue_events_preserve_interrupt_order_and_ignore_the_side(self):
         """Primary interrupt ordering controls durable queue pause; a side or late old turn must not silently pause a newer primary turn."""

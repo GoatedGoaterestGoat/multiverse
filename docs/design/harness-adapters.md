@@ -1747,6 +1747,39 @@ leaves `waiting` core can ask `prompt_outcome` in its metadata-only mode, which 
 only that record and says `closed` only when the record is this launch's and
 conversation's, never from Claude's transcript.
 
+Turn events go the same way (`--turn-events-json`), from the rows Claude stores
+(`session.append`, with each row's id) and its turn hooks, grouped as the transcript
+reader groups rows. A user row with an origin opens a prompt turn: it is stored just
+before `turn.start`, which starts the turn under that row's id; a `turn.start` with
+no new row continues the last turn, which then ends again. A `queued_command` row
+in a running turn is a join. A local command's row opens a command turn, and its
+output row ends it, or the note it stores for the model right after its output
+(`/context`'s report), which the reader groups with it: the command's end waits for
+the next row in its conversation to say which; Claude raises no turn hooks for
+those. The source is the
+person's for a typed row (Claude stores a typed local command as its own) and the
+harness's otherwise, with the mv2 delivery attempt the mod matched the row to;
+core makes it mv2's. The first prompt row the person's side stores in a task
+launch's first load (`MV2_FIRST_TASK`) is the task. A row belongs to the turn
+running when its append is entered, and rows rank in that order, which is the order
+Claude stores them in (their appends can finish in another). A turn's end goes once
+its rows, from the first the file's tail holds on, are whole in the transcript file
+and none is still arriving: Claude raises `turn.complete` about 0.1 to 0.2 s before
+it writes them, so the agent stays `working` until then, at most 2 s, and the end
+goes with the idle report, naming the turn's row latest in the file. The end takes
+its place as `turn.complete` is entered, before Claude's own part of that hook runs,
+so a turn started meanwhile goes after it; it goes only once that part has returned
+(rows Claude stores meanwhile are the turn's), or at the bound. A continuation keeps
+the turn, but an end proves only the rows admitted before the next `turn.start`, and
+the hook leaves the status alone if any turn started while it waited. A join takes
+its place among the edges when its append is entered and gives it up if its step's
+end goes first (a continuation's join keeps its place when an earlier end goes); edges keep their order within a conversation, so an old
+conversation's never hold up a new one's after a `/clear`, which also stops the
+file reads for the old conversation's ends. Its state comes from `turn.complete`'s
+reason: `answer` and `refusal` are finished, `aborted` (Esc) interrupted, `error`
+an error. A load that never saw what opened the running turn (a reload mid-turn)
+reports no end for it; core closes it.
+
 The mod also writes `claude-queue.json`: the mv2 messages Claude holds now
 (`waitingRows`: taken, neither stored nor refused), each by its delivery attempt's
 ID, with its mode and when it was taken. It is rewritten whenever one is taken,
@@ -1813,7 +1846,14 @@ per row: a listing reads every agent's transcripts, and a per-row index holds
 about 1.5 times its file. The transcript reads keep their per-row index for the
 eight most recently read transcripts. History versions come from one counter
 that only grows, so an index built again after its eviction never reuses a
-version a reader holds.
+version a reader holds. A read has one deadline, core's reader's, which the
+adapter never re-arms: it is checked right before every step that can block or
+grow with the transcript (opening the projects listing and taking each entry,
+each project folder, opening the transcript and each chunk, each row parsed,
+each analysis phase, each fact of the view) and once more, with everything
+decided, before an analysis or a view is kept. A cold index of a large transcript takes tens of seconds, and a turn
+event's read has 0.5 s, so past the deadline a read stops and keeps nothing
+partial: the index is left as it was, and the next read starts from there.
 
 A new process would parse every transcript from its start, about a second per
 large agent, so each agent's usage indexes are also kept in its folder

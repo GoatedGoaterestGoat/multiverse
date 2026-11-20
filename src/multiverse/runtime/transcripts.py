@@ -17,7 +17,8 @@ from threading import Lock
 from typing import Any
 
 from .. import harnesses
-from ..harnesses.types import SessionHandle, RowFact, TranscriptView, TranscriptRowsChanged, normalize_session_id
+from ..harnesses.types import (SessionHandle, RowFact, TranscriptView, TranscriptRowsChanged, TurnProjection,
+                              normalize_session_id)
 from ..plugins.access import Denied
 from ..plugins.agent_files import AgentGone
 from ..store import read
@@ -49,6 +50,18 @@ class Unavailable(ValueError):
 class Retry(Unavailable):
     def __init__(self, reason='Transcript identity is changing; retry shortly'):
         super().__init__(reason, retry=True)
+
+
+class _ReadDeadline(Retry):
+    """The read budget expired independently of snapshot validity."""
+
+
+class _BeforeProviderDeadline(_ReadDeadline):
+    """The budget expired before entering a transcript provider."""
+
+
+class _PendingTranscript(Unavailable):
+    """A provider reports an unfinished write. Only the event resolver waits for it."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -179,9 +192,12 @@ class ReadExecutor:
     deadline: float
     _validate: Any = field(repr=False)
 
-    def check(self):
+    def _check_deadline(self):
         if time.monotonic() >= self.deadline:
-            raise Retry('Transcript read exceeded its deadline; retry with a smaller page')
+            raise _ReadDeadline('Transcript read exceeded its deadline; retry with a smaller page')
+
+    def check(self):
+        self._check_deadline()
         self._validate()
 
 
@@ -226,7 +242,7 @@ def _gone(directory):
     return AgentGone(f'Agent folder {directory} is gone; it was removed or moved')
 
 
-def _snapshot(root, reference, *, allow_navigation=False):
+def _snapshot(root, reference, *, allow_navigation=False, reconcile=True, deadline=None):
     effects.require('transcript_view', getattr(reference, 'name', reference))
     root = Path(root).resolve()
     directory = reference if isinstance(reference, Path) else agents.directory(root, reference)
@@ -243,7 +259,7 @@ def _snapshot(root, reference, *, allow_navigation=False):
         # This may reconcile proven /clear evidence. Never claim to hold the
         # launch lock before native's nonblocking snapshot path has acquired it.
         from . import navigation
-        if not (allow_navigation and navigation.pending(facts)):
+        if reconcile and not (allow_navigation and navigation.pending(facts)):
             properties, facts = native.session_snapshot(root, directory, properties, facts, adapter=adapter,
                                                          launch_locked=False)
         with native._snapshot_lock(directory):
@@ -289,7 +305,8 @@ def _snapshot(root, reference, *, allow_navigation=False):
                 raise Unavailable(f'{error.file}: {error.reason}') from None
             except OSError:
                 raise Unavailable('Native session records cannot be read reliably; repair the agent records') from None
-        reader = ReadExecutor(deadline=time.monotonic() + READ_SECONDS, _validate=validate)
+        reader = ReadExecutor(deadline=time.monotonic() + READ_SECONDS if deadline is None else deadline,
+                              _validate=validate)
         reader.check()
         return _Snapshot(root=root, directory=directory, adapter=adapter, session=session, earlier=earlier,
                          universe_id=universe_id, reader=reader)
@@ -347,7 +364,10 @@ def _generation(session):
 def _provider(snapshot, method, session, *args, **kwargs):
     if native.adapter_hook(snapshot.adapter, method) is None:
         raise Unavailable('Transcript reading is not implemented for this harness yet')
-    snapshot.reader.check()
+    try:
+        snapshot.reader.check()
+    except _ReadDeadline as error:
+        raise _BeforeProviderDeadline(str(error)) from None
     try:
         result = effects.call(snapshot.adapter, method, session, *args, reader=snapshot.reader, **kwargs)
     except (Denied, AgentGone, Unavailable, TranscriptRowsChanged):
@@ -396,7 +416,8 @@ def _validate_view(view):
         raise Unavailable('The harness returned invalid transcript metadata', state='error')
     source = view.source
     if source.state != 'supported':
-        raise Unavailable(source.reason or 'The native transcript is unavailable', state=source.state)
+        error = _PendingTranscript if source.retry is True else Unavailable
+        raise error(source.reason or 'The native transcript is unavailable', state=source.state)
     positions = set()
     for row in view.rows:
         if (not isinstance(row, RowFact) or not isinstance(row.position, str) or not row.position
@@ -754,6 +775,111 @@ def _grouped(loaded):
 
 def _groups(loaded):
     return _grouped(loaded)[0]
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnReference:
+    """Public turn and row identity established by one immutable transcript view."""
+    turn: str | None = None
+    ref: str | None = None
+    generation: str | None = None
+    kind: str | None = None
+
+
+@dataclass(frozen=True)
+class _TurnRead:
+    loaded: _Loaded
+    references: tuple[TurnReference, ...]
+    pending_rows: bool
+
+
+def turn_references(root, directory, launch_id, native_id, generation, transitions, *, deadline):
+    """Resolve one scoped event batch off-loop, waiting briefly for its reported rows."""
+    unresolved = (TurnReference(),) * len(transitions)
+    has_rows = any(edge.ref is not None for edge in transitions)
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline, last)
+            if last is None:
+                return unresolved  # The launch or conversation moved; no earlier view is current.
+            if not last.pending_rows:
+                return last.references + unresolved[len(last.references):]
+        except _BeforeProviderDeadline:
+            break  # No new transcript read began. Recheck the saved view's ownership below.
+        except _ReadDeadline:
+            # The deadline elapsed before the next view was established.
+            return unresolved
+        except (Retry, _PendingTranscript):
+            last = None
+            if not has_rows:
+                return unresolved
+        except (AgentGone, Unavailable, TranscriptRowsChanged, OSError, ValueError, TypeError, KeyError):
+            return unresolved
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(.025, remaining))
+    if last is None:
+        return unresolved
+    try:
+        last.loaded.snapshot.reader._validate()
+    except (AgentGone, Unavailable, OSError, ValueError, TypeError, KeyError):
+        return unresolved
+    return last.references
+
+
+def _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline, previous):
+    try:
+        snap = _snapshot(root, directory, allow_navigation=True, reconcile=False, deadline=deadline)
+    except _ReadDeadline as error:
+        raise _BeforeProviderDeadline(str(error)) from None
+    facts = records.runtime(snap.directory / 'runtime.json')
+    if ((snap.session.launch_id, snap.session.native_id) != (launch_id, native_id)
+            or facts.get('session_generation', 0) != generation):
+        return None
+    loaded = _load(root, directory, snapshot=snap)
+    project = native.adapter_hook(snap.adapter, 'project_turn_event')
+    groups, by_row = _grouped(loaded)
+    anchors = {indexes[0]: turn for turn, indexes in groups if turn.kind in ('prompt', 'command')}
+    results = []
+    fallback = ()
+    pending_rows = False
+    try:
+        snap.reader._check_deadline()
+        if (previous is not None and previous.loaded.generation == loaded.generation
+                and previous.loaded.snapshot.universe_id == snap.universe_id and previous.loaded.view == loaded.view):
+            snap.reader._check_deadline()
+            previous.loaded.snapshot.reader._validate()
+            fallback = previous.references
+        for edge in transitions:
+            snap.reader._check_deadline()
+            if project is None:
+                anchor = loaded.refs.get(edge.turn)
+                row = loaded.refs.get(edge.ref)
+                pending_rows |= edge.ref is not None and edge.ref not in loaded.refs
+            else:
+                chosen = _provider(snap, 'project_turn_event', loaded.session, loaded.view, edge)
+                if not isinstance(chosen, TurnProjection):
+                    results.append(TurnReference())
+                    continue
+                anchor = loaded.positions.get(chosen.turn_position)
+                row = loaded.positions.get(chosen.row_position)
+                pending_rows |= edge.ref is not None and row is None
+            turn = anchors.get(anchor)
+            if row is not None and (row not in by_row or turn is not None and turn.id != by_row[row]):
+                row = None
+            ref = _cursor(loaded, row) if row is not None else None
+            results.append(TurnReference(turn=turn.id if turn is not None else None, ref=ref,
+                                         generation=loaded.generation if ref is not None else None,
+                                         kind=turn.kind if turn is not None else None))
+        snap.reader.check()
+    except _ReadDeadline:
+        # Recheck only ownership. No further transcript reads may start after the cutoff.
+        snap.reader._validate()
+        # The unvisited suffix can keep its proof only from an identical validated view.
+        results.extend(fallback[len(results):])
+        pending_rows = False
+    return _TurnRead(loaded, tuple(results), pending_rows)
 
 
 def _turn_boundary(loaded, groups, anchor, *, before=False):

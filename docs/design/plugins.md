@@ -428,6 +428,7 @@ caller can forget one:
 | `prompt.opened` | core's prompt ledger, when a harness's waiting prompt can first be listed: reported by the adapter, or found by a read of the listing (1.21; see [waiting prompts](waiting-prompts.md)) | id, kind, requires_waiting |
 | `prompt.closed` | core's prompt ledger, when that prompt ends: reported by the adapter, before a status change away from `waiting`, or at its launch's or conversation's end | id, kind, state, cause (as `prompt_result()` gives them then) |
 | `agent.prompt` | `runtime/prompts.py`, when an answer mv2 sent changes outcome | id, kind, tool, caller, state, cause; `outcome` (the same as state, until 2.0); never the prompt's text or the answer |
+| `turn.started`, `turn.joined`, `turn.ended` | core's ledger, from the adapter's turn edges (1.21; see [waiting prompts](waiting-prompts.md#turn-events)) | turn, kind, ref, generation; on a start or join source (person, mv2 or harness) and message (the mv2 message ID); first_task on a start; state on an end |
 | `PLUGIN.*` | `mv.events.emit` from a plugin | anything JSON (namespaced to its name) |
 
 Moving or removing a whole subverse records nothing in its own journal, which

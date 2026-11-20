@@ -38,7 +38,7 @@ EXTENSION_POINTS = frozenset({
 CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status", "agent.exited", "agent.killed",
                "agent.reported", "agent.session", "agent.command", "agent.moved", "agent.removed", "message.saved", "message.delivered",
                "message.failed", "message.read", "universe.created", "refresh.applied", "prompt.opened",
-               "prompt.closed", "agent.prompt")
+               "prompt.closed", "agent.prompt", "turn.started", "turn.joined", "turn.ended")
 EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.

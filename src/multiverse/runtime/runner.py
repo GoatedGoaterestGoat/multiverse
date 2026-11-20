@@ -437,6 +437,9 @@ def launch_environment(request):
     for key in request.get('unset_env', []):
         env.pop(key, None)
     env.update(request['env'])
+    env.pop('MV2_FIRST_TASK', None)
+    if request.get('task_launch') is True:
+        env['MV2_FIRST_TASK'] = '1'
     cli_prefix = str(Path(env['MV2_CLI']).parent) + os.pathsep
     if not env.get('PATH', '').startswith(cli_prefix):
         env['PATH'] = cli_prefix + env.get('PATH', '')
@@ -705,7 +708,7 @@ def main():
 
             def navigate(action, event):
                 if action == 'commit' and proxy is not None:
-                    proxy.stage_prompt_transitions()
+                    proxy.stage_adapter_events()
                 return apply_navigation(action, event)
 
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
@@ -716,11 +719,15 @@ def main():
                 record_connection=attachments.connection_logger(launch, started=runner_started),
                 record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
                 navigation=navigate,
-                relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name},
+                relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name,
+                               'task_launch': request.get('task_launch') is True},
                 record_delivery_observation=delivery_publisher,
                 record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None,
                 record_prompt_transitions=lambda native_id, generation, edges: prompt_events.stage(
                     agent_dir, launch.name, native_id, edges, generation=generation),
+                record_turn_transitions=lambda native_id, generation, edges, *, deadline: prompt_events.stage_turns(
+                    Path(env['MV2_UNIVERSE']), agent_dir, launch.name, native_id, edges, generation=generation,
+                    task_launch=request.get('task_launch') is True, deadline=deadline),
                 publish_prompt_events=lambda: prompt_events.publish(agent_dir))
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
@@ -838,7 +845,7 @@ def main():
             startup.start()
         if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
-                                    before_status_event=proxy.stage_prompt_transitions if proxy else None)
+                                    before_status_event=proxy.stage_status_events if proxy else None)
             roles['status observer'] = attachments.Role(launch, 'status observer', started=runner_started)
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
@@ -879,7 +886,7 @@ def main():
             finish_failed_wake(launch, request, env, process,
                                diagnostic.get('reason') or 'Runner ended before launch readiness')
         if proxy is not None:
-            proxy.stage_prompt_transitions()
+            proxy.stage_adapter_events()
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code in (0, -signal.SIGTERM, 143) or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
@@ -898,7 +905,7 @@ def main():
         print(f"Multiverse launch failed: {error}", file=sys.stderr)
         diagnostic = launch_diagnostic(agent_dir, launch.name, f'Multiverse launch failed: {error}')
         if proxy is not None:
-            proxy.stage_prompt_transitions()
+            proxy.stage_adapter_events()
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error), **diagnostic)
         if not exited:  # failed before the process ended, or before it could start: still its one exit
             from multiverse.runtime.lifecycle import _event

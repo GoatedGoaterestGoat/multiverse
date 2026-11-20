@@ -5,10 +5,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from time import monotonic
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse.harnesses.types import ObservedBinding, RowFact, TranscriptSource, TranscriptView, TranscriptRowsChanged
+from multiverse.harnesses.types import (ObservedBinding, RowFact, TranscriptSource, TranscriptView,
+                                       TranscriptRowsChanged, TurnEnded, TurnJoined, TurnProjection, TurnStarted)
 from multiverse.plugins.access import within, Denied
 from multiverse.plugins.agent_files import AgentGone
 from multiverse.runtime import transcripts as t
@@ -79,6 +81,184 @@ class TranscriptCoreTest(BaseTest):
              tip=facts[-1].ref if facts else None, gap=None, history_version=0)
         self.provider.bodies = {i: {'body': [f'body {i}']} for i in range(len(labels))}
         return facts
+
+    def test_turn_event_references_require_the_current_generation_and_same_turn(self):
+        """A native observation may otherwise attach rows from another turn or a previously selected conversation."""
+        edges = (TurnStarted(turn='r0', ref='r0', kind='prompt', source='person'),
+                 TurnJoined(turn='r0', ref='r3', source='harness'),
+                 TurnEnded(turn='r2', kind='prompt', ref='r3', state='finished'))
+        rows = t.rows(self.root, self.directory, bodies=False)
+        self.provider.calls.clear()
+        ordered = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, edges,
+                                    deadline=monotonic() + 5)
+        self.assertEqual(ordered, (
+            t.TurnReference(turn=rows.rows[0].turn, ref=rows.rows[0].cursor, generation=rows.generation, kind='prompt'),
+            t.TurnReference(turn=rows.rows[0].turn, kind='prompt'),
+            t.TurnReference(turn=rows.rows[3].turn, ref=rows.rows[3].cursor, generation=rows.generation, kind='prompt'),
+        ))
+        self.assertEqual([call[0] for call in self.provider.calls], ['view'])
+        self.assertEqual(t.turn_references(self.root, self.directory, 'launch', self.native_id, 1, edges,
+                                           deadline=monotonic() + 5), (t.TurnReference(),) * len(edges))
+
+    def test_turn_projection_uses_public_groups_and_cursors_from_the_same_view(self):
+        """An adapter's private position is usable only through core's validated public cursor and turn grouping."""
+        self.set_rows(['prompt', 'response', 'prompt', 'response'], refs=False)
+        expected = t.rows(self.root, self.directory, bodies=False)
+        edge = TurnEnded(turn='native-turn', kind='prompt', ref='native-last-row', state='finished')
+
+        def project(session, view, transition, *, reader):
+            self.assertIs(view, self.provider.views[self.native_id])
+            self.assertEqual(transition, edge)
+            reader.check()
+            return TurnProjection(turn_position='2:original', row_position='3:original')
+
+        self.provider.project_turn_event = project
+        self.assertEqual(t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, (edge,),
+                                           deadline=monotonic() + 5), (
+            t.TurnReference(turn=expected.rows[3].turn, ref=expected.rows[3].cursor,
+                            generation=expected.generation, kind='prompt'),
+        ))
+
+    def test_turn_edges_wait_for_the_reported_row_in_the_same_scope(self):
+        """A join or end can arrive before its reported row is visible to transcript readers."""
+        for edge, label in ((TurnJoined(turn='r0', ref='r1', source='person'), 'mid_turn'),
+                            (TurnEnded(turn='r0', kind='prompt', ref='r1', state='finished'), 'response')):
+            with self.subTest(edge=type(edge).__name__):
+                self.set_rows(['prompt'])
+                with patch.object(t, 'time', wraps=t.time) as clock:
+                    clock.sleep.side_effect = lambda _: self.set_rows(['prompt', label])
+                    reference, = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, (edge,),
+                                                   deadline=monotonic() + 5)
+                clock.sleep.assert_called_once()
+                rows = t.rows(self.root, self.directory, bodies=False)
+                self.assertEqual(reference, t.TurnReference(turn=rows.rows[1].turn, ref=rows.rows[1].cursor,
+                                                             generation=rows.generation, kind='prompt'))
+
+    def test_turn_start_keeps_null_when_the_row_misses_the_deadline(self):
+        """A reported start must use the shared deadline even when its row becomes readable on the next attempt."""
+        self.set_rows([])
+        edge = TurnStarted(turn='r0', ref='r0', kind='prompt', source='person')
+        elapsed = 0.0
+
+        def publish_at_deadline(delay):
+            nonlocal elapsed
+            elapsed += delay
+            self.set_rows(['prompt'])
+
+        with patch.object(t, 'time') as clock:
+            clock.monotonic.side_effect = lambda: elapsed
+            clock.sleep.side_effect = publish_at_deadline
+            result = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, (edge,), deadline=.01)
+        clock.sleep.assert_called_once_with(.01)
+        self.assertEqual(result, (t.TurnReference(),))
+        self.assertEqual([call[0] for call in self.provider.calls], ['view'])
+
+    def test_turn_projection_keeps_partial_proof_only_for_the_current_scope(self):
+        """A later edge running out of time must preserve an earlier verified cursor only for the same binding."""
+        page = t.rows(self.root, self.directory, bodies=False)
+        proved = t.TurnReference(turn=page.rows[0].turn, ref=page.rows[0].cursor,
+                                 generation=page.generation, kind='prompt')
+        start = TurnStarted(turn='native-turn', ref='input', kind='prompt', source='person')
+        end = TurnEnded(turn=start.turn, ref='end', kind='prompt', state='finished')
+        properties = self.directory / 'properties.json'
+        original = read(properties)
+        for change_scope in (False, True):
+            with self.subTest(change_scope=change_scope):
+                elapsed = 0.0
+
+                def project(session, view, edge, *, reader):
+                    nonlocal elapsed
+                    if edge is end:
+                        if change_scope:
+                            write(properties, {**original, 'native_session_home': self.home + '-moved'})
+                        elapsed = .5
+                    return TurnProjection(turn_position='0:original',
+                                          row_position='0:original' if edge is start else '1:original')
+
+                self.provider.project_turn_event = project
+                with patch.object(t, 'time') as clock:
+                    clock.monotonic.side_effect = lambda: elapsed
+                    result = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0,
+                                               (start, end), deadline=.5)
+                self.assertEqual(result, (t.TurnReference() if change_scope else proved, t.TurnReference()))
+
+    def test_retry_cutoff_keeps_unvisited_proof_only_from_an_identical_view(self):
+        """A pending input's retry must retain a proved end unless the transcript view changed."""
+        start = TurnStarted(turn='native-turn', ref='unwritten-input', kind='prompt', source='person')
+        end = TurnEnded(turn=start.turn, ref='end', kind='prompt', state='finished')
+        for change_view in (False, True):
+            with self.subTest(change_view=change_view):
+                self.set_rows(['prompt', 'response'])
+                page = t.rows(self.root, self.directory, bodies=False)
+                proved = t.TurnReference(turn=page.rows[1].turn, ref=page.rows[1].cursor,
+                                         generation=page.generation, kind='prompt')
+                elapsed, ends = 0.0, 0
+
+                def project(session, view, edge, *, reader):
+                    nonlocal elapsed, ends
+                    if edge is start:
+                        return TurnProjection(turn_position='0:original')
+                    ends += 1
+                    if ends == 2:
+                        elapsed = .5
+                    return TurnProjection(turn_position='0:original', row_position='1:original')
+
+                def reopen(delay):
+                    nonlocal elapsed
+                    elapsed += delay
+                    self.set_rows(['prompt'] if change_view else ['prompt', 'response'])
+
+                self.provider.project_turn_event = project
+                with patch.object(t, 'time') as clock:
+                    clock.monotonic.side_effect = lambda: elapsed
+                    clock.sleep.side_effect = reopen
+                    first, last = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0,
+                                                    (start, end), deadline=.5)
+                clock.sleep.assert_called_once()
+                self.assertEqual(ends, 2)
+                self.assertIsNone(first.ref)
+                self.assertEqual(last, t.TurnReference() if change_view else proved)
+
+    def test_retry_cutoff_before_provider_can_use_the_prior_view(self):
+        """A cutoff before a second native read can retain the first view, but an incomplete second read cannot."""
+        self.set_rows(['prompt', 'response'])
+        page = t.rows(self.root, self.directory, bodies=False)
+        proved = t.TurnReference(turn=page.rows[1].turn, ref=page.rows[1].cursor,
+                                 generation=page.generation, kind='prompt')
+        start = TurnStarted(turn='r0', ref='unwritten-input', kind='prompt', source='person')
+        end = TurnEnded(turn='r0', ref='r1', kind='prompt', state='finished')
+        invoke, read_view = t._provider, self.provider.transcript_view
+        for read_started in (False, True):
+            with self.subTest(read_started=read_started):
+                elapsed, reads = 0.0, 0
+
+                def call_provider(snapshot, method, session, *args, **options):
+                    nonlocal elapsed
+                    if not read_started and reads == 1:
+                        elapsed = .5
+                    return invoke(snapshot, method, session, *args, **options)
+
+                def load_view(*args, **options):
+                    nonlocal elapsed, reads
+                    reads += 1
+                    if reads == 2:
+                        elapsed = .5
+                    return read_view(*args, **options)
+
+                def advance(delay):
+                    nonlocal elapsed
+                    elapsed += delay
+
+                with patch.object(t, 'time') as clock, patch.object(t, '_provider', side_effect=call_provider), \
+                        patch.object(self.provider, 'transcript_view', side_effect=load_view):
+                    clock.monotonic.side_effect = lambda: elapsed
+                    clock.sleep.side_effect = advance
+                    first, last = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0,
+                                                    (start, end), deadline=.5)
+                clock.sleep.assert_called_once()
+                self.assertEqual(reads, 2 if read_started else 1)
+                self.assertIsNone(first.ref)
+                self.assertEqual(last, t.TurnReference() if read_started else proved)
 
     def test_pages_apply_bounds_before_reading_bodies_and_keep_each_cursor_boundary(self):
         """Filters and reverse pages can otherwise skip or repeat rows while oversized bodies bypass the read cap."""

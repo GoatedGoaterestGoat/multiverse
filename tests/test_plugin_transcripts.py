@@ -178,17 +178,25 @@ class TranscriptApiTest(PluginTestCase):
                 next(pages)
             config.set_enabled(self.root, "reader", True)
         with self.subTest("a /clear under a cursor"):
-            saved = self.agent_.transcript().end
+            previous = self.agent_.transcript()
+            old_path = self.fake.path
             fresh = ClaudeRows()
             fresh.prompt("After the clear")
             self.fake.clear(fresh.rows)
             with self.assertRaises(api.TranscriptChanged) as caught:
-                self.agent_.transcript_rows(after=saved)
+                self.agent_.transcript_rows(after=previous.end)
             self.assertEqual(caught.exception.reason, "replaced")
             self.assertNotIsInstance(caught.exception, OSError)
             resumed = self.agent_.transcript_rows(after=caught.exception.resume)
             self.assertEqual([row.label for row in resumed.rows], ["prompt"])
             self.assertEqual(len(self.agent_.transcript().earlier), 1)
+        with self.subTest("an earlier transcript was removed"):
+            old_path.unlink()
+            info = self.agent_.transcript(generation=previous.generation)
+            self.assertEqual((info.state, info.retry), ("unavailable", False))
+            with self.assertRaises(api.TranscriptUnavailable) as caught:
+                self.agent_.transcript_rows(generation=previous.generation)
+            self.assertFalse(caught.exception.retry)
         other = self.agent("other")
         self.transcript(other, self.rows.rows)
         unknown = self.mv.universe(self.root).agent("other").transcript().generation

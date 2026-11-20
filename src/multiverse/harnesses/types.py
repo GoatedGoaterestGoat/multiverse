@@ -18,7 +18,7 @@ EFFECTS: Mapping[str, Effect] = {
         'launch_started', 'launch_refusal', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
-        'transcript_view', 'transcript_bodies', 'transcript_readable',
+        'transcript_view', 'transcript_bodies', 'transcript_readable', 'project_turn_event',
         'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
         'waiting_prompts', 'prompt_outcome', 'queued_prompts',
     ), 'observe'),
@@ -603,6 +603,7 @@ class TranscriptSource:
     size: int | None = None
     updated_at: str | None = None
     stable_rows: bool = True
+    retry: bool = False  # a transient absence, such as a native transcript that has not been written yet
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -656,6 +657,51 @@ class TranscriptProvider(Protocol):
                           indexes: Sequence[int], *, max_bytes: int,
                           reader: TranscriptReader | None = None) -> list[dict | None]: ...
     def transcript_readable(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnStarted:
+    """The first input of a native turn, observed by its owning conversation."""
+    turn: str
+    kind: Literal['prompt', 'command']
+    ref: str | None
+    source: Literal['person', 'harness']
+    attempt: str | None = None
+    first_task: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnJoined:
+    """Additional input whose native turn and origin are known."""
+    turn: str
+    ref: str | None
+    source: Literal['person', 'harness']
+    attempt: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnEnded:
+    """A native turn ended, with its last known stored row."""
+    turn: str
+    kind: Literal['prompt', 'command']
+    ref: str | None
+    state: Literal['finished', 'interrupted', 'error', 'unknown']
+
+
+TurnTransition = TurnStarted | TurnJoined | TurnEnded
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnProjection:
+    """Exact row positions in the validated TranscriptView passed to the adapter."""
+    turn_position: str | None = None
+    row_position: str | None = None
+
+
+class TurnEventProvider(Protocol):
+    """Optionally project native turn observations within one immutable transcript view."""
+    def project_turn_event(self, session: SessionHandle, view: TranscriptView, transition: TurnTransition, *,
+                           reader: TranscriptReader | None = None) -> TurnProjection: ...
 
 
 @dataclass(frozen=True, kw_only=True)

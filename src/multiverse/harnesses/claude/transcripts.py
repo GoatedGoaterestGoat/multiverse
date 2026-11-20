@@ -13,6 +13,7 @@ be read raises `Unreadable` rather than read as absence.
 """
 from collections import OrderedDict
 from dataclasses import dataclass
+import contextlib
 import itertools
 import hashlib
 import json
@@ -119,29 +120,49 @@ def holds_name(name, keys):
     return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
 
 
-def session_transcripts(native_id, environment=None, workspaces=(), links=False):
+def session_transcripts(native_id, environment=None, workspaces=(), links=False, check=None):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
 
     Raises Unreadable when a folder can't be listed or searched and could hold the session (a dangling link, or a
     folder gone before it was searched, counts as one that can't be searched): Claude files it
     under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
     folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
-    that finds nothing would otherwise read as proof the transcript is absent.
+    that finds nothing would otherwise read as proof the transcript is absent. `check`: called before the listing
+    and between its entries; it raises past a read's deadline.
     """
-    return _scan_transcripts(native_id, environment, workspaces, links)[0]
+    return _scan_transcripts(native_id, environment, workspaces, links, check)[0]
 
 
-def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
+def _scan_transcripts(native_id, environment=None, workspaces=(), links=False, check=None):
     """session_transcripts, and whether this call listed the projects folder itself (False when it is missing)."""
     projects = claude_home(environment) / 'projects'
+    found, files, keys = [], set(), project_keys(workspaces)
+    if check is not None:
+        check()  # right before the listing opens
     try:
-        entries = list(os.scandir(projects))
+        listing = os.scandir(projects)
     except FileNotFoundError:
         return [], False
     except OSError as error:
         raise Unreadable(projects) from error
-    found, files, keys = [], set(), project_keys(workspaces)
+    entries, taking = [], iter(listing)
+    try:
+        while True:  # taken one at a time: a deadline mid-listing fetches no further entry
+            if check is not None:
+                check()
+            try:
+                entries.append(next(taking))
+            except StopIteration:
+                break
+            except OSError as error:  # the listing failing partway is the folder not being listable
+                raise Unreadable(projects) from error
+    finally:
+        close = getattr(listing, 'close', None)
+        if close is not None:
+            close()
     for entry in entries:
+        if check is not None:
+            check()  # outside the handlers below: a deadline is never taken for an unreadable folder
         candidate = Path(entry.path) / f'{native_id}.jsonl'
         holds = holds_name(entry.name, keys)
         try:
@@ -277,11 +298,13 @@ class Transcript:
         handle.seek(self.offset - len(self.tail))
         return handle.read(len(self.tail)) == self.tail
 
-    def _intact(self, handle):
-        """Whether the bytes already indexed are still exactly what was read."""
+    def _intact(self, handle, check=None):
+        """Whether the bytes already indexed are still exactly what was read. `check`: called between chunks."""
         digest, left = hashlib.sha256(), self.offset
         handle.seek(0)
         while left:
+            if check is not None:
+                check()
             chunk = handle.read(min(left, 1 << 22))
             if not chunk:
                 return False
@@ -340,9 +363,13 @@ class Transcript:
         self.proven_at, self.saved_offset = monotonic(), self.offset
         return True
 
-    def read(self, *, prove=False):
+    def read(self, *, prove=False, check=None):
         """Read up to date. `prove`: also prove every byte indexed earlier unchanged, if the file changed since the
-        last proof; `self.proven` is the file's stamp then (or when the index was read whole)."""
+        last proof; `self.proven` is the file's stamp then (or when the index was read whole). `check`: called
+        between chunks and every CHECK_ROWS rows; it raises past a read's deadline, and the index is then left as
+        it was (or empty, when a proof had already found it stale), never partly read."""
+        if check is not None:
+            check()  # right before the transcript opens
         with open_regular(self.path) as handle:
             status = os.fstat(handle.fileno())
             if self.saved is not None:
@@ -354,13 +381,13 @@ class Transcript:
             elif not self.offset:
                 stale = False
             elif prove and stamp != self.proven:
-                stale, proved = not self._intact(handle), True
+                stale, proved = not self._intact(handle, check), True
             else:
                 due = self.proven_at is None or monotonic() - self.proven_at >= PROOF_INTERVAL
                 if stamp == self.stamp and not (self.unproved and due):
                     stale = False  # unchanged since a read that proved it, or not due yet
                 elif stamp == self.stamp or status.st_size == self.stamp[1] or due:
-                    stale, proved = not self._intact(handle), True  # no append to explain the change, or due a proof
+                    stale, proved = not self._intact(handle, check), True  # no append to explain the change, or due a proof
                 else:
                     stale, tail_only = not self._tail_intact(handle), True
             if stale:
@@ -369,33 +396,48 @@ class Transcript:
                 self._reset(status.st_ino)
             start = self.offset
             handle.seek(self.offset)
-            data = handle.read()
-        end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
-        # Parse the new lines first and change nothing until all of them parsed: a failure leaves the index as it
-        # was, so the next read starts from the same place and never counts a row twice.
-        added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
-        conversation = self.path.stem  # a main transcript is named after its session
-        chain = self.chain
-        for line in data[:end].split(b'\n')[:-1]:
-            item = entry(position, line + b'\n', chain)
-            if self.rows:
-                added.append(item)
-            if item.kind == 'unreadable':
-                observed = None
-            if item.kind == 'assistant' and item.usage is not None and item.response:
-                responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
-                last = item.at or last
-                if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
-                    # The latest reply's own fields, even when its model is missing: never an older turn's.
-                    observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
-            position, chain = position + item.size, item.chain
+            # Read, split and parse a chunk at a time, so a deadline is checked throughout (one read and split of a
+            # large file is half a second alone). Change nothing until every new line parsed: a failure or a deadline
+            # leaves the index as it was, so the next read starts from the same place and never counts a row twice.
+            added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
+            conversation = self.path.stem  # a main transcript is named after its session
+            chain, prefix, tail, read_to = self.chain, self.prefix.copy(), self.tail, self.offset
+            pending = b''  # the start of a line whose newline hasn't been read yet
+            while True:
+                if check is not None:
+                    check()
+                part = handle.read(READ_CHUNK)
+                if not part:
+                    break  # an unfinished last line waits for its newline
+                buffer = pending + part
+                end = buffer.rfind(b'\n') + 1
+                whole, pending = buffer[:end], buffer[end:]
+                if not whole:
+                    continue
+                for line in whole.split(b'\n')[:-1]:
+                    if check is not None:
+                        check()  # every row: a check is cheap next to a row's parse
+                    item = entry(position, line + b'\n', chain)
+                    if self.rows:
+                        added.append(item)
+                    if item.kind == 'unreadable':
+                        observed = None
+                    if item.kind == 'assistant' and item.usage is not None and item.response:
+                        responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
+                        last = item.at or last
+                        if (not item.sidechain and item.model != '<synthetic>'
+                                and not (item.has_session and item.session != conversation)):
+                            # The latest reply's own fields, even when its model is missing: never an older turn's.
+                            observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
+                    position, chain = position + item.size, item.chain
+                prefix.update(whole)
+                tail = (tail + whole)[-TAIL:]
+                read_to += len(whole)
         self.entries.extend(added)
         self.chain = chain
         self.responses.update(responses)
         self.last, self.observed = last, observed
-        self.prefix.update(data[:end])
-        self.tail = (self.tail + data[:end])[-TAIL:]
-        self.offset += end
+        self.prefix, self.tail, self.offset = prefix, tail, read_to
         self.stamp = stamp
         if prove or proved or not start:
             self.proven, self.proven_at, self.unproved = stamp, monotonic(), False
@@ -416,6 +458,25 @@ _transcripts_lock = threading.Lock()
 # eviction starts above any version a reader holds from before, so the reader parses again rather than trusting a
 # cursor into a history that changed while no index watched it.
 _versions = itertools.count(1)
+
+
+READ_CHUNK = 1 << 22  # bytes read at a time
+CHECK_ROWS = 256  # rows between deadline checks: about 50 ms of parsing a large transcript
+
+
+def ticker(check, every=CHECK_ROWS):
+    """A function to call once per row: it calls `check` (which raises past a read's deadline) every `every` rows.
+    None when there is no check."""
+    if check is None:
+        return None
+    count = 0
+
+    def tick():
+        nonlocal count
+        count += 1
+        if count % every == 0:
+            check()
+    return tick
 
 
 def _index(path, rows, saved=None):
@@ -662,10 +723,14 @@ INTERRUPTED = '[Request interrupted by user'  # Claude's marker for an Esc: it e
 COMMAND_OUTPUT = ('<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>')
 
 
-def labels(entries):
+def labels(entries, check=None):
     """(label, source) for each entry, by Claude's rules (docs/design/transcript-protocols.md, Labels)."""
     out, seen, command, span = [], set(), None, False  # command: the promptId of the latest typed command
+    outputs = set()  # the refs of command output rows: a meta row under one is the command's report (/context's)
+    tick = ticker(check)
     for item in entries:
+        if tick is not None:
+            tick()
         label, source = 'meta', None
         new = item.prompt_id is not None and item.prompt_id not in seen
         if item.kind == 'system/compact_boundary':
@@ -688,6 +753,8 @@ def labels(entries):
                 label, command = 'command', item.prompt_id
             elif item.head.startswith('/') and new and not item.meta:
                 label, command = 'command', item.prompt_id
+            elif item.meta and item.parent is not None and item.parent in outputs:
+                label = 'command_output'
             elif item.companion or item.head.startswith(INTERRUPTED) or item.meta:
                 label = 'injected'
             elif span:
@@ -705,6 +772,8 @@ def labels(entries):
             label = 'compaction' if span else 'response'
         if item.prompt_id:
             seen.add(item.prompt_id)
+        if label == 'command_output' and item.ref:
+            outputs.add(item.ref)
         out.append((label, source))
     return out
 
@@ -754,14 +823,17 @@ def _keeping(by_ref, order, summaries, tip):
     return max(found, key=lambda item: order[item.ref]) if found else None
 
 
-def walk(entries, tip=None, labelled=None):
+def walk(entries, tip=None, labelled=None, check=None):
     """The history: from `tip` when stored, else the newest leaf of the parent graph (the last stored: a batch of
     rows, such as a compaction's install, can carry older timestamps than a row before it), back through parent links and across a boundary by its logical parent, plus every block of each response it
     passes and every result answering one of their calls (parallel tool results branch off their own call), and
     the typed /compact row a boundary answers (the boundary's logical parent is the row before it)."""
-    labelled = labelled if labelled is not None else labels(entries)
+    labelled = labelled if labelled is not None else labels(entries, check)
+    tick = ticker(check)
     by_ref, order = {}, {}
     for index, item in enumerate(entries):
+        if tick is not None:
+            tick()
         if not item.ref or item.sidechain:
             continue
         by_ref[item.ref], order[item.ref] = item, index
@@ -833,8 +905,12 @@ def walk(entries, tip=None, labelled=None):
             seen.add(entries[typed[-1]].ref)
     # A row without a ref (titles, modes, API request records, ...) belongs to the branch of the nearest row with a
     # ref before it in the file, and comes right after that row: stored order is conversation order.
+    if check is not None:
+        check()  # the passes above are one each over the rows, about 0.1 s for a large transcript
     keys, owner = {order[ref]: (position[ref], 0, order[ref]) for ref in seen if ref in order}, None
     for index, item in enumerate(entries):
+        if tick is not None:
+            tick()
         if item.ref and not item.sidechain:
             owner = item.ref
         elif not item.ref and not item.sidechain and (owner is None or owner in seen):
@@ -861,19 +937,67 @@ class CantTell(Exception):
     """A read that can't say what the transcript holds: copies that disagree, or storage it can't read."""
 
 
-def newest_copy(native_id, environment, workspaces=()):
+class _Stopped(Exception):
+    """A read's check raised: carried past the handlers that turn an OSError into unreadable storage, so a deadline
+    is never mistaken for one, whatever the check raises."""
+    def __init__(self, error):
+        super().__init__(error)
+        self.error = error
+
+
+def _carried(check):
+    if check is None:
+        return None
+
+    def carried():
+        try:
+            check()
+        except Exception as error:
+            raise _Stopped(error) from error
+    return carried
+
+
+@contextlib.contextmanager
+def _holding(lock, check):
+    """The lock, taken under the read's deadline: a read past it never waits on another read holding the lock."""
+    if check is None:
+        with lock:
+            yield
+        return
+    check()
+    while not lock.acquire(timeout=LOCK_WAIT):
+        check()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+LOCK_WAIT = .01  # seconds between deadline checks while another read holds the shared index lock
+
+
+def newest_copy(native_id, environment, workspaces=(), check=None):
+    """_newest_copy, raising whatever `check` raised as itself."""
+    try:
+        return _newest_copy(native_id, environment, workspaces, check)
+    except _Stopped as stopped:
+        raise stopped.error from None
+
+
+def _newest_copy(native_id, environment, workspaces=(), check=None):
     """The index of the session's newest copy, read up to date, for the transcript reads. Older copies must hold a
     uuid prefix of the newest copy's rows (Claude moves a transcript by renaming it, so more than one copy is an
     anomaly), or CantTell names them. Usage reads the newest copy without this check or the full prefix proof."""
+    carried = _carried(check)
     try:
-        paths = session_transcripts(native_id, environment, workspaces)
+        paths = session_transcripts(native_id, environment, workspaces, check=carried)
     except Unreadable as error:
         raise CantTell(f"Claude's storage folder {error.path} can't be read: restore read access to it") from error
     if not paths:
         return None
-    with _transcripts_lock:
+    with _holding(_transcripts_lock, carried):
         try:
-            indexes = [_index(path, rows=True).read(prove=True) for path in paths]
+            indexes = [_index(path, rows=True).read(prove=True, check=carried) for path in paths]
         except (OSError, Unreadable) as error:
             raise CantTell(f"Claude's transcript can't be read: {error}") from error
         newest = indexes[-1]
@@ -899,26 +1023,41 @@ class Analysis:
     version: int           # rises when the history changes other than by growing at its end
 
 
-def analyse(index, tip=None):
-    """Labels, history and context for the index as read, cached per index until it grows or is rewritten."""
+def _on_history(history):
+    return frozenset(history.rows)
+
+
+def _history_refs(entries, history):
+    return tuple(entries[i].ref for i in history.rows)
+
+
+def analyse(index, tip=None, check=None):
+    """Labels, history and context for the index as read, cached per index until it grows or is rewritten. `check`
+    is called through it; past a deadline it raises, and nothing is cached or changed."""
     key = (len(index.entries), index.rewrites, tip)
     cached = getattr(index, 'analysis', None)
     if cached is not None and cached[0] == key:
         return cached[1]
     entries = index.entries
-    labelled = tuple(labels(entries))
-    history = walk(entries, tip, labelled)
-    on = frozenset(history.rows)
+    step = check if check is not None else (lambda: None)
+    step()
+    labelled = tuple(labels(entries, check))
+    step()
+    history = walk(entries, tip, labelled, check)
+    step()
+    on = _on_history(history)
+    step()
     context = frozenset(in_context(entries, history))
-    refs = tuple(entries[i].ref for i in history.rows)
-    version = getattr(index, 'history_version', 0)
+    step()
+    refs = _history_refs(entries, history)
     previous = getattr(index, 'history_refs', None)
+    # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones already
+    # read (its boundary and summary come before the rows it kept).
+    rewritten = tip is None and previous is not None and (
+        getattr(index, 'history_rewrites', index.rewrites) != index.rewrites or refs[:len(previous)] != previous)
+    step()  # last, with everything decided: nothing below waits, and nothing above changed the index
+    version = next(_versions) if rewritten else getattr(index, 'history_version', 0)
     if tip is None:
-        if previous is not None and (getattr(index, 'history_rewrites', index.rewrites) != index.rewrites
-                                     or refs[:len(previous)] != previous):
-            # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones
-            # already read (its boundary and summary come before the rows it kept).
-            version = next(_versions)
         index.history_version, index.history_refs, index.history_rewrites = version, refs, index.rewrites
     result = Analysis(len(entries), labelled, history, on, context, version)
     index.analysis = (key, result)

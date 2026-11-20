@@ -321,7 +321,7 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, bl
     if status_event is not None:
         # Native observation and journal writes stay outside the runtime lock.
         if before_status_event is not None:
-            before_status_event()
+            before_status_event(status_event['to'])
         if before == 'waiting':
             prompt_events.leaving_wait(agent_dir, launch_id, data)
         if not prompt_events.publish_ordered(agent_dir, 'agent.status', launch_id, status_event):

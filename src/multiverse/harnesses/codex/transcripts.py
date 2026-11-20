@@ -13,7 +13,9 @@ import re
 import stat
 
 from ..types import (RowFact, TranscriptSource, TranscriptView,
-                     TranscriptRowsChanged, normalize_session_id)
+                     TranscriptRowsChanged, TurnEnded, TurnProjection, normalize_session_id)
+from .receipt_events import identifier
+from .turn_events import end_ref
 from .storage import session_home, _header, _metadata_object, MAX_ENTRIES
 from .rollout import open_rollout, preferred, decoder, CompressionUnavailable, MAX_ROWS
 
@@ -24,6 +26,10 @@ NO_STORAGE = "mv2 has no record of this agent's Codex storage; resume it once"
 
 class Unreadable(ValueError):
     pass
+
+
+class _UnwrittenHeader(Unreadable):
+    """An exact rollout has no complete first row yet."""
 
 
 def check(reader):
@@ -56,6 +62,7 @@ def copies(home, native_id, reader=None):
                       + r'(?:_' + uuid + r')?\.jsonl(?:\.zst)?')
     roots = [Path(home) / part for part in ('sessions', 'archived_sessions')]
     pending, found, scanned = list(roots), set(), 0
+    header_pending = False
     while pending:
         check(reader)
         directory = pending.pop()
@@ -76,6 +83,9 @@ def copies(home, native_id, reader=None):
                             decoder()  # Preserve missing-module advice rather than hiding it as bad metadata.
                         evidence = _header(path, native_id, budget=lambda: check(reader))
                         if evidence.state != 'ok':
+                            if evidence.value == {'header_pending': True}:
+                                header_pending = True
+                                continue
                             raise Unreadable('The Codex rollout header cannot verify this thread')
                         found.add(path)
                     elif entry.name.startswith('rollout-') and native_id in entry.name:
@@ -91,6 +101,8 @@ def copies(home, native_id, reader=None):
             raise
         except OSError:
             raise Unreadable('Codex rollout storage cannot be read') from None
+    if header_pending:
+        raise _UnwrittenHeader('The Codex rollout header cannot verify this thread')
     return sorted(found, key=lambda path: (path.stat().st_mtime_ns, str(path)))
 
 
@@ -139,6 +151,19 @@ class Entry:
     effort: str | None = None
     review: bool | None = None
     primary: bool | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexFact(RowFact):
+    native_turn: str | None
+    user_item_id: str | None
+    user_item_thread: str | None
+    end_identity: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexView(TranscriptView):
+    native_id: str
 
 
 # Codex 0.164.0 core/src/event_mapping.rs and context/contextual_user_message.rs.
@@ -396,11 +421,19 @@ def entry(line, offset, previous):
     if outer == 'session_meta':
         primary = (payload.get('source') in (None, 'cli', 'vscode', 'exec', 'mcp')
                    and payload.get('thread_source') in (None, 'user'))
-    fact = RowFact(position=f'{offset + len(line)}:{chain}', ref=string(payload.get('id'))
-                   if outer in ('response_item', 'inter_agent_communication') else None,
-                   kind=kind, label=label, source='peer' if outer == 'inter_agent_communication' else None,
-                   call_id=call, at=string(row.get('timestamp')), size=len(line),
-                   preview=text[:200] if label == 'prompt' or role == 'user' else '')
+    native_turn = string(payload.get('turn_id')) or string(passthrough.get('turn_id'))
+    user_item = echo and inner == 'item_completed'
+    user_item_id, user_item_thread = completed_item.get('id'), payload.get('thread_id')
+    terminal = outer == 'event_msg' and inner in ('task_complete', 'turn_complete', 'turn_aborted')
+    fact = CodexFact(position=f'{offset + len(line)}:{chain}', ref=string(payload.get('id'))
+                     if outer in ('response_item', 'inter_agent_communication') else None,
+                     kind=kind, label=label, source='peer' if outer == 'inter_agent_communication' else None,
+                     call_id=call, at=string(row.get('timestamp')), size=len(line),
+                     preview=text[:200] if label == 'prompt' or role == 'user' else '',
+                     native_turn=native_turn,
+                     user_item_id=user_item_id if user_item and identifier(user_item_id) else None,
+                     user_item_thread=user_item_thread if user_item and identifier(user_item_thread) else None,
+                     end_identity=end_ref(payload.get('completed_at'), payload.get('duration_ms')) if terminal else None)
     rollback = payload.get('num_turns') if outer == 'event_msg' and inner == 'thread_rolled_back' else 0
     plain_text = (isinstance(content, list) and bool(content) and all(
         isinstance(block, dict) and block.get('type') in ('input_text', 'text', 'output_text')
@@ -411,7 +444,7 @@ def entry(line, offset, previous):
     # plain text can be paired exactly; current provenance covers media inputs.
     text_hash = hashlib.sha256(text.encode()).hexdigest() if text and plain_text else None
     return Entry(fact, offset, digest, chain, role, text_hash,
-                 string(payload.get('turn_id')) or string(passthrough.get('turn_id')), rollback if type(rollback) is int and rollback > 0 else 0,
+                 native_turn, rollback if type(rollback) is int and rollback > 0 else 0,
                  string(payload.get('cli_version')) if outer == 'session_meta' else None,
                  payload.get('trigger_turn') is True, input_kind, echo,
                  outer == 'session_meta' and payload.get('history_base') is not None,
@@ -626,8 +659,40 @@ def analyse(entries, tip=None, reader=None):
     return tuple(facts), tuple(history), context, latest, None, version
 
 
-def empty(state, reason):
-    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(),
+def project_turn_event(session, view, transition, *, reader=None):
+    if (not isinstance(view, CodexView) or view.source.state != 'supported'
+            or view.native_id != session.native_id or view.source.home != session.home):
+        return TurnProjection()
+    active = anchor = row = None
+    anchors = matches = 0
+    ending = isinstance(transition, TurnEnded)
+    # Check the whole validated history for duplicate identities, with no second
+    # rollout read or truncated per-view index that could hide an older match.
+    for index in view.history:
+        check(reader)
+        fact = view.rows[index]
+        if fact.kind in ('event_msg/task_started', 'event_msg/turn_started'):
+            active = fact.native_turn
+        if (active == transition.turn and fact.native_turn in (None, active)
+                and fact.label in ('prompt', 'command')):
+            anchor, anchors = fact.position, anchors + 1
+        if transition.ref is None or fact.native_turn != transition.turn:
+            continue  # A recovered end cannot borrow the previous occurrence.
+        if ending:
+            aborted = fact.kind == 'event_msg/turn_aborted'
+            if (fact.end_identity == transition.ref
+                    and (transition.state == 'unknown' or aborted == (transition.state == 'interrupted'))):
+                matches += 1
+                if fact.ends_turn:
+                    row = fact.position
+        elif fact.user_item_thread == session.native_id and fact.user_item_id == transition.ref:
+            row, matches = fact.position, matches + 1
+    return TurnProjection(turn_position=anchor if anchors == 1 else None,
+                          row_position=row if matches == 1 else None)
+
+
+def empty(state, reason, *, retry=False):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason, retry=retry), rows=(), history=(),
                           context_from=0, tip=None, gap=None, history_version=0)
 
 
@@ -642,16 +707,18 @@ def view(session, *, tip=None, reader=None):
         path, entries, _ = newest(home, session.native_id, reader)
     except CompressionUnavailable as error:
         return empty('error', str(error))
+    except _UnwrittenHeader:
+        return empty('error', 'Codex rollout storage cannot be read consistently', retry=True)
     except (Unreadable, OSError):
         return empty('error', 'Codex rollout storage cannot be read consistently')
     if path is None:
-        return empty('unavailable', 'Codex has not written a rollout for this session yet')
+        return empty('unavailable', 'Codex has not written a rollout for this session yet', retry=True)
     check(reader)
     try:
         facts, history, context, latest, gap, version = analyse(entries, tip, reader)
     except Unreadable:
         return empty('error', 'Codex rollback input boundaries cannot be established')
-    return TranscriptView(source=TranscriptSource(state='supported', home=home, format='codex-jsonl',
+    return CodexView(native_id=session.native_id, source=TranscriptSource(state='supported', home=home, format='codex-jsonl',
                           version=next((item.version for item in reversed(entries) if item.version), None),
                           size=sum(item.fact.size for item in entries),
                           updated_at=next((item.fact.at for item in reversed(entries) if item.fact.at), None)),
