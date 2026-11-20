@@ -23,6 +23,16 @@ from multiverse.tools import inbox as inbox_tool, listen, send
 from multiverse.universe import focus, mailbox
 
 
+def start_token(pid):
+    """A start token from a ps slow enough to time out would be empty, and every process check after it unknown."""
+    deadline = time.monotonic() + 30
+    while (token := process_started(pid)) is None and time.monotonic() < deadline:
+        time.sleep(.1)
+    if token is None:
+        raise AssertionError(f'No start token for {pid} within 30 s')
+    return token
+
+
 class ListenTest(BaseTest):
     def setUp(self):
         super().setUp()
@@ -32,13 +42,17 @@ class ListenTest(BaseTest):
                            'universe_id': store.read(self.root / 'universe.json')['id'],
                            'native_session_id': self.native}
         store.write(self.directory / 'properties.json', self.properties)
+        token = start_token(os.getpid())
         self.facts = {'launch_id': self.launch, 'state': 'running', 'pid': os.getpid(),
-                      'pid_started': process_started(os.getpid()), 'runner_pid': os.getpid(),
-                      'runner_started': process_started(os.getpid())}
+                      'pid_started': token, 'runner_pid': os.getpid(), 'runner_started': token}
         store.write(self.directory / 'runtime.json', self.facts)
         (self.directory / '.launch.lock').touch()
         self.enterContext(patch.dict(os.environ, {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': self.agent,
             'MV2_AGENT_DIR': str(self.directory), 'MV2_LAUNCH_ID': self.launch}))
+
+    def proven(self):
+        """Scripted clocks count listen's polls, and a slow ps adds one; the process proof has its own test."""
+        self.enterContext(patch.object(listen, 'ended', return_value=False))
 
     def command(self, *options):
         output, error, code = io.StringIO(), io.StringIO(), 0
@@ -216,7 +230,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                 frontend = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'])
                 track(pid=frontend.pid)
                 store.write(self.directory / 'runtime.json', {**self.facts, pid: frontend.pid,
-                    'pid_started' if pid == 'pid' else 'runner_started': process_started(frontend.pid)})
+                    'pid_started' if pid == 'pid' else 'runner_started': start_token(frontend.pid)})
                 clock = [0.0]
                 def crash_and_arrive(delay):
                     frontend.terminate()
@@ -232,6 +246,107 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                         frontend.terminate()
                         frontend.wait(timeout=5)
                     mailbox.inbox(self.directory, limit=None)
+
+        store.write(self.directory / 'runtime.json', self.facts)
+        read = mailbox.inbox
+        for sustained in (False, True):
+            with self.subTest(unknown='sustained' if sustained else 'once'):
+                self.message()
+                checks, reads, clock = [], [], [0.0]
+                def unknown(record):
+                    checks.append(record)
+                    return None if sustained or len(checks) == 1 else False
+                def reading(*args, **options):
+                    reads.append(len(checks))
+                    return read(*args, **options)
+                def tick(delay):
+                    clock[0] += delay
+                    if clock[0] > 4 * listen.UNKNOWN_SECONDS:
+                        raise AssertionError('An unknown process check never ended the listener')
+                with patch.object(listen, 'ended', side_effect=unknown), \
+                        patch.object(mailbox, 'inbox', side_effect=reading), \
+                        patch.object(listen, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=tick)):
+                    # Even a zero timeout waits for a check that can be told: "timed out" would hide the message.
+                    if sustained:
+                        with self.assertRaisesRegex(ValueError, 'Cannot verify'):
+                            listen.run(self.root, timeout='0')
+                    else:
+                        self.assertTrue(listen.run(self.root, timeout='0')['ok'])
+                # Once: read only after a later poll proved both processes. Sustained: never read, then refused.
+                self.assertEqual(reads, [] if sustained else [4])
+                if sustained:
+                    self.assertGreaterEqual(clock[0], listen.UNKNOWN_SECONDS)
+                mailbox.inbox(self.directory, limit=None)
+        for first in ('unknown', 'proven'):
+            with self.subTest(unknown='proof of a pair the launch replaced', first=first):
+                # The launch records new processes between the proof and the read: both the read and the timeout
+                # wait for proof of the current ones, whether or not a check was unknown before.
+                self.message()
+                moved, seen = self.facts['pid'] + 1, []
+                swap = 4 if first == 'unknown' else 2
+                def replaced(record):
+                    seen.append(record['pid'])
+                    if len(seen) == swap:
+                        store.write(self.directory / 'runtime.json', {**self.facts, 'pid': moved})
+                    return None if first == 'unknown' and len(seen) == 1 else False
+                with patch.object(listen, 'ended', side_effect=replaced):
+                    self.assertTrue(listen.run(self.root, timeout='0')['ok'])
+                self.assertIn(moved, seen)
+                store.write(self.directory / 'runtime.json', self.facts)
+                mailbox.inbox(self.directory, limit=None)
+        for moved in (False, True):
+            with self.subTest(unknown='a quiet check that becomes a read', moved=moved):
+                # After an empty read and an unknown check, a message (and maybe new processes) arrives during the
+                # last quiet check before the deadline: the listener reads it with fresh proof, never "Timed out".
+                clock, checks = [0.0], []
+                def quiet(facts):
+                    checks.append(facts['pid'])
+                    if len(checks) == 3:
+                        if moved:
+                            store.write(self.directory / 'runtime.json', {**self.facts, 'pid': facts['pid'] + 1})
+                        self.message()
+                    return len(checks) != 2
+                def tick(delay):
+                    clock[0] += delay
+                    self.assertLess(clock[0], 5)
+                with patch.object(listen, '_processes', side_effect=quiet), \
+                        patch.object(listen, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=tick)):
+                    self.assertTrue(listen.run(self.root, timeout='1.1')['ok'])
+                self.assertEqual(checks, [self.facts['pid']] * 3 + [self.facts['pid'] + moved])
+                store.write(self.directory / 'runtime.json', self.facts)
+                mailbox.inbox(self.directory, limit=None)
+        with self.subTest(unknown='answered while the launch lock stays busy'):
+            # An answered check ends the unknown period even when the lock keeps the pair comparison waiting.
+            clock, checks = [0.0], []
+            def answered(_):
+                checks.append(clock[0])
+                return len(checks) != 1
+            def tick(delay):
+                clock[0] += delay
+            with (self.directory / '.launch.lock').open('r+') as busy:
+                fcntl.flock(busy, fcntl.LOCK_EX)
+                with patch.object(listen, '_processes', side_effect=answered), \
+                        patch.object(listen, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=tick)):
+                    result = listen.run(self.root, timeout=str(2 * listen.UNKNOWN_SECONDS))
+            self.assertEqual(result['ok'], False)
+            self.assertGreater(checks[-1], listen.UNKNOWN_SECONDS)
+            mailbox.inbox(self.directory, limit=None)
+        with self.subTest(unknown='a late answer'):
+            # No check starts once the first unanswered one began UNKNOWN_SECONDS ago, however slow each is.
+            self.message()
+            clock, checks = [0.0], []
+            def slow(_):
+                clock[0] += 3.9
+                checks.append(clock[0])
+                return len(checks) == 9
+            def tick(delay):
+                clock[0] += delay
+            with patch.object(listen, '_processes', side_effect=slow), \
+                    patch.object(listen, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=tick)):
+                with self.assertRaisesRegex(ValueError, 'Cannot verify'):
+                    listen.run(self.root, timeout='0')
+            self.assertLess(len(checks), 9)
+            mailbox.inbox(self.directory, limit=None)
 
     def test_lock_contention_never_extends_the_deadline_or_adopts_another_launch(self):
         """Native sends, inbox readers and focus changes can hold locks; waiting must still time out or end with its
@@ -255,7 +370,8 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                     with held.open('r+') as handle:
                         if case != 'replacement':
                             fcntl.flock(handle, fcntl.LOCK_EX)
-                        with self.listener(held, timeout='0.2' if case == 'timeout' else None) as (child, attempted, polled):
+                        # Each poll's process check may take up to ps's 2 s timeout on a loaded machine.
+                        with self.listener(held, timeout='3' if case == 'timeout' else None) as (child, attempted, polled):
                             def reached(path):
                                 if path.exists():
                                     return True
@@ -281,7 +397,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                                 fcntl.flock(handle, fcntl.LOCK_UN)
                                 self.message()
                             try:
-                                output, error = child.communicate(timeout=2)
+                                output, error = child.communicate(timeout=10)
                             except subprocess.TimeoutExpired:
                                 self.fail(f'Listener remained blocked on {lock_name} during {case}')
                             self.assertNotEqual(child.returncode, 0, output + error)
@@ -295,6 +411,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         timeout, then what is unread once it ends, naming the held messages and claiming the report so the turn-end
         note stays quiet, or leaving out what a note that came first announced; a break interrupts the agent while
         the user answers, or tells it twice."""
+        self.proven()
         focus.start(self.directory)
         with patch.object(listen, 'time', SimpleNamespace(monotonic=time.monotonic,
                                                            sleep=Mock(side_effect=AssertionError('listen waited while focused')))):
@@ -355,6 +472,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         """A focus that starts as listen prints waits for the line, a timeout never prints into a focus that began
         during its checks, a failed print claims nothing, and a focus that began as the listener started counts as
         one it waited through; each break wakes the agent during a focus, or loses or repeats the turn-end note."""
+        self.proven()
         def held():
             focus.hold(self.directory, lambda focus_id: mailbox.append_message(
                 self.directory, 'stop', {'name': 'sender'}, 'inbox-only', intended='steer', focus=focus_id))
@@ -429,8 +547,9 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
 
         # A focus that ends during the process check: what it held is read before an expired timeout.
         def end_during_check(facts):
-            original(facts)
+            proven = original(facts)
             focus.end(self.directory)
+            return proven
         def focus_and_hold(directory):
             focus.start(directory)
             held()

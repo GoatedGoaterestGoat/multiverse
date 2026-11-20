@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -1169,12 +1170,31 @@ class TmuxRestartTest(BaseTest):
         socket = str(self.work / 't.sock')
         track(tmux_socket=socket)
 
-        def tmux(*args):
-            return subprocess.run(['tmux', '-S', socket, *args], stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, check=True, timeout=10).stdout.strip()
+        def tmux(*args, tries=1):
+            for attempt in range(tries):
+                reply = subprocess.run(['tmux', '-S', socket, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                                       text=True, timeout=10)
+                if reply.returncode == 0:
+                    return reply.stdout.strip()
+                time.sleep(0.2)
+            self.fail(f'tmux {" ".join(args)} exited {reply.returncode}: {reply.stderr.strip()}')
+
+        def exited(pid):  # kill-server returns before the server has exited
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z':
+                        return  # exited, not yet reaped
+                except ProcessLookupError:
+                    return
+                except OSError:  # no /proc (macOS): still running
+                    pass
+                time.sleep(0.02)
+            self.fail(f'the old tmux server {pid} was still running 10 s after kill-server')
 
         def server(session):
-            tmux('new-session', '-d', '-s', session, 'sleep 60')
+            tmux('new-session', '-d', '-s', session, 'sleep 60', tries=5)  # a loaded machine's socket can lag
             return tmux('display-message', '-p', '-t', session, '#{pid}\t#{start_time}\t#{pane_id}').split('\t')
         self.addCleanup(lambda: subprocess.run(['tmux', '-S', socket, 'kill-server'], stdin=subprocess.DEVNULL,
                                                capture_output=True, timeout=10))
@@ -1201,6 +1221,7 @@ class TmuxRestartTest(BaseTest):
             self.assertFalse(agent_identity.runs_in_agent(live, self.root))  # unproven, never an error
         self.assertIs(subprocess.run, real)
         tmux('kill-server')
+        exited(int(pid))  # a new server can't take the socket while the old one is still letting go of it
         again, _, reused = server('person')
         self.assertEqual((reused, again != pid), (pane, True))  # the same pane ID on a new server
         for shell in ({'TMUX': f'{socket},{again},0', 'TMUX_PANE': reused}, live):  # the new pane, or an old TMUX

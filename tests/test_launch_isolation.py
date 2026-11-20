@@ -1116,11 +1116,19 @@ class LaunchIsolationTest(unittest.TestCase):
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
                    "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
-                   "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR")
-        # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through.
+                   "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR",
+                   "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_SCRATCHPAD_DIR",
+                   # What Claude's background-session host gives a session: its credential, token pipes, rules.
+                   "CLAUDE_BG_SESSION_CREDENTIAL", "CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR", "CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_BG_SESSION_PERMISSION_RULES", "CLAUDE_BG_MEMORY_TOGGLED_OFF", "CLAUDE_BG_AUTO_MEMORY_OFF", "CLAUDE_BG_GATEWAY_WITHHELD", "CLAUDE_BG_GATEWAY_ROUTED")
+        # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through. So
+        # does a CLAUDE_CONFIG_DIR the parent session shares with its agents: it is where their transcripts are. And
+        # so do the plugin folders and claude.ai Project a person names for their Claude sessions, although Claude
+        # itself removes them for a fresh Claude.
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
                   **{name: "parent" for name in markers}, "CLAUDE_CODE_CHILD_SESSION": "1", "NO_COLOR": "1",
-                  "TERM": "tmux-256color", "CLAUDE_CODE_TMPDIR": "/users-own/tmp"}
+                  "TERM": "tmux-256color", "CLAUDE_CODE_TMPDIR": "/users-own/tmp",
+                  "CLAUDE_CONFIG_DIR": "/shared/claude", "CLAUDE_CODE_PLUGIN_DIRS": "/users-own/plugins",
+                  "CLAUDE_CODE_ATTRIBUTION_PROJECT": "claude_proj_users_own"}
         values = self.adapter_values()
         # environment.md suggests replacing unset_env (for NO_COLOR, say); the markers must stay removed then.
         variants = ({}, {"unset_env": ["NO_COLOR"]}, {"env": {"CLAUDE_CODE_CHILD_SESSION": "0"}})
@@ -1166,6 +1174,10 @@ class LaunchIsolationTest(unittest.TestCase):
                                      settings.get("env", {}))
                     self.assertEqual(env["TERM"], "tmux-256color")
                     self.assertEqual(env.get("CLAUDE_CODE_TMPDIR"), "/users-own/tmp")
+                    if name == 'claude':
+                        self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), "/shared/claude")
+                    self.assertEqual((env.get("CLAUDE_CODE_PLUGIN_DIRS"), env.get("CLAUDE_CODE_ATTRIBUTION_PROJECT")),
+                                     ("/users-own/plugins", "claude_proj_users_own"))
                     self.assertTrue(env["PATH"].startswith("/child/bin" + os.pathsep))
 
         # Claude Code (2.1.301+) saves no transcript when it inherits CLAUDE_CODE_CHILD_SESSION=1, the marker it
