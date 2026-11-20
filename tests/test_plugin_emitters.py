@@ -157,13 +157,19 @@ class EmitterTest(EmitterBase):
             agents.update_runtime(self.agent_dir, "L1", status="waiting")
             mailbox.append_message(self.agent_dir, "hi", {}, "inbox-only")
             agents.report(self.root, "worker", "working", "busy")
-            self.assertIsNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"}))
+            spilled = events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": "spilled"})
+            self.assertIsNone(spilled)
             self.assertLess(time.monotonic() - started, 3)
             self.assertEqual(read(self.agent_dir / "runtime.json")["status"], "waiting")
-            self.assertEqual(self.recorded(), [])
-            self.assertIn("dropped: the journal was busy", events_log.read_text())
+            self.assertEqual(self.recorded(), [])  # nothing in the journal yet, but nothing dropped:
+            self.assertTrue(list((events.directory(self.root) / events.SPILL).glob("*.jsonl")))  # spilled
             stop_holder(holder)
-            self.assertIsNotNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"}))
+            last = events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": "after"})
+            self.assertIsNotNone(last)
+            found = [event for event in self.recorded() if event["type"] == "agent.status"]
+            # The spilled ones were merged first, in this process's order, before the event that merged them.
+            self.assertEqual([event["data"].get("n") for event in found][-2:], ["spilled", "after"])
+            self.assertEqual(list((events.directory(self.root) / events.SPILL).glob("*.jsonl")), [])
         with self.subTest("core's own locks held by another process"):
             holder = hold(*(self.agent_dir / name for name in (".runtime.lock", ".launch.lock", ".inbox.lock")))
             self.addCleanup(stop_holder, holder)
@@ -203,6 +209,6 @@ class EmitterTest(EmitterBase):
         with self.subTest("an unusable journal"):
             events.directory(self.root).rename(self.work / "journal")
             events.directory(self.root).write_text("not a directory")
-            logged = len(events_log.read_text())
+            logged = len(events_log.read_text()) if events_log.exists() else 0
             self.assertIsNone(events.emit(self.root, "agent.status", {"id": "a"}))
             self.assertIn("agent.status", events_log.read_text()[logged:])

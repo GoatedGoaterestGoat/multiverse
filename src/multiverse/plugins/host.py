@@ -887,6 +887,7 @@ def _deliver(loaded, mv, scope, name, stopping=None):
     _journals[place] = journal
     held, complete, page_after = set(), True, after  # held: handlers that have not finished an earlier event
     handlers = range(len(loaded.registrations.handlers))
+    events.merge(scope)  # events spilled while the journal was busy, should no writer have come since
     for page in range(PAGES_PER_POLL):
         found, gap = events.read(scope, page_after, limit=READ_LIMIT)
         if (found or gap is not None) and events.journal_id(scope) != journal:

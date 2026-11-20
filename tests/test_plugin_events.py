@@ -1,5 +1,7 @@
 """The event journal and the plugin host: recording, rolling, pruning, reading, handlers, services and cursors."""
+import errno
 import json
+import fcntl
 import os
 from pathlib import Path
 import sys
@@ -192,6 +194,558 @@ class JournalTest(PluginTestCase):
                                              key="complete"), "written")
         opened_after, _ = events.read(self.root, 1)
         self.assertEqual([(row["seq"], row["data"]["id"]) for row in opened_after], [(2, "q")])
+
+    def test_a_busy_journal_spills_events_and_merges_them_in_order(self):
+        """Events recorded while the journal is busy are spilled and merged in order, each once; a break drops or doubles them."""
+        self.subscribe()
+        spill = events.directory(self.root) / events.SPILL
+        with self.subTest("busy, then merged"):
+            events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": 0})
+            with events._bounded_lock(events.directory(self.root) / ".lock") as held:
+                self.assertTrue(held)
+                for index in (1, 2, 3):
+                    self.assertIsNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"},
+                                                  data={"n": index}))
+            self.assertEqual([event["data"]["n"] for event in events.read(self.root, 0)[0]], [0])
+            events.merge(self.root)  # the plugin host's poll, with no writer since
+            found = events.read(self.root, 0)[0]
+            self.assertEqual([event["data"]["n"] for event in found], [0, 1, 2, 3])
+            self.assertEqual([event["seq"] for event in found], [1, 2, 3, 4])
+            self.assertEqual(sorted(path.name for path in spill.iterdir()), [])
+        with self.subTest("a spiller that opened its file before a merger took it"):
+            events._spill(self.root, {"schema": 1, "seq": 0, "type": "agent.status", "data": {"n": 4}})
+            [first] = spill.iterdir()
+            real, raced = fcntl.flock, []
+
+            def merger_between(descriptor, operation):  # after the spiller's open, before its lock: a merger takes
+                if not raced:                          # the file, reads it and deletes it
+                    raced.append(True)
+                    taken = spill / (".merging-" + first.name)
+                    os.replace(first, taken)
+                    events.merge(self.root)
+                return real(descriptor, operation)
+            with mock.patch.object(events.fcntl, "flock", side_effect=merger_between):
+                events._spill(self.root, {"schema": 1, "seq": 0, "type": "agent.status", "data": {"n": 5}})
+            events.merge(self.root)
+            self.assertEqual([event["data"]["n"] for event in events.read(self.root, 0)[0]][-2:], [4, 5])
+        with self.subTest("a merge cut short goes on where it stopped"):
+            for index in range(6, 46):
+                events._spill(self.root, {"schema": 1, "seq": 0, "type": "agent.status", "data": {"n": index}})
+            with spill.joinpath(next(spill.iterdir()).name).open("ab") as handle:
+                handle.write(b'{"schema":1,"seq":0,"type":"agent.st')  # torn by a killed process
+            with events._bounded_lock(events.directory(self.root) / ".lock") as held:
+                events._merge_spills(self.root, budget=600)  # a few lines only
+            self.assertTrue(any(path.name.endswith(".offset") for path in spill.iterdir()))
+            events.merge(self.root)
+            numbers = [event["data"]["n"] for event in events.read(self.root, 0, 1000)[0]]
+            self.assertEqual([n for n in numbers if n >= 6], list(range(6, 46)))  # each once, in order; torn one dropped
+            self.assertEqual(list(spill.iterdir()), [])
+
+    def test_spilled_events_stay_first_once_and_bounded(self):
+        """Spilled events stay first, a cut-off merge never repeats a row, and a locked spill file never stalls a recorder."""
+        self.subscribe()
+
+        def spill(*numbers):
+            with events._bounded_lock(events.directory(self.root) / ".lock") as held, \
+                    mock.patch.object(events, "LOCK_SECONDS", 0):
+                self.assertTrue(held)
+                for n in numbers:
+                    events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": n})
+
+        def seen():
+            return [event["data"]["n"] for event in events.read(self.root, 0, 1000)[0]]
+        with self.subTest("a newer event behind spills one merge can't drain"):
+            spill(1, 2)
+            first = events._spill_path(self.root).read_bytes().splitlines(keepends=True)[0]
+            merge = events._merge_spills
+            with mock.patch.object(events, "_merge_spills",
+                                   side_effect=lambda root, budget=None, single=False: merge(root, len(first) + 1)):
+                events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": 3})
+            events.merge(self.root)
+            self.assertEqual(seen(), [1, 2, 3])
+        with self.subTest("a merge cut off right after an append"):
+            spill(4, 5)
+            append = events._append
+
+            def cut_off(root, event):
+                append(root, event)
+                raise OSError("cut off after the append")
+            with mock.patch.object(events, "_append", side_effect=cut_off):
+                events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [4, 5])
+            self.assertEqual(seen().count(4), 1)
+        with self.subTest("a spill file held locked"):
+            path = events._spill_path(self.root)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            holder = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            started = time.monotonic()
+            spill(6, 7)
+            self.assertLess(time.monotonic() - started, 2)  # never waits on it
+            os.close(holder)
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [6, 7])  # kept in a new file of its own, merged after, in order
+            before = events._spill_path(self.root).name
+            with mock.patch.object(events.time, "time_ns", return_value=1):  # the clock stepped back
+                self.assertGreater(events._spill_path(self.root, fresh=True).name, before)  # still sorts after
+
+    def test_spills_survive_cut_off_merges_torn_writes_and_keep_cross_process_order(self):
+        """Spills stay whole, once and in age order across processes through cut-off merges and torn writes; else events vanish."""
+        self.subscribe()
+        base = events.directory(self.root)
+
+        def spill(*numbers):
+            with events._bounded_lock(base / ".lock"), mock.patch.object(events, "LOCK_SECONDS", 0):
+                for n in numbers:
+                    events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": n})
+
+        def seen(after=0):
+            return [row["data"]["n"] for row in events.read(self.root, after, 1000)[0]]
+        events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": 0})
+        with self.subTest("cut off after the append, before its number was published"):
+            spill(1)
+            with mock.patch.object(events, "_write_counter", side_effect=OSError("cut off")):
+                events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen(1), [1])  # a reader past 0 sees it
+        with self.subTest("progress a cut-off cleanup left behind"):
+            folder = base / events.SPILL
+            (folder / (events.CLAIM + events._spill_path(self.root).name[:-6] + ".jsonl.offset")).write_text(
+                json.dumps({"offset": 10 ** 6, "pending": None}))
+            spill(2, 3)
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [2, 3])
+        with self.subTest("a merge that fails keeps the event that tried it"):
+            spill(4)
+            with mock.patch.object(events, "_save_progress", side_effect=OSError("no room")):
+                events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"n": 5})
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [4, 5])
+        with self.subTest("a short write"):
+            real = events.os.write
+            with mock.patch.object(events.os, "write", lambda fd, data: real(fd, data[:max(1, len(data) // 2)])):
+                spill(6)
+            spill(7)
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [6, 7])
+        with self.subTest("two processes' spills in the order they happened"):
+            with mock.patch.object(events.os, "getpid", return_value=11):
+                spill(8)
+                first = events._spill_name
+            with mock.patch.object(events.os, "getpid", return_value=12):
+                spill(9)
+            with mock.patch.object(events, "_spill_name", first), \
+                    mock.patch.object(events.os, "getpid", return_value=11):
+                spill(10)
+            events.merge(self.root)
+            self.assertEqual(seen()[-3:], [8, 9, 10])
+        with self.subTest("a special file or a link where a spill would go"):
+            path = events._spill_path(self.root)
+            path.unlink(missing_ok=True)
+            os.mkfifo(path)  # opening it to write would block without O_NONBLOCK
+            started = time.monotonic()
+            spill(11)
+            self.assertLess(time.monotonic() - started, 2)
+            events.merge(self.root)
+            self.assertEqual(seen()[-1], 11)  # written to a fresh file instead, and merged
+            folder = base / events.SPILL
+            elsewhere = self.work / "elsewhere"
+            elsewhere.mkdir()
+            for child in folder.iterdir():
+                child.unlink()
+            folder.rmdir()
+            folder.symlink_to(elsewhere)  # the spill folder a link: never written through
+            spill(12)
+            self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_merges_hold_order_and_once_through_damage_and_bounds(self):
+        """Merges keep each process's files in order, damage never replayed, work bounded; else events double or reorder."""
+        self.subscribe()
+        base = events.directory(self.root)
+
+        def seed(pid, numbers, padding=""):
+            with events._bounded_lock(base / ".lock"), mock.patch.object(events, "LOCK_SECONDS", 0), \
+                    mock.patch.object(events.os, "getpid", return_value=pid):
+                for n in numbers:
+                    with mock.patch.object(events, "now", return_value=f"2026-01-01T00:{n // 60:02}:{n % 60:02}+00:00"):
+                        events.emit(self.root, "agent.status", data={"n": n, "pad": padding})
+
+        def seen():
+            return [row["data"]["n"] for row in events.read(self.root, 0, 1000)[0]]
+
+        def cut_off_at(number):
+            real = events._append
+
+            def append(root, event):
+                done = real(root, event)
+                if event["data"]["n"] == number:
+                    raise OSError("cut off after the append")
+                return done
+            return mock.patch.object(events, "_append", append)
+        with self.subTest("a cut-off merge across files repeats nothing"):
+            seed(11, [0])
+            seed(12, range(1, 9), "x" * 12000)
+            with cut_off_at(8):
+                events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen(), list(range(9)))
+        with self.subTest("progress that can't be read waits, never starts over"):
+            seed(13, [9])
+            with cut_off_at(9):
+                events.merge(self.root)
+            real_open = os.open
+
+            def unreadable(path, flags, *args, **keywords):
+                if flags & os.O_ACCMODE == os.O_RDONLY and str(path).endswith(".offset"):
+                    raise OSError(errno.EIO, "progress unreadable for now")
+                return real_open(path, flags, *args, **keywords)
+            with mock.patch.object(os, "open", unreadable):
+                events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen(), list(range(10)))
+        with self.subTest("damaged progress: the journal says which rows are in"):
+            seed(14, [10, 11])
+            with cut_off_at(10):
+                events.merge(self.root)
+            [progress] = [path for path in (base / events.SPILL).iterdir() if path.name.endswith(".offset")]
+            progress.write_text("not progress")
+            events.merge(self.root)
+            self.assertEqual(seen(), list(range(12)))
+        with self.subTest("a spill folder that can't be opened isn't an empty backlog"):
+            seed(15, [12])
+            real_open = os.open
+
+            def refused(path, flags, *args, **keywords):
+                if Path(path) == base / events.SPILL:
+                    raise OSError(errno.EACCES, "refused for now")
+                return real_open(path, flags, *args, **keywords)
+            with mock.patch.object(os, "open", refused):
+                events.emit(self.root, "agent.status", data={"n": 99})
+            self.assertNotIn(99, seen())  # never ahead of 12
+            events.merge(self.root)
+            self.assertEqual(seen()[-1], 12)
+        with self.subTest("one process's files in succession, whatever the clock said"):
+            seed(16, [14])
+            with mock.patch.object(events.os, "getpid", return_value=16):
+                first = events._spill_path(self.root)
+            with first.open("rb") as holder:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+                seed(16, [13])  # recorded later, though the clock reads earlier: a new file of this process
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [14, 13])
+        with self.subTest("a merge that fails mid-way leaves no file open"):
+            seed(17, [15])
+            seed(18, [16])
+            held, real_open, real_close, made = set(), os.open, os.close, []
+
+            def opening(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                held.add(descriptor)
+                return descriptor
+
+            def closing(descriptor):
+                held.discard(descriptor)
+                real_close(descriptor)
+
+            def reader(*args):
+                if made:
+                    raise OSError(errno.EMFILE, "out of descriptors")
+                made.append(real(*args))
+                return made[0]
+            real = events._Claimed
+            with mock.patch.object(events, "_Claimed", reader), mock.patch.object(os, "open", opening), \
+                    mock.patch.object(os, "close", closing):
+                events.merge(self.root)
+            self.assertEqual(held, set())
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [15, 16])
+        with self.subTest("a recorder reads no more than its budget"):
+            for pid in range(4):
+                seed(20 + pid, range(17 + 3 * pid, 20 + 3 * pid), "x" * 12000)
+            reads, real_pread = [], os.pread
+            with mock.patch.object(os, "pread", lambda fd, size, at: reads.append(size) or real_pread(fd, size, at)):
+                events.emit(self.root, "agent.status", data={"n": 40})
+            self.assertLessEqual(sum(reads), events.EMIT_MERGE_BYTES)
+
+    def test_damaged_progress_and_merge_limits_never_double_hide_or_reorder(self):
+        """Damaged progress reconciles once, no row passes an older one, a recorder stays in budget; else events double."""
+        self.subscribe()
+        base = events.directory(self.root)
+        def seed(pid, numbers, padding=""):  # each row recorded at second `n`, so the right order is by number
+            with events._bounded_lock(base / ".lock"), mock.patch.object(events, "LOCK_SECONDS", 0), \
+                    mock.patch.object(events.os, "getpid", return_value=pid):
+                for n in numbers:
+                    with mock.patch.object(events, "now", return_value=f"2026-01-01T00:{n // 60:02}:{n % 60:02}+00:00"):
+                        events.emit(self.root, "agent.status", data={"n": n, "pad": padding})
+
+        def seen(after=0):
+            return [row["data"]["n"] for row in events.read(self.root, after, 1000)[0]]
+
+        def interrupted(numbers, padding=""):
+            seed(41, numbers, padding)
+            real = events._append
+
+            def append(root, event):
+                done = real(root, event)
+                if event["data"]["n"] == numbers[-1]:
+                    raise OSError("cut off after the last append")
+                return done
+            with mock.patch.object(events, "_append", append):
+                events.merge(self.root)
+            [progress] = [path for path in (base / events.SPILL).iterdir() if path.name.endswith(".offset")]
+            progress.write_text("torn")
+        with self.subTest("damaged progress reconciled across a budget cut"):
+            interrupted([0, 1, 2], "x" * 12000)
+            with events._bounded_lock(base / ".lock"):
+                events._merge_spills(self.root, budget=12500)
+            events.merge(self.root)
+            self.assertEqual(seen(), [0, 1, 2])
+        with self.subTest("a journal that can't be read proves nothing"):
+            interrupted([3])
+            real = Path.read_bytes
+            segment = events.segments(self.root)[-1][1]
+            with mock.patch.object(type(segment), "read_bytes",
+                                   lambda path: (_ for _ in ()).throw(OSError("unreadable")) if path == segment
+                                   else real(path)):
+                events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen(), [0, 1, 2, 3])
+        with self.subTest("a recovered row's number is published"):
+            last = seen()
+            seed(42, [4])
+            with mock.patch.object(events, "_write_counter", side_effect=OSError("cut off before the counter")):
+                events.merge(self.root)
+            [progress] = [path for path in (base / events.SPILL).iterdir() if path.name.endswith(".offset")]
+            progress.write_text("torn")
+            events.merge(self.root)
+            self.assertEqual(seen(len(last)), [4])
+        with self.subTest("no append while another process's next row is unknown"):
+            seed(43, [6])  # a small row, recorded later
+            seed(44, [5], "x" * 12000)  # a large one, recorded earlier: unknown within the budget below
+            first = min((base / events.SPILL).glob("*.jsonl"))
+            with events._bounded_lock(base / ".lock"):
+                events._merge_spills(self.root, budget=4 * first.stat().st_size)
+            events.merge(self.root)
+            self.assertEqual(seen()[-2:], [5, 6])
+        with self.subTest("a later row never passes an older one written to a reused file"):
+            seed(45, [7])
+            with mock.patch.object(events.os, "getpid", return_value=45):
+                mine = events._spill_name
+            seed(46, [8])
+            with mock.patch.object(events, "_spill_name", mine):
+                seed(45, [9])
+            events.merge(self.root)
+            events.merge(self.root)
+            self.assertEqual(seen()[-3:], [7, 8, 9])
+        with self.subTest("a recorder's reads and appends stay in its budget, and it never reconciles"):
+            seed(47, range(10, 18), "x" * 12000)
+            spent, real_read, real_append = [], os.pread, events._append
+
+            def counted_read(fd, size, at):
+                data = real_read(fd, size, at)
+                spent.append(len(data))
+                return data
+
+            def counted_append(root, event):
+                spent.append(len(events._line(event)))
+                return real_append(root, event)
+            with mock.patch.object(os, "pread", counted_read), mock.patch.object(events, "_append", counted_append):
+                events.emit(self.root, "agent.status", data={"n": 18})
+            self.assertLessEqual(sum(spent), events.EMIT_MERGE_BYTES)
+            events.merge(self.root)
+            interrupted([19])
+            reads, real = [], Path.read_bytes
+            with mock.patch.object(Path, "read_bytes",
+                                   lambda path: (lambda data: reads.append(len(data)) or data)(real(path))):
+                events.emit(self.root, "agent.status", data={"n": 20})
+            self.assertEqual(reads, [])  # the whole journal is the host's to read
+
+    def test_a_merge_tells_order_cheaply_holds_no_file_and_never_guesses(self):
+        """Merges order rows from a few bytes each, hold no file open, never guess an unreadable one; else they stall."""
+        self.subscribe()
+        base = events.directory(self.root)
+
+        def seed(pid, numbers, padding=""):  # each row recorded at second `n`, so the right order is by number
+            with events._bounded_lock(base / ".lock"), mock.patch.object(events, "LOCK_SECONDS", 0), \
+                    mock.patch.object(events.os, "getpid", return_value=pid):
+                for n in numbers:
+                    with mock.patch.object(events, "now", return_value=f"2026-01-01T00:{n // 60:02}:{n % 60:02}+00:00"):
+                        events.emit(self.root, "agent.status", data={"n": n, "pad": padding})
+
+        def seen():
+            return [row["data"]["n"] for row in events.read(self.root, 0, 1000)[0]]
+        with self.subTest("a waiting file that can't be read holds newer rows back"):
+            mark = len(seen())
+            seed(51, [101])
+            seed(52, [100])
+            unreadable, real_open = max((base / events.SPILL).glob("*.jsonl")).name, os.open
+
+            def opening(name, *args, **kwargs):
+                if name == unreadable:
+                    raise OSError(errno.EIO, "unreadable for now")
+                return real_open(name, *args, **kwargs)
+            with mock.patch.object(os, "open", opening):
+                events.merge(self.root)
+            self.assertEqual(seen()[mark:], [])
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [100, 101])
+        with self.subTest("large rows at a small budget still go, each merge within it"):
+            mark = len(seen())
+            for pid in range(61, 67):
+                seed(pid, [pid + 49], "x" * 12000)
+            spent, real_pread = [], os.pread
+
+            def counting(descriptor, size, at):
+                data = real_pread(descriptor, size, at)
+                spent[-1] += len(data)
+                return data
+            with mock.patch.object(os, "pread", counting), \
+                    events._bounded_lock(base / ".lock"):
+                for _ in range(12):
+                    spent.append(0)
+                    events._merge_spills(self.root, budget=30000)
+            self.assertLessEqual(max(spent), 30000)
+            self.assertEqual(seen()[mark:], list(range(110, 116)))
+        with self.subTest("a merge holds no spill file open between reads"):
+            mark = len(seen())
+            for pid in range(71, 76):
+                seed(pid, [pid + 49, pid + 54])
+            held, most, real_open, real_close = set(), [0], os.open, os.close
+
+            def opening(*args, **kwargs):
+                descriptor = real_open(*args, **kwargs)
+                held.add(descriptor)
+                most[0] = max(most[0], len(held))
+                return descriptor
+
+            def closing(descriptor):
+                held.discard(descriptor)
+                real_close(descriptor)
+            with events._bounded_lock(base / ".lock"), mock.patch.object(os, "open", opening), \
+                    mock.patch.object(os, "close", closing):
+                events._merge_spills(self.root)
+            self.assertLessEqual(most[0], 3)  # the spill folder, a file read or claimed, a progress write
+            self.assertEqual(sorted(seen()[mark:]), list(range(120, 130)))
+        with self.subTest("claims of a reused name keep their order whatever the clock does"):
+            mark = len(seen())
+            seed(81, [130])
+            first = events._spill_name
+            folder = os.open(base / events.SPILL, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with events._bounded_lock(base / ".lock"):
+                    with mock.patch.object(events.time, "time_ns", return_value=200):
+                        self.assertTrue(events._claim(folder, first[1]))
+                    with mock.patch.object(events, "_spill_name", first):
+                        seed(81, [131])
+                    with mock.patch.object(events.time, "time_ns", return_value=100):
+                        self.assertTrue(events._claim(folder, first[1]))
+            finally:
+                os.close(folder)
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [130, 131])
+        with self.subTest("a recorder leaves a row in doubt to the host"):
+            mark = len(seen())
+            seed(91, [140])
+            real = events._append
+
+            def cut_off(root, event):
+                real(root, event)
+                raise OSError("cut off right after the append")
+            with mock.patch.object(events, "_append", cut_off):
+                events.merge(self.root)
+            with mock.patch.object(events, "_replayed", wraps=events._replayed) as replayed, \
+                    mock.patch.object(events, "now", return_value="2026-01-01T00:02:21+00:00"):
+                events.emit(self.root, "agent.status", data={"n": 141, "pad": ""})
+            self.assertEqual(replayed.call_count, 0)  # proving it reads the journal: the host's work
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [140, 141])
+        with self.subTest("a waiting file a spiller holds mid-row holds newer rows back"):
+            mark = len(seen())
+            seed(101, [151])
+            with mock.patch.object(events.os, "getpid", return_value=102):
+                waiting = events._spill_path(self.root)
+            row = events._line({"at": "2026-01-01T00:02:30+00:00", "schema": 1, "seq": 0, "type": "agent.status",
+                                "agent": None, "launch": None, "data": {"n": 150, "pad": ""},
+                                events.REPLAY: "spill/held"})
+            with waiting.open("wb") as spilling:
+                fcntl.flock(spilling.fileno(), fcntl.LOCK_EX)
+                spilling.write(row[:11])
+                spilling.flush()
+                events.merge(self.root)
+                before = seen()[mark:]
+                spilling.write(row[11:])
+                spilling.flush()
+            events.merge(self.root)
+            self.assertEqual((before, seen()[mark:]), ([], [150, 151]))
+        with self.subTest("a process's later file never goes before its earlier one, whatever its rows' times"):
+            mark = len(seen())
+            seed(110, [162])
+            seed(111, [163])
+            with mock.patch.object(events.os, "getpid", return_value=111):
+                earlier = events._spill_path(self.root)
+            with earlier.open("rb") as holding:
+                fcntl.flock(holding.fileno(), fcntl.LOCK_EX)
+                seed(111, [161])  # held: a new file of process 111, its row dated earlier (the clock stepped back)
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [162, 163, 161])
+        with self.subTest("many files at a small budget merge across passes, each going on from the last"):
+            mark = len(seen())
+            for k in range(26):
+                seed(120 + k, [170 + k])
+            with events._bounded_lock(base / ".lock"):
+                for _ in range(16):
+                    events._merge_spills(self.root, budget=2900)
+            self.assertEqual(seen()[mark:], list(range(170, 196)))
+        spill = base / events.SPILL
+        with self.subTest("a row a cut-off merge appended is settled before anything newer goes in"):
+            mark = len(seen())
+            seed(130, [230])
+            real = events._append
+
+            def cut_off(root, event):
+                real(root, event)
+                raise OSError("cut off right after the append")
+            with mock.patch.object(events, "_append", cut_off):
+                events.merge(self.root)
+            seed(131, range(220, 229), "x" * 12000)  # dated earlier, enough to push it out of the replay tail
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [230, *range(220, 229)])
+        with self.subTest("lines that aren't events are passed once, not read again by every merge"):
+            mark = len(seen())
+            seed(132, [240])
+            waiting = max(spill.glob("*.jsonl"))
+            waiting.write_bytes((b"{" + b"x" * 1100 + b"\n") * 4 + waiting.read_bytes())
+            with events._bounded_lock(base / ".lock"):
+                for _ in range(9):
+                    events._merge_spills(self.root, budget=3000)
+            self.assertEqual(seen()[mark:], [240])
+        with self.subTest("a file claimed before keeps its place among its process's files"):
+            mark = len(seen())
+            seed(133, [251])
+            with (spill / events._spill_name[1]).open("rb") as holding:
+                fcntl.flock(holding.fileno(), fcntl.LOCK_EX)
+                seed(133, [250])  # a later file of that process, dated earlier
+            folder = os.open(spill, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with events._bounded_lock(base / ".lock"):
+                    self.assertTrue(events._claim(folder, events._spill_name[1]))  # the later one claimed first
+            finally:
+                os.close(folder)
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [251, 250])
+        with self.subTest("a saved time out of range is learned again"):
+            mark = len(seen())
+            seed(134, [260])
+            folder = os.open(spill, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with events._bounded_lock(base / ".lock"):
+                    claimed = events._claim(folder, events._spill_name[1])
+            finally:
+                os.close(folder)
+            (spill / (claimed + ".offset")).write_text(json.dumps({"offset": 0, "pending": None, "when": 10 ** 400}))
+            events.merge(self.root)
+            self.assertEqual(seen()[mark:], [260])
 
     def test_a_segment_pruned_while_it_is_read_becomes_a_gap(self):
         """Segments rolled by size or day and pruned by age, by plugins.json's size limit or between listing and

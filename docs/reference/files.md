@@ -131,7 +131,7 @@ mv2 and the plugins write here, so leave it alone.
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
 
-`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, `journal-id`, and its second copy `journal-id.copy` (so a lost or unreadable `journal-id` is not taken for a new journal). A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
+`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, `journal-id`, and its second copy `journal-id.copy` (so a lost or unreadable `journal-id` is not taken for a new journal). A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. `spill/` holds events a process recorded while the journal was busy, one file per process, until the next writer merges them in (a file being merged is renamed `.merging-NAME-ID.jsonl`, with its progress beside it in `...offset`, including when its next row was recorded, so the next merge goes on from there; links and files that aren't regular are never written or followed). mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
 
 ## statusline.json
 
