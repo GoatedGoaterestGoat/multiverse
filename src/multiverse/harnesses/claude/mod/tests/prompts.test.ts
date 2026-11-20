@@ -3,7 +3,7 @@
 // wait process, which ends when its answer file appears or its prompt file goes, or throws when the test presses Esc.
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { closedOutcome } from '../hooks/prompts'
+import { closedOutcome, suggestionMeaning } from '../hooks/prompts'
 
 const FOLDER = '/agent/claude-prompts'
 const ID = /^\/agent\/claude-prompts\/([0-9a-f-]{36})\.json$/
@@ -453,6 +453,35 @@ describe('prompts for mv2', () => {
       [{ how: 'closed', cause: 'denied' }, { state: 'gone', cause: 'closed' }],
     ]
     for (const [record, outcome] of rows) expect([record, closedOutcome(record)]).toEqual([record, outcome])
+  })
+
+
+  test("each choice says what it does, and a suggestion that does more than allow the same again is 'other'", async ($, on) => {
+    // A plugin picks 'the allow-for-session choice' by meaning: a mode switch called allow_session would let it turn
+    // on accept-edits for the whole session thinking it allowed one request again.
+    const rows: [Record<string, unknown>, boolean, { meaning?: string; short?: string }][] = [
+      [{ type: 'addRules', rules: [], behavior: 'allow', destination: 'session' }, false, { meaning: 'allow_session' }],
+      [{ type: 'addRules', rules: [], behavior: 'allow', destination: 'localSettings' }, true, { meaning: 'allow_always' }],
+      [{ type: 'addDirectories', directories: ['/tmp/x'], destination: 'session' }, false, { meaning: 'allow_session' }],
+      [{ type: 'addDirectories', directories: ['/tmp/x'], destination: 'userSettings' }, true, { meaning: 'allow_always' }],
+      [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }, false, { meaning: 'other', short: 'Allow, accept edits' }],
+      [{ type: 'setMode', mode: 'somethingNew', destination: 'session' }, false, { meaning: 'other', short: 'Allow, set mode' }],
+      [{ type: 'setMode', mode: 'acceptEdits', destination: 'localSettings' }, true, { meaning: 'other', short: 'Allow, accept edits' }],
+      [{ type: 'addRules', rules: [], behavior: 'deny', destination: 'session' }, false, { meaning: 'other', short: 'Allow, change rules' }],
+      [{ type: 'removeRules', rules: [], behavior: 'allow', destination: 'session' }, false, { meaning: 'other', short: 'Allow, change rules' }],
+    ]
+    for (const [suggestion, saved, expected] of rows) expect([suggestion, suggestionMeaning(suggestion, saved)]).toEqual([suggestion, expected])
+    for (const row of rows) expect((row[2].short ?? '').length).toBeLessThanOrEqual(24)
+    const w = world(on)
+    void ask($, 'Bash', BASH, SESSION)
+    await w.until(() => w.published().length === 1)
+    expect(w.record(w.published()[0] ?? '').choices.map((c: { id: string; meaning?: string; short?: string }) => [c.id, c.meaning, c.short]))
+      .toEqual([['allow', 'allow', undefined], ['allow_session', 'allow_session', undefined],
+        ['allow_session_2', 'other', 'Allow, accept edits'], ['deny', 'deny', undefined]])
+    void ask($, 'ExitPlanMode', PLAN)
+    await w.until(() => w.published().length === 2)
+    const plan = w.published().map(w.record).find((r) => r.kind === 'plan')
+    expect(plan.choices.map((c: { meaning: string }) => c.meaning)).toEqual(['approve_plan', 'keep_planning'])
   })
 
 })

@@ -16,7 +16,8 @@ from tui_demo import DemoBackend
 
 QUESTION = {
     "id": "demo-question", "kind": "question", "tool": "AskUserQuestion", "summary": "Which parts and how?",
-    "detail": {}, "asked_at": None, "answerable": True, "reason": None, "subagent": None, "choices": [],
+    "detail": {"origin": "the release checklist"}, "asked_at": None, "answerable": True, "reason": None,
+    "subagent": None, "choices": [],
     "questions": [
         {"id": "Which parts?", "header": "Parts", "question": "Which parts?", "options": [["API", ""], ["UI", ""]],
          "multiple": True, "free_text": False, "secret": False, "required": True},
@@ -75,6 +76,96 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
         await pilot.press("a")
         await self.settle(pilot)
 
+    async def test_the_answer_screen_shows_what_the_highlight_is_and_keeps_it_in_view(self):
+        """The highlighted choice's full label shows whatever is picked, a full-length display title is shown whole,
+        and in a 60x20 terminal the highlighted choice and its scope stay in view; fragile because two choices can
+        share a short label, and a choice scrolled out of view could be picked and sent unseen (a saved rule)."""
+        def choice(n, meaning, short, label, saves=False):
+            return {"id": f"choice-{n}", "label": label, "saves_rule": saves, "takes_message": False,
+                    "meaning": meaning, "short": short}
+        title = ("Review the generated command and its context before it runs here " + "x" * 80)[:71] + "TITLE-END"
+        prompt = {"id": "long", "kind": "permission", "tool": "Bash", "summary": "make release", "detail": {},
+                  "asked_at": None, "answerable": True, "reason": None, "subagent": None, "questions": [],
+                  "display": {"title": title, "subject": "make release " + "VERSION=1.2.3 " * 34,  # 500 characters
+                              "lines": [f"line {n}" for n in range(1, 9)]},
+                  "choices": [choice(1, "allow", "Allow once", "Yes"),
+                              choice(2, "allow_session", "Allow for session", "Yes, for make in this session"),
+                              choice(3, "allow_session", "Allow for session", "Yes, for make release in this session"),
+                              choice(4, "allow_always", "Allow always", "Yes, and always allow make in this project",
+                                     saves=True),
+                              choice(5, "deny", "Deny", "No")]}
+        self.writer["status"] = "waiting"
+        self.backend.prompts[self.writer["id"]] = [prompt]
+        for size in ((120, 36), (60, 20)):
+            self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+            async with self.app.run_test(size=size) as pilot:
+                await self.settle(pilot)
+                await pilot.press("p")
+                await self.open(pilot, self.writer)
+                screen = self.app.screen
+                self.assertIsInstance(screen, AnswerScreen)
+
+                def frame():
+                    return "".join(strip.text for strip in screen._compositor.render_strips()).replace(" ", "")
+
+                long = screen.query_one("#prompt-choice-long", Static)
+                if size == (120, 36):
+                    with self.subTest("the whole display title"):
+                        self.assertIn("TITLE-END", frame())
+                    with self.subTest("the highlighted choice's full label, whatever is picked"):
+                        await pilot.press("down", "enter", "down")  # pick the first session choice, then look on
+                        await self.settle(pilot)
+                        self.assertEqual(screen.picked, "choice-2")
+                        self.assertEqual(str(long.render()), "Yes, for make release in this session")
+                else:
+                    with self.subTest("at 60x20 the highlighted choice and its scope stay in view"):
+                        await pilot.press("down", "down", "down")  # Allow always, the fourth: it saves a rule
+                        await self.settle(pilot)
+                        shown = frame()
+                        for text in ("Allowalways", "savesarule", "alwaysallowmakeinthisproject"):
+                            self.assertIn(text, shown)
+                await pilot.press("escape")
+                await self.settle(pilot)
+        self.assertEqual(self.backend.answers, [])
+
+    async def test_a_long_full_label_never_hides_the_highlighted_choice_in_a_short_terminal(self):
+        """At 60x20, a highlighted choice whose full label is longer than the view stays on screen with its rule
+        warning, the label scrolling in its own box; fragile because scrolling the label into view pushed the choice
+        out, and a hidden rule-saving choice could still be picked and sent (the reviewer's case on 0ccf880f)."""
+        item = {"id": "test", "kind": "permission", "summary": "Test choices", "detail": {}, "questions": [],
+                "display": {"title": "Run a command", "subject": "review-command", "lines": []},
+                "choices": [{"id": "highlight-first", "short": "Allow always", "saves_rule": True,
+                             "label": "Requested scope details " * 18 + "SCOPE-END"},
+                            *[{"id": f"alt-{n}", "short": "Allow for session", "label": f"Alternative scope {n}"}
+                              for n in range(1, 8)]]}
+        async with self.app.run_test(size=(60, 20)) as pilot:
+            screen = AnswerScreen("worker", item)
+            await self.app.push_screen(screen)
+            await self.settle(pilot)
+            frame = "\n".join(strip.text for strip in screen._compositor.render_strips())
+            self.assertIn("highlight-first", frame)
+            self.assertIn("saves a rule", frame)
+            self.assertIn("Requested scope details", frame)  # the full label starts in view, and scrolls on its own
+            self.assertNotIn("SCOPE-END", frame)
+        item["choices"][1] = {"id": "second", "short": "Allow always", "saves_rule": True,
+                              "label": "SECOND-START " + "Other scope details " * 18}
+        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+        async with self.app.run_test(size=(60, 20)) as pilot:
+            screen = AnswerScreen("worker", item)
+            await self.app.push_screen(screen)
+            await self.settle(pilot)
+            box = screen.query_one("#prompt-choice-long-box")
+            await pilot.press("tab", "end")  # read the first label to its end
+            await self.settle(pilot)
+            self.assertGreater(box.scroll_y, 0)
+            await pilot.press("shift+tab", "enter")  # pick it: the same choice keeps its place in the label
+            await self.settle(pilot)
+            self.assertGreater(box.scroll_y, 0)
+            await pilot.press("down")  # another choice: its label from the start, where scopes differ
+            await self.settle(pilot)
+            self.assertEqual(box.scroll_y, 0)
+            self.assertIn("SECOND-START", "\n".join(strip.text for strip in screen._compositor.render_strips()))
+
     async def test_the_inspector_shows_a_waiting_prompt_and_a_answers_it_as_picked_and_nothing_else(self):
         """A waiting agent's prompt shows in the inspector and a opens it; what is sent is exactly the choice, message
         or labels picked, nothing is sent on Esc or with a required question empty, a secret box is masked, and the
@@ -102,19 +193,33 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.backend.answers, [])
             with self.subTest("the highlighted choice alone is never sent"):
                 await self.open(pilot, self.writer)
-                await pilot.press("ctrl+enter")  # "Yes" is highlighted, not picked
+                await pilot.press("ctrl+enter")  # "Allow once" is highlighted, not picked
                 await self.settle(pilot)
                 self.assertIsInstance(self.app.screen, AnswerScreen)
                 self.assertEqual(self.backend.answers, [])
                 self.assertIn("Pick a choice", str(self.app.screen.query_one("#answer-error", Static).render()))
+            with self.subTest("the prompt as core's display says it, not the harness's own detail"):
+                self.assertIn("Run a command", str(self.app.screen.query_one("#dialog-title").render()))
+                shown = "\n".join(str(widget.render()) for widget in self.app.screen.query(".prompt-detail"))
+                self.assertIn("git push origin draft-pr\nPublish the draft branch", shown)
+                self.assertNotIn("command:", shown)
+            with self.subTest("choices by their short labels, the highlighted one's long label under them"):
+                choices = self.app.screen.query_one("#prompt-choices")
+                shown = [str(choices.get_option_at_index(i).prompt).split("  ")[0] for i in range(choices.option_count)]
+                self.assertEqual(shown, ["Allow once", "Allow always", "Deny"])
+                long = self.app.screen.query_one("#prompt-choice-long", Static)
+                self.assertEqual(str(long.render()), "Yes")
+                await pilot.press("down")
+                self.assertEqual(str(long.render()), "Yes, and don't ask again for git push")
+                await pilot.press("up")
             with self.subTest("Enter only picks: nothing is sent until Ctrl+Enter"):
-                await pilot.press("enter")  # picks "Yes"
+                await pilot.press("enter")  # picks "Allow once"
                 await self.settle(pilot)
                 self.assertIsInstance(self.app.screen, AnswerScreen)
                 self.assertEqual(self.backend.answers, [])
-                self.assertIn("Picked: Yes", str(self.app.screen.query_one("#prompt-picked", Static).render()))
+                self.assertIn("Picked: Allow once", str(self.app.screen.query_one("#prompt-picked", Static).render()))
             with self.subTest("a choice with its message, exactly as picked"):
-                await pilot.press("down", "down", "enter")  # Yes, Yes always, No: the one that takes a message
+                await pilot.press("down", "down", "enter")  # Allow once, Allow always, Deny: it takes a message
                 self.app.screen.query_one("#prompt-message", Input).value = "push to a fork instead"
                 await pilot.press("ctrl+enter")
                 await self.settle(pilot)
@@ -131,6 +236,9 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                 self.app.refresh_snapshot()
                 await self.open(pilot, self.writer)
                 screen = self.app.screen
+                # no display (an older adapter): the harness's own detail, as before
+                self.assertIn("origin: the release checklist", "\n".join(
+                    str(widget.render()) for widget in screen.query(".prompt-detail")))
                 secret = screen.query_one("#q1-text", Input)
                 self.assertTrue(secret.password)
                 screen.query_one("#q0", SelectionList).select("UI")
@@ -174,6 +282,8 @@ class AnswerPromptTests(unittest.IsolatedAsyncioTestCase):
                 self.app.refresh_snapshot()
                 await self.open(pilot, self.writer)
                 screen = self.app.screen
+                # no short label (an older adapter): nothing more to say under the choices
+                self.assertFalse(screen.query_one("#prompt-choice-long-box").display)
                 screen.query_one("#q2-note", Input).value = "typed before declining"
                 screen.query_one("#q3-note", Input).value = "k3y"
                 screen.query_one("#prompt-choices").focus()

@@ -9,14 +9,19 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import cli
-from multiverse.harnesses.types import PromptChoice, PromptList, PromptQuestion, PromptResult, WaitingPrompt
+from multiverse.harnesses.types import (PromptChoice, PromptDisplay, PromptList, PromptQuestion, PromptResult,
+                                        WaitingPrompt)
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.tools import answer as tool
 
 PROMPTS = PromptList(state="ok", coverage="complete", prompts=(
-    WaitingPrompt(id="perm1", kind="permission", tool="Bash", summary="rm -rf build", choices=(
-        PromptChoice(id="allow", label="Yes"), PromptChoice(id="allow_always", label="Always", saves_rule=True),
-        PromptChoice(id="deny", label="No", takes_message=True))),
+    WaitingPrompt(id="perm1", kind="permission", tool="Bash", summary="rm -rf build",
+                  display=PromptDisplay(title="Run a command", subject="rm -rf build",
+                                        lines=("Clean the build folder",)), choices=(
+        PromptChoice(id="allow", label="Yes", meaning="allow", short="Allow once"),
+        PromptChoice(id="allow_always", label="Always", saves_rule=True, meaning="allow_always", short="Allow always"),
+        PromptChoice(id="deny", label="Deny", takes_message=True, meaning="deny", short="Deny"),
+        PromptChoice(id="later", label="Ask me later"))),
     WaitingPrompt(id="ask1", kind="question", tool="AskUserQuestion", summary="Which database?", questions=(
         PromptQuestion(id="Which database should I use?", header="Database", question="Which database should I use?",
                        options=(("Postgres", ""), ("SQLite", ""))),
@@ -73,8 +78,15 @@ class AnswerCommandTests(PluginTestCase):
             with self.subTest("the list shows choices, rule-saving ones and questions by number"):
                 status, out, _ = self.mv2()
                 self.assertEqual(status, 0)
-                self.assertIn("perm1  permission  Bash: rm -rf build", out)
-                self.assertIn("allow_always (Always) [saves a rule; person only]", out)
+                # core's display: its title on the prompt's line, its subject and lines under it; a prompt without
+                # one (ask1, an older adapter) shows its tool and summary
+                self.assertIn("perm1  permission  Run a command\n    rm -rf build\n    Clean the build folder\n", out)
+                self.assertIn("ask1  question  AskUserQuestion: Which database?", out)
+                self.assertIn("allow_always (Allow always: Always) [saves a rule; person only]", out)
+                # the short label, then the long one only where it says more; a choice with no short label (an
+                # older adapter) is its long label
+                self.assertIn("allow (Allow once: Yes), ", out)
+                self.assertIn("deny (Deny) [takes --message], later (Ask me later)", out)
                 self.assertIn("1. Database: Which database should I use?  [Postgres | SQLite]", out)
                 self.assertIn("secret: answer with --stdin", out)
                 self.assertIn("async1  question  request_user_input_async: Which branch?  (doesn't need the agent "

@@ -96,8 +96,9 @@ class ClaudePromptsTest(BaseTest):
         self.assertNotIn(older, prompts)
         self.assertNotIn(cleared, prompts)
         self.assertTrue(prompts[current]['answerable'])
+        # An older mod publishes no meanings: none is guessed.
         self.assertEqual(prompts[current]['choices'][1], {'id': 'allow_always', 'label': 'Allow, and also allow Bash(touch:*), saved',
-                                                         'saves_rule': True, 'takes_message': False})
+                                                         'saves_rule': True, 'takes_message': False, 'meaning': None, 'short': None})
         self.assertFalse(prompts[newer]['answerable'])
         self.assertIn("aren't checked on Claude Code 2.1.999", prompts[newer]['reason'])
         self.assertEqual(listed.value['coverage'], 'complete')
@@ -250,6 +251,71 @@ class ClaudePromptsTest(BaseTest):
                 self.assertEqual(self.adapter.prompt_outcome(self.session(), PromptAnswer(id=open_one)).value['state'], 'submitted')
                 (answers / f'{open_one}{suffix}').unlink()
         self.assertEqual(self.adapter.prompt_outcome(self.session(), PromptAnswer(id=str(uuid4()))).value['state'], 'unknown')
+
+    def test_a_choices_meaning_is_listed_only_when_it_is_one_core_takes(self):
+        """Core refuses a whole listing whose meaning is outside its set or, for a named meaning, disagrees with saves_rule,
+        so a choice from a newer or broken mod must lose its meaning, not hide the prompt; an 'other' must carry its own
+        short label, and may save a rule or not."""
+        choice = lambda **fields: {'id': 'allow_session', 'label': 'Allow', 'saves_rule': False, 'takes_message': False, **fields}
+        for label, item, expected in (
+                ('a meaning in the set', choice(meaning='allow_session'), ('allow_session', None)),
+                ('a saving meaning that saves', choice(meaning='allow_always', saves_rule=True), ('allow_always', None)),
+                ("a saving meaning that doesn't save", choice(meaning='allow_always'), (None, None)),
+                ('a meaning that saves without saying so', choice(meaning='allow', saves_rule=True), (None, None)),
+                ('other with its short label', choice(meaning='other', short='Allow, accept edits'), ('other', 'Allow, accept edits')),
+                ('other that saves a rule', choice(meaning='other', short='Allow, accept edits', saves_rule=True), ('other', 'Allow, accept edits')),
+                ('other without one', choice(meaning='other'), (None, None)),
+                ('other, too long', choice(meaning='other', short='x' * 25), (None, None)),
+                ('other, not plain', choice(meaning='other', short='Allow\nall'), (None, None)),
+                ('other with a bidi control', choice(meaning='other', short='Allow\u202eall'), (None, None)),
+                ('other with a zero-width space', choice(meaning='other', short='Allow\u200b'), (None, None)),
+                ('an unknown meaning', choice(meaning='allow_forever'), (None, None)),
+                ("a named meaning's short label is core's", choice(meaning='deny', short='Nope'), ('deny', None)),
+                ('no meaning', choice(), (None, None))):
+            with self.subTest(label):
+                id = self.publish(choices=[item])
+                listed = self.adapter.waiting_prompts(self.session()).value['prompts']
+                got = next(p for p in listed if p['id'] == id)['choices'][0]
+                self.assertEqual((got['meaning'], got['short']), expected)
+                (self.agent_dir / 'claude-prompts' / f'{id}.json').unlink()
+
+    def test_a_prompts_display_says_what_is_asked_within_cores_bounds(self):
+        """The display is what a plugin and the dashboard show without knowing Claude's tools; core refuses a listing past
+        its bounds, so a long command or a many-line plan must be cut, never break the listing; and it is public, so a
+        fetched URL shows its host only, never a secret in it."""
+        long = 'echo ' + 'x' * 600
+        for label, fields, expected in (
+                ('a command', {'tool': 'Bash', 'detail': {'input': {'command': 'npm test\nnpm run lint', 'description': 'Run the tests'}}},
+                 {'title': 'Run a command', 'subject': 'npm test', 'lines': ['Run the tests', 'npm run lint']}),
+                ('a long command is cut', {'tool': 'Bash', 'detail': {'input': {'command': long}}},
+                 {'title': 'Run a command', 'subject': long[:499] + '\u2026', 'lines': []}),
+                ('a file edit', {'tool': 'Edit', 'detail': {'input': {'file_path': '/w/a.py', 'old_string': 'x'}}},
+                 {'title': 'Edit a file', 'subject': '/w/a.py', 'lines': []}),
+                ('a fetched page: its host only, never a password, path, query or fragment',
+                 {'tool': 'WebFetch', 'detail': {'input': {'url': 'https://me:s3cret@Docs.example.com:8443/x/y?token=abc#top', 'prompt': 'Summarise it'}}},
+                 {'title': 'Fetch a web page', 'subject': 'docs.example.com:8443', 'lines': ['Summarise it']}),
+                ('a fetched page at an IPv6 address', {'tool': 'WebFetch', 'detail': {'input': {'url': 'http://[::1]:8080/a'}}},
+                 {'title': 'Fetch a web page', 'subject': '[::1]:8080', 'lines': []}),
+                ('a fetched page with no readable host', {'tool': 'WebFetch', 'detail': {'input': {'url': 'not a url'}}},
+                 {'title': 'Fetch a web page', 'subject': None, 'lines': []}),
+                ('an MCP tool', {'tool': 'mcp__github__create_issue', 'detail': {'input': {'title': 't'}}},
+                 {'title': 'Use an MCP tool', 'subject': 'github: create_issue', 'lines': []}),
+                ('a tool mv2 has no words for', {'tool': 'Frobnicate', 'detail': {'input': {}}},
+                 {'title': 'Use Frobnicate', 'subject': None, 'lines': []}),
+                ('a plan, first lines only', {'kind': 'plan', 'tool': 'ExitPlanMode', 'detail': {'input': {'plan': '\n'.join(f'{n}. step' for n in range(12))}}},
+                 {'title': 'Approve the plan', 'subject': None, 'lines': [f'{n}. step' for n in range(8)]}),
+                ('one question', {'kind': 'question', 'tool': 'AskUserQuestion', 'choices': [], 'questions': QUESTIONS[:1]},
+                 {'title': 'Answer a question', 'subject': 'Colour', 'lines': []}),
+                ('two questions', {'kind': 'question', 'tool': 'AskUserQuestion', 'choices': [], 'questions': QUESTIONS},
+                 {'title': 'Answer 2 questions', 'subject': None, 'lines': []}),
+                ('a form', {'kind': 'form', 'tool': None, 'choices': [], 'answerable': False, 'reason': 'terminal',
+                            'detail': {'server': 'docs', 'message': 'Pick a page\x07', 'mode': None, 'schema': None}},
+                 {'title': 'Fill in a form', 'subject': 'docs', 'lines': ['Pick a page']})):
+            with self.subTest(label):
+                id = self.publish(**fields)
+                listed = self.adapter.waiting_prompts(self.session()).value['prompts']
+                self.assertEqual(next(p for p in listed if p['id'] == id)['display'], expected)
+                (self.agent_dir / 'claude-prompts' / f'{id}.json').unlink()
 
     def test_a_prompts_end_event_gives_the_outcome_its_end_record_alone_gives(self):
         """The mod's prompt.closed event carries a state and cause it maps from its end record (hooks/prompts.ts

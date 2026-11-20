@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 import stat
 import shutil
 import subprocess
@@ -830,9 +831,102 @@ def published_prompt(record, id, session):
         answerable = False
         reason = (f"mv2's answers aren't checked on Claude Code {record.get('claude') or 'of unknown version'}: answer it in "
                   'the terminal')
-    return {'id': id, 'kind': record['kind'], 'summary': summary, 'detail': detail, 'asked_at': _short(record.get('asked_at'), 64),
+    return {'id': id, 'kind': record['kind'], 'summary': summary, 'display': prompt_display(record, questions), 'detail': detail,
+            'asked_at': _short(record.get('asked_at'), 64),
             'tool': _short(record.get('tool'), 256), 'choices': choices, 'questions': questions, 'answerable': answerable,
             'reason': reason if not answerable else None, 'subagent': _short(record.get('subagent'), 256)}
+
+
+MEANINGS = ('allow', 'allow_session', 'allow_always', 'deny', 'deny_always', 'stop', 'dismiss', 'approve_plan',
+            'keep_planning', 'other')  # core's set (types.PromptChoiceMeaning)
+SAVING = ('allow_always', 'deny_always')
+
+
+def _short_label(text):
+    """An 'other' choice's short label as core takes it: 1 to 24 printable characters, not all blank. Core checks
+    every character with str.isprintable and refuses the whole listing otherwise (a bidi control, say)."""
+    return isinstance(text, str) and 0 < len(text) <= 24 and text.isprintable() and bool(text.strip())
+
+
+def choice_meaning(item):
+    """{'meaning', 'short'} the mod published for a choice, or both None: an older mod's choice, one outside core's
+    set, an 'other' without a plain short label of at most 24 characters, or a named meaning that disagrees with
+    saves_rule (core would refuse the whole listing; 'other' may save or not). Core fills the short label of every
+    meaning but 'other'."""
+    meaning, short = item.get('meaning'), item.get('short')
+    if (meaning not in MEANINGS or meaning != 'other' and (meaning in SAVING) != item['saves_rule']
+            or meaning == 'other' and not _short_label(short)):
+        return {'meaning': None, 'short': None}
+    return {'meaning': meaning, 'short': short if meaning == 'other' else None}
+
+
+TOOL_TITLES = {'Bash': ('Run a command', 'command'), 'Edit': ('Edit a file', 'file_path'),
+               'MultiEdit': ('Edit a file', 'file_path'), 'Write': ('Write a file', 'file_path'),
+               'NotebookEdit': ('Edit a notebook', 'notebook_path'), 'Read': ('Read a file', 'file_path'),
+               'Glob': ('Find files', 'pattern'), 'Grep': ('Search files', 'pattern'), 'WebFetch': ('Fetch a web page', None),
+               'WebSearch': ('Search the web', 'query'), 'Task': ('Start a subagent', 'description'),
+               'Agent': ('Start a subagent', 'description'), 'Skill': ('Use a skill', 'skill')}
+TOOL_LINES = {'Bash': ('description',), 'Grep': ('path', 'glob'), 'Glob': ('path',), 'WebFetch': ('prompt',),
+              'Task': ('subagent_type',), 'Agent': ('subagent_type',)}
+DISPLAY_LINES, DISPLAY_LINE = 8, 200
+
+
+def _url_host(value):
+    """A fetched URL's host and port, for display: never its credentials, path, query or fragment, any of which can
+    hold a secret (a signed link's token, a password before the host)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value.strip())
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = f'[{host}]' if ':' in host else host
+    return f'{host}:{port}' if port else host
+
+
+def _plain(text, limit):
+    """Printable text cut to `limit` characters with an ellipsis; None when nothing printable is left."""
+    if not isinstance(text, str):
+        return None
+    text = ''.join(ch if ch.isprintable() else ' ' for ch in text).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def prompt_display(record, questions):
+    """What the prompt asks, in core's display shape ({title, subject, lines}), from what the mod published: the tool
+    and its input for a permission, the questions, the plan, or the form's server and message."""
+    kind, detail = record['kind'], record.get('detail') if isinstance(record.get('detail'), dict) else {}
+    data = detail.get('input') if isinstance(detail.get('input'), dict) else {}
+    title, subject, lines = None, None, []
+    if kind == 'question':
+        title = 'Answer a question' if len(questions) == 1 else f'Answer {len(questions)} questions'
+        subject = questions[0]['header'] if len(questions) == 1 else None
+    elif kind == 'plan':
+        title = 'Approve the plan'
+        lines = [line for line in str(data.get('plan') or '').splitlines() if line.strip()]
+    elif kind == 'form':
+        title, subject = 'Fill in a form', detail.get('server')
+        lines = str(detail.get('message') or '').splitlines()
+    else:
+        tool = record.get('tool') if isinstance(record.get('tool'), str) else ''
+        mcp = re.fullmatch(r'mcp__(.+?)__(.+)', tool)
+        if mcp:
+            title, subject = 'Use an MCP tool', f'{mcp[1]}: {mcp[2]}'
+        elif tool in TOOL_TITLES:
+            title, key = TOOL_TITLES[tool]
+            value = data.get(key) if key else None
+            text = value if isinstance(value, str) else ''
+            subject = _url_host(data.get('url')) if tool == 'WebFetch' else text.splitlines()[0] if text.splitlines() else None
+            lines = [data[k] for k in TOOL_LINES.get(tool, ()) if isinstance(data.get(k), str)] + text.splitlines()[1:]
+        else:
+            title = f'Use {tool}' if tool else 'Allow a tool'
+    kept = [cut for line in lines if (cut := _plain(line, DISPLAY_LINE)) is not None][:DISPLAY_LINES]
+    return {'title': _plain(title, 80) or 'Answer a prompt', 'subject': _plain(subject, 500), 'lines': kept}
 
 
 def prompt_schema(record):
@@ -844,7 +938,7 @@ def prompt_schema(record):
                 or _short(item.get('label'), 512) is None or type(item.get('saves_rule')) is not bool
                 or type(item.get('takes_message')) is not bool or any(c['id'] == item['id'] for c in choices)):
             return None
-        choices.append({k: item[k] for k in ('id', 'label', 'saves_rule', 'takes_message')})
+        choices.append({**{k: item[k] for k in ('id', 'label', 'saves_rule', 'takes_message')}, **choice_meaning(item)})
     for item in record.get('questions') or []:
         if not isinstance(item, dict) or _short(item.get('id')) is None or _short(item.get('question')) is None:
             return None

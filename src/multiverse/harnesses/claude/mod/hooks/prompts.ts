@@ -29,7 +29,9 @@ const SCOPES: Record<string, string> = {
   projectSettings: 'saved to your project settings', userSettings: 'saved to your user settings',
 }
 
-type Choice = { id: string; label: string; saves_rule: boolean; takes_message: boolean }
+// `meaning`: what the choice does, from core's set (harnesses/types.py PromptChoiceMeaning); 'other' brings its own
+// `short` label (core fills the rest). Left out where no meaning fits without misleading.
+type Choice = { id: string; label: string; saves_rule: boolean; takes_message: boolean; meaning?: string; short?: string }
 type Question = { id: string; header: string; question: string; options: [string, string][]; multiple: boolean;
   free_text: boolean }
 type Decision = Record<string, unknown>
@@ -128,17 +130,32 @@ function describe(s: Record<string, unknown>): string {
   return `Allow, and ${String(s.type)} ${rules || dirs}, ${scope}`.replace(/ +,/, ',')
 }
 
+// A suggestion choice allows this call and applies one of Claude's suggestions. An allow rule or a directory allows
+// the same again (for the session, or always when saved); a mode switch (acceptEdits, say) or another change of the
+// rules does more than that, so it is 'other' with its own short label, saved or not ('other' may save; only the named
+// meanings are tied to saves_rule).
+const MODES: Record<string, string> = { acceptEdits: 'Allow, accept edits', bypassPermissions: 'Allow, bypass all',
+  plan: 'Allow, plan mode', default: 'Allow, default mode', dontAsk: "Allow, don't ask" }
+
+export function suggestionMeaning(s: Record<string, unknown>, saved: boolean): { meaning?: string; short?: string } {
+  if ((s.type === 'addRules' && s.behavior === 'allow') || s.type === 'addDirectories') return { meaning: saved ? 'allow_always' : 'allow_session' }
+  if (s.type === 'setMode') return { meaning: 'other', short: MODES[String(s.mode)] ?? 'Allow, set mode' }
+  return { meaning: 'other', short: 'Allow, change rules' }
+}
+
 function permission(suggestions: unknown, plan: boolean) {
   const choices: Choice[] = []
   const decisions = new Map<string, Decision>()
   const saves = new Set<string>()
   const add = (choice: Choice, decision: Decision) => { choices.push(choice); decisions.set(choice.id, decision); if (choice.saves_rule) saves.add(choice.id) }
   if (plan) {
-    add({ id: 'allow', label: 'Approve the plan; edits are then asked for', saves_rule: false, takes_message: false }, { behavior: 'allow' })
-    add({ id: 'deny', label: 'Keep planning, with your feedback', saves_rule: false, takes_message: true }, { behavior: 'deny' })
+    add({ id: 'allow', label: 'Approve the plan; edits are then asked for', saves_rule: false, takes_message: false, meaning: 'approve_plan' },
+      { behavior: 'allow' })
+    add({ id: 'deny', label: 'Keep planning, with your feedback', saves_rule: false, takes_message: true, meaning: 'keep_planning' },
+      { behavior: 'deny' })
     return { choices, decisions, saves }
   }
-  add({ id: 'allow', label: 'Allow once', saves_rule: false, takes_message: false }, { behavior: 'allow' })
+  add({ id: 'allow', label: 'Allow once', saves_rule: false, takes_message: false, meaning: 'allow' }, { behavior: 'allow' })
   const seen = new Map<string, number>()
   for (const s of Array.isArray(suggestions) ? suggestions : []) {
     if (s === null || typeof s !== 'object') continue
@@ -146,12 +163,12 @@ function permission(suggestions: unknown, plan: boolean) {
     const base = saved ? 'allow_always' : 'allow_session'
     const n = (seen.get(base) ?? 0) + 1
     seen.set(base, n)
-    add({ id: n === 1 ? base : `${base}_${n}`, label: describe(s as Record<string, unknown>), saves_rule: saved, takes_message: false },
-      { behavior: 'allow', updatedPermissions: [s] })
+    add({ id: n === 1 ? base : `${base}_${n}`, label: describe(s as Record<string, unknown>), saves_rule: saved, takes_message: false,
+      ...suggestionMeaning(s as Record<string, unknown>, saved) }, { behavior: 'allow', updatedPermissions: [s] })
   }
   // No "deny and stop the turn" (interrupt): Claude stores it exactly as the person's No or Esc, with no decision
   // row, so mv2 could never tell whose answer took.
-  add({ id: 'deny', label: 'Deny; the agent carries on', saves_rule: false, takes_message: true }, { behavior: 'deny' })
+  add({ id: 'deny', label: 'Deny; the agent carries on', saves_rule: false, takes_message: true, meaning: 'deny' }, { behavior: 'deny' })
   return { choices, decisions, saves }
 }
 

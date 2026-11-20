@@ -16,7 +16,7 @@ from multiverse.harnesses.codex import prompt_codec as codec
 from multiverse.harnesses.codex import prompt_files, prompts
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
-from multiverse.harnesses.types import NativeEndpoint, PromptAnswer, PromptOutcomeQuery, SessionHandle
+from multiverse.harnesses.types import NativeEndpoint, NativeResult, PromptAnswer, PromptOutcomeQuery, SessionHandle
 from multiverse.runtime import rpc, native as runtime_native, prompts as core_prompts
 from websockets.asyncio.client import unix_connect
 from websockets.asyncio.server import unix_serve
@@ -50,10 +50,13 @@ class PromptCodecTest(unittest.TestCase):
         self.assertEqual([row['id'] for row in offer.choices],
                          ['allow', 'allow_session', 'allow_rule_2', 'network_rule_3', 'deny', 'stop'])
         self.assertEqual([row['saves_rule'] for row in offer.choices], [False, False, True, True, False, False])
+        self.assertEqual([row.get('meaning') for row in offer.choices],
+                         ['allow', 'allow_session', 'allow_always', 'deny_always', 'deny', 'stop'])
         for action in ('allow', 'deny'):
             decision = {'applyNetworkPolicyAmendment': {'network_policy_amendment': {'host': 'example.invalid', 'action': action}}}
             network_offer = codec.describe(COMMAND, params(availableDecisions=[decision]))
             self.assertTrue(network_offer.choices[0]['saves_rule'])
+            self.assertEqual(network_offer.choices[0].get('meaning'), action + '_always')
             with self.assertRaisesRegex(ValueError, 'Only the person'):
                 network_offer.response(answer(network_offer.choices[0]['id']))
         for row, expected in zip(offer.choices, offered):
@@ -95,6 +98,7 @@ class PromptCodecTest(unittest.TestCase):
                 self.assertEqual(offer.answerable, eligible)
                 if eligible:
                     self.assertEqual(offer.detail['changes'], item['changes'])
+                    self.assertEqual([row.get('meaning') for row in offer.choices], ['allow', 'allow_session', 'stop'])
                     self.assertEqual(offer.response(answer('allow_session')), {'decision': 'acceptForSession'})
                     with self.assertRaises(ValueError):
                         offer.response(answer('deny'))  # The TUI does not offer wire-level decline.
@@ -103,6 +107,8 @@ class PromptCodecTest(unittest.TestCase):
                         {'path': {'type': 'glob_pattern', 'pattern': '/safe/*'}, 'access': 'read'}]}}
         offer = codec.describe(PERMISSIONS, params(permissions=profile))
         self.assertTrue(offer.answerable)
+        self.assertEqual([(row.get('meaning'), row.get('short')) for row in offer.choices],
+                         [('allow', None), ('other', 'Allow, strict review'), ('allow_session', None), ('deny', None)])
         self.assertEqual(offer.response(answer('allow_session')), {'permissions': profile, 'scope': 'session'})
         self.assertEqual(offer.response(answer('allow_review')),
                          {'permissions': profile, 'scope': 'turn', 'strictAutoReview': True})
@@ -166,6 +172,9 @@ class PromptCodecTest(unittest.TestCase):
         self.assertEqual(form.response(answer(answers={'name': ['Pat'], 'enabled': ['True'], 'mode': ['B']})),
                          {'action': 'accept', 'content': {'name': 'Pat', 'enabled': True, 'mode': 'b'}, '_meta': None})
         self.assertEqual(form.response(answer('cancel')), {'action': 'cancel', 'content': None, '_meta': None})
+        self.assertEqual([row.get('meaning') for row in form.choices], ['dismiss'])
+        message_approval = codec.describe(MCP, params(mode='form', serverName='server', requestedSchema=None))
+        self.assertEqual([row.get('meaning') for row in message_approval.choices], ['allow', 'deny', 'dismiss'])
         for environment in (None, 'registration-scope'):
             scoped = codec.describe(MCP, params(mode='form', serverName='server', turnId=None,
                 requestedSchema=schema, environmentId=environment))
@@ -204,6 +213,7 @@ class PromptCodecTest(unittest.TestCase):
             cancelled = {'action': 'cancel', 'content': None,
                          '_meta': {'codex_approval_cancellation_reason': 'user'}}
             with self.subTest(cancel=persist):
+                self.assertEqual(approval.choices[-1].get('meaning'), 'dismiss')
                 self.assertEqual(approval.response(answer('cancel')), cancelled)
                 self.assertEqual(approval.person_answer(cancelled), {'choice': 'cancel'})
             if 'always' in persist:
@@ -214,9 +224,62 @@ class PromptCodecTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 approval.response(answer('allow', answers={'_meta': ['persist:always']}))
 
+    def test_display_preserves_bounded_plain_prompt_fields_without_copying_options_or_secrets(self):
+        """Native prompt data can contain control bytes, lengthy fields and terminal-only authentication metadata."""
+        long_command = 'cmd\x1b ' + 'x' * 510
+        purpose = '\n'.join(['y' * 201, *map(str, range(10))])
+        command = codec.describe(COMMAND, params(command=long_command, reason=purpose,
+                                               availableDecisions=['accept'])).public('command')['display']
+        self.assertEqual(command['title'], 'Run a command')
+        self.assertEqual((len(command['subject']), command['subject'][-1]), (500, '…'))
+        self.assertTrue(command['subject'].isprintable())
+        self.assertEqual(command['lines'], ['y' * 199 + '…', *map(str, range(7))])
+
+        change = {'id': 'item-one', 'type': 'fileChange', 'changes': [
+            {'path': '/workspace/file', 'kind': {'type': 'update'}, 'diff': 'PRIVATE DIFF'}]}
+        file = codec.describe(FILE, params(reason='Update the fixture'), item=change).public('file')['display']
+        self.assertEqual(file, {'title': 'Edit a file', 'subject': '/workspace/file', 'lines': ['Update the fixture']})
+        grant = codec.describe(PERMISSIONS, params(permissions={'network': {'enabled': True},
+                               'fileSystem': {'write': ['/workspace']}})).public('grant')['display']
+        self.assertEqual(grant, {'title': 'Grant permissions', 'subject': 'Network and filesystem access',
+                                 'lines': ['Write /workspace']})
+        profile = {'fileSystem': {'read': None, 'write': ['/workspace'], 'entries': [
+            {'path': {'type': 'special', 'value': {'kind': 'root'}}, 'access': 'write'},
+            {'path': {'type': 'glob_pattern', 'pattern': '**/*.env'}, 'access': 'deny'},
+            {'path': {'type': 'special', 'value': {'kind': 'project_roots', 'subpath': 'src'}}, 'access': 'read'},
+            {'path': {'type': 'path', 'path': '/workspace'}, 'access': 'write'},
+        ]}}
+        offer = codec.describe(PERMISSIONS, params(permissions=profile))
+        self.assertEqual(offer.public('grant')['display']['lines'],
+                         ['Write :root', 'Deny read glob **/*.env', 'Read :workspace_roots/src', 'Write /workspace'])
+        self.assertEqual(offer.response(answer('allow'))['permissions'], profile)
+
+        question = codec.describe(QUESTION, params(questions=[
+            {'id': 'native-question', 'header': 'Credential', 'question': 'Enter a credential',
+             'isSecret': True, 'options': [{'label': 'PRIVATE OPTION', 'description': 'detail'}]}]))
+        self.assertEqual(question.public('q')['display'],
+                         {'title': 'Answer a question', 'subject': 'Credential', 'lines': []})
+        async_question = codec.describe('request_user_input_async', params(questionIndex=0,
+            question={'title': 'Pick one', 'options': ['PRIVATE OPTION']}))
+        self.assertEqual(async_question.public('async')['display'],
+                         {'title': 'Answer a question', 'subject': None, 'lines': []})
+
+        form = codec.describe(MCP, params(mode='form', serverName='example', message='Fill this in',
+            requestedSchema={'type': 'object', 'properties': {'n': {'type': 'string'}}}))
+        self.assertEqual(form.public('form')['display'],
+                         {'title': 'Fill in a form', 'subject': 'example', 'lines': ['Fill this in']})
+        url = codec.describe(MCP, params(mode='url', url='https://name:PRIVATE@example.invalid/verify?token=PRIVATE'))
+        self.assertEqual(url.public('url')['display'],
+                         {'title': 'Open an MCP URL', 'subject': 'example.invalid', 'lines': []})
+
     def test_bad_and_oversized_inputs_have_no_partial_answer_path(self):
         """A malformed first response consumes the native callback, so invalid choices must fail before send."""
         offer = codec.describe(COMMAND, params(command='safe', availableDecisions=['accept']))
+        near_limit = codec.describe(COMMAND, params(command='echo ' + 'x' * 64600, availableDecisions=['accept']))
+        self.assertTrue(near_limit.answerable, near_limit.reason)
+        self.assertEqual(near_limit.response(answer('allow')), {'decision': 'accept'})
+        too_large = codec.describe(COMMAND, params(command='x' * (64 << 10), availableDecisions=['accept']))
+        self.assertFalse(too_large.answerable)
         for value in [answer('allow', message='not offered'), answer('allow', allow_rule=1),
                       {**answer('allow'), 'answers': []}, answer({'decision': 'accept'}), answer('allow', answers={'x': ['bad']})]:
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -276,6 +339,47 @@ class PromptRelayTest(unittest.TestCase):
 
     def result(self, id):
         return prompts.outcome(self.session, SimpleNamespace(id=id)).value
+
+    def test_older_relay_choices_get_meanings_only_when_the_native_offer_matches(self):
+        """Adding display meanings cannot break a live older relay or legitimize a changed offer."""
+        id = self.request()
+        name = id + '.open.json'
+        legacy = self.relay.files.read(name)
+        del legacy['prompt']['display']
+        legacy['prompt']['choices'] = [
+            {key: value for key, value in choice.items() if key not in ('meaning', 'short')}
+            for choice in legacy['prompt']['choices']
+        ]
+        self.relay.files.write(name, legacy)
+        found = prompts.catalog(self.session)
+        self.assertEqual([row.get('meaning') for row in found.value['prompts'][0]['choices']],
+                         ['allow', 'allow_session', 'deny', 'stop'])
+        self.assertEqual(found.value['prompts'][0]['display']['title'], 'Run a command')
+
+        taken = []
+        executor = SimpleNamespace(check_session=lambda: None, write_prompt_answer=lambda session, request:
+                                    taken.append(request) or NativeResult('pending'))
+        request = PromptAnswer(id=id, choice='deny')
+        self.assertEqual(prompts.submit(self.session, request, executor).state, 'pending')
+        self.assertEqual(taken, [request])
+
+        legacy['prompt']['choices'][0]['label'] = 'An incompatible offer'
+        self.relay.files.write(name, legacy)
+        self.assertTrue(all('meaning' not in row for row in prompts.catalog(self.session).value['prompts'][0]['choices']))
+        self.assertEqual(prompts.submit(self.session, request, executor).state, 'unavailable')
+        self.assertEqual(taken, [request])
+
+        legacy['prompt']['choices'][0]['label'] = 'Allow once'
+        for flag, value in [('saves_rule', 0), ('takes_message', 0.0)]:
+            with self.subTest(flag=flag):
+                legacy['prompt']['choices'][0][flag] = value
+                self.relay.files.write(name, legacy)
+                repaired = prompts.catalog(self.session).value['prompts'][0]
+                self.assertNotIn('meaning', repaired['choices'][0])
+                self.assertNotIn('display', repaired)
+                self.assertEqual(prompts.submit(self.session, request, executor).state, 'unavailable')
+                self.assertEqual(taken, [request])
+                legacy['prompt']['choices'][0][flag] = False
 
     def test_metadata_only_outcome_requires_the_exact_durable_callback_close(self):
         """A submitted response can settle late and an unclosed receipt cannot explain a waiting exit."""

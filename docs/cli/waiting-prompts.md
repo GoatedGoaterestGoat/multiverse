@@ -16,14 +16,18 @@ Only a person, from a terminal that isn't an agent's, or a plugin can read or an
 
 ## Read the prompts
 
-`mv2 answer NAME` lists the prompts the agent waits on and its retained asynchronous questions. Each line shows the prompt's ID, its kind, and what it is about, such as the command or file a permission prompt asks about. Under it are its choices, or its questions, numbered:
+`mv2 answer NAME` lists the prompts the agent waits on and its retained asynchronous questions. Each line shows the prompt's ID, its kind, and what it asks, such as `Run a command`, the same way for every harness. Under it are what it is about, such as the command or file, any further lines the harness gives, such as the command's stated purpose, then its choices, or its questions, numbered. A prompt from a harness that doesn't describe it this way shows its tool and a one-line summary instead:
 
 ```text
-4f2c9a1e  permission  Bash: rm -rf build
-    choices: allow (Yes), allow_session (Yes, for this session), deny (No) [takes --message]
+4f2c9a1e  permission  Run a command
+    rm -rf build
+    Clean the build folder
+    choices: allow (Allow once: Yes), allow_session (Allow for session: Yes, for this session), deny (Deny: No) [takes --message]
 7b0d3e55  question  AskUserQuestion: Which database should I use?
     1. Database: Which database should I use?  [Postgres | SQLite]  (typed text allowed)
 ```
+
+Each choice shows its ID, then its short label, which says what it does the same way for every harness, such as `Allow for session`, then the harness's own label where that says more, such as a rule's scope. A choice from a harness that gives no short label shows its own label. `--json` has both, with the choice's `meaning`.
 
 A choice marked `saves a rule` also changes your saved settings, such as always allowing a command, and only a person can give it. A prompt mv2 can't answer says why, often "answer it in the terminal". When mv2 can't tell whether it sees every prompt the agent waits on, the list ends with `Coverage unknown` and the reason.
 
