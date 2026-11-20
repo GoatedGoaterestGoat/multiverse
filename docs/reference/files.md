@@ -128,6 +128,7 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Written after the cursor: an interrupted write delivers again, never skips. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
 | `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
+| `registry.json` | Each plugin that's on here: the event types it subscribes to, the source that found it, and, for one found only in your own environment (`MV2_PLUGIN_PATH`, a package of another Python), its folder. Every process here records the plugin's events from it, and finds it there, at the content pinned for it when you turned it on (`mv2 plugins trust NAME` approves an edit). Written when you turn a plugin on or off and when you list the plugins. |
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
 

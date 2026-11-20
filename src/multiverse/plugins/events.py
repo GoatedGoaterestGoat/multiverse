@@ -108,6 +108,25 @@ def subscribers(root, kind):
     delivers anything."""
     if loader.safe_mode():
         return []
+    from . import config, registry
+    if root is not None:
+        recorded = registry.known(root)
+        settings = config.load(root, observed=True)
+        if recorded is not None and not settings.problem:
+            # Recorded plugins are decided from the record and plugins.json alone, without finding them, so a plugin
+            # this process can't find (in the person's MV2_PLUGIN_PATH) counts too. Discovery, only for plugins that
+            # are on but not recorded (turned on by hand, or before the record), and never at a recorded one's cost.
+            names = {name for name, value in recorded.items() if settings.is_on(name)
+                     and any(fnmatch.fnmatchcase(kind, pattern) for pattern in value["events"])}
+            if any(on and name not in recorded for name, on in settings.enabled.items()):
+                try:
+                    names.update(found.name for found in loader.declared(root)
+                                 if found.on and found.name not in recorded
+                                 and any(fnmatch.fnmatchcase(kind, pattern) for pattern in found.manifest.events))
+                except Exception:
+                    pass
+            return sorted(names)
+    # A universe with no record yet: by discovery.
     if not any(fnmatch.fnmatchcase(kind, pattern)
                for manifest in loader.manifest_records(root) for pattern in manifest.events):
         return []  # With no subscribing manifest, plugins.json cannot change the answer.

@@ -83,6 +83,10 @@ class InstallerTest(PluginTestCase):
                             target.resolve())  # it runs from a copy of exactly the pinned bytes
         (target / "plugin.py").write_text(CODE + "# edited\n")
         self.assertEqual(self.state(), "changed")
+        alias = {"MV2_PLUGIN_PATH": os.pathsep.join([str(target), os.environ["MV2_PLUGIN_PATH"]])}
+        with mock.patch.dict(os.environ, alias):  # found through a path naming it, and listed there
+            plugins.listing(self.root, wait=0)
+            self.assertEqual(trust.state(target), "changed")  # approves no edit: only the person's trust does
         with self.assertRaisesRegex(ValueError, "mv2 plugins remove"):
             tool.run(self.root, plugin_action="untrust", name="notes")  # would unpin it, not stop it
         tool.run(self.root, plugin_action="trust", name="notes")  # the person approves the edit

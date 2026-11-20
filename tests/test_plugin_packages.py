@@ -11,7 +11,7 @@ from unittest import mock
 import zipfile
 
 from multiverse import plugins
-from multiverse.plugins import config, loader, packages
+from multiverse.plugins import config, loader, packages, trust
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.tools import plugins as tool
 
@@ -49,9 +49,20 @@ class PackagesTest(PluginTestCase):
         self.hashes = {version: wheel(self.wheels, "mv2fixture", version) for version in ("1.0", "2.0")}
 
     def needing(self, name, lines):
-        return self.write_plugin(name, {"api": "1.20", "module": "plugin", "python": {"requirements": "req.txt"}},
-                                 {"plugin.py": "import mv2fixture\n\ndef register(mv):\n    pass\n",
-                                  "req.txt": "".join(line + "\n" for line in lines)})
+        directory = self.write_plugin(name, {"api": "1.20", "module": "plugin",
+                                             "python": {"requirements": "req.txt"}},
+                                      {"plugin.py": "import mv2fixture\n\ndef register(mv):\n    pass\n",
+                                       "req.txt": "".join(line + "\n" for line in lines)})
+        if trust.state(directory) == "changed":  # on and recorded, so pinned: the person approves their edit
+            trust.trust(directory)
+        return directory
+
+    def rewrite(self, path, text):
+        """Edit a plugin's file as its developer does: once the plugin is on and recorded it runs pinned, so the
+        person approves the edit (mv2 plugins trust)."""
+        path.write_text(text)
+        if trust.state(path.parent) == "changed":
+            trust.trust(path.parent)
 
     def pinned(self, version):
         return f"mv2fixture=={version} \\\n    --hash=sha256:{self.hashes[version]}"
@@ -92,7 +103,7 @@ class PackagesTest(PluginTestCase):
             self.assertEqual(sys.path[-1], str(site))  # after every entry of mv2's own
             self.assertIn("Installed its Python packages", tool.text("enable", result))
         with self.subTest("a changed list needs the person's ok again"):
-            (self.plugins_dir / "relay" / "req.txt").write_text(self.pinned("2.0") + "\n")
+            self.rewrite(self.plugins_dir / "relay" / "req.txt", self.pinned("2.0") + "\n")
             loader.reset()
             packages._active.clear()
             with self.assertRaisesRegex(loader.PluginError, "run mv2 plugins packages relay"):
@@ -109,7 +120,7 @@ class PackagesTest(PluginTestCase):
         directory = self.needing("relay", [self.pinned("1.0")])
 
         def changed(prompt):
-            (directory / "req.txt").write_text(self.pinned("2.0") + "\n")
+            self.rewrite(directory / "req.txt", self.pinned("2.0") + "\n")
             return "y"
         with mock.patch.object(sys.stdin, "isatty", return_value=True), \
                 mock.patch.object(sys.stdout, "isatty", return_value=True), \
@@ -128,7 +139,7 @@ class PackagesTest(PluginTestCase):
         loader.reset()
         loader.load(self.entry("relay"))
         with self.subTest("a newer version of the same plugin's package in a running process"):
-            (directory / "req.txt").write_text(self.pinned("2.0") + "\n")
+            self.rewrite(directory / "req.txt", self.pinned("2.0") + "\n")
             self.run_tool("packages", "relay", install_packages=True)
             loader.reset()
             with self.assertRaisesRegex(loader.PluginError, "already loaded mv2fixture 1.0 for it: restart"):
@@ -155,7 +166,7 @@ class PackagesTest(PluginTestCase):
         loader.load(self.entry("relay"))
         problem = lambda: self.run_tool("info", "relay")["problem"] or ""
         with self.subTest("a running process loaded an older version"):
-            (directory / "req.txt").write_text(f"{self.pinned('2.0')}\ntextual=={textual} --hash=sha256:{'a' * 64}\n")
+            self.rewrite(directory / "req.txt", f"{self.pinned('2.0')}\ntextual=={textual} --hash=sha256:{'a' * 64}\n")
             self.run_tool("packages", "relay", install_packages=True)
             self.assertIn("already loaded mv2fixture 1.0 for it: restart", problem())
             packages._active.clear()
@@ -187,6 +198,7 @@ class PackagesTest(PluginTestCase):
         self.needing("relay", [self.pinned("1.0")])
         config.set_enabled(self.root, "relay", True)
         state = lambda: {item["name"]: item["state"] for item in plugins.listing(self.root, wait=0)}["relay"]
+        state()  # listed first, as the Plugins screen does: that records the plugin and pins what it runs
         with self.assertRaises(loader.PluginError):
             loader.load(self.entry("relay"))
         self.assertEqual([state() for _ in range(3)], ["failed"] * 3)
@@ -334,7 +346,7 @@ class PackagesTest(PluginTestCase):
         # Already on, with a list that changed: it stays on, unable to load, and says so (API120-PACKAGES-3).
         directory = self.needing("relay", [self.pinned("1.0")])
         self.run_tool("enable", "relay", install_packages=True)
-        (directory / "req.txt").write_text(f"mv2fixture==2.0 --hash=sha256:{'0' * 64}\n")
+        self.rewrite(directory / "req.txt", f"mv2fixture==2.0 --hash=sha256:{'0' * 64}\n")
         with self.assertRaisesRegex(plugins.PluginError, "relay stays on here, but can't load until they install"):
             self.run_tool("enable", "relay", install_packages=True)
         self.assertTrue(self.entry("relay").on)

@@ -131,8 +131,7 @@ progress.release()
         child.wait.return_value = child.poll.return_value = 0
         with self.subTest(parent='progressing past 15 s'), \
              patch.object(runner.sys, 'argv', ['runner', str(self.launch)]), \
-             patch.object(runner.time, 'monotonic', side_effect=lambda: self.clock), \
-             patch.object(runner.time, 'sleep', side_effect=advance), \
+             patch.object(registration, 'time', SimpleNamespace(monotonic=lambda: self.clock, sleep=advance)), \
              patch.object(runner, 'process_started', return_value=None), \
              patch.object(registration, 'process_snapshot', return_value=(self.owner['parent_started'], 'S')), \
              patch.object(runner.subprocess, 'Popen', return_value=child) as popen, \

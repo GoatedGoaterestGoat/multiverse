@@ -40,6 +40,8 @@ When two sources have a plugin with the same name, the first in this order wins:
 | `checkout` | `plugins/NAME/` in the mv2 checkout you run: optional Git submodules | Yes |
 | `bundled` | Inside mv2 itself | Yes |
 
+A plugin that's on behaves the same in every process of the universe, however you found it. Listing the plugins (`mv2 plugins`, `P`) records what events each one follows, so agents' processes record them too. Turning a plugin on, or listing the plugins in your own shell while it's on, also records, for one only your own environment finds (`MV2_PLUGIN_PATH`, a package of another Python), its folder, pinned at the files it has then, the ones your shell already runs. From then on every process, your own included, runs exactly those files and records the events they follow: after you edit it, `mv2 plugins` and `P` show it as changed until you run `mv2 plugins trust NAME`. Only you record a folder: turning a plugin on from an agent, or an agent's listing, records just its events, and no listing ever moves a recorded folder or approves an edit. After moving a plugin, turn it off, then on again where your environment finds its new place (a plugin that's on is never moved from one folder to another while on).
+
 An untrusted universe copy never hides a plugin of the same name from another source. A trusted copy does, and `mv2 plugins` and the `P` screen say what it overrides. Installing a plugin doesn't turn it on in any universe.
 
 ## Install a plugin

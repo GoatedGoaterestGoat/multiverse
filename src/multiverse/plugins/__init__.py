@@ -6,8 +6,8 @@ counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
 answer goes on without it. See docs/develop/plugins.md.
 """
-from contextlib import contextmanager
-from dataclasses import asdict
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict, replace
 import json
 import os
 import sys
@@ -130,6 +130,13 @@ def bootstrap_lines(root):
     for loaded in loader.active(root):
         lines.extend(loaded.registrations.bootstrap)
     return lines
+
+
+def _record(root, current):
+    """Record what this process finds in the universe's registry (registry.record), before it loads anything, so it
+    loads what every other process here will: True when the record changed."""
+    from . import registry
+    return registry.record(root, current, person=not from_agent(root))
 
 
 def problems(root, reserved=(), wait=None):
@@ -309,11 +316,31 @@ def listing(root, wait=loader.REFRESH_WAIT):
     and has settings is loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings
     check refuses reads `unusable` here as it does in doctor. A plugin that is off is never imported here; its
     own settings screen or fields (settings `own_view`) come from settings_view(), on request."""
-    from . import host, installer
-    current = entries(root)
+    from . import host, installer, registry
+    current, started = entries(root), set()
+    if _record(root, current):  # before anything loads: a path plugin first pinned here runs from its pinned copy
+        current = entries(root)
+        # One this process already ran, or was loading, from its own folder now runs from its pinned copy, loaded
+        # on its own (what ran from the folder isn't proved to be those bytes). One that had loaded is loaded again
+        # here, waiting as for a settings check; one still loading or failed starts in the background. Either way
+        # it reads as it did: loaded, loading, or failed.
+        moved = [found for found in current if found.on and found.state == "on" and found.manifest is not None
+                 and loader.ran_from(found.directory)]
+        for found in moved:
+            if loader.ran_from(found.directory, loaded=True):
+                try:
+                    loader.load(found, wait=wait)
+                except PluginError:
+                    pass  # its entry says why
+            else:
+                loader.start(found)
+                started.add(found.name)  # loading: never waited out here, as any load under way isn't
+        if moved:
+            current = entries(root)
     placed = installer.pinned(root)
     checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
-              and found.on and found.state in ("on", "unusable") and found.loaded is None]
+              and found.on and found.state in ("on", "unusable") and found.loaded is None
+              and found.name not in started]
     for found in checks:
         try:
             loader.load(found, wait=wait)
@@ -1180,6 +1207,7 @@ def set_enabled(root, name, on, grant=None):
     """
     root = Path(root)
     installed = []
+    admitted = None
     if not on and all(found.name != name or found.state == "missing" for found in entries(root)):
         # A plugin this universe no longer has (removed, or never here): turning it off forgets it here, its
         # grant too, so what a removal left can be cleared.
@@ -1191,24 +1219,93 @@ def set_enabled(root, name, on, grant=None):
         return {"name": name, "on": False, "installed": [], "granted": None, "forgotten": forgotten}
     was_on = entry(root, name).on
     if on:
-        found = entry(root, name)
+        found = _own_choice(root, entry(root, name))
         if found.state in ("invalid", "untrusted", "changed", "incompatible"):
             raise PluginError(found.problem)
+        if found.directory is not None and found.source not in ("universe", "personal", "checkout", "bundled"):
+            # One admitted state: its fingerprint, and the manifest read from exactly those bytes, which the grant
+            # is checked against and the record publishes; an edit at any point after can't be pinned in its place.
+            from . import registry
+            try:
+                admitted = registry.snapshot(found.directory) + (found.source,)
+            except (OSError, ValueError) as error:
+                raise PluginError(f"{name} changed while it was being turned on; try again ({error})") from None
+            # What is admitted is checked as it is: its name, and whether this mv2 can load it.
+            if admitted[2].name != name:
+                raise PluginError(f"{name} changed while it was being turned on (it now names {admitted[2].name})")
+            problem = loader.compatible(admitted[2])
+            if problem:
+                raise PluginError(f"{name} {problem}")
+            found = replace(found, manifest=admitted[2])
         grant = _grant_for(root, found, grant)
-        if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
-            installed.append(str(settings_files.path(root, name)))
     elif grant is not None:
         raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
-    try:
-        config.set_enabled(root, name, bool(on), grant=grant if on else None,
-                           no_raise_from=found.manifest.access.request if on and from_agent(root) and found.manifest
-                           else None)
-    except config.WouldRaise as error:
-        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
-                          f"mv2 plugins grant {name} {grant}") from None
+    from . import registry
+    preparing = on and admitted is not None and not from_agent(root)
+    with (registry.writing(root, name) if preparing else nullcontext()):
+        if preparing:
+            # Checked here, under the writer lock, against the switch and record as they are now, before anything
+            # is written: another enable may have turned it on from elsewhere since this one looked.
+            recorded = (registry.known(root) or {}).get(name, {}).get("directory")
+            if (config.load(root).enabled.get(name) is True and recorded is not None
+                    and recorded != str(admitted[0])):
+                # On from one folder, asked to be on from another: the folder (registry) and the grant (plugins.json)
+                # can't change together, so a move goes through off, which drops the record, and on again.
+                raise PluginError(f"{name} is on here from {recorded}; to turn it on from {admitted[0]}, turn it off "
+                                  f"first: mv2 plugins disable {name}, then mv2 plugins enable {name}")
+        if on and found.manifest is not None and settings_files.install_defaults(root, found.manifest):
+            installed.append(str(settings_files.path(root, name)))
+        if preparing:
+            # Recorded and pinned at what was admitted before the switch is published, under the registry's writer
+            # lock until it is, so no reader ever sees it on as an ordinary folder and no listing in between forgets
+            # what was prepared: a plugin whose record or pin didn't take as admitted isn't turned on.
+            registry.record(root, entries(root), person=True, approved=name, admitted=admitted)
+            if ((registry.known(root) or {}).get(name, {}).get("directory") != str(admitted[0])
+                    or not registry._pinned_at(admitted[0], admitted[1])):
+                raise PluginError(f"{name} couldn't be recorded and pinned as it was admitted, so it was left off; "
+                                  f"try again")
+        try:
+            config.set_enabled(root, name, bool(on), grant=grant if on else None,
+                               no_raise_from=found.manifest.access.request if on and from_agent(root)
+                               and found.manifest else None)
+        except config.WouldRaise as error:
+            raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                              f"mv2 plugins grant {name} {grant}") from None
     if on and not was_on:
         anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
+    from . import registry
+    # Every process here records its events, and finds it, however this one did.
+    # Patterns and the rest brought up to date; a plugin this enable prepared and published under the writer lock
+    # carries no approval here, so a later enable's choice is never undone by this one finishing.
+    registry.record(root, entries(root), person=not from_agent(root),
+                    approved=name if on and not preparing else None,
+                    admitted=admitted if on and not preparing else None)
     return {"name": name, "on": bool(on), "installed": installed, "granted": grant if on else None}
+
+
+def _own_choice(root, found):
+    """The plugin the person turning it on chooses: when discovery chose the folder the registry records for it,
+    where this, the person's own process, finds it by a source another process may lack (a folder in their
+    MV2_PLUGIN_PATH, say), if that is another folder (turning it on there is how it moves); otherwise what discovery
+    chose, by its ordinary precedence."""
+    from . import registry
+    if from_agent(root) or found.manifest is None:
+        return found
+    recorded = (registry.known(root) or {}).get(found.name, {}).get("directory")
+    if recorded is None or not (found.source == "recorded" or str(Path(found.directory).resolve()) == recorded):
+        return found  # no recorded folder discovery chose for it: ordinary precedence stands
+    for source, directory in loader._source_directories(root):
+        if source in registry.SHARED or source == found.source and directory == found.directory:
+            continue
+        try:
+            manifest = manifests.load(directory)
+        except manifests.ManifestError:
+            continue
+        if manifest.name == found.name:
+            if Path(directory).resolve() == Path(found.directory).resolve():
+                return found
+            return replace(found, source=source, directory=directory, manifest=manifest, state="on", problem=None)
+    return found
 
 
 def anchor_events(root, name, again=False):

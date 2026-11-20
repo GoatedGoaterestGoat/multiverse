@@ -253,7 +253,13 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         result = plugins.set_enabled(root, name, plugin_action == "enable", grant=grant)
         if "forgotten" in result:  # a plugin this universe no longer has
             return {"universe": str(root), **result}
-        found = plugins.entry(root, name)
+        try:
+            found = plugins.entry(root, name)
+        except plugins.PluginError:
+            if plugin_action == "enable":
+                raise
+            # Off, and found here only through its record, which turning it off drops: it's off, not missing.
+            return {"universe": str(root), **result, "state": "off", "problem": None}
         from ..plugins import host
         top = root
         while universe.parent(top) is not None:
@@ -278,17 +284,20 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     copy = plugins.universe_copy(root, name)
     if copy is None:
         found = plugins.entry(root, name)
-        from ..plugins import installer
+        from ..plugins import installer, registry
         record = installer.pinned(root).get(str(Path(found.directory).resolve())) if found.directory else None
-        if record is None or record["placement"] != "personal":
+        # A folder the universe records for this plugin runs at its pinned content in every process, so an edit is
+        # approved here: that folder, whichever copy this process finds first.
+        recorded = registry.read(root).get(name, {}).get("directory")
+        if (record is None or record["placement"] != "personal") and recorded is None:
             raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
-        if plugin_action == "untrust":
+        if plugin_action == "untrust" and record is not None:
             # An installed plugin is pinned at its content: untrusting it would leave it unpinned, not stopped.
             raise ValueError(f"{name} was installed by mv2 plugins install: turn it off here with mv2 plugins "
                              f"disable {name}, or remove it with mv2 plugins remove {name}")
         if plugins.from_agent(root):
             raise ValueError(f"Only the person trusts a plugin: ask them to run mv2 plugins trust {name}")
-        copy = Path(found.directory).resolve()
+        copy = Path(recorded) if recorded is not None and record is None else Path(found.directory).resolve()
     if plugin_action == "trust":
         value = trust.trust(copy)
         after = plugins.entry(root, name)
