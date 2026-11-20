@@ -7,6 +7,7 @@ RecordError, which says which file and why in one line, for the caller to report
 only what a reader depends on, not a schema: a record that merely lacks a field is still readable.
 """
 from pathlib import Path
+from dataclasses import dataclass
 import errno
 import json
 import os
@@ -35,16 +36,38 @@ def _kind(value):
             float: "a number", type(None): "null"}.get(type(value), type(value).__name__)
 
 
-def _object(path, *, missing_ok=False, growing=False):
+@dataclass
+class ReadBudget:
+    remaining: int
+    files: int = 1024
+
+
+def _unique(pairs):
+    found = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError('duplicate JSON object fields')
+        found[key] = value
+    return found
+
+
+def _object(path, *, missing_ok=False, growing=False, budget=None):
     """A JSON object, or None for exhausted ENOENT with missing_ok; other failures are RecordError."""
     path = Path(path)
     max_bytes = None if growing else MAX_BYTES
+    if budget is not None:
+        if budget.remaining <= 0 or budget.files <= 0:
+            raise RecordError(path, 'ledger read budget exhausted')
+        max_bytes = min(MAX_BYTES, budget.remaining)
+        budget.files -= 1
     try:
         with open_replaced(path) as stream:
             size = os.fstat(stream.fileno()).st_size
             if max_bytes is not None and size > max_bytes:
                 raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
             raw = stream.read(size if max_bytes is None else max_bytes + 1)
+            if budget is not None:
+                budget.remaining -= len(raw)
         if max_bytes is not None and len(raw) > max_bytes:
             raise RecordError(path, f"larger than {max_bytes // (1024 * 1024)} MiB")
     except RecordError:
@@ -56,7 +79,8 @@ def _object(path, *, missing_ok=False, growing=False):
     if not raw.strip():
         raise RecordError(path, "is empty")
     try:
-        data = json.loads(raw.decode("utf-8"))
+        data = (json.loads(raw.decode("utf-8")) if budget is None else
+                json.loads(raw.decode("utf-8"), object_pairs_hook=_unique))
     except UnicodeDecodeError:
         raise RecordError(path, "is not text") from None
     except RecursionError:
@@ -68,9 +92,11 @@ def _object(path, *, missing_ok=False, growing=False):
     return data
 
 
-def ledger(path):
+def ledger(path, *, budget=None):
     """An optional growing inbox ledger; size alone is not damage, unlike a launch/identity record."""
-    return _object(path, missing_ok=True, growing=True) or {}
+    if budget is None:
+        return _object(path, missing_ok=True, growing=True) or {}
+    return _object(path, missing_ok=True, growing=True, budget=budget) or {}
 
 
 def properties(path, *, harness_optional=False):

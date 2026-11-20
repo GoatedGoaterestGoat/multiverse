@@ -10,6 +10,7 @@ import sys
 import threading
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
@@ -22,6 +23,9 @@ from native_safety import require_checked_codex, isolated_home
 from native_cli import forbidden_python, mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
+
+# Another agent's sender, as mv2 names one: a name alone, with no agent behind it, reads as the person's.
+REVIEWER = {'name': 'reviewer', 'agent_id': str(uuid4())}
 
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
@@ -143,12 +147,12 @@ class CodexPermissionTest(TerminalBase):
                     if stage.endswith('-wake'):
                         with patch.object(CodexAdapter, 'send', side_effect=AssertionError('Wake must use the CLI prompt')):
                             delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage,
-                                                 sender={'name': 'reviewer'}, delivery='follow-up')
+                                                 sender=REVIEWER, delivery='follow-up')
                         self.assertTrue(delivered['ok'], delivered)
                         # Arrives before the TUI has bound/submitted its CLI prompt.
                         additional = send.run(self.root, agent=launched['id'],
                             text='permission-probe-extra ADDITIONAL_WAKE_INPUT',
-                            sender={'name': 'reviewer'}, delivery='follow-up') if stage == 'bridge-wake' else None
+                            sender=REVIEWER, delivery='follow-up') if stage == 'bridge-wake' else None
                         if additional:
                             self.assertEqual(additional['state'], 'pending', additional)
                         resumed = lifecycle.wait_ready(self.root, directory, agents.runtime(directory)['launch_id'],

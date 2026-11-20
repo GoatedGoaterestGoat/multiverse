@@ -554,6 +554,42 @@ class ApiTest(PluginTestCase):
                                                                             set()).agents], ["worker"])
             self.assertEqual(plugins.panel_context(found["blind"], self.root, {}, rows, set()).agents, ())
 
+    def test_history_gives_the_last_messages_and_which_are_unread_without_reading_any(self):
+        """history() gives the last K messages flagged unread as the inbox shows them, marking none read; it once always raised, and a consuming read or a wrong flag hides an unseen message."""
+        import shutil
+        from multiverse.universe import mailbox
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read", "messages.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("reader")
+        directory, person = self.agent("worker"), {"name": "user", "agent_id": None}
+        for text in ("one", "two"):
+            mailbox.append_message(directory, text, person)
+        mailbox.inbox(directory)  # the agent reads both
+        mailbox.append_message(directory, "go", person, delivery="steer")  # delivered natively, never in its inbox
+        mailbox.append_message(directory, "up", person, delivery="follow-up", inbox_only_text="up")  # its inbox copy
+        mailbox.append_message(directory, "held", person, intended="steer", focus="f1")
+        for text in ("three", "four"):
+            mailbox.append_message(directory, text, person)
+        mailbox.held(directory, "f1")  # mv2 held reads one ahead of the read position
+        records = ("inbox.cursor", "inbox-read.json", "inbox-state.json")
+        before = {name: (directory / name).read_bytes() if (directory / name).exists() else None for name in records}
+        worker = api.Plugin(loader.load(self.entry("reader"))).universe(self.root).agent("worker")
+        self.assertEqual([(message["text"], message["unread"]) for message in worker.history(last=6)],
+                         [("two", False), ("go", False), ("up", True), ("held", False), ("three", True),
+                          ("four", True)])
+        self.assertEqual([message["text"] for message in worker.history(last=2)], ["three", "four"])
+        self.assertEqual(set(worker.history(last=1)[0]), {"at", "from", "text", "delivery", "unread"})
+        self.assertEqual({name: (directory / name).read_bytes() if (directory / name).exists() else None
+                          for name in records}, before)  # nothing marked read
+        self.assertEqual([message["text"] for message in worker.inbox()][-2:], ["three", "four"])
+        self.assertEqual(len(worker.inbox()), 3)  # still unread: the copy, three and four
+        with self.assertRaisesRegex(api.Error, "positive number"):
+            worker.history(last=0)
+        shutil.rmtree(directory)
+        with self.assertRaises(api.Error):
+            worker.history()
+        self.assertFalse(directory.exists())  # a removed agent's folder isn't made again
+
     def test_an_agents_harness_home_is_its_recorded_storage(self):
         """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
         storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown

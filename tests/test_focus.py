@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -18,7 +20,9 @@ from test_multiverse import BaseTest
 from isolation import track
 from multiverse import cli, harnesses, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
-from multiverse.runtime import agent_identity, focus_note, native
+from multiverse.runtime import agent_identity, focus_note, native, prompts
+
+SERVER = {'pid': 1, 'epoch': 100}  # the tmux server the fixture agents' panes were created on
 from multiverse.terminal import statusline
 from multiverse.tools import focus as focus_tool, listen, send, unfocus
 from multiverse.universe import agents, focus, mailbox, templates
@@ -290,8 +294,14 @@ class FocusCommandTest(BaseTest):
                 'summary': 'Waiting on the user', 'harness': 'claude', 'workspace': str(self.work),
                 'universe_id': store.read(self.root / 'universe.json')['id'], 'native_session_id': str(uuid4())})
             store.write(directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'idle',
-                'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
+                'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1',
+                         'server_identity': SERVER}})
             (directory / '.launch.lock').touch()   # a launched agent's; held and listen never create it
+        # The tmux server these records name, as it would answer: the one that created their panes.
+        # What it says of a pane: the server pair, and the tags lifecycle put on it (here, asker's on %1).
+        self.panes = {'%1': (SERVER['pid'], SERVER['epoch'], '%1', self.directories['asker'].name,
+                             store.read(self.root / 'universe.json')['id'], self.launch)}
+        self.enterContext(patch.object(agent_identity, '_pane', side_effect=lambda socket, pane: self.panes.get(pane)))
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
@@ -327,10 +337,9 @@ class FocusCommandTest(BaseTest):
     def history(self, name):
         return mailbox.inbox(self.directories[name], all_messages=True, limit=None)['messages']
 
-    def test_steer_and_follow_up_to_a_focused_agent_wait_in_its_inbox(self):
-        """Steer and follow-up to a focused agent are saved inbox-only, naming the focus and what they were meant to
-        be, and never reach its harness, while other recipients are not held up; a break loses the message or buries
-        the question the focus protects."""
+    def test_only_agents_steer_and_follow_up_to_a_focused_agent_wait_in_its_inbox(self):
+        """An agent's steer and follow-up to a focused agent are saved inbox-only, naming the focus and what they were
+        meant to be, while a person's and a plugin's reach it; a break buries the question, or holds back its answer."""
         self.output('focus', 'asker', '--for', '20m')
         held = focus.current(self.directories['asker'])
         line = 'asker is currently focused. Your message has been delivered as an inbox message instead.\n'
@@ -338,7 +347,7 @@ class FocusCommandTest(BaseTest):
             with self.subTest(delivery=delivery):
                 self.assertEqual(self.output('send', 'asker', '--text', 'start the benchmark', '--delivery', delivery,
                                              agent='helper'), line)
-        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json'))
+        record = json.loads(self.output('send', 'asker', '--text', 'start the benchmark', '--json', agent='helper'))
         self.assertEqual((record['state'], record['saved'], record['ok'], record['delivery'], record['intended']),
                          ('held', True, True, 'inbox-only', 'steer'))
         self.assertEqual([(m['delivery'], m['intended'], m['focus']) for m in self.history('asker')],
@@ -351,6 +360,203 @@ class FocusCommandTest(BaseTest):
         self.assertEqual([agent for agent, _ in self.calls], [self.directories['other'].name])
         self.output('send', 'asker', '--text', 'also this', '--queue-only', agent='helper')
         self.assertNotIn('intended', self.history('asker')[-1])
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        for who, send_it in (('the person', lambda delivery: json.loads(self.output(
+                                 'send', 'asker', '--text', 'yes, go', '--delivery', delivery, '--json'))),
+                             ('a plugin', lambda delivery: send.run(self.root, agent='asker', text='yes, go',
+                                                                    sender=plugin, delivery=delivery))):
+            for delivery in ('steer', 'follow-up'):
+                with self.subTest(sender=who, delivery=delivery):
+                    self.calls.clear()
+                    record = send_it(delivery)
+                    self.assertNotEqual(record['state'], 'held', record)
+                    self.assertEqual((record['delivery'], self.calls),
+                                     (delivery, [(self.directories['asker'].name, delivery)]))
+                    self.assertNotIn('intended', self.history('asker')[-1])
+        self.assertEqual(focus.last(self.directories['asker'])['held'], 4)  # only the agents' were held
+        # What an agent's launch leaves behind besides its identity marks it an agent too: its control socket, or
+        # its own tmux pane (qa-claude F1, the user's "harden a bit"); a sibling pane on that server stays a person.
+        socket = str(self.work / 'absent.sock')
+        elsewhere = templates.create(self.work / 'elsewhere' / '.multiverse', 'elsewhere', workdir=self.work)
+        store.write(elsewhere / 'state/agents' / str(uuid4()) / 'runtime.json',
+                    {'launch_id': self.launch,
+                     'tmux': {'socket': socket, 'session': '$5', 'pane': '%5', 'server_identity': SERVER}})
+        commas = str(self.work / 'a,b' / 'tmux,1.sock')  # tmux allows it; TMUX then holds more commas
+        universe = store.read(self.root / 'universe.json')['id']
+
+        def recorded(pane, socket, folder=None, server=SERVER):  # an agent of this universe on `pane`, tagged there
+            identity = str(uuid4())
+            directory = self.root / 'state/agents' / (folder or identity)
+            store.write(directory / 'properties.json', {'id': identity, 'name': f'agent{pane[1:]}',
+                                                        'universe_id': universe})
+            store.write(directory / 'runtime.json', {'launch_id': self.launch, 'tmux': {
+                'socket': socket, 'session': '$' + pane[1:], 'pane': pane,
+                **({'server_identity': server} if server else {})}})
+            self.panes[pane] = (SERVER['pid'], SERVER['epoch'], pane, identity, universe, self.launch)
+            return directory
+        recorded('%7', commas)
+        recorded('%8', socket, folder='recovered')  # a moved folder: tagged by the agent's id, not the folder's name
+        for shell, held_ in (({'MV2_CONTROL_SOCKET': str(self.work / 'control.sock')}, True),
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}, True),  # an agent's pane, markers gone
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%9'}, False),  # a sibling pane on its server
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%5'}, False),  # an agent's of another tree
+                             ({'TMUX': f'{self.work / "other.sock"},1,0', 'TMUX_PANE': '%1'}, False),
+                             ({'TMUX': f'{commas},1,0', 'TMUX_PANE': '%7'}, True),  # a socket path with commas
+                             ({'TMUX': f'{socket},1,0', 'TMUX_PANE': '%8'}, True)):  # an agent in a moved folder
+            with self.subTest(shell=shell), patch.dict(os.environ, shell):
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='from a shell', delivery='steer')
+                self.assertEqual(record['state'] == 'held', held_, record)
+                self.assertEqual(bool(self.calls), not held_)
+                # Answering a prompt as the person goes by the same check.
+                from multiverse.runtime import prompts
+                self.assertEqual(prompts._caller(None, self.root), None if held_ else {'kind': 'person'})
+        # The pane counts only on the server that created it, while it has its agent's tags (Shao, PR #43): after a
+        # restart a new pane reuses a stopped agent's %1; a reused PID starts at another time, or in the same second
+        # with a new, untagged pane; an old record has no server; a server may not answer. Each leaves a person.
+        recorded('%3', socket, server=None)  # recorded before server identity, tagged all the same
+        stray = recorded('%4', socket)  # an agent whose record names another universe, and whose pane says so
+        store.write(stray / 'properties.json', {**store.read(stray / 'properties.json'), 'universe_id': 'elsewhere'})
+        self.panes['%4'] = (*self.panes['%4'][:4], 'elsewhere', self.launch)
+        recorded('%1;kill-server', socket)  # a damaged record's pane, which must never reach tmux
+        asker = self.panes['%1']
+        for case, shell, answer in (('a restarted server', {'TMUX': f'{socket},2,0', 'TMUX_PANE': '%1'},
+                                     (2, 200, '%1', '', '', '')),
+                                    ('a reused PID', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'},
+                                     (1, 999, *asker[2:])),
+                                    ('a reused PID in the same second', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'},
+                                     (1, 100, '%1', '', '', '')),
+                                    ('no server recorded', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%3'},
+                                     self.panes['%3']),
+                                    ('no answer', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}, None),
+                                    ("another universe's agent", {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%4'},
+                                     self.panes['%4']),
+                                    ('a TMUX PID too long to be one', {'TMUX': f'{socket},{"1" * 5000},0',
+                                                                      'TMUX_PANE': '%1'}, asker),
+                                    ('not a pane ID', {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1;kill-server'},
+                                     asker)):
+            with self.subTest(case), patch.dict(os.environ, shell), \
+                    patch.object(agent_identity, '_pane', return_value=answer) as asked:
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='from a shell', delivery='steer')
+                self.assertNotEqual(record['state'], 'held', record)
+                self.assertEqual(prompts._caller(None, self.root), {'kind': 'person'})
+                if case == 'not a pane ID':
+                    self.assertFalse(asked.called)  # never handed to tmux
+        pane = {'TMUX': f'{socket},1,0', 'TMUX_PANE': '%1'}
+        with self.subTest('a record caught being replaced'), patch.dict(os.environ, pane):
+            real, missed, armed = agent_identity.read, [], []
+            identity = self.directories['asker'] / 'properties.json'
+
+            def replaced_once(path):  # each record read reads as missing once, as while it is replaced
+                if path == identity and path in missed:
+                    armed.append(path)  # the matching agent's universe record is read next: it misses once too
+                if ((path.name == 'runtime.json' or path == identity or path.name == 'universe.json' and armed)
+                        and path not in missed):
+                    missed.append(path)
+                    raise FileNotFoundError(2, 'No such file or directory', str(path))
+                return real(path)
+            with patch.object(agent_identity, 'read', side_effect=replaced_once):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+            self.assertEqual({path.name for path in missed}, {'runtime.json', 'properties.json', 'universe.json'})
+            # Once the scan's retries are spent, a record read missing proves nothing: it counts as an agent's
+            # (lifecycle, recheck 2); a sibling pane whose scan completes stays the person.
+            missed.clear()
+            with patch.object(agent_identity, 'SCAN_SECONDS', -1), \
+                    patch.object(agent_identity, 'read', side_effect=replaced_once):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+                missed.clear()
+                with patch.dict(os.environ, {'TMUX_PANE': '%9'}):
+                    self.assertTrue(agent_identity.runs_in_agent(root=self.root))  # unsure: never the person
+            with patch.object(agent_identity, 'SCAN_SECONDS', -1), patch.dict(os.environ, {'TMUX_PANE': '%9'}):
+                self.assertFalse(agent_identity.runs_in_agent(root=self.root))  # every record read: a person
+            # The deadline passing during the read that then misses counts too (lifecycle, recheck 3).
+            slow_missed = []
+
+            def slow_then_missing(path):
+                if path.name == 'runtime.json' and not slow_missed:  # only the first record read: the crossing
+                    slow_missed.append(path)
+                    threading.Event().wait(0.1)  # past SCAN_SECONDS below, while this read runs
+                    raise FileNotFoundError(2, 'No such file or directory', str(path))
+                return real(path)
+            with patch.object(agent_identity, 'SCAN_SECONDS', 0.05), patch.dict(os.environ, {'TMUX_PANE': '%9'}), \
+                    patch.object(agent_identity, 'read', side_effect=slow_then_missing):
+                self.assertTrue(agent_identity.runs_in_agent(root=self.root))
+        selected = {**pane, 'MV2_UNIVERSE': str(self.root)}
+        with self.subTest('prompts without a root find the pane'), patch.dict(os.environ, selected):
+            from multiverse.runtime import prompts
+            self.assertIsNone(prompts._caller(None, None))
+        with patch.dict(os.environ, {'MV2_LAUNCH_ID': self.launch}), \
+                self.assertRaisesRegex(ValueError, 'identity is incomplete'):  # partial: refused, never the person
+            send.run(self.root, agent='asker', text='from a shell', delivery='steer')
+        # Inside an agent's process, a sender it names is still the agent's: the person's or a plugin's look, or
+        # none at all, gets nothing past the focus (reviewer, 178021d0).
+        for named in ({'name': 'user', 'agent_id': None}, plugin, {}):
+            with self.subTest(named_by_an_agent=named), patch.dict(os.environ, self.agent_environment('helper')):
+                self.calls.clear()
+                record = send.run(self.root, agent='asker', text='slip past', sender=named, delivery='steer')
+                self.assertEqual((record['state'], self.calls), ('held', []))
+        self.assertEqual(focus.current(self.directories['asker']), held)
+
+    def test_a_held_message_names_its_plugin_and_whose_session_sent_it_never_the_person(self):
+        """A message sent from a plugin or an agent's session never reads as the person's; a break makes an agent take it as the user's word."""
+        from multiverse.tools import inbox
+        self.output('focus', 'asker')
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        pane = {'TMUX': f"{self.work / 'absent.sock'},1,0", 'TMUX_PANE': '%1'}
+        rows = (({}, plugin, 'plugin remote', False),
+                (self.agent_environment('helper'), plugin, 'plugin remote, run by agent helper', True),
+                (pane, plugin, "plugin remote, run in an agent's session", True),
+                (self.agent_environment('helper'), {'name': 'user', 'agent_id': None}, 'agent helper', True),
+                (pane, {'name': 'user', 'agent_id': None}, "an agent's session", True),
+                # A flag and a name the caller passes are never taken on trust, for the hold either.
+                (self.agent_environment('helper'), {'name': 'lead', 'agent_id': None, 'agent_process': True},
+                 'agent helper', True),
+                ({}, {'name': 'lead', 'agent_id': None, 'agent_process': True}, 'user', False),
+                ({}, {'name': 'plugin remotex', 'plugin': 'remote', 'agent_id': None}, 'plugin remote', False),
+                # A plugin's own name can't claim an agent, and an agent's session can't pass its own id as the user.
+                ({}, {'name': 'plugin remote, run by agent lead', 'plugin': 'remote', 'agent_id': None},
+                 'plugin remote', False),
+                (self.agent_environment('helper'), {'name': 'user', 'agent_id': self.directories['helper'].name},
+                 'helper', True),
+                ({}, {'name': 'lead', 'agent_id': None}, 'user', False),
+                # mv2's own mark is trusted only outside an agent's session (focus-mode).
+                (self.agent_environment('helper'), {'name': 'lead', 'agent_id': None, 'core': True},
+                 'agent helper', True))
+        for shell, named, expected, held_ in rows:
+            with self.subTest(expected=expected, named=named.get('name')), patch.dict(os.environ, shell):
+                record = send.run(self.root, agent='asker', text='a note', sender=named)
+                self.assertEqual(record['state'] == 'held', held_, record)
+            saved = self.history('asker')[-1]
+            if not saved['from'].get('agent_id'):  # what a live delivery shows too
+                self.assertEqual(saved['from']['name'], expected)
+            shown = inbox.readable(self.root, {'messages': [saved]})
+            self.assertRegex(shown, f'^Message from {re.escape(expected)}[ :]')
+            if expected != 'user':
+                self.assertNotIn('Message from user', shown)
+        # A record saved flagged but named by its caller, as before this check, reads as an agent's session.
+        # The focus-end note's process carries no agent's marks or pane, whatever its parent's report had, so the
+        # note reads as mv2's.
+        started = []
+        reported = {**self.agent_environment('asker'), 'MV2_CONTROL_SOCKET': str(self.work / 'control.sock'), **pane}
+        with patch.dict(os.environ, reported), \
+                patch.object(focus.subprocess, 'Popen', side_effect=lambda *a, **k: started.append(k['env'])):
+            focus._spawn(self.directories['asker'], 'focus-id')
+        self.assertFalse(agent_identity.runs_in_agent(started[0], root=self.root))
+        with patch.dict(os.environ, started[0], clear=True):
+            send.run(self.root, agent='asker', text='You received 1 held message.', sender=focus_note.SENDER)
+        saved = self.history('asker')[-1]
+        self.assertEqual((saved['from']['name'], saved['from'].get('core')), ('mv2', True))
+        self.assertTrue(inbox.readable(self.root, {'messages': [saved]}).startswith('Message from mv2'))
+        for name in ('user', 'agent lead'):
+            older = {**self.history('asker')[-1], 'from': {'name': name, 'agent_id': None, 'agent_process': True}}
+            shown = inbox.readable(self.root, {'messages': [older]})
+            self.assertTrue(shown.startswith("Message from an agent's session"), shown)
+        self.output('unfocus', 'asker')
+        self.calls.clear()
+        with patch.dict(os.environ, self.agent_environment('helper')):
+            send.run(self.root, agent='asker', text='live', sender=plugin)  # delivered: the same name
+        self.assertEqual(self.history('asker')[-1]['from']['name'], 'plugin remote, run by agent helper')
 
     def test_held_reads_only_what_the_last_focus_held_and_the_note_goes_to_the_agent_that_unfocuses(self):
         """mv2 held reads and marks read only the unread messages the last focus held, however it ended, leaving
@@ -635,7 +841,7 @@ class FocusCommandTest(BaseTest):
              "unfocus once they have."),
             (complete('follow-up'), [], 'asker',
              "1 follow-up message was already queued for you before this focus, and it won't stop it: it arrives when "
-             "your turn ends. The focus holds only messages sent from now on."),
+             "your turn ends. The focus holds only agents' messages sent from now on."),
             (complete('follow-up', 'follow-up'), ['asker', '--turn'], None,
              "2 follow-up messages were already queued for asker before this focus, and it won't stop them: they arrive "
              "when its turn ends and start a new turn. A turn focus counts any turn end, so it will likely end with that "
@@ -665,6 +871,33 @@ class FocusCommandTest(BaseTest):
         focus.end(directory)
         with patch.object(queued_prompts, 'for_send', side_effect=AssertionError('the dashboard read the queue')):
             self.assertNotIn('queue_note', LocalBackend().focus(self.root, 'asker'))
+
+    def test_the_focus_end_note_reaches_the_agent_as_its_one_line(self):
+        """The focus-end note reaches the agent with no sender line and real messages keep theirs; a break shows neither."""
+        from multiverse.runtime.native import framed_text
+        directory = self.directories['asker']
+        core = {'name': 'mv2', 'agent_id': None, 'core': True}
+        for count in (1, 2):
+            with self.subTest(count=count):
+                note = mailbox.append_message(directory, focus.note(count), core, 'follow-up', focus_note=str(uuid4()))
+                self.assertEqual(framed_text(self.root, note), focus.note(count))
+                self.assertEqual(framed_text(self.root, note, listing=True), 'Message from mv2:\n' + focus.note(count))
+        noun = {1: 'message', 2: 'messages'}
+        self.assertEqual([focus.note(count).split(' during')[0] for count in (1, 2)],
+                         [f'You received {count} steer or follow-up {noun[count]}' for count in (1, 2)])
+        # Real messages keep their sender line: the person's, a plugin's, mv2's own without focus_note, and an
+        # agent's message carrying the same text.
+        senders = [({'name': 'user', 'agent_id': None}, 'Message from user:'),
+                   ({'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}, 'Message from plugin remote:'),
+                   (core, 'Message from mv2:')]
+        for sender, header in senders:
+            message = mailbox.append_message(directory, focus.note(1), sender, 'follow-up')
+            self.assertEqual(framed_text(self.root, message), header + '\n' + focus.note(1))
+        forged = mailbox.append_message(directory, focus.note(1), {'name': 'user', 'agent_id': None}, 'follow-up',
+                                        focus_note=str(uuid4()))
+        self.assertTrue(framed_text(self.root, forged).startswith('Message from user:\n'))
+        self.output('send', 'asker', '--text', 'hello', '--delivery', 'inbox-only', agent='helper')
+        self.assertTrue(self.output('inbox', '--all', '--last', '1', agent='asker').startswith('Message from helper'))
 
     def test_agents_change_only_their_own_focus(self):
         """An agent can focus and unfocus only itself while the person can change any agent; otherwise one agent could
@@ -807,31 +1040,66 @@ class FocusCommandTest(BaseTest):
         self.assertIn('Focused until your next turn ends.', output)
         self.assertIn('It ends by itself', output)
         self.assertEqual(focus.current(directory)['turns'], 2)
-        for status in ('idle', 'working', 'idle'):
-            self.assertIn('currently focused', self.output('send', 'asker', '--text', 'ping'))
+        for status in ('idle', 'working'):
+            self.assertIn('currently focused', self.output('send', 'asker', '--text', 'ping', agent='helper'))
             agents.update_runtime(directory, self.launch, status=status)
+        # A plugin's follow-up isn't held: it reaches the agent, and the turn it starts ends the focus.
+        self.calls.clear()
+        plugin = {'name': 'plugin notifier', 'plugin': 'notifier', 'agent_id': None}
+        send.run(self.root, agent='asker', text='the build passed', sender=plugin, delivery='follow-up')
+        self.assertEqual(self.calls, [(directory.name, 'follow-up')])
+        self.assertIsNotNone(focus.current(directory))
+        agents.update_runtime(directory, self.launch, status='idle')
         self.assertIsNone(focus.current(directory))
-        self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping'))
+        self.assertIn('next pause', self.output('send', 'asker', '--text', 'ping', agent='helper'))
         self.assertEqual(len(senders), 1)
 
     def test_retry_waits_for_unfocus_but_check_does_not(self):
-        """deliver --retry is refused while focused and works after unfocus, and --check is never held back; a retry
-        would otherwise slip a steer past the focus."""
+        """deliver --retry leaves an agent's failed steer until the unfocus but retries a person's and a plugin's, and
+        --check is never held back; a break slips an agent's steer past the focus, or holds the person's back."""
         self.output('focus', 'asker')
         self.assertEqual(self.output('deliver', 'asker', '--retry'), 'asker: no messages to retry.\n')
         self.output('unfocus', 'asker')
-        self.output('send', 'asker', '--text', 'before')
+        self.output('send', 'asker', '--text', 'before', agent='helper')
         mailbox.update_message(self.directories['asker'], self.history('asker')[0]['id'], submission_state='failed')
         self.output('focus', 'asker', '--for', '1h')
         with patch.object(native, 'finalize_launch_only', side_effect=AssertionError('up-front focus must avoid delivery work')):
             self.assertEqual(self.output('deliver', 'asker', '--retry', code=1), '')
-        self.assertTrue(self.stderr.startswith('Not retried: asker is focused until '), self.stderr)
+            self.assertTrue(self.stderr.startswith('1 message from agents not retried: asker is focused until '),
+                            self.stderr)
+            self.assertEqual(json.loads(self.output('deliver', 'asker', '--retry', '--json', code=1))['waiting'], 1)
         self.assertEqual(len(self.calls), 1)
         # --check is not held back: it reports the definite failure (exit 1) instead of the focus.
         self.output('deliver', 'asker', '--check', code=1)
         self.assertIn('Not delivered to asker', self.stderr)
         self.assertNotIn('focused', self.stderr)
+        # One an agent's process sent before the focus, naming another sender, still waits (reviewer, f105bd85).
         self.output('unfocus', 'asker')
+        with patch.dict(os.environ, self.agent_environment('helper')):
+            send.run(self.root, agent='asker', text='named as the person', sender={'name': 'user', 'agent_id': None})
+        mailbox.update_message(self.directories['asker'], self.history('asker')[-1]['id'], submission_state='failed')
+        self.output('focus', 'asker', '--for', '1h')
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1)
+        self.assertEqual(self.calls, [])
+        self.assertIn('2 messages from agents not retried', self.stderr)
+        # A person's and a plugin's failed messages are retried while focused; the agent's still wait. An agent
+        # running the retry is an agent sending, so all wait (focus-mode, f105bd85).
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        self.output('send', 'asker', '--text', 'from the person')
+        send.run(self.root, agent='asker', text='from a plugin', sender=plugin)
+        for message in self.history('asker')[1:]:
+            mailbox.update_message(self.directories['asker'], message['id'], submission_state='failed')
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1, agent='other')
+        self.assertEqual(self.calls, [])
+        self.assertIn('4 messages not retried, since an agent is retrying: asker is focused', self.stderr)
+        self.calls.clear()
+        self.output('deliver', 'asker', '--retry', code=1)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn('2 messages from agents not retried: asker is focused until ', self.stderr)
+        self.output('unfocus', 'asker')
+        self.calls.clear()
         self.output('deliver', 'asker', '--retry')
         self.assertEqual(len(self.calls), 2)
 
@@ -840,7 +1108,7 @@ class FocusCommandTest(BaseTest):
         submitted; a break slips steers past a focus that was already in effect."""
         directory = self.directories['asker']
         for text in ('first', 'second'):
-            self.output('send', 'asker', '--text', text)
+            self.output('send', 'asker', '--text', text, agent='helper')
         for message in self.history('asker'):
             mailbox.update_message(directory, message['id'], submission_state='failed')
         submit = native.send_or_wake
@@ -854,7 +1122,7 @@ class FocusCommandTest(BaseTest):
         with patch.object(native, 'send_or_wake', side_effect=focus_after_first):
             self.output('deliver', 'asker', '--retry', code=1)
         self.assertEqual(len(self.calls), 1)
-        self.assertIn('The rest were not retried: asker is focused until unfocused', self.stderr)
+        self.assertIn('1 message from agents not retried: asker is focused until unfocused', self.stderr)
 
     def test_the_dashboard_backend_reads_a_damaged_focus_as_none(self):
         """The dashboard's real backend lists an agent whose focus.json has a far-future until as not focused, and
@@ -892,6 +1160,53 @@ class FocusCommandTest(BaseTest):
                                              'until': (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()})
         self.assertNotIn('focused', statusline.render(self.root, directory.name, self.launch, 'claude'))
         self.assertNotIn('Focused', self.output('list'))
+
+
+@unittest.skipUnless(shutil.which('tmux'), 'needs tmux')
+class TmuxRestartTest(BaseTest):
+    def test_a_pane_reusing_a_stopped_agents_id_on_a_restarted_server_is_not_that_agent(self):
+        """Pane IDs start again at %0 when tmux restarts; matched by ID alone, the person's shell or the plugin host there is refused as a stopped agent."""
+        socket = str(self.work / 't.sock')
+        track(tmux_socket=socket)
+
+        def tmux(*args):
+            return subprocess.run(['tmux', '-S', socket, *args], stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, check=True, timeout=10).stdout.strip()
+
+        def server(session):
+            tmux('new-session', '-d', '-s', session, 'sleep 60')
+            return tmux('display-message', '-p', '-t', session, '#{pid}\t#{start_time}\t#{pane_id}').split('\t')
+        self.addCleanup(lambda: subprocess.run(['tmux', '-S', socket, 'kill-server'], stdin=subprocess.DEVNULL,
+                                               capture_output=True, timeout=10))
+        pid, epoch, pane = server('agent')
+        agent, launch = self.root / 'state/agents' / str(uuid4()), str(uuid4())
+        properties = {'id': agent.name, 'name': 'stopped', 'universe_id': store.read(self.root / 'universe.json')['id']}
+        store.write(agent / 'properties.json', properties)
+        for key, value in (('agent_id', properties['id']), ('universe_id', properties['universe_id']),
+                           ('launch_id', launch)):  # tagged as lifecycle tags an agent's pane
+            tmux('set-option', '-p', '-t', pane, f'@mv2_{key}', value)
+        store.write(agent / 'runtime.json',
+                    {'state': 'running', 'launch_id': launch,
+                     'tmux': {'socket': socket, 'session': '$0', 'pane': pane,
+                              'server_identity': {'pid': int(pid), 'epoch': int(epoch)}}})
+        live = {'TMUX': f'{socket},{pid},0', 'TMUX_PANE': pane}
+        self.assertTrue(agent_identity.runs_in_agent(live, self.root))  # its agent, markers gone, still counts
+        real = subprocess.run
+
+        def garbled(*args, **kwargs):  # a tmux answering with bytes that aren't text, in either mode
+            if kwargs.get('text'):
+                raise UnicodeDecodeError('utf-8', b'\xff', 0, 1, 'invalid start byte')
+            return subprocess.CompletedProcess(args, 0, b'\xff\xfe\n', b'')
+        with patch.object(agent_identity.subprocess, 'run', side_effect=garbled):
+            self.assertFalse(agent_identity.runs_in_agent(live, self.root))  # unproven, never an error
+        self.assertIs(subprocess.run, real)
+        tmux('kill-server')
+        again, _, reused = server('person')
+        self.assertEqual((reused, again != pid), (pane, True))  # the same pane ID on a new server
+        for shell in ({'TMUX': f'{socket},{again},0', 'TMUX_PANE': reused}, live):  # the new pane, or an old TMUX
+            with self.subTest(shell=shell), patch.dict(os.environ, shell):
+                self.assertFalse(agent_identity.runs_in_agent(root=self.root))
+                self.assertEqual(prompts._caller(None, self.root), {'kind': 'person'})
 
 
 if __name__ == '__main__':

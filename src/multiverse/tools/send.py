@@ -48,6 +48,13 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
         caller = sender_actor()
         sender = caller.sender() if caller else {"agent_id": os.environ.get("MV2_AGENT_ID"), "universe": os.environ.get("MV2_UNIVERSE"),
                   "name": "agent" if os.environ.get("MV2_AGENT_ID") else "user"}
+    # Whom a focus holds is decided by who calls, never by the sender a caller names: a process with an agent's
+    # identity is an agent, whatever sender it passes. The person's terminal, and a plugin in the dashboard or the
+    # host, have none.
+    from ..runtime.agent_identity import runs_in_agent
+    in_agent = runs_in_agent(root=root)
+    sender = _normalized(sender, in_agent)  # saved as it will be shown, live and in the inbox
+    holds = focus.holds(sender) or in_agent  # from the sender as it will be saved, so a retry decides the same
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
         raise ValueError('Specify an agent name between each comma')
@@ -98,7 +105,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 continue
             if unread_senders is None:
                 unread_senders = _unread_senders(caller) if _present or _present_error else set()
-            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for)
+            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             if result.get('upgrade_damaged'):
@@ -156,6 +163,41 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             **({'blocked_recipients': blocked_names} if blocked_names else {})}
 
 
+def _normalized(sender, in_agent):
+    """The sender as it is saved and shown, whatever name, id or flags the caller passed: nothing a caller writes
+    names a sender by itself, so no message reads as the person's, or as another's, unless it is.
+
+    Inside an agent's session it is that agent: its own verified sender, or, for anything else, whose session sent
+    it ("plugin notes, run by agent worker", "plugin notes, run in an agent's session", "agent worker", "an
+    agent's session"), marked `labelled` so a later reader knows mv2 wrote that name, a core sender included.
+    Outside one, a plugin's is "plugin NAME", any other with no agent of its own is the person's, and those marks
+    are dropped; mv2's own (core) senders are left as they are."""
+    if not isinstance(sender, dict) or (sender.get("core") is True and not in_agent):
+        return sender  # mv2's own (its focus note runs with no agent's marks); inside an agent's session it's labelled
+    from ..plugins import manifest
+    plugin = sender.get("plugin")
+    plugin = plugin if isinstance(plugin, str) and manifest.NAME.fullmatch(plugin) else None
+    clean = {key: value for key, value in sender.items() if key not in ("agent_process", "labelled")}
+    if in_agent:
+        from ..runtime.agent_identity import sender_actor
+        try:
+            caller = sender_actor()
+        except ValueError:
+            caller = None
+        if caller is not None and not plugin and sender.get("agent_id") == caller.identity:
+            return caller.sender()  # its own, with its own name, whatever name it passed
+        agent = caller.sender().get("name") if caller is not None else None
+        if plugin:
+            name = f"plugin {plugin}, run by agent {agent}" if agent else f"plugin {plugin}, run in an agent's session"
+        else:
+            name = f"agent {agent}" if agent else "an agent's session"
+        return {"name": name, "agent_id": None, "agent_process": True, "labelled": True,
+                **({"plugin": plugin} if plugin else {})}
+    if clean.get("agent_id"):
+        return clean
+    return {**clean, "name": f"plugin {plugin}"} if plugin else {**clean, "name": "user"}
+
+
 def _unread_senders(caller):
     """Optional output advice: peek once before sending, outside every delivery lock."""
     return mailbox.unread_senders(caller.directory) if caller is not None else set()
@@ -175,7 +217,7 @@ def _skipped(sender, text, delivery, reason):
              'reason': reason}, {})
 
 
-def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None):
+def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None, holds=True):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
@@ -183,7 +225,7 @@ def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None
                     and blocked.matches(records.properties(directory / 'properties.json'), sender))
         if upgraded:
             delivery = 'follow-up'
-        result, receipt = _deliver_one(root, directory, text, sender, delivery, note_for,
+        result, receipt = _deliver_one(root, directory, text, sender, delivery, note_for, holds,
                                        upgraded=upgraded)
         if upgraded and result.get('saved') and (result['delivery'] == 'follow-up' or result['state'] == 'held'):
             result['upgraded_from'] = 'inbox-only'
@@ -209,15 +251,16 @@ def _upgrade_unavailable(root, directory, properties):
         return True  # No native attempt happened; keep the original inbox-only message.
 
 
-def _deliver_one(root, directory, text, sender, delivery, note_for, *, upgraded=False):
+def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, *, upgraded=False):
     """The send lock covers the dependency decision, focus hold, save and native admission."""
     # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
     if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
         return _skipped(sender, text, delivery, 'a newer focus began')
     held = focus.hold(directory, lambda focus_id: append_message(directory, text, sender, 'inbox-only', intended=delivery,
-                                                                 focus=focus_id)) if delivery != 'inbox-only' and note_for is None else None
+                                                                 focus=focus_id)) if (
+        delivery != 'inbox-only' and note_for is None and holds) else None
     if held:
-        # Saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
+        # An agent's: saved as inbox-only, so nothing reaches the harness while the agent waits on the user.
         record, message = held
         return ({**{key: message[key] for key in ('at', 'from', 'text', 'delivery', 'intended')}, 'state': 'held',
                  'saved': True, 'ok': True, 'focus': record,

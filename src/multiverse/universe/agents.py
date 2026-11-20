@@ -245,14 +245,14 @@ def update_runtime(agent_dir, launch_id, **changes):
     return mutate_runtime(agent_dir, launch_id, lambda data: changes, create_parent=True)
 
 
-def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
+def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, blocking=True):
     """Reduce current facts under the runtime lock; None leaves the record alone.
 
     Reducers are core bookkeeping only: no native calls or plugin callbacks.
     Keep launch guards, refusal precedence and status events shared with writes.
     """
     ended = None
-    with lock(agent_dir / ".runtime.lock", create_parent=create_parent):
+    with lock(agent_dir / ".runtime.lock", create_parent=create_parent, blocking=blocking):
         data = runtime(agent_dir)
         if data.get("launch_id") != launch_id:
             raise ValueError("Outdated launch; refusing to update current runtime")

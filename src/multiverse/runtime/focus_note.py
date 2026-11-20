@@ -12,7 +12,7 @@ import time
 
 from ..universe import focus, mailbox
 
-# Shown as `Message from mv2:`; not an agent and not the person.
+# Not an agent and not the person. The agent gets the note's one line; mv2 inbox shows it as `Message from mv2:`.
 SENDER = {'name': 'mv2', 'agent_id': None, 'core': True}
 POLL = 0.1
 

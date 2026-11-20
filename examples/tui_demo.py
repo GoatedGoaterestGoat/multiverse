@@ -80,22 +80,31 @@ class DemoBackend:
         if harness != "claude":
             return None
         return {"models": [{"id": "claude-opus-5-5", "name": "Opus 5.5", "efforts": ["low", "medium", "high", "xhigh"],
-                            "default": True, "effort_unset": True},
+                            "aliases": ["opus"], "default": True, "effort_unset": True},
                            {"id": "claude-haiku-4-5", "name": "Haiku 4.5", "efforts": [], "default": False,
                             "effort_unset": True}],
                 "free_form": False, "narrowed": False, "unset": True, "default_model": None, "problems": []}
+
+    def set_model(self, root, reference, model, effort):
+        """The saved model and effort for the next resume; None keeps the saved effort, as core does."""
+        with self.lock:
+            agent = self.find(root, reference)
+            agent["model"] = model or None
+            if effort is not None:
+                agent["effort"] = effort or None
+            notices = (["Its session keeps its current model until it's stopped and resumed."]
+                       if agent["live"] == "alive" else [])
+            return {"ok": True, "id": agent["id"], "name": agent["name"], "model": agent["model"],
+                    "effort": agent.get("effort"), "notices": notices}
 
     def send(self, root, reference, text, delivery="steer", queue_only=False):
         with self.lock:
             agent = self.find(root, reference)
             delivery = "inbox-only" if queue_only else delivery
-            held = agent.get("focus") and delivery != "inbox-only"
+            # The demo sends as the person, and a focus holds only agents' messages, so nothing here is held.
             self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text,
-                                  "delivery": "inbox-only" if held else delivery, **({"intended": delivery} if held else {}),
-                                  "at": datetime.now(timezone.utc).isoformat(), "from": {"name": "user"}})
-            if held:
-                return {"delivery": "inbox-only", "intended": delivery, "state": "held", "saved": True, "ok": True,
-                        "focus": agent["focus"]}
+                                  "delivery": delivery, "at": datetime.now(timezone.utc).isoformat(),
+                                  "from": {"name": "user"}})
             return {"delivery": delivery, "state": "queued", "saved": True}
 
     def focus(self, root, reference, duration=None, turn=False):

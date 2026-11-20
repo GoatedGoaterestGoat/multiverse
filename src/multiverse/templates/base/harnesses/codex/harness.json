@@ -3,6 +3,6 @@
   "adapter": "codex",
   "description": "Codex CLI; prompt-led coordination and explicit native session resume.",
   "settings": {
-    "model": "gpt-6.1-sol"
+    "model": "gpt-6.2-sol"
   }
 }

@@ -32,6 +32,15 @@ class Draft:
     labels = {"name": "Name"}
     columns = ("name", "summary")
     operation = verb = ""
+    saves = "create"  # what Enter does, for the hints
+
+    def arguments(self, values):
+        """What the backend operation takes."""
+        return self.scope, values
+
+    def describe(self, result):
+        """The status line after the operation, or None for the usual one."""
+        return None
 
     def __post_init__(self):
         self.cursor = len(self.values[self.active])
@@ -292,6 +301,107 @@ class AgentDraft(Draft):
 
     def created_key(self, agent):
         return agent_key({**agent, "universe": str(self.scope)})
+
+
+class ModelDraft(AgentDraft):
+    """An existing agent's saved model and effort, edited in its own row with the new-agent row's picker; the next
+    resume launches with them, and a running session keeps its model until then.
+
+    It starts from the saved choice. A saved spelling the list names by another (an alias such as `opus` for the
+    listed ID) is picked as that ID; one the list doesn't offer, such as a model outside the harness's subset,
+    leaves nothing picked and says so, so it must be chosen again."""
+    columns = ("name", "summary")
+    operation, verb, saves = "set_model", "Set model", "save"
+
+    def __init__(self, scope, previous_key, row):
+        super().__init__(scope, previous_key, {"name": row["name"], "harness": row["harness"],
+                                               "model": row.get("model") or "", "effort": row.get("effort") or ""},
+                         (row["harness"],))
+        self.row = row
+        self.saved = (row.get("model") or "", row.get("effort") or "")
+        self.unlisted = None  # a saved model the list doesn't offer
+        self.saved_as = self.saved[0]  # the listed ID a saved alias is picked as
+        self.active = "model"
+        self.focus("model")
+
+    @property
+    def fields(self):
+        return ("model", "effort") if self.efforts() else ("model",)
+
+    @property
+    def key(self):
+        return agent_key(self.row)
+
+    def settle(self):
+        listed = self.listed()
+        saved = self.saved[0]
+        if listed and saved and self.values["model"] == saved and saved not in {m["id"] for m in listed["models"]}:
+            found = next((m["id"] for m in listed["models"] if saved.strip() in (m.get("aliases") or ())), None)
+            if found:
+                self.values["model"] = self.saved_as = found
+            elif not self.typed():
+                self.unlisted, self.values["model"] = saved, ""
+        super().settle()
+        if self.active not in self.fields:
+            self.focus("model")
+
+    def choose(self, field, value):
+        if field == "model":
+            self.unlisted = None
+        super().choose(field, value)
+
+    def focus_column(self, _column):
+        """A click anywhere in the row picks the model: its name isn't a field here."""
+        self.focus("model")
+
+    def insert(self, text):
+        if self.active == "model":
+            self.unlisted = None
+        super().insert(text)
+
+    def option_label(self, field, value):
+        if field == "model" and not value and self.unlisted:
+            return f"{clean(self.unlisted)}: not allowed here, choose a model"
+        return super().option_label(field, value)
+
+    def cell(self, name):
+        if name == "name":
+            return Text(clean(self.values["name"]), style=theme.TEXT)
+        return super().cell(name)
+
+    def add_to(self, snapshot):
+        return snapshot  # its row is the agent's own
+
+    def effort(self, values):
+        """The effort to save: the one picked, or, where the model takes none or the harness lists none, None, so
+        core keeps a saved effort the model still takes, as `resume --model` does, and says when it drops one."""
+        return values.get("effort", "") if "effort" in self.fields else None
+
+    def changed(self, values):
+        effort = self.effort(values)
+        same = values["model"] in (self.saved[0], self.saved_as)  # a saved alias, picked as its listed ID
+        return not same or (self.saved[1] if effort is None else effort) != self.saved[1]
+
+    def problem(self, values, snapshot):
+        if self.reading():
+            return "model", "Still reading this harness's models; try again in a moment."
+        if self.unlisted and not values["model"]:
+            return "model", f"{clean(self.unlisted)} isn't allowed here any more: choose a model."
+        for key in ("model", "effort"):
+            if key in self.fields and self.options(key) is not None and not values[key] and not self.unset_allowed(key):
+                article = "an" if key == "effort" else "a"
+                return key, f"Choose {article} {key}: this harness's settings allow only those listed."
+        return None
+
+    def arguments(self, values):
+        return self.scope, self.row["id"], values["model"], self.effort(values)
+
+    def describe(self, result):
+        notes = [clean(note) for note in (result or {}).get("notices") or ()]
+        return " ".join([f"Saved {clean(self.row['name'])}'s model for its next resume.", *notes]), False
+
+    def created_key(self, _result):
+        return self.key
 
 
 class SubverseDraft(Draft):

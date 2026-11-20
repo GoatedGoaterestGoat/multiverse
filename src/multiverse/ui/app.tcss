@@ -93,6 +93,11 @@ ChoiceScreen #choices > .option-list--option-highlighted { background: $mv-curso
 #plugins-dialog .detail-title { height: 1; }
 #plugins-table { height: auto; max-height: 50%; }
 #plugin-about { height: 1fr; margin-top: 1; scrollbar-size: 1 1; }
+#columns-dialog { width: 92%; max-width: 80; height: 92%; border: round $mv-teal; background: $mv-base; padding: 0 1; }
+#columns-dialog .detail-title { height: 1; }
+#columns-file { height: auto; color: $mv-overlay1; margin-bottom: 1; }
+#columns-table { height: 1fr; }
+ColumnsScreen .cerror { height: auto; color: $mv-red; }
 #plugin-details { height: auto; color: $mv-subtext0; }
 #plugin-settings-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
 #plugin-settings-notes { height: auto; color: $mv-yellow; margin-bottom: 1; }

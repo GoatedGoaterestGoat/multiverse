@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 import threading
 from time import monotonic
 import unicodedata
@@ -259,6 +260,8 @@ class Transcript:
     def __init__(self, path, rows=True):
         # rows=False: a usage index, which keeps the totals and the latest turn but no Entry per row.
         self.path, self.rewrites, self.rows = path, 0, rows
+        self.saved = None  # a usage index another process saved, proved at the next read before it counts
+        self.saved_offset = 0  # how far the copy in the agent's store reaches, as this process last wrote or took it
         self._reset(None)
 
     def _reset(self, inode):
@@ -286,11 +289,64 @@ class Transcript:
             left -= len(chunk)
         return digest.digest() == self.prefix.digest()
 
+    def saved_state(self):
+        """What another process needs to take this usage index over: where it read to and a digest of those bytes,
+        the latest time and turn, and each response's counted usage. No transcript text."""
+        return {'inode': self.inode, 'offset': self.offset, 'prefix': self.prefix.hexdigest(), 'chain': self.chain,
+                'last': self.last, 'observed': self.observed,
+                'responses': {key: [counted(usage, name) for name in USAGE_KEYS] for key, usage in self.responses.items()}}
+
+    def adopt(self, saved):
+        """Take a usage index another process saved (saved_state's shape), to prove at the next read; one that
+        doesn't have that shape is ignored, and the next read starts from the beginning."""
+        try:
+            observed, responses = saved['observed'], saved['responses']
+            shaped = (all(type(saved[key]) is int and saved[key] >= 0 for key in ('inode', 'offset'))
+                      and isinstance(saved['prefix'], str) and re.fullmatch('[0-9a-f]{64}', saved['prefix'])
+                      and isinstance(saved['chain'], str) and (saved['last'] is None or isinstance(saved['last'], str))
+                      and (observed is None or (isinstance(observed, dict) and set(observed) == {'model', 'effort', 'observed_at'}
+                                                and all(v is None or isinstance(v, str) for v in observed.values())))
+                      and isinstance(responses, dict)
+                      and all(isinstance(counts, list) and len(counts) == len(USAGE_KEYS)
+                              and all(type(n) is int and n >= 0 for n in counts) for counts in responses.values()))
+        except (KeyError, TypeError):
+            shaped = False
+        if shaped and saved['offset']:
+            self.saved = saved
+
+    def _take_saved(self, handle, status):
+        """Prove the saved index's bytes unchanged (the same inode, then a hash of every byte it read, which costs
+        no parse) and take it over; False, and nothing taken, when they changed."""
+        saved, self.saved = self.saved, None
+        if status.st_ino != saved['inode'] or status.st_size < saved['offset']:
+            return False
+        digest, left, tail = hashlib.sha256(), saved['offset'], b''
+        handle.seek(0)
+        while left:
+            chunk = handle.read(min(left, 1 << 22))
+            if not chunk:
+                return False
+            digest.update(chunk)
+            tail = (tail + chunk)[-TAIL:]
+            left -= len(chunk)
+        if digest.hexdigest() != saved['prefix']:
+            return False
+        self._reset(status.st_ino)
+        self.offset, self.prefix, self.tail, self.chain = saved['offset'], digest, tail, saved['chain']
+        self.responses = {key: dict(zip(USAGE_KEYS, counts)) for key, counts in saved['responses'].items()}
+        self.last, self.observed = saved['last'], dict(saved['observed']) if saved['observed'] else None
+        # Proved now: the next lines are read as an append to it.
+        self.stamp = self.proven = (status.st_mtime_ns, status.st_size)
+        self.proven_at, self.saved_offset = monotonic(), self.offset
+        return True
+
     def read(self, *, prove=False):
         """Read up to date. `prove`: also prove every byte indexed earlier unchanged, if the file changed since the
         last proof; `self.proven` is the file's stamp then (or when the index was read whole)."""
         with open_regular(self.path) as handle:
             status = os.fstat(handle.fileno())
+            if self.saved is not None:
+                self._take_saved(handle, status)
             stamp = (status.st_mtime_ns, status.st_size)
             proved = tail_only = False
             if status.st_ino != self.inode or status.st_size < self.offset:
@@ -362,18 +418,65 @@ _transcripts_lock = threading.Lock()
 _versions = itertools.count(1)
 
 
-def _index(path, rows):
-    """The kept index for `path` (a full one when `rows`), the most recently used last; under _transcripts_lock."""
+def _index(path, rows, saved=None):
+    """The kept index for `path` (a full one when `rows`), the most recently used last; under _transcripts_lock.
+    `saved`: an agent's saved usage indexes by path, one of which a new usage index takes over if it proves."""
     cache, limit = (_transcripts, FULL_INDEXES) if rows else (_usage, USAGE_INDEXES)
     index = cache.get(path)
     if index is None:
         index = cache[path] = Transcript(path, rows)
         if rows:
             index.history_version = next(_versions)
+        elif saved and isinstance(saved.get(str(path)), dict):
+            index.adopt(saved[str(path)])
     cache.move_to_end(path)
     while len(cache) > limit:
         cache.popitem(last=False)
     return index
+
+
+# A process that opens reads every transcript from its start, about a second per large agent, so each agent's usage
+# indexes are also kept in its state folder (`USAGE_STORE`): a new process proves one by a hash of the bytes it read,
+# which costs no parse, and parses only what Claude wrote since. It holds only positions, digests and counts, for the
+# session's current transcripts; one past STORE_BYTES is neither written nor read.
+USAGE_STORE = 'claude-usage.json'
+STORE_BYTES = 32 << 20
+SAVE_INTERVAL = 5  # seconds between one process's writes of one agent's store
+_saved_at = {}  # store path: monotonic() of this process's last write
+
+
+def _load_store(store):
+    """An agent's saved usage indexes by transcript path, or {} when there's none or it can't be used. Bounded on
+    the opened file, so one swapped in after any check can't be read past STORE_BYTES."""
+    try:
+        with open_regular(store) as handle:
+            text = handle.read(STORE_BYTES + 1)
+        if len(text) > STORE_BYTES:
+            return {}
+        data = json.loads(text)
+    except (OSError, ValueError, Unreadable):
+        return {}
+    indexes = data.get('transcripts') if isinstance(data, dict) and data.get('schema') == 1 else None
+    return indexes if isinstance(indexes, dict) else {}
+
+
+def _save_store(store, states):
+    """Write an agent's usage indexes ({path: saved_state}) whole, beside the store and moved over it. The
+    temporary file has a random name and is created new, never through an entry already there."""
+    text = json.dumps({'schema': 1, 'transcripts': states}, separators=(',', ':')).encode()
+    if len(text) > STORE_BYTES:
+        return False
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(dir=store.parent, prefix=f'{store.name}.', suffix='.tmp')
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(text)
+        os.replace(temporary, store)
+    except OSError:
+        if temporary:
+            Path(temporary).unlink(missing_ok=True)
+        return False
+    return True
 
 
 def counted(usage, key):
@@ -381,7 +484,7 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_reading(native_id, workspaces=(), environment=None):
+def context_reading(native_id, workspaces=(), environment=None, store=None):
     """(tokens, timestamp, observed) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
@@ -393,7 +496,8 @@ def context_reading(native_id, workspaces=(), environment=None):
     if not mains:
         return None
     with _transcripts_lock:
-        transcript = _index(mains[-1], rows=False).read()
+        saved = _load_store(store) if store and mains[-1] not in _usage else None
+        transcript = _index(mains[-1], rows=False, saved=saved).read()
         responses, stamp, observed = transcript.responses, transcript.last, transcript.observed
     if not responses:
         return None
@@ -408,15 +512,26 @@ def context_usage(native_id):
     return reading[0] if reading else None
 
 
-def measured_usage(native_id, workspaces=(), environment=None):
+def measured_usage(native_id, workspaces=(), environment=None, store=None):
     """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
-    than total a scan that skipped part of the storage."""
+    than total a scan that skipped part of the storage. `store`: the agent's saved usage indexes (USAGE_STORE),
+    taken over where they prove and written again after a read that moved."""
     mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     paths = [mains[-1], *subagent_transcripts(mains[-1])]
     with _transcripts_lock:
-        transcripts = [_index(path, rows=False).read() for path in paths]
+        saved = _load_store(store) if store and any(path not in _usage for path in paths) else None
+        transcripts = [_index(path, rows=False, saved=saved).read() for path in paths]
+        states = None
+        if store and (monotonic() - _saved_at.get(store, -SAVE_INTERVAL) >= SAVE_INTERVAL
+                      and any(transcript.offset != transcript.saved_offset for transcript in transcripts)):
+            states = {str(path): transcript.saved_state() for path, transcript in zip(paths, transcripts) if transcript.offset}
+            _saved_at[store] = monotonic()
+    if states is not None and _save_store(store, states):
+        with _transcripts_lock:
+            for transcript in transcripts:
+                transcript.saved_offset = states.get(str(transcript.path), {}).get('offset', 0)
     responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
     cached = sum(counted(usage, 'cache_read_input_tokens') for usage in responses)
     written = sum(counted(usage, 'cache_creation_input_tokens') for usage in responses)

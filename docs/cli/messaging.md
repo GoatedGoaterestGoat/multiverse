@@ -22,7 +22,7 @@ mv2 send reviewer,tester --text 'The fix is on branch fix-login.'
 
 Separate several recipients with commas. Each one gets the message and its own result line. A failure for one doesn't stop the others. The recipient sees the message as `Message from SENDER:` followed by your text.
 
-When a recipient is missing here but exists in a [related universe](agents.md#find-and-refer-to-agents), its error names the universe and suggests `-u PATH` before `send`. Several matches are listed without selecting one; nothing is sent to them until you choose the universe explicitly.
+When a recipient is missing here but exists in a [related universe](agents.md#find-and-refer-to-agents), its error names the universe and suggests `-u PATH` before `send`. Several matches are listed without selecting one; nothing is sent to them until you choose the universe explicitly. If the quick search reaches its limit before finding a match, the error says so and suggests `mv2 -u TOP list --recursive`, with the top related universe's path, to include parents and siblings as well as subverses. If the top cannot be verified, it asks you to run the listing from the related tree’s top universe instead. Select the match explicitly with `mv2 -u PATH send NAME`.
 
 If the sender's record is unreadable or damaged, the sender line keeps the message's saved name, or `user` if none was saved. An unreadable or damaged sender universe uses its saved path in that line. The message stays readable and deliverable.
 
@@ -198,10 +198,25 @@ is reported once with the message text and advice to send a new message delibera
 submitted. A proven loss emits `message.failed` for plugins. The final result
 remains in inbox history. A message aimed outside the agent's recorded session
 lineage is reported once as uncheckable, with its saved delivery evidence unchanged. It is never retried automatically.
+On a verified checked Codex bridge, mv2 also records delivery as it happens:
+starting or completing a native user-message item confirms its exact saved
+submission ID. The receipt is durable in mv2, so future checks omit it without
+reading native history again. Duplicate events do not create another delivery,
+and a receipt for an older attempt never confirms a newer retry. This does not
+mark the inbox read or prove that the model acted on the message.
+
+Messages consumed without an mv2 relay connected, or before this feature, still
+need the existing lookup. Unreadable, oversized or ambiguous delivery records
+(including retries sharing one old client ID), receipt-write failures, bounded
+observation capacity
+and a relay exiting before publication can also leave no saved confirmation.
 Codex checks up to 100 queued entries and the latest 20 full turns, with a 64 MiB
 limit per reply. Large tool output within that limit does not prevent receipt
 confirmation. A missing receipt, larger reply or transport failure leaves
 consumption unconfirmed; checking never resends input or loads an old conversation.
+No paginated full-history search is added. An old message outside the lookup
+window can remain unknown indefinitely; its disappearance from the queue and a
+subsequent turn are not proof that the exact message reached the conversation.
 A message that woke an agent is checked against that launch's own starting
 prompt, with the harness's transcript evidence (Claude Code today), on each
 `mv2 deliver --check` until it settles; listings and the dashboard never read it.
@@ -239,11 +254,11 @@ mv2 unfocus                   # end it, and say what waits in the inbox
 
 While an agent is focused:
 
-- `steer` and `follow-up` messages to it are saved as `inbox-only` messages, and the sender is told so. Nothing reaches its harness.
+- `steer` and `follow-up` messages from agents are saved as `inbox-only` messages, and the sender is told so. A person's and a plugin's reach the agent as usual. Whatever runs inside an agent's session counts as that agent, a plugin's command and a shell in its own tmux pane included, whatever sender it names. A pane is its own only on the tmux server that created it: after tmux restarts, a new pane that reuses a stopped agent's pane ID is not that agent's.
 - `inbox-only` messages are saved as usual.
 - `listen` is refused, and a `listen` already running [reports nothing until the focus ends](#listen-for-quiet-messages).
-- `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
-- What you type in its terminal reaches it as usual: a focus holds back only mv2's messages.
+- `deliver --retry` to it retries a person's and a plugin's failed messages, and leaves agents' until it unfocuses, saying how many. Run by an agent, it retries none of them until then. `deliver --check` still works.
+- What you type in its terminal reaches it as usual: a focus holds back only agents' messages.
 - A `steer` or `follow-up` sent before the focus began is still delivered if the harness had already accepted it, or if it waited for the agent to finish starting. The turn it starts counts toward a `--turn` focus.
 
 `mv2 focus` says when the agent's harness already holds follow-ups from mv2, which the focus won't stop. It reads them the way [send does](../design/queued-prompts.md), counting follow-ups only. With `--turn`, it also says that the turn they start will likely end the focus before the user answers, and suggests a focus until `mv2 unfocus` instead. When mv2 can't read the queue and a follow-up may be queued, it says it couldn't check, and why. The dashboard's `f` doesn't check.
@@ -254,7 +269,7 @@ A turn focus ends when the agent's status next goes to idle from working, or fro
 
 - **An agent that focuses itself, or one you focus while it is working,** finishes its current turn first. The focus ends with the turn after it, which takes your answer.
 - **One you focus while it is waiting on you or idle** has its focus end with the turn that takes your answer: for a permission prompt, that is the current turn.
-- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, and one that delivers a message accepted before the focus. While background work runs, focus until `mv2 unfocus` instead.
+- **Any turn end counts,** including a turn the harness starts by itself, for example when a background task finishes, one that delivers a message accepted before the focus, and one a person's or a plugin's `steer` or `follow-up` starts. That turn is the answer when the message is the person's, or a plugin's that relays the person (the remote control); a plugin's other message ends the focus before the user answers. While background work runs, focus until `mv2 unfocus` instead.
 
 A turn focus needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`. Focus until `mv2 unfocus` then.
 
@@ -268,14 +283,14 @@ mv2 held
 
 Inside an agent session, `held` shows the unread `steer` and `follow-up` messages that the agent's last focus held, however that focus ended, and marks only those read. Other unread messages stay unread for `mv2 inbox`. `held` is refused while the agent is focused.
 
-A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
+A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. A plugin's message names the plugin, and the agent that ran it, as in `Message from plugin notes, run by agent worker`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
 
 When a focus ends with held messages unread, the agent is told in these cases:
 
 | The focus ends | The agent is told |
 | --- | --- |
 | The agent runs `mv2 unfocus` | In its output: `You received 2 steer or follow-up messages during your focus. Use mv2 held to check only those messages.` |
-| A `--turn` focus ends with a turn, whoever set it | The same text, in a `follow-up` from mv2 that starts a turn. A `listen` that is running reports instead |
+| A `--turn` focus ends with a turn, whoever set it | The same text, as a `follow-up` that starts a turn. It reaches the agent as that one line, without a `Message from` line; `mv2 inbox --all` lists it as from mv2. A `listen` that is running reports instead |
 
 A timed focus that runs out, and a focus the user ends, tell the agent nothing. The held messages still wait for `held` and `inbox`.
 

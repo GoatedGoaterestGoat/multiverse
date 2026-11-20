@@ -795,6 +795,8 @@ class PluginTestCase(unittest.TestCase):
         environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config), TMUX_TMPDIR=str(self.work),
                            MV2_PYTHON=sys.executable,  # what a launch from this mv2 gives a callback
                            MV2_RUN_DIR=str(self.work / "run"),
+                           # Secrets go to a file in the test's own home, never the user's keychain (1.20).
+                           MV2_SECRET_STORE="file",
                            PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
                            MV2_PLUGIN_PATH=os.pathsep.join(
                                str(path) for path in (self.plugin, self.plugins_dir) if path is not None))

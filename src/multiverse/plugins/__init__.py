@@ -233,7 +233,26 @@ def problems(root, reserved=(), wait=None):
         found_problems.extend(item_conflicts(root))
     except Exception:
         pass
+    from . import packages
+    for why in packages.clashes([found.manifest for found in entries(root)
+                                 if found.on and found.manifest is not None]).values():
+        if not any(why in line for line in found_problems):
+            found_problems.append(why)
+    found_problems.extend(f"a secret {key} of {plugin} is set here, but {plugin} doesn't declare it any more: "
+                          f"remove it with mv2 plugins secret {plugin} {key} --clear"
+                          for plugin, key in _orphan_secrets(root))
     return found_problems
+
+
+def _orphan_secrets(root):
+    """This universe's own secrets no plugin found here declares, [(plugin, key)], or [] when they can't be read."""
+    from . import secrets
+    try:
+        declared = {found.name: {secret.key for secret in found.manifest.secrets}
+                    for found in entries(root) if found.manifest is not None}
+        return secrets.orphans(root, declared)
+    except (secrets.SecretsError, PluginError):
+        return []
 
 
 def notes(root):
@@ -303,6 +322,8 @@ def listing(root, wait=loader.REFRESH_WAIT):
         current = entries(root)
     recent = loader.errors()
     stopped = host.left_stopped(root)
+    from . import packages
+    clashing = packages.clashes([found.manifest for found in current if found.on and found.manifest is not None])
     result = []
     for found in current:
         manifest = found.manifest
@@ -313,7 +334,9 @@ def listing(root, wait=loader.REFRESH_WAIT):
             # fails closed), and its defaults are never shown as its settings.
             state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
         elif problem is None and state in ("on", "loaded", "loading"):
-            problem = below_minimum(root, found)  # on, but it can't work: said where the listing is read
+            # On, but it can't work: said where the listing is read, whichever plugin a process loaded first.
+            problem = (below_minimum(root, found) or clashing.get(found.name)
+                       or (packages.problem(manifest) if manifest is not None and manifest.python else None))
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
@@ -858,10 +881,109 @@ def entry_access(root, name):
     return _access_here(Path(root), entry(Path(root), name))
 
 
-def from_agent():
-    """Whether this process runs for an agent: its launches and their children carry MV2_AGENT_ID or MV2_AGENT_DIR.
-    A guard against mistakes, not against an agent that unsets them."""
-    return bool(os.environ.get("MV2_AGENT_ID") or os.environ.get("MV2_AGENT_DIR"))
+def packages_state(root, name):
+    """What plugin `name` declares of Python packages and whether they are installed here (1.20), or None."""
+    from . import packages
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    return packages.state(found.manifest)
+
+
+def install_packages(root, name, approved=None):
+    """Install plugin `name`'s Python packages, once the person has said yes to the list (packages.install).
+    `approved`: the folder name of the list they were shown (packages_state's `folder`), so a changed list never
+    installs on an old yes."""
+    from . import packages
+    if from_agent(root):
+        raise PluginError(f"Only the person can approve installing a plugin's Python packages: ask them to run "
+                          f"mv2 plugins packages {name}")
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    try:
+        return packages.install(found.manifest, approved=approved)
+    except packages.PackagesError as error:
+        raise PluginError(str(error)) from None
+
+
+def secrets_view(root, name):
+    """Plugin `name`'s declared secrets here, never a value (1.20): [{key, label, help, required, set, from}], where
+    `from` is the universe whose value is used (this one, or a parent's), or None."""
+    from . import secrets
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    shown = []
+    for secret in found.manifest.secrets:
+        try:
+            source = secrets.where(root, name, secret.key)
+        except secrets.SecretsError:
+            source = None
+        shown.append({"key": secret.key, "label": secret.label, "help": secret.help, "required": secret.required,
+                      "set": source is not None, "from": str(source) if source is not None else None,
+                      "inherited": source is not None and Path(source).resolve() != Path(root).resolve()})
+    return shown
+
+
+def secrets_stamp(root=None):
+    """Something that changes whenever any plugin's secret is set or cleared, by any process, in any store (1.20):
+    the secrets index's time and size, or None while none was ever set. Never a value. For a screen to watch."""
+    from . import secrets
+    try:
+        stat = (secrets.directory() / secrets.INDEX).stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _declared_secret(root, name, key):
+    found = entry(Path(root), name)
+    if found.manifest is None:
+        raise PluginError(found.problem or f"{name} has no readable manifest")
+    declared = {secret.key: secret for secret in found.manifest.secrets}
+    if key not in declared:
+        raise PluginError(f"{name} declares no secret {key!r}"
+                          + (f"; it declares {', '.join(declared)}" if declared else ""))
+    return declared[key]
+
+
+def set_secret(root, name, key, value):
+    """Keep `value` as this universe's secret `key` of plugin `name` (the person only); the store's name. Errors
+    never hold the value."""
+    from . import secrets
+    if from_agent(root):
+        raise PluginError(f"Only the person sets a plugin's secrets: ask them to run mv2 plugins secret {name} {key}")
+    secret = _declared_secret(root, name, key)
+    try:
+        store = secrets.set_secret(root, name, key, value, label=f"mv2: {name} {secret.label}")
+    except secrets.SecretsError as error:
+        raise PluginError(f"{name}'s {secret.label} was not set: {error}") from None
+    loader._entries.clear()  # its state here may change (a required one now set)
+    return store
+
+
+def clear_secret(root, name, key):
+    """Remove this universe's own secret `key` of plugin `name` (the person only): True if it was set here."""
+    from . import secrets
+    if from_agent(root):
+        raise PluginError(f"Only the person clears a plugin's secrets: ask them to run "
+                          f"mv2 plugins secret {name} {key} --clear")
+    if (name, key) not in _orphan_secrets(root):  # one its plugin no longer declares can always be cleared
+        _declared_secret(root, name, key)
+    try:
+        cleared = secrets.clear_secret(root, name, key)
+    except secrets.SecretsError as error:
+        raise PluginError(f"{name}'s {key} was not cleared: {error}") from None
+    loader._entries.clear()
+    return cleared
+
+
+def from_agent(root=None):
+    """Whether this process runs for an agent (agent_identity.runs_in_agent): mv2's launch markers, or, given the
+    universe `root`, a tmux pane one of its tree's agents records. A guard against mistakes."""
+    from ..runtime.agent_identity import runs_in_agent
+    return runs_in_agent(root=root)
 
 
 def _grant_for(root, found, grant):
@@ -877,7 +999,7 @@ def _grant_for(root, found, grant):
         if levels.rank(grant) < levels.rank(wanted.minimum):
             raise PluginError(f"{found.name} needs at least {wanted.minimum} access"
                               + (f": {wanted.why}" if wanted.why else ""))
-    if from_agent():
+    if from_agent(root):
         if grant is not None and levels.rank(grant) > levels.rank(wanted.minimum):
             raise PluginError(f"An agent can turn {found.name} on with at most {wanted.minimum} access. "
                               f"For more, a person runs: mv2 plugins grant {found.name} {grant}")
@@ -900,7 +1022,7 @@ def set_grant(root, name, level):
     try:
         # From an agent, compared with the grant recorded now and written in one locked step: a person who lowers
         # it meanwhile is never overwritten.
-        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent() else None)
+        config.set_grant(root, name, level, no_raise_from=wanted.request if from_agent(root) else None)
     except config.WouldRaise as error:
         raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
                           f"mv2 plugins grant {name} {level}") from None
@@ -993,7 +1115,7 @@ def set_enabled(root, name, on, grant=None):
         raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
     try:
         config.set_enabled(root, name, bool(on), grant=grant if on else None,
-                           no_raise_from=found.manifest.access.request if on and from_agent() and found.manifest
+                           no_raise_from=found.manifest.access.request if on and from_agent(root) and found.manifest
                            else None)
     except config.WouldRaise as error:
         raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "

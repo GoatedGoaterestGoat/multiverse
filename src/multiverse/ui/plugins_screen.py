@@ -19,11 +19,12 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
-from ..plugins import access as plugin_access, loader
+from ..plugins import access as plugin_access, loader, packages as plugin_packages
 from ..plugins.settings import DELETE
 from .columns import COLUMNS
 from .plugin_service import universe_name
 from .screens import ChoiceScreen
+from .secrets_screen import SecretsScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
@@ -140,6 +141,15 @@ def describe(item):
         if str(shadow.get("directory")) in overridden:
             continue
         lines.append(f"Shadows a {clean(shadow.get('source'))} plugin at {clean(shadow.get('directory'))}")
+    packages = item.get("packages")
+    if packages:
+        if packages.get("installed"):
+            lines.append(f"Python packages: {len(packages['packages'])}, installed")
+        elif packages.get("packages"):
+            hint = " (Enter reviews and installs them)" if item["on"] else " (Space asks before installing them)"
+            lines.append(f"Python packages: {len(packages['packages'])}, not installed{hint}")
+        if packages.get("problem") and not packages.get("packages"):
+            lines.append("Python packages: " + clean(packages["problem"]))
     settings = item.get("settings")
     if settings:
         lines.append("Settings: " + clean(settings.get("path") or "") + (" (unusable)" if settings.get("problem") else ""))
@@ -160,7 +170,8 @@ class PluginsScreen(ModalScreen):
         super().__init__()
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
         self.items, self.problems, self.host = [], [], None
-        self.changed = self.busy = self.opening = False
+        self.changed = self.busy = self.opening = self.installing = False
+        self.reads = 0  # list reads started: only the latest shows what it read
         self.note = None  # a status line a plugin screen left
 
     def compose(self):
@@ -176,19 +187,28 @@ class PluginsScreen(ModalScreen):
         self.service = self.service or self.app.plugin_service
         self.query_one("#plugins-table", DataTable).add_columns("Plugin", "Here", "State", "Version", "Errors")
         self.generation, self.stamp = loader.generation(), file_stamp(self.root / "plugins.json")
+        self.secrets_stamp = self.read_secrets_stamp()
         self.load()
         self.set_interval(1.0, self.follow)
 
     def follow(self):
-        """Read the list again when a plugin finished loading (or failed to), or plugins.json changed from outside
-        (a grant, an access_ceiling, a plugin turned on or off), since it was read. Never while a chooser or a
-        screen of its own is open on top, or a change it started is under way: the next tick catches up."""
+        """Read the list again when a plugin finished loading (or failed to), plugins.json changed from outside
+        (a grant, an access_ceiling, a plugin turned on or off), or a secret was set or cleared anywhere (another
+        terminal's mv2 plugins secret), since it was read. Never while a chooser or a screen of its own is open on
+        top, or a change it started is under way: the next tick catches up."""
         if self.busy or self.opening or self.app.screen is not self:
             return
-        stamp = file_stamp(self.root / "plugins.json")
-        if loader.generation() != self.generation or stamp != self.stamp:
-            self.generation, self.stamp = loader.generation(), stamp
-            self.load(keep=(self.selected() or {}).get("name"))
+        stamp, secrets_stamp = file_stamp(self.root / "plugins.json"), self.read_secrets_stamp()
+        if loader.generation() != self.generation or stamp != self.stamp or secrets_stamp != self.secrets_stamp:
+            self.generation, self.stamp, self.secrets_stamp = loader.generation(), stamp, secrets_stamp
+            self.load()
+
+    def read_secrets_stamp(self):
+        """The secret store's stamp (a stat, never a value), or None when it can't be read."""
+        try:
+            return self.service.secrets_stamp(self.root)
+        except Exception:
+            return None
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))
@@ -203,22 +223,94 @@ class PluginsScreen(ModalScreen):
     @work(group="plugins-load", exit_on_error=False)
     async def load(self, keep=None):
         """The list first, then the universe's plugin problems and the host: each shows as soon as it is read, so a
-        plugin still loading (whose problems are only known once it has) never keeps the list from showing."""
+        plugin still loading (whose problems are only known once it has) never keeps the list from showing. Reads
+        can overlap (a follow tick, an action's reread): only the latest started shows what it read, so an older
+        one finishing last never draws over a newer state."""
+        self.reads += 1
+        mine = self.reads
         try:
             items = await asyncio.to_thread(self.service.listing, self.root)
+            await asyncio.to_thread(self.read_packages, items)
         except Exception as error:
-            self.query_one("#plugin-details", Static).update("Plugins unavailable.")
-            self.error(str(error))
+            if mine == self.reads:
+                self.query_one("#plugin-details", Static).update("Plugins unavailable.")
+                self.error(str(error))
+            return
+        if mine != self.reads:
             return
         self.items = items
         self.fill(keep)
         try:
-            self.problems = await asyncio.to_thread(self.service.problems, self.root)
+            problems = await asyncio.to_thread(self.service.problems, self.root)
+            if mine != self.reads:
+                return
+            self.problems = problems
             self.describe_selected()
-            self.host = await asyncio.to_thread(self.service.host_state, self.root)
+            host = await asyncio.to_thread(self.service.host_state, self.root)
+            if mine != self.reads:
+                return
+            self.host = host
             self.describe_selected()
         except Exception as error:
+            if mine == self.reads:
+                self.error(str(error))
+
+    def read_packages(self, items):
+        """Each plugin's Python packages and whether they're installed (cheap: a file read and a stat each)."""
+        for item in items:
+            try:
+                item["packages"] = self.service.packages_state(self.root, item["name"])
+            except Exception as error:
+                item["packages"] = {"packages": [], "installed": False, "folder": None, "problem": str(error)}
+
+    def missing_packages(self, item):
+        """The packages state when the plugin declares packages that aren't installed here, else None."""
+        found = item.get("packages")
+        return found if found and found.get("packages") and not found.get("installed") else None
+
+    @work(group="plugins-packages-ask", exit_on_error=False)
+    async def ask_packages(self, item, then):
+        """Show what installing the plugin's packages means, the same words the CLI asks with, for the list as it is
+        now (read again here, not when the screen opened); Install installs exactly that list off the event loop and
+        then runs `then`, Cancel (or Esc) leaves the plugin as it is."""
+        name = item["name"]
+        try:
+            found = await asyncio.to_thread(self.service.packages_state, self.root, name)
+            if not (found and found.get("packages") and not found.get("installed")):  # installed meanwhile, or none
+                then()
+                return
+            prompt = await asyncio.to_thread(self.service.packages_prompt, name, found)
+        except Exception as error:
+            self.busy = False
             self.error(str(error))
+            return
+        approved = Path(found["folder"]).name  # what the person says yes to: core refuses another list
+
+        def chosen(choice):
+            if choice != "install":
+                self.busy = False
+                self.error(f"{name}'s packages weren't installed" + ("; it stays off." if not item["on"] else "."))
+                return
+            self.error(f"Installing {name}'s Python packages…")
+            self.install(name, then, approved)
+
+        text = "\n".join(clean(line) for line in str(prompt).split("\n"))  # the plugin's names, as plain text
+        self.app.push_screen(ChoiceScreen(f"Install {name}'s Python packages", [
+            ("install", "Install them"), ("cancel", "Cancel" + (": it stays off" if not item["on"] else ""))],
+            description=text), chosen)
+
+    @work(group="plugins-packages", exit_on_error=False)
+    async def install(self, name, then, approved):
+        self.installing = True
+        try:
+            await asyncio.to_thread(self.service.install_packages, self.root, name, approved)
+        except Exception as error:
+            self.installing = self.busy = False
+            self.error(str(error))  # core's reason names the plugin and what failed
+            self.load()  # the row selected when it redraws: a Down pressed meanwhile is kept
+            return
+        self.installing, self.changed = False, True
+        then()
 
     def fill(self, keep=None):
         table = self.query_one("#plugins-table", DataTable)
@@ -258,6 +350,10 @@ class PluginsScreen(ModalScreen):
         self.action_settings()
 
     def action_close(self):
+        if self.installing:  # the install would go on without the screen that turns the plugin on afterwards
+            self.error(f"Installing Python packages: wait for it to finish (it gives up after "
+                       f"{plugin_packages.INSTALL_SECONDS // 60} minutes).")
+            return
         self.dismiss(self.note or self.changed)
 
     def action_toggle(self):
@@ -266,9 +362,19 @@ class PluginsScreen(ModalScreen):
             return
         self.busy = True  # also while the access chooser is open, so a held Space opens one
         self.error("")
-        offered = [] if item["on"] else levels(item)
+        if not item["on"] and self.missing_packages(item):  # asked first: turning it on would only fail to load
+            self.ask_packages(item, lambda: self.turn_on(item))
+            return
+        if item["on"]:
+            self.switch(item["name"], False)
+        else:
+            self.turn_on(item)
+
+    def turn_on(self, item):
+        """Turn the plugin on, first asking which access to grant where it can work with less than it asks for."""
+        offered = levels(item)
         if not offered:
-            self.switch(item["name"], not item["on"])
+            self.switch(item["name"], True)
             return
         name, why = item["name"], (item.get("access") or {}).get("why")
 
@@ -298,7 +404,12 @@ class PluginsScreen(ModalScreen):
         self.busy = False
         self.changed = True
         self.error("")
-        self.load(keep=name)
+        self.load()
+
+    def installed(self, name):
+        self.busy = False
+        self.error(f"Installed {name}'s Python packages.")
+        self.load()
 
     def action_host(self):
         """h: start the plugin host when it is off, stop it when it runs (it outlives the dashboard otherwise)."""
@@ -337,6 +448,46 @@ class PluginsScreen(ModalScreen):
         item = self.selected()
         if item is None or self.busy or self.opening:  # opening: a held Enter must not stack identical screens
             return
+        if item["on"] and self.missing_packages(item):  # on but unable to load without them: install first
+            self.busy = True
+            self.ask_packages(item, lambda: self.installed(item["name"]))
+            return
+        self.opening = True
+        self.configure(item)
+
+    @work(group="plugins-screen", exit_on_error=False)
+    async def configure(self, item):
+        """Enter: the plugin's settings, its secrets, or a choice of the two when it has both. Its secrets are read
+        only now, off the event loop: reading them asks the keychain."""
+        try:
+            secrets = await asyncio.to_thread(self.service.secrets_view, self.root, item["name"])
+        except Exception:
+            secrets = []  # the settings still open; a plugin whose manifest can't be read says so there
+        self.opening = False
+        if not secrets:
+            self.open_settings(item)
+            return
+        if not item.get("settings"):
+            self.open_secrets(item, secrets)
+            return
+        missing = sum(1 for secret in secrets if secret.get("required") and not secret.get("set"))
+
+        def chosen(choice):
+            if choice == "secrets":
+                self.open_secrets(item, secrets)
+            elif choice == "settings":
+                self.open_settings(item)
+
+        self.app.push_screen(ChoiceScreen(f"Configure {item['name']}", [
+            ("settings", "Settings"),
+            ("secrets", f"Secrets ({len(secrets)}" + (f", {missing} required not set)" if missing else ")"))]),
+            chosen)
+
+    def open_secrets(self, item, secrets):
+        self.app.push_screen(SecretsScreen(self.root, self.service, item["name"], secrets, self.scope_name),
+                             self.edited)
+
+    def open_settings(self, item):
         settings = item.get("settings")
         if not settings:
             self.error(f"{item['name']} has no settings.")

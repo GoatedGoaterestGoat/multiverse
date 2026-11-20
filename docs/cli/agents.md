@@ -46,7 +46,7 @@ Each line shows the agent's name, status, reported phase and summary. A `working
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require an exact recovery address. Distinct damaged IDs do not make a healthy agent's prefix ambiguous, but a collision in the full address does: if a recovered agent's stored ID also names a leftover folder, shortening that ID cannot select either one. Duplicate names and ambiguous IDs or prefixes are refused with the matching folders listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
-If no local agent matches, the error also looks in related universes: parents, siblings and subverses in the same tree. It lists the matches with their paths and the `-u` option to reach them. Put that option before the command, as in `mv2 -u .multiverse/subverses/qa inspect worker`. The command never chooses another universe for you. This quick, read-only search skips damaged records and linked directories; if its search limit is reached, any matches shown may be incomplete. A name found nowhere keeps the usual error.
+If no local agent matches, the error also looks in related universes: parents, siblings and subverses in the same tree. It lists the matches with their paths and the `-u` option to reach them. Put that option before the command, as in `mv2 -u .multiverse/subverses/qa inspect worker`. The command never chooses another universe for you. This quick, read-only search skips damaged records and linked directories; if its search limit is reached, any matches shown may be incomplete. With no match before that limit, the error suggests `mv2 -u TOP list --recursive`, naming the top related universe so parents and siblings are included, and `-u PATH` to select a match explicitly. If the top cannot be verified within the budget, it asks you to run that listing from the related tree’s top universe instead of guessing its path. Missing-file presence probes share one retry budget across the search; a record first seen missing after that budget is exhausted remains unverified. A completed search with no match keeps the usual error.
 
 ## Watch an agent
 
@@ -103,6 +103,22 @@ Linux launches record the process's start ticks and boot ID, so a wall-clock adj
 A `steer` or `follow-up` message to a stopped agent also resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` send can also wake an agent if it [upgrades to a follow-up because the recipient is blocked on the sender](messaging.md).
 
 For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window or your explicit `--wait-timeout` ends without either, a healthy process that passed its startup check proceeds with a notice that screen startup could not be confirmed. A process that has not passed that check still times out. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
+
+
+## Save a model without resuming
+
+```sh
+mv2 set-model worker --model sonnet --effort high
+mv2 set-model worker --model opus
+mv2 set-model worker --effort default
+mv2 set-model worker --model default --effort default
+```
+
+`set-model` saves the model and effort for the agent's next resume. It works for running and stopped agents. A running session keeps its current choice until you stop and resume it. The command never restarts it or changes the person's harness defaults.
+
+Omitted fields keep their saved values. `--model default` clears the saved model and uses the harness's configured default on resume. `--effort default` clears the saved effort. Changing only the model keeps a compatible saved effort, or drops it with a note when the harness permits an unset effort. A subset that requires a specific effort still requires an allowed choice. The same model-subset rules and access as `resume` apply. An unconfirmed native model or effort command must settle before another choice is saved. Damaged or incomplete agent records must be repaired first.
+
+`mv2 inspect worker` and `mv2 list --json` show the saved `model` and `effort`. The dashboard's Model column continues to show the running session's latest observation. Before an observation arrives, it keeps the model and effort shown before the saved edit, for that launch only. `--json` on `set-model` returns the saved fields and its `notices`.
 
 ## Move and remove
 

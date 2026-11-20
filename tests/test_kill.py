@@ -1,4 +1,5 @@
 """Real, isolated tmux shutdown stages and exact-launch process ownership."""
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import shutil
@@ -284,18 +285,36 @@ class KillTest(TerminalBase):
             self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
             self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
 
-    def test_native_process_ignoring_term_is_killed_before_wrapper_removal(self):
-        """A native process ignoring SIGTERM is killed before its wrapper is removed; a break leaves orphan native
-        processes behind removed panes, unnoticed."""
+    def test_a_slow_exit_gets_its_grace_and_a_process_ignoring_term_is_killed_before_wrapper_removal(self):
+        """A slow SIGTERM exit may finish, one ignoring it is killed; else Claude loses a write or an orphan stays."""
         script = self.root / 'harnesses/fake/worker.py'
-        script.write_text('import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n' + script.read_text())
-        launched, directory = self.spawn()
-        start = time.monotonic()
-        lifecycle.kill(self.root, launched['id'])
-        self.assertGreaterEqual(time.monotonic() - start, 2)
-        facts = agents.runtime(directory)
-        self.assertEqual(facts['exit_code'], -signal.SIGKILL)
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
+        original = script.read_text()
+        cases = (
+            ('exits 3 s after SIGTERM, past the old 2 s grace',
+             'import signal, sys, time\nfrom pathlib import Path\n'
+             'def finish(*_):\n    time.sleep(3)\n    Path(sys.argv[-1]).with_name("finished").write_text("clean")\n'
+             '    sys.exit(0)\nsignal.signal(signal.SIGTERM, finish)\n', None),
+            ('ignores SIGTERM', 'import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n', 1))
+        for number, (case, prefix, grace) in enumerate(cases):
+            with self.subTest(case):
+                script.write_text(prefix + original)
+                launched = lifecycle.start(self.root, f'slow{number}', 'a task', 'fake', socket_path=self.socket)
+                directory = agents.directory(self.root, launched['id'])
+                until(lambda: (directory / 'seen.json').exists())
+                start = time.monotonic()
+                with patch.object(lifecycle, 'STOP_GRACE', grace) if grace else nullcontext():
+                    lifecycle.kill(self.root, launched['id'])
+                waited = time.monotonic() - start
+                facts = agents.runtime(directory)
+                row = next(row for row in lifecycle.listing(self.root) if row['id'] == launched['id'])
+                self.assertEqual(row['live'], 'dormant')
+                if grace:
+                    self.assertEqual(facts['exit_code'], -signal.SIGKILL)
+                    self.assertGreaterEqual(waited, grace)
+                else:
+                    self.assertNotEqual(facts['exit_code'], -signal.SIGKILL, 'killed before its grace ran out')
+                    self.assertEqual(next(directory.glob('launches/*/finished')).read_text(), 'clean')
+                    self.assertGreaterEqual(waited, 3)
 
     def test_resume_race_never_tears_down_replacement_launch(self):
         """A kill racing a resume never tears down the replacement launch; fragile because it is a race, and the

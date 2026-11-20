@@ -53,6 +53,71 @@ class TrustTest(PluginTestCase):
         self.assertFalse(self.marker.exists(), "the trusted plugin.py, not the planted bytecode, must run")
         self.assertIn("plugin-cache", loaded.module.__file__)
 
+    def test_an_edited_trusted_copy_never_runs(self):
+        """A trusted copy whose files were edited after it was made is refused, never run, until it is made again
+        from the trusted plugin, while files Claude adds there stay fine; a break runs code nobody trusted."""
+        import shutil
+        trust.trust(self.directory)
+        copy = Path(loader.load(self.entry("local")).module.__file__).parent
+        for written in ("tsconfig.json", ".claude-plugin/types/tsconfig.json",  # what Claude writes at a start
+                        ".claude-plugin/types/claude-code/index.d.ts"):
+            (copy / "claude" / written).parent.mkdir(parents=True, exist_ok=True)
+            (copy / "claude" / written).write_text("{}")
+        loader.reset()
+        self.assertEqual(self.entry("local").state, "on")
+        (copy / "plugin.py").write_text(HARMFUL)  # edited in the cache, the universe's plugin untouched
+        loader.reset()  # as a new process finds it
+        found = self.entry("local")
+        self.assertEqual(found.state, "changed")
+        self.assertIn("was edited after it was trusted", found.problem)
+        with self.assertRaises(loader.PluginError):
+            loader.load(found)
+        self.assertFalse(self.marker.exists(), "the edited copy must never run")
+        shutil.rmtree(copy)  # what the problem says to do
+        loader.reset()
+        self.assertEqual(self.entry("local").state, "on")
+        loader.load(self.entry("local"))
+        self.assertFalse(self.marker.exists())
+        # Nor does anything else placed in the copy run (reviewer, d99f1003): a new module, bytecode Python would
+        # prefer to the trusted source, or an edit with the copy's list of files removed.
+        for case in ("module", "Claude hook", "bytecode", "sourceless package", "sourceless module", "list removed"):
+            with self.subTest(case=case):
+                shutil.rmtree(copy, ignore_errors=True)
+                loader.reset()
+                loader.load(self.entry("local"))  # the copy made again, trusted
+                if case == "module":
+                    (copy / "extra.py").write_text(HARMFUL)
+                elif case == "Claude hook":  # Claude would run it: not bookkeeping, wherever it sits
+                    (copy / "claude" / "hooks" / "extra.ts").write_text("export default {}\n")
+                elif case == "bytecode":
+                    source = self.work / "harmful.py"
+                    source.write_text(HARMFUL)
+                    planted = copy / "__pycache__" / f"plugin.{sys.implementation.cache_tag}.pyc"
+                    planted.parent.mkdir(exist_ok=True)
+                    py_compile.compile(str(source), cfile=str(planted), dfile=str(copy / "plugin.py"),
+                                       invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+                elif case.startswith("sourceless"):  # Python imports a lone .pyc as it is (reviewer, 55ab69b3)
+                    source = self.work / "harmful.py"
+                    source.write_text(HARMFUL)
+                    planted = copy / ("plugin/__init__.pyc" if case == "sourceless package" else "extra.pyc")
+                    planted.parent.mkdir(exist_ok=True)
+                    py_compile.compile(str(source), cfile=str(planted), dfile=str(planted.with_suffix(".py")),
+                                       invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+                else:
+                    (copy / trust.LISTED).unlink()
+                    (copy / "plugin.py").write_text(HARMFUL)
+                loader.reset()
+                found = self.entry("local")
+                # As a process with no bytecode prefix of its own would load it (the test runner sets one).
+                with mock.patch.object(sys, "pycache_prefix", None):
+                    if found.state == "on":
+                        loader.load(found)
+                self.assertFalse(self.marker.exists(), case)
+                if case == "bytecode":  # removed from the copy, never read
+                    self.assertFalse(planted.exists())
+                else:
+                    self.assertEqual(found.state, "changed", case)
+
     def test_trust_fingerprint_lifecycle(self):
         """An untrusted plugin refuses to load and trust turns it on; editing a file, adding node_modules JS or a .so,
         or an edit keeping size and mtime makes it changed so it never runs, while bytecode and test caches, a new
@@ -140,7 +205,9 @@ class TrustTest(PluginTestCase):
                                                       (2, 1, 296), True))
         [claude_dir] = plan.claude_plugin_dirs
         self.assertIn("plugin-cache", claude_dir)
-        (Path(claude_dir) / "tsconfig.json").write_text("{}")  # what Claude writes into a directory it loads
+        (Path(claude_dir) / ".claude-plugin" / "types").mkdir(parents=True)  # what Claude writes into a directory
+        (Path(claude_dir) / ".claude-plugin" / "types" / "tsconfig.json").write_text("{}")  # it loads
+        (Path(claude_dir) / "tsconfig.json").write_text("{}")
         loader.reset()
         self.assertEqual(self.entry("local").state, "on")
         self.assertFalse((self.directory / "claude" / "tsconfig.json").exists())

@@ -1,5 +1,7 @@
 """Compatibility command line; each action lives in tools/<name>.py."""
 import argparse
+import contextlib
+import io
 import os
 from pathlib import Path
 from importlib import import_module
@@ -16,7 +18,7 @@ from .tools._common import add_universe, output
 # Harness integrations report status with `python -m multiverse.tools.runtime_update`;
 # it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "held", "listen", "focus", "unfocus", "report",
+            "stop", "kill", "set-model", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "held", "listen", "focus", "unfocus", "report",
             "session-bind", "capabilities", "deliver", "native-status", "ask", "slash", "answer", "get-usage", "tui", "doctor",
             "refresh", "update", "plugins")
 
@@ -165,13 +167,51 @@ def _diagnostic_paths(root, *, recursive=False):
     return paths
 
 
+SECRET_REFUSAL = ("mv2: mv2 plugins secret takes only NAME, KEY and --clear (or --json), never a value as an "
+                  "argument or option, so nothing was saved and what you typed isn't shown here. Your shell may have "
+                  "kept it in its history: remove it there. Then run mv2 plugins secret NAME KEY and type it, or "
+                  "pipe it in.")
+
+
+def _secret_command(argv):
+    """Whether these words may run mv2 plugins secret, read before parsing so a parse error repeats none of them.
+    Deliberately wide: any `secret` word after `plugins`, wherever options and their values put it, since guessing
+    the action's position the way argparse would is what let values through. A plugins command that only names
+    `secret` otherwise gets the fixed refusal instead of argparse's message, which costs it nothing that matters."""
+    if "plugins" not in argv:
+        return False
+    return "secret" in argv[argv.index("plugins") + 1:]
+
+
 def main():
     argv = sys.argv[1:]
+    secret = _secret_command(argv)
     try:
-        args = parser(argv).parse_args(argv)
+        built = parser(argv)
+        if secret:
+            # Nothing argparse would say about this command is repeated: any word or option value here may be the
+            # secret itself (--value=KEY, --clear=KEY, --grant=KEY), so a parse error gives one fixed message.
+            said = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(said):
+                    args, unknown = built.parse_known_args(argv)
+            except SystemExit as exited:
+                if exited.code in (0, None):
+                    raise
+                args, unknown = None, [None]
+        else:
+            args, unknown = built.parse_known_args(argv)
     except ValueError as error:  # a plugin's command that cannot load says why
         print(f"mv2: {error}", file=sys.stderr)
         sys.exit(1)
+    # mv2 plugins takes stray words as a hidden argument (so they are never repeated for secret): a usage error,
+    # exit 2, as argparse gives one.
+    stray = list(getattr(args, "extra", None) or []) if args is not None and args.action == "plugins" else []
+    if unknown or stray:
+        if secret:
+            print(SECRET_REFUSAL, file=sys.stderr)
+            sys.exit(2)
+        built.error(f"unrecognized arguments: {' '.join(unknown + stray)}")
     absent = frozenset()
     diagnostic = (args.action in ('list', 'doctor', 'inspect') or
                   args.action == 'plugins' and args.plugin_action in ('list', 'info'))

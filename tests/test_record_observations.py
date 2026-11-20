@@ -6,6 +6,7 @@ import io
 import sys
 import json
 import os
+import resource
 from pathlib import Path
 import shutil
 import threading
@@ -19,11 +20,147 @@ from test_multiverse import BaseTest
 from multiverse import store
 from multiverse.harnesses.types import ObservedBinding
 from multiverse.runtime import lifecycle, native, slash
-from multiverse.tools import doctor
+from multiverse.tools import doctor, inbox as inbox_tool
+from multiverse.ui.backend import LocalBackend
 from multiverse.universe import agents, mailbox, sessions
 
 
 class RecordObservationsTest(BaseTest):
+    def test_fleet_counts_fit_a_small_descriptor_budget(self):
+        """Retaining one lock per inbox can exhaust descriptors and hide healthy messages in a large fleet."""
+        rows = []
+        for number in range(70):
+            directory, properties, _ = self.agent(f'fd-{number}')
+            mailbox.append_message(directory, 'hello', None)
+            rows.append({**properties, 'universe': str(self.root)})
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        soft = 48 if limits[0] == resource.RLIM_INFINITY else min(48, limits[0])
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, limits[1]))
+        try:
+            with self.clock():
+                sequential = LocalBackend()
+                self.assertEqual([sequential.unread_count(row) for row in rows], [1] * 70)
+                self.assertEqual(LocalBackend().unread_counts(rows), [1] * 70)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+
+    def test_descriptor_pressure_releases_locks_before_fresh_peeks(self):
+        """A resource-error fallback must release its batch locks and recheck a cursor absent in the abandoned batch."""
+        directories = [self.agent(f'pressure-{number}')[0] for number in range(3)]
+        for directory in directories:
+            mailbox.append_message(directory, 'hello', None)
+        ledger = directories[0] / 'inbox-state.json'
+        store.write(ledger, {})
+        original, failed = mailbox.records.open_replaced, []
+        def pressure(path, **kwargs):
+            if path == ledger and not failed:
+                failed.append(path)
+                cursor = directories[0] / 'inbox.cursor'
+                cursor.write_text(str((directories[0] / 'inbox.jsonl').stat().st_size))
+                raise OSError(errno.EMFILE, 'descriptor pressure', str(path))
+            return original(path, **kwargs)
+        with patch.object(mailbox.records, 'open_replaced', pressure), self.clock():
+            readings = mailbox.unread_many(directories)
+        for directory in directories:
+            self.assertIsInstance(readings[directory], list)
+        self.assertEqual([len(readings[directory]) for directory in directories], [0, 1, 1])
+        self.assertEqual(len(failed), 1)
+        for directory in directories:
+            with store.lock(directory / '.inbox.lock', blocking=False):
+                pass
+
+    def test_descriptor_pressure_during_lock_collection_releases_the_partial_group(self):
+        """A failed lock open must not leave earlier inboxes locked when the batch falls back to ordinary peeks."""
+        directories = [self.agent(f'lock-pressure-{number}')[0] for number in range(3)]
+        for directory in directories:
+            mailbox.append_message(directory, 'hello', None)
+        original, failed = mailbox.lock, []
+        @contextmanager
+        def pressure(path, **kwargs):
+            if path == directories[1] / '.inbox.lock' and not failed:
+                failed.append(path)
+                raise OSError(errno.ENFILE, 'descriptor pressure', str(path))
+            with original(path, **kwargs):
+                yield
+        with patch.object(mailbox, 'lock', pressure), self.clock():
+            readings = mailbox.unread_many(directories)
+        for directory in directories:
+            self.assertIsInstance(readings[directory], list)
+            self.assertEqual(len(readings[directory]), 1)
+            with store.lock(directory / '.inbox.lock', blocking=False):
+                pass
+        self.assertEqual(len(failed), 1)
+
+    def test_fleet_unread_counts_share_one_locked_absence_window(self):
+        """Cold unread counts must not wait per agent or lend their absence snapshot to a later consuming read."""
+        directories, rows = [], []
+        for number in range(10):
+            directory, properties, _ = self.agent(f'count-{number}')
+            directories.append(directory)
+            rows.append({**properties, 'universe': str(self.root)})
+            if number % 2:
+                mailbox.append_message(directory, 'hello', None)
+        backend = LocalBackend()
+        with self.clock() as (_, sleeps):
+            self.assertEqual(backend.unread_counts(rows), [number % 2 for number in range(10)])
+            self.assertEqual(len(sleeps), store.MISSING_ATTEMPTS - 1)
+        for number, directory in enumerate(directories):
+            self.assertFalse((directory / 'inbox.cursor').exists())
+            if number % 2 == 0:
+                self.assertFalse((directory / '.inbox.lock').exists())
+        with self.clock() as (_, sleeps):
+            self.assertEqual(backend.unread_counts(rows), [number % 2 for number in range(10)])
+            self.assertEqual(sleeps, [])
+        with self.clock() as (_, sleeps):
+            mailbox.inbox(directories[1], peek=True)
+            self.assertEqual(len(sleeps), store.MISSING_ATTEMPTS - 1)
+
+    def test_fleet_peek_recovers_a_cursor_gap_and_keeps_errors_local(self):
+        """Batching may neither hide a read cursor during replacement nor let one damaged or locked inbox stop peers."""
+        directories = [self.agent(f'peer-{number}')[0] for number in range(3)]
+        for directory in directories:
+            mailbox.append_message(directory, 'hello', None)
+        cursor = directories[0] / 'inbox.cursor'
+        cursor.write_text(str((directories[0] / 'inbox.jsonl').stat().st_size))
+        (directories[1] / 'inbox-state.json').write_text('[]')
+        stat, missed = Path.stat, []
+        def gap(path, *args, **kwargs):
+            if path == cursor and len(missed) < 2:
+                missed.append(path)
+                raise FileNotFoundError(2, 'replacing', str(path))
+            return stat(path, *args, **kwargs)
+        with patch.object(Path, 'stat', gap), self.clock():
+            readings = mailbox.unread_many(directories)
+        self.assertEqual(readings[directories[0]], [])
+        self.assertIsInstance(readings[directories[1]], ValueError)
+        self.assertEqual(len(readings[directories[2]]), 1)
+        with store.lock(directories[2] / '.inbox.lock'), self.clock():
+            self.assertIsInstance(mailbox.unread_many(directories)[directories[2]], BlockingIOError)
+        for directory in directories:
+            with store.lock(directory / '.inbox.lock', blocking=False):
+                pass  # every acquired batch lock is released, including the damaged inbox's
+        with patch.object(mailbox, '_inbox_locked', side_effect=KeyboardInterrupt), self.clock():
+            with self.assertRaises(KeyboardInterrupt):
+                mailbox.unread_many(directories)
+        for directory in directories:
+            with store.lock(directory / '.inbox.lock', blocking=False):
+                pass  # cancellation releases all of them, including inboxes not reached yet
+
+    def test_fleet_count_does_not_cache_a_change_that_followed_its_read(self):
+        """A message arriving between a batch read and cache publication must appear on the next refresh."""
+        directory, properties, _ = self.agent()
+        mailbox.append_message(directory, 'first', None)
+        rows = [{**properties, 'universe': str(self.root)}]
+        real = inbox_tool.unread_many
+        def arriving(root, references):
+            value = real(root, references)
+            mailbox.append_message(directory, 'second', None)
+            return value
+        backend = LocalBackend()
+        with patch.object(inbox_tool, 'unread_many', arriving):
+            self.assertEqual(backend.unread_counts(rows), [1])
+        self.assertEqual(backend.unread_counts(rows), [2])
+
     def setUp(self):
         super().setUp()
         # A real configured adapter with no executable/native queries; no session is launched.

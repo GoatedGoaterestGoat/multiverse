@@ -31,13 +31,13 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | `phase`, `summary` | What the agent last reported with `mv2 report`. A `working` or `blocked` phase also says how long ago it was reported, so how current the summary is, such as `working (10m)` or `blocked (2h)` |
 | `focus` | How long the agent's focus lasts: the time left, `turn` or `on` (off by default) |
 | `harness` | The harness the agent runs |
-| `model` | The agent's model by its display name, such as `Opus 5.5` or `GPT 6.1 Sol`: the universe's own name for it from its harness settings, else the one mv2 ships in its model tables (which follow new releases, so an alias such as `opus` can later name a newer model). A running agent shows the model its session last reported, so a switch with `/model` shows after its next reply. Otherwise, and until the first reading lands, it shows the model the agent was launched with, else its harness's default model (`settings.model`), the one it would resume on, else `-`. A model neither names shows as recorded (off by default) |
+| `model` | The agent's model by its display name, such as `Opus 5.5` or `GPT 6.1 Sol`: the universe's own name for it from its harness settings, else the one mv2 ships in its model tables (which follow new releases, so an alias such as `opus` can later name a newer model). A running agent shows the model its session last reported, so a switch with `/model` shows after its next reply. Otherwise, and until the first reading lands, it shows the model the agent was launched with, else its harness's default model (`settings.model`), the one it would resume on, else `-`. After its saved model or effort is changed for the next resume (`e`, or `mv2 set-model`), a running agent with no reading yet keeps showing the model and effort it was launched with; it shows the saved choice once it's stopped and resumed. A model neither names shows as recorded (off by default) |
 | `effort` | Not a column of its own: with `model` also listed, the agent's effort in parentheses in the Model cell, such as `Opus 5.5 (xhigh)`. It is the effort a running agent's session reports where its harness records one, else the effort it was launched with; nothing when neither is known. Without `model` it shows nowhere (off by default) |
 | `id`, `universe`, `task`, `updated_at` | Optional extra columns |
 | `unread` | Not a column of its own: the agent's unread inbox messages as a count after its name, such as `reviewer ✉2`, shown only while there are some (off by default). Counting them never marks them read, and an inbox that can't be read shows no count |
 | `blocked_on` | Not a column of its own: a blocked agent's summary starts with what it's waiting for, in its own colour, such as `Waiting for user: decide the model list`, `Waiting for tester in qa: …` or `Waiting for self: tests running, ETA 5 min`, or just `Waiting for lifecycle` with no summary (on in both bundled templates). An agent mv2 can no longer find reads `Waiting for ada (gone)`, and one named `user` or `self` reads `agent user`. A view without `summary` (or `core:summary`) shows it nowhere, the inspector included; a plugin column standing in for Summary shows its own value, and core's summary where it has none |
 
-Choose columns in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
+Choose columns with `C`, or in the universe's `views/default.json` (see [views](#views)). [Concepts](../concepts.md#agent-state) explains the state fields.
 
 Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A plugin's column can also stand in for a core column. Where the view lists that core key, such as `context`, and the plugin is on, the dashboard shows the plugin's column there, and a row the plugin has no value for shows core's cell. To keep core's own column, list it as `core:context`, set `"replace": false` in the view, or name the plugin's column to place it yourself. Name, Live, Status and Focus always show core's own. The Plugins screen says when a plugin's column replaces a core one.
 
@@ -57,6 +57,7 @@ Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A
 | `f` | Focus the selected agent, or unfocus it |
 | `K` or `s` | Kill the selected agent, after confirming |
 | `r` | Resume a stopped or dormant agent |
+| `e` | Choose the selected agent's model and effort for its next resume |
 | `p` | Show or hide the inspector |
 | `v` | Show full details of an agent or folder |
 | `i` | Read the selected agent's unread inbox messages; they stay unread for the agent |
@@ -64,6 +65,7 @@ Plugins can add columns. Name one in `columns` by its key, or as `PLUGIN:KEY`. A
 | `x` | Move the selected agent or subverse |
 | `d` | Send the selected agent or subverse to the trash, after confirming |
 | `P` | Open the selected universe's plugins: turn each on or off (choosing its access when it can work with less than it asks for), see what it adds and its access, and Configure it; see [plugins](../use/plugins.md) |
+| `C` | Choose the agent list's columns: turn each on or off and order them; see [the Columns screen](#the-columns-screen) |
 | `Tab` | Move between the list, a local view and its links |
 | `F5` | Refresh now |
 | `?` | Show all keys |
@@ -82,11 +84,15 @@ Press `n` to add a draft row in the selected folder. Type the name, then press `
 
 `status` and `phase` are separate. `status` is the harness's own state (`working`, `waiting` or `idle`). `phase` is what the agent last reported with `mv2 report`, and reads `starting` until it reports.
 
-Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and the `base` template. For anything else, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
+Press `g` for a new subverse, type a name and press `Enter`. The subverse uses its parent's workspace and starts from a copy of its parent's definitions, as `mv2 subverse` does without `--template`. For another workspace or a clean template, use `mv2 subverse` (see [universes](../cli/universes.md#subverses)).
+
+## Change an agent's model
+
+Press `e` on an agent to choose the model and effort it launches with next time, as `mv2 set-model` does. Its row turns into the new-agent picker for its harness, starting from the saved choice: `↑`/`↓` choose, `Tab` moves between Model and Effort, `Enter` saves and `Esc` discards. Only the models the harness's settings allow are offered. A saved model they no longer allow is named, and you choose another. A model with no efforts sends none, so a saved effort the model still takes is kept. A running agent's session keeps its current model until it's stopped and resumed, and nothing restarts. The Model column still shows what the session uses.
 
 ## Message, focus, kill and resume
 
-- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. On a focused agent, the message goes to its inbox without interrupting it; to answer it, attach with Enter. If the agent focuses while the form is open, your message goes to its inbox.
+- **`m`** opens a message form for the selected agent. A stopped agent is resumed with your message as its first prompt. It's a `steer`, which reaches a focused agent too: a focus holds only agents' messages.
 - **`f`** asks how long to [focus](../cli/messaging.md#focus-an-agent) the selected agent: 5 minutes, 20 minutes, 1 hour, until its next turn ends, or until you unfocus it. The turn choice shows only while the harness reports the agent's status. On a focused agent, `f` unfocuses it and says how many inbox messages wait. The inspector and `v` say until when an agent is focused.
 - **`i`** shows the selected agent's unread inbox messages as the agent will read them with `mv2 inbox`. Reading them here doesn't mark them read, so the agent still gets them.
 - **`a`** answers the prompt a `waiting` agent is stopped at, as [`mv2 answer`](../cli/waiting-prompts.md) does. The inspector names the prompt (`⏸ Waiting on: permission · Bash: git push`). A Codex agent can also ask asynchronous questions while it works. The inspector shows its retained ones as `Open questions: …`, and `a` answers them the same way, also after a question was skipped in its terminal; the terminal's question card may still show it ([Codex](../use/harnesses.md#codex)). `a` opens it with the call and the choices the harness offers, or its questions. A choice that saves a rule to your settings is marked. A form with both questions and choices, such as Codex's cancel, takes one or the other: its answers, or a choice you pick instead, which goes alone; `Enter` on the picked choice again takes it back. A question that takes a note, such as Codex's "Other", has a note box beside it. A secret answer or note is typed into a hidden box. Nothing counts until you pick it: a choice with `Enter`, an option with `Space`. `Ctrl+Enter` answers and `Esc` closes without sending. The outcome, and why when the answer didn't take, shows on the bottom line and in the inspector as `Last answer`. A prompt takes one answer, so mv2 never sends a second one.
@@ -110,6 +116,18 @@ For a Codex agent, the mouse wheel scrolls its transcript. For keyboard scrollba
 ## Subverse portals
 
 `Enter` on a subverse opens it as its own view. Its title, columns and widgets replace the parent's. `Backspace` or the breadcrumb takes you back, and restores folds, selection, search and scroll. You can't go above the universe the dashboard was opened on.
+
+## The Columns screen
+
+`C` (or Columns in the command palette) lists the columns of the universe on show, as its `views/default.json` sets them, and the ones it could show: core's, and those the plugins on here add.
+
+- **Space** turns the selected column on or off. Universe / agent always shows.
+- **Shift+↑ / Shift+↓** moves it. A column that is off waits at its usual place, so turning it on puts it there.
+- **Enter** writes the file and the list follows; **Esc** discards.
+
+Unread, Effort and Blocked on aren't columns of their own, so they sit under the column they add to (Universe / agent, Model, Working on, or core's own of it, such as `core:model`, where that one is shown) and move with it. While that column is off, the mark reads, for example, `(needs Model)`, and stays saved, so turning the column on brings it back.
+
+Enter changes only the file's `columns` value: its other keys and their layout stay as written. If the file changed on disk after the screen read it, nothing is written: the screen reads it again and says so. A file that isn't a regular file of plain UTF-8 JSON, or whose `columns` isn't a list of names, opens read-only, with why. Once you save, the file is the universe's own edit, so `mv2 refresh` keeps it and reports a later template change to it as a conflict.
 
 ## Views
 

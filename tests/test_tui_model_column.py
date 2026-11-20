@@ -9,7 +9,7 @@ from unittest import mock
 from multiverse import cli
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.runtime import lifecycle, native
-from multiverse.store import read, write
+from multiverse.store import read, write, uid
 from textual.widgets import DataTable
 
 
@@ -165,13 +165,27 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         self.agent("bare")
         self.agent("pending")
         self.agent("effortonly", model="opus", effort="xhigh")
+        # A next-resume edit keeps this launch's prior model/effort fallback, even before usage is available.
+        launch = uid()
+        saved = {'model': 'claude-sonnet-5-5', 'effort': 'medium'}
+        snapshot = {'launch_id': launch, 'model': 'opus', 'effort': None}
+        for name, prior, active in (
+                ('edited', snapshot, launch),
+                ('editedobs', {**snapshot, 'effort': 'xhigh'}, launch),
+                ('editedeffort', snapshot, launch),
+                ('editedstopped', {**snapshot, 'effort': 'xhigh'}, launch),
+                ('editednewlaunch', snapshot, uid()),
+                ('editedunknown', {**snapshot, 'model': None}, launch)):
+            self.agent(name, **saved, model_before_edit=prior, runtime={'launch_id': active, 'state': 'stopped'})
         rows = {row["name"]: row for row in lifecycle.listing(self.root, usage=False)}
         opus, default = rows["stopped"]["model_name"], rows["bare"]["default_model_name"]
         self.assertTrue(opus and default and default != "claude-haiku-5-5", (opus, default))
-        running = {"reports", "noeffort", "pending", "effortonly"}
+        running = {"reports", "noeffort", "pending", "effortonly", "edited", "editedobs", "editedeffort",
+                   "editednewlaunch", "editedunknown"}
         reports = {"reports": ("claude-sonnet-5-5", "high"), "noeffort": ("claude-sonnet-5-5", None),
                    "stopped": ("claude-sonnet-5-5", "low"), "pending": ("claude-sonnet-5-5", "medium"),
-                   "effortonly": (None, "low")}  # a session can report its effort without its model
+                   "effortonly": (None, "low"), "editedobs": ("claude-sonnet-5-5", "high"),
+                   "editedeffort": (None, "low")}  # a session can report its effort without its model
         real_observe, gate = lifecycle.observe, threading.Event()
         self.addCleanup(gate.set)
 
@@ -186,9 +200,12 @@ class ModelColumnTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                                              "effort": effort, "observed_at": "2026-11-12T12:00:00+00:00"}}
 
         before = {"reports": f"{opus} (xhigh)", "noeffort": f"{opus} (xhigh)", "stopped": opus, "bare": default,
-                  "pending": default, "effortonly": f"{opus} (xhigh)"}
+                  "pending": default, "effortonly": f"{opus} (xhigh)", "edited": opus, "editedobs": f"{opus} (xhigh)",
+                  "editedeffort": opus, "editedstopped": "Sonnet (team) (medium)",
+                  "editednewlaunch": "Sonnet (team) (medium)", "editedunknown": "-"}
         after = {**before, "reports": "Sonnet (team) (high)", "noeffort": "Sonnet (team) (xhigh)",
-                 "pending": "Sonnet (team) (medium)", "effortonly": f"{opus} (low)"}
+                 "pending": "Sonnet (team) (medium)", "effortonly": f"{opus} (low)",
+                 "editedobs": "Sonnet (team) (high)", "editedeffort": f"{opus} (low)"}
 
         def cells(d):
             headers, found = d.table()

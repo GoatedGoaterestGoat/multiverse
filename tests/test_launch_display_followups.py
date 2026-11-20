@@ -105,6 +105,17 @@ class LaunchDisplayFollowupTest(BaseTest):
                 self.assertLessEqual(failed.keys(), lifecycle.ROW_FIELDS)
             reader.assert_not_called()
 
+    def test_absent_panes_share_one_server_refresh_per_listing(self):
+        """An abandoned pane per agent must not trigger fresh server recovery and process queries for every row."""
+        for number in range(1, 11):
+            self.record(number, state='running')
+        with patch.object(Tmux, 'snapshot', return_value=({}, None)) as snapshot:
+            rows = lifecycle.listing(self.root, usage=False)
+            self.assertEqual([row['live'] for row in rows], ['dormant'] * 10)
+            self.assertEqual(snapshot.call_count, 2)
+            lifecycle.listing(self.root, usage=False)
+            self.assertEqual(snapshot.call_count, 4)  # no cache survives into the next listing
+
     def test_publication_stages_read_as_starting_never_damaged_or_absent(self):
         """Each stage of a launch's publication, a cached absence and an unknown server read as starting, alive or
         unknown with their reason, never damaged or absent; fragile because the snapshot and the record are

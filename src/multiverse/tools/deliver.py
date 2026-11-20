@@ -41,10 +41,19 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
     if dismiss:
         history = [message for message in history if mailbox.dismissible(message, message['tracking'])]
     held = focus.current(directory) if retry else None
-    if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
-                    and not message['tracking'].get('uncheckable_reported_at') and not message['tracking'].get('dismissed_at')
-                    and message['tracking']['submission_state'] in ('failed', 'launch-only') for message in history):
-        return _focused(name, held, [], _present_error or _present)
+    retryable = [message for message in history if message.get('schema') == 2
+                 and message.get('delivery') in ('steer', 'follow-up')
+                 and not message['tracking'].get('uncheckable_reported_at')
+                 and not message['tracking'].get('dismissed_at')
+                 and message['tracking']['submission_state'] in ('failed', 'launch-only')] if held else []
+    # A focus holds only agents' messages: a person's or a plugin's is retried, an agent's waits for the unfocus.
+    # An agent running the retry is an agent sending: everything waits.
+    from ..runtime.agent_identity import runs_in_agent
+    by_agent = runs_in_agent(root=root)
+    holds = (lambda message: True) if by_agent else (lambda message: focus.holds(message.get('from')))
+    if retryable and all(holds(message) for message in retryable):
+        return _focused(name, held, [], _present_error or _present, waiting=len(retryable), by_agent=by_agent)
+    waiting = 0
     results = []
     finalized = 0
     counts = {}
@@ -112,11 +121,12 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 receipt = final
             elif retry:
                 with store.lock(directory / '.send.lock'):
-                    # A focus takes the send lock to start, so one that started after the check above stops
-                    # the retry here, before anything more is submitted.
+                    # A focus takes the send lock to start, so one that started after the check above holds back
+                    # an agent's message here, before it is submitted.
                     held = focus.current(directory)
-                    if held:
-                        return _focused(name, held, results, _present_error or _present)
+                    if held and holds(message):
+                        waiting += 1
+                        continue
                     if state == 'launch-only' and not native.reopen_launch_only(root, directory, message['id']):
                         finalized += 1
                         continue
@@ -194,6 +204,9 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
         for present, line in details:
             present(line)
+    if waiting:
+        return {**_focused(name, held or focus.current(directory), results, _present_error or _present,
+                           waiting=waiting, by_agent=by_agent), **({'finalized': finalized} if finalized else {})}
     if _present and finalized:
         _present(f'{name}: {finalized} earlier {"message is" if finalized == 1 else "messages are"} final' +
                  ('; nothing to retry.' if not results else '.'))
@@ -222,12 +235,18 @@ def _check_state(receipt, *, accepted):
     return 'uncertain'
 
 
-def _focused(name, held, results, present):
-    """A retry refused, or stopped part way, because the recipient is focused."""
-    reason = f'{name} is focused {focus.ends(held)}, so no steer or follow-up reaches it; retry after it unfocuses.'
+def _focused(name, held, results, present, waiting=None, by_agent=False):
+    """A retry refused, or left part done, because the recipient is focused: `waiting` agents' messages were
+    left for after the unfocus while the others were retried."""
+    ends = f' {focus.ends(held)}' if held else ''
+    reason = f'{name} is focused{ends}, so no steer or follow-up from an agent reaches it; retry after it unfocuses.'
     if present:
-        present(f'{"The rest were not retried" if results else "Not retried"}: {reason}')
-    return {'messages': results, 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held}
+        plural = "message" if waiting == 1 else "messages"
+        left = ('Not retried' if not waiting else f'{waiting} {plural} not retried, since an agent is retrying'
+                if by_agent else f'{waiting} {plural} from agents not retried')
+        present(f'{left}: {reason}')
+    return {'messages': results, 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held,
+            **({'waiting': waiting} if waiting else {})}
 
 
 def cli_run(root=None, *, json=False, **options):

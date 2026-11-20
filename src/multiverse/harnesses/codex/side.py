@@ -98,7 +98,7 @@ class LaunchConnection:
                 supplied['runtimeWorkspaceRoots'] = normalized['runtimeWorkspaceRoots']
             if 'sandboxPolicy' in supplied:
                 supplied['sandboxPolicy'] = normalized['sandbox']
-            if self.version == (0, 169, 0) and 'environments' in supplied:
+            if self.version in ((0, 169, 0), (0, 170, 0)) and 'environments' in supplied:
                 try:
                     navigation_environments({'environments': supplied.pop('environments')}, required=True,
                                             policy=policy, cwd=root.settings['workspace'])
@@ -114,7 +114,7 @@ class LaunchConnection:
                 if (not isinstance(cwd, str) or not Path(cwd).is_absolute()
                         or Path(cwd).resolve() != Path(root.settings['workspace']).resolve()):
                     raise ValueError('Unverified native settings workspace')
-                navigation_environments(settings, required=self.version == (0, 169, 0),
+                navigation_environments(settings, required=self.version in ((0, 169, 0), (0, 170, 0)),
                                         policy=root.current_grants, cwd=root.settings['workspace'])
                 # ThreadSettings omits runtime roots. Equal observed permissions
                 # only preserve this snapshot; they never establish or revive it.
@@ -279,9 +279,9 @@ class LaunchConnection:
                         if thread.get('attachedToThreadId') is not None:
                             raise ValueError('An attached side conversation cannot preserve primary navigation grants')
                         policy = grant_policy(observed)
-                        if self.version == (0, 169, 0):
+                        if self.version in ((0, 169, 0), (0, 170, 0)):
                             navigation_root(thread)
-                        navigation_environments(thread, required=self.version == (0, 169, 0),
+                        navigation_environments(thread, required=self.version in ((0, 169, 0), (0, 170, 0)),
                                                 policy=policy, cwd=self.root.settings['workspace'])
                         if policy != self.root.grant_ceiling:
                             raise ValueError('Native primary permissions changed')
@@ -356,6 +356,17 @@ class LaunchConnection:
 
     def usage(self, value):
         return self.root.usage(value) if self.primary_frame else None
+
+    def delivery_observation(self, value):
+        from . import receipt_events
+        cli = self.root.settings.get('navigation_cli')
+        if (self.ended or self.root.bound is not True or self.owns_primary() is not True
+                or self.root.launch_refusal is not None
+                or not isinstance(cli, (list, tuple)) or any(type(part) is not int for part in cli)
+                or tuple(cli) not in receipt_events.VERSIONS or self.version != tuple(cli)):
+            return None
+        observed = receipt_events.observation(value, self.root.native_id)
+        return {'kind': 'user_message', **observed} if observed is not None else None
 
     def closed(self):
         self.ended = True

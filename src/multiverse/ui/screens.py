@@ -28,11 +28,13 @@ f              Focus the selected agent (5 min, 20 min, 1 hour, its next turn or
                and follow-up messages; inbox-only messages still arrive
 K / s          Kill (with confirmation); s is an alias
 r              Resume a stopped or dormant agent
+e              The selected agent's model and effort for its next resume; Tab field, Enter save, Esc cancel
 v              Full agent details or group configuration
 i              The selected agent's unread inbox messages; they stay unread for it
 a              Answer the prompt a waiting agent is stopped at: a permission, a question, a plan
 p              Show / hide the inspector (opens only with this key)
 P              Plugins of the selected group: on / off here, what each adds, and its settings
+C              Columns: turn the agent list's columns on or off and order them; Enter saves, Esc discards
 g              New subverse inside the selected group (inline, name only)
 x              Move the selected agent or subverse: choose a group, then Enter or x
 d              Delete the selected agent or subverse (to trash, with confirmation)

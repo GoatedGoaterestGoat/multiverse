@@ -8,7 +8,6 @@ from textual import work
 from ..display import clean
 from ..tools.inbox import readable
 from ..tools.unfocus import summary as unfocus_summary
-from ..universe import focus
 from ..tools.answer import outcome as answer_outcome
 from .plugin_service import error_text, in_daemon
 from .prompt_screen import AnswerScreen, prompt_line
@@ -76,17 +75,11 @@ class AgentCommands:
             self.message_form(dict(self.selected))
 
     def message_form(self, agent):
-        """The message form; while the agent is focused, its inbox-only form."""
-        held = agent.get("focus")
-        # The person's message to a focused agent goes to its inbox too.
-        title, delivery, description = (f'Message {agent["name"]}', "steer", "") if not held else (
-            f'Message {agent["name"]} (focused)', "inbox-only",
-            f'{agent["name"]} is focused {focus.ends(held)}, so this message goes to its inbox without '
-            f'interrupting it. To answer it directly, attach with Enter.')
-        # If it focuses while the form is open, mv2 saves the message to its inbox instead, and sent() says so.
-        self.push_screen(Form(title, [("text", "Message", "", True, True)], description=clean(description)),
+        """The message form: a steer, which a focus doesn't hold, since the person sends it."""
+        title = f'Message {agent["name"]}' + (" (focused)" if agent.get("focus") else "")
+        self.push_screen(Form(title, [("text", "Message", "", True, True)]),
                          lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
-                                                              agent["id"], values["text"], delivery, describe=sent)
+                                                              agent["id"], values["text"], "steer", describe=sent)
                          if values is not None else None)
 
     def action_toggle_focus(self):
@@ -106,8 +99,8 @@ class AgentCommands:
                 self.submit_operation("Focus", self.backend.focus, root, agent["id"], arguments.get("duration"),
                                       arguments.get("turn", False), describe=focused)
         self.push_screen(ChoiceScreen(f"Focus {name}", [entry[:2] for entry in lengths], description=clean(
-            f"While {name} is focused, steer and follow-up messages to it are refused and their senders are "
-            f"told to send inbox-only, so nothing buries what it needs from you. Esc cancels.")), chosen)
+            f"While {name} is focused, steer and follow-up messages to it from agents wait in its inbox, so "
+            f"nothing buries what it needs from you. Esc cancels.")), chosen)
 
     def action_inbox(self):
         if self.ready() and self.selected:

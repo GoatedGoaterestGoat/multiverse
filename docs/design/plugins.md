@@ -626,7 +626,7 @@ plugin (1.13).
 
 ### Versioning
 
-- `api.VERSION` is `(1, 19)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 20)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -655,7 +655,11 @@ plugin (1.13).
   measured `context`: changes to it are dropped, and the rest of what an
   adjuster returns applies as before. A plugin shows an estimate of its own in
   a column of its own (`replaces="context"`), never in place of what mv2
-  measured.
+  measured. 1.20 makes one more, also the user's: a plugin's `agent.send`
+  steer or follow-up reaches a focused agent, as the person's does, where
+  before it was saved inbox-only with `state` `"held"`. A focus holds only
+  agents' messages. A plugin that wants its message to wait sends it
+  inbox-only.
 - mv2 supports the current major and the one before it for at least one
   release. A plugin on the old major loads with a deprecation note in
   `mv2 plugins`.
@@ -664,6 +668,61 @@ plugin (1.13).
 - Results are frozen dataclasses with the fields a plugin needs, plus `.record`,
   the tool's full record, for anything the dataclass leaves out. `.record` is
   not covered by the version, and the docs say so.
+
+### Python packages (1.20)
+
+A plugin can name packages mv2 doesn't have in a requirements file
+(`"python": {"requirements": "..."}`), each pinned with `==` and hashed. The
+user decided both (2026-11-19):
+
+- **A folder of the plugin's own**, `~/.multiverse/plugin-packages/KEY/`, not
+  mv2's environment. `mv2 update` runs `uv sync --locked`, which removes every
+  package the lock doesn't list, and a package installed beside mv2's could
+  replace one mv2 uses. The folder goes on the import path after mv2's own, so
+  mv2's win. A package mv2 has at the same version is left out, and at another
+  version refused. Plugins share one process, so a second plugin needing
+  another version of a package a loaded plugin has is refused, naming the
+  first.
+- **Exact versions and hashes, required**, so what installs is exactly what the
+  person approved, and an upload replaced on the index is refused.
+
+Installing takes only wheels, so it runs no package's code. Importing does run
+it, with the plugin's own trust, so mv2 installs only on the person's yes: at
+`mv2 plugins enable`, or `mv2 plugins packages`, which list each package first.
+An agent can't approve it, and loading never installs. KEY digests the
+plugin's name, its requirements file and the Python, so a changed list needs
+the person's yes again. An install goes into a staging folder renamed into
+place once complete, so a failure leaves nothing that later reads as
+installed.
+
+### Secrets (1.20)
+
+A plugin declares API keys and tokens in its manifest (`secrets`), never in its
+settings schema, so the settings code never shows, saves or copies one. The
+user decided (2026-11-19):
+
+- **Where:** the OS keychain (macOS `security`, Linux `secret-tool`), and a
+  0600 file in a 0700 folder under `~/.multiverse` where neither is there. A
+  value reaches a keychain tool on its stdin, never its argv, where `ps` would
+  show it, and is stored as the hex of its UTF-8 so no quoting can change it.
+  Every name on a `security -i` line is checked first (the universe id is a
+  UUID; the plugin's name and the key are a manifest's), so none can end a
+  quote or start another command. A tool's own output is never repeated, only
+  its exit status, since a tool may echo what it was given. A clear the
+  keychain refuses stays recorded as set, and says so.
+- **Scope:** per universe, keyed by the universe's id, the plugin and the key.
+  A subverse with no value of its own reads its nearest parent's, live.
+  Nothing is copied, so rotating the parent's reaches every subverse that has
+  none of its own.
+- **Disable and remove:** kept on disable, cleared only by hand. `mv2 doctor`
+  names a secret whose plugin no longer declares it.
+
+`index.json` beside the file store records which are set and where, never a
+value, so listing and the Plugins screen never open the keychain. Only the
+plugin that declared a secret reads it, through `universe.secret(key)`, while
+it is on and trusted in that universe. An agent can neither set nor clear one,
+and the command never takes a value as an argument. A missing required secret
+makes the plugin `unusable` in that universe, naming the command.
 
 ### Effect classes and access grants (1.13)
 
@@ -1354,7 +1413,21 @@ is about consent and blast radius:
      staging directories a process left behind. It is
      hashed while copied and left out if anything changed meanwhile, and what
      the hash leaves out is not copied either, so a `.pyc` planted beside a
-     reviewed `.py` never runs: Python compiles the copy's own. The plugin is imported from that copy and its Claude
+     reviewed `.py` never runs: Python compiles the copy's own. The copy keeps
+     the list of files it was made with (`.mv2-files`), and each use checks
+     those files still hash to the trusted value (by their stats, rehashed only
+     when they change): an edited copy is tampering, so the plugin is listed
+     as changed and never runs until the copy is removed and made again. A file
+     added since counts as an edit too, since an added module could run,
+     except what Claude Code writes into a plugin directory at an interactive
+     start: `tsconfig.json` beside `.claude-plugin/`, and anything under
+     `.claude-plugin/types/` (checked on 2.1.327-2.1.328). A copy with no list
+     is checked over all its files and given its list if they match. Bytecode
+     for a trusted copy goes to `~/.multiverse/pycache`, and the copy's own
+     `__pycache__` is removed, so none placed there is read; a `.pyc` anywhere
+     else in the copy, which Python would import as it is, counts as added. A process that already loaded the plugin keeps what it
+     loaded. This guards against an edit by mistake: whatever can write the
+     cache can also write the trust list itself. The plugin is imported from that copy and its Claude
      directory loaded from it, so what Claude writes there (`tsconfig.json`,
      types) never touches the trusted plugin. `mv2 plugins check --load` uses
      the copy too, and a process that imports from a universe's plugin

@@ -61,7 +61,9 @@ mv2 plugins disable notifier
 mv2 -u .multiverse/subverses/ops plugins enable remote   # a subverse
 ```
 
-`enable` lists what the plugin may do, installs its default settings when the universe has none, and says when the plugin needs the plugin host. In the dashboard, press `P`, select the plugin and press `Space`. If the plugin can work with less access than it asks for, the dashboard asks which access to grant it in that universe; `Esc` leaves it off.
+A plugin can need Python packages that mv2 doesn't have. Enabling it then lists each package with its exact version and asks before installing them. Installing runs none of their code, but the plugin imports them, so their code runs inside mv2 with the plugin's trust: say yes only if you trust the plugin and its packages. They go in a folder of the plugin's own under `~/.multiverse/plugin-packages/`, never into mv2's own environment, and `mv2 update` leaves them alone. `mv2 plugins packages NAME` shows them and installs them when you say yes; `--install-packages` says yes without the question, for scripts. When the plugin's list changes, it asks again. An agent can't approve an install.
+
+`enable` lists what the plugin may do, installs its default settings when the universe has none, and says when the plugin needs the plugin host. In the dashboard, press `P`, select the plugin and press `Space`. If the plugin can work with less access than it asks for, the dashboard asks which access to grant it in that universe; `Esc` leaves it off. If its Python packages aren't installed, it first shows the same list as `mv2 plugins packages NAME` and asks: Install installs exactly the list it showed and then turns the plugin on; if the plugin's list changed meanwhile, nothing installs and the screen says so. Cancel or `Esc` leaves it off. On a plugin that's on but can't load without them, `Enter` asks the same. While they install, `Esc` waits, so the install isn't left running.
 
 The switch lives in the universe's `plugins.json`, which you can also edit by hand:
 
@@ -98,6 +100,26 @@ mv2 plugins grant compaction observe           # changes it later
 
 A call above a plugin's level fails with a reason, such as `planner has observe access here; send needs act`, and a launch addition that needs more is left out, with the reason on the agent's `mv2 inspect` `Note:` line. Each says what holds the plugin back and how to change it: its grant (`mv2 plugins grant`), the universe's `access_ceiling`, or `MV2_EFFECTS` for that process. A plugin that is on but held below the least level it can work with is reported by `mv2 plugins` and `mv2 doctor`.
 
+## Set a plugin's secrets
+
+A plugin that needs an API key or a token declares it as a secret, which mv2 keeps out of its settings:
+
+```sh
+mv2 plugins secrets notifier        # what it declares, and whether each is set
+mv2 plugins secret notifier api_key   # asks for the value; typing is hidden
+some-command | mv2 plugins secret notifier api_key   # or from stdin
+mv2 plugins secret notifier api_key --clear
+```
+
+- **Where they go.** The system keychain: macOS Keychain, or the Secret Service on Linux. Where there is none, a file only you can read, `~/.multiverse/plugin-secrets/secrets.json`, and the command says so. `MV2_SECRET_STORE=file` picks the file anyway, for example in tests or on a machine whose keychain you'd rather not use. Never the universe's folder, a settings file, a log, `mv2 doctor`, a transcript or an agent's environment, and never shown again: only "set" or "not set".
+- **Per universe.** Each universe has its own. A subverse without one of its own uses its nearest parent's, so changing the parent's changes theirs. Set one in the subverse to override it there; clearing it there goes back to the parent's.
+- **Who.** Only you: an agent can't set or clear one, and the value is never taken as an argument, which your shell would keep in its history. On a terminal that can't hide what you type, the command reads nothing and asks you to pipe the value in. Only the plugin that declared a secret reads it, while it is on and trusted in that universe.
+- **Missing.** A plugin missing a required secret is listed with the command that sets it, and acts as off in that universe until it's set.
+- **When the keychain refuses.** Setting or clearing one fails with the keychain tool's exit status, never its output. A secret the keychain refused to remove stays set, and `--clear` says so.
+- **Disabling** keeps them, so turning the plugin on again needs nothing; a disabled plugin can't read them. `--clear` removes one, and `mv2 doctor` names a secret whose plugin no longer declares it, with the command that clears it.
+
+In the dashboard, press `P`, select the plugin and press `Enter`; for a plugin with settings too, choose Secrets. Each secret says whether it is set here, comes from a parent universe, or is missing, and never shows a value. `Enter` on one asks for its value in the terminal, as `mv2 plugins secret` does: the dashboard steps aside, typing is hidden, and an empty line or `Ctrl+C` keeps it as it is. A terminal that can't hide typing is asked nothing; the screen names the command to run in one that can. The value never passes through the dashboard, so its logs can't hold it. `Ctrl+D` clears the selected one here, after asking. The Plugins screen follows a secret set or cleared in another terminal, so a plugin missing a required one shows it within a second. A secret that comes from a parent universe is cleared there; a value set here overrides it here.
+
 ## Change a plugin's settings
 
 ```sh
@@ -128,7 +150,7 @@ A repository can carry plugins in its `.multiverse/plugins/`, and cloning the re
 - `trust NAME` trusts the universe's own copy, even when a bundled, checkout or personal plugin has the same name. It says which copy it trusted and what that copy now overrides. Use this to run your own fork of a plugin such as compaction.
 - Python bytecode and test-tool caches are left out of the hash and never run, so running a plugin's own tests keeps it trusted.
 - Any change to the files makes the plugin `changed`, and you must trust it again.
-- mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`.
+- mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`. If that copy's files are edited, the plugin is listed as changed and doesn't run; the problem names the copy to remove, and mv2 then makes it again from the trusted plugin.
 - Only universe plugins need trust. The other sources hold code that you or mv2 installed.
 
 Trust and permissions are not a sandbox. A plugin runs with your permissions. The permissions that `enable` lists are what the plugin asked for. Anything running as you, including an agent, can run `mv2 plugins trust`.

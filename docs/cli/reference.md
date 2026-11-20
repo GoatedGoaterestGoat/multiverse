@@ -31,6 +31,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`resume`](#resume) | Resume an agent, or explicitly recover its missing native conversation. |
 | [`stop`](#stop) | Alias for kill: end native work, then remove the owned tmux wrapper. |
 | [`kill`](#kill) | End native work and its process, then remove the agent's tmux wrapper. |
+| [`set-model`](#set-model) | Save an agent's model and effort for its next resume, without restarting it. |
 | [`move`](#move) | Move a stopped agent, or a subverse whose agents are all stopped, to another universe. |
 | [`remove`](#remove) | Move a stopped agent, or a subverse whose agents are all stopped, to the trash. |
 | [`trash`](#trash) | List removed agents and subverses and replaced refresh files, or delete them permanently with --empty. |
@@ -40,7 +41,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
 | [`held`](#held) | Read the steer and follow-up messages held during your last focus, and mark only those read. |
 | [`listen`](#listen) | Wait in a background shell for unread inbox-only messages, without reading them. |
-| [`focus`](#focus) | Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox. |
+| [`focus`](#focus) | Focus an agent while it needs the user: steer and follow-up messages from agents wait in the agent's inbox. |
 | [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
 | [`status`](#status) | Alias for [`report`](#report). |
@@ -84,7 +85,7 @@ mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] [--json] name
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `name` |  |  |  |
-| `--template` | `TEMPLATE` |  | `base` |
+| `--template` | `TEMPLATE` | Use a clean template instead of copying the parent's definitions |  |
 | `--workspace` | `WORKSPACE` |  |  |
 | `--json` |  | Print the subverse's record as JSON |  |
 
@@ -195,6 +196,21 @@ mv2 kill [--attachment-only] [--json] agent
 | `agent` |  |  |  |
 | `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
 | `--json` |  | Print the full record as JSON |  |
+
+## set-model
+
+Save an agent's model and effort for its next resume, without restarting it.
+
+```sh
+mv2 set-model [--model MODEL] [--effort EFFORT] [--json] agent
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  | Agent name or ID |  |
+| `--model` | `MODEL` | Model ID or alias; default clears the recorded model |  |
+| `--effort` | `EFFORT` | Effort level; default clears the recorded effort |  |
+| `--json` |  | Print the saved choice and notices as JSON |  |
 
 ## move
 
@@ -331,7 +347,7 @@ mv2 listen [--timeout TIMEOUT]
 
 ## focus
 
-Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox.
+Focus an agent while it needs the user: steer and follow-up messages from agents wait in the agent's inbox.
 
 ```sh
 mv2 focus [--json] [--for DURATION | --turn] [agent]
@@ -570,14 +586,14 @@ mv2 update [--check] [--json] [--plugin-fetch-timeout SECONDS]
 List, turn on or off, configure, trust and check plugins.
 
 ```sh
-mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--json] [ACTION] [name] [LEVEL]
+mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--install-packages] [--clear] [--json] [ACTION] [name] [LEVEL]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate or new | `list` |
+| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate, new, packages, secrets or secret | `list` |
 | `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name) |  |
-| `LEVEL` |  | grant: observe, spend or act |  |
+| `LEVEL` |  | grant: observe, spend or act; secret: the KEY |  |
 | `--grant` | `observe`, `spend`, `act` | enable: the access level to grant it here (otherwise a terminal asks; without one, its minimum) |  |
 | `--set` | `KEY=VALUE` | settings: change one setting (VALUE is JSON, or else text); repeatable |  |
 | `--unset` | `KEY` | settings: remove one setting, back to its default; repeatable |  |
@@ -586,4 +602,6 @@ mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--pru
 | `--apply` |  | migrate: make the changes (otherwise only show them) |  |
 | `--recursive` |  | migrate: this universe and every subverse |  |
 | `--dir` | `DIRECTORY` | new: where to create it (default: the current directory) |  |
+| `--install-packages` |  | enable, packages: install the plugin's Python packages without asking (the person only) |  |
+| `--clear` |  | secret: remove this universe's value (a parent's, if set, is used again) |  |
 | `--json` |  | Print the full result as JSON |  |

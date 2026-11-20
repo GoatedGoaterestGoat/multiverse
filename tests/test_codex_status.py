@@ -228,35 +228,50 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
 
 class RunnerLifetimeTest(unittest.TestCase):
     def test_bridge_is_starting_until_relay_accepts_binding(self):
-        """A bridge launch stays starting until the relay binds the thread, which is what makes sends wait; a break
-        lets early input land in whatever thread the TUI opened."""
+        """Optional receipt observation must never break binding readiness or a launch without trusted identity."""
         from multiverse.runtime import runner
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            agent_id, launch_id, native_id = str(uuid4()), str(uuid4()), str(uuid4())
-            directory = root / 'state/agents' / agent_id
-            launch = directory / 'launches' / launch_id
-            launch.mkdir(parents=True)
-            write(directory / 'properties.json', {'id': agent_id, 'name': 'worker', 'harness': 'codex', 'native_session_id': native_id})
-            write(directory / 'runtime.json', {'launch_id': launch_id, 'state': 'starting'})
-            write(launch / 'request.json', {'argv': ['fake-codex'],
-                  'attachment': {'readiness': 'binding'},
-                  'rpc_proxy': {'socket_path': '/tmp/mv2-native-' + launch_id + '/rpc.sock', 'settings': {}, 'binds_session': True},
-                  'env': {'MV2_CLI': str(root / 'bin/mv2'), 'MV2_UNIVERSE': str(root)}})
-            (launch / 'ready').touch()
-            process = Mock(pid=123)
-            process.poll.return_value = 0
-            def waited(timeout=None):
-                self.assertEqual(read(directory / 'runtime.json')['state'], 'starting')
-                proxy_factory.call_args.args[2](native_id)
-                self.assertEqual(read(directory / 'runtime.json')['state'], 'running')
-                return 0
-            process.wait.side_effect = waited
-            with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
-                 patch.object(runner, 'process_started', return_value=None), \
-                 patch.object(runner.subprocess, 'Popen', return_value=process), \
-                 patch('multiverse.harnesses.load'), patch('multiverse.runtime.rpc.LaunchProxy') as proxy_factory:
-                self.assertEqual(runner.main(), 0)
+        for family, identity in (('codex', 'missing'), ('codex', ''), ('codex', False),
+                                 ('claude', 'present'), ('codex', 'present')):
+            with self.subTest(family=family, identity=identity), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                agent_id, launch_id, native_id = str(uuid4()), str(uuid4()), str(uuid4())
+                directory = root / 'state/agents' / agent_id
+                launch = directory / 'launches' / launch_id
+                launch.mkdir(parents=True)
+                write(directory / 'properties.json', {'id': agent_id, 'name': 'worker', 'harness': 'codex', 'native_session_id': native_id})
+                write(directory / 'runtime.json', {'launch_id': launch_id, 'state': 'starting'})
+                environment = {'MV2_CLI': str(root / 'bin/mv2'), 'MV2_UNIVERSE': str(root)}
+                if identity != 'missing':
+                    environment['MV2_AGENT_ID'] = agent_id if identity == 'present' else identity
+                write(launch / 'request.json', {'argv': ['fake-codex'],
+                      'attachment': {'readiness': 'binding'},
+                      'rpc_proxy': {'socket_path': '/tmp/mv2-native-' + launch_id + '/rpc.sock', 'settings': {}, 'binds_session': True},
+                      'env': environment})
+                (launch / 'ready').touch()
+                process = Mock(pid=123)
+                process.poll.return_value = 0
+                def waited(timeout=None):
+                    self.assertEqual(read(directory / 'runtime.json')['state'], 'starting')
+                    proxy_factory.call_args.args[2](native_id)
+                    self.assertEqual(read(directory / 'runtime.json')['state'], 'running')
+                    return 0
+                process.wait.side_effect = waited
+                with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                     patch.object(runner, 'process_started', return_value=None), \
+                     patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch('multiverse.harnesses.load') as loaded, \
+                     patch('multiverse.runtime.rpc.LaunchProxy') as proxy_factory:
+                    loaded.return_value.family = family
+                    self.assertEqual(runner.main(), 0)
+                callbacks = proxy_factory.call_args.kwargs
+                if family == 'codex' and identity == 'present':
+                    observer = callbacks['record_delivery_observation']
+                    self.assertEqual(observer.agent_id, agent_id)
+                    self.assertEqual(observer.harness, 'codex')
+                    self.assertTrue(callable(callbacks['record_delivery_error']))
+                else:
+                    self.assertIsNone(callbacks['record_delivery_observation'])
+                    self.assertIsNone(callbacks['record_delivery_error'])
 
 
 if __name__ == '__main__':

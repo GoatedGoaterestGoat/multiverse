@@ -60,6 +60,8 @@ To see the column, add `"shout"` to `columns` in `.multiverse/views/default.json
 | `events` | Event types it subscribes to: `"agent.status"`, `"message.*"`, `"*"`. Needs `events`. |
 | `harnesses` | Harness extensions that need no code; see [launch additions](#launch-additions). |
 | `settings` | `{"version", "schema", "defaults", "legacy"}`; see [settings](#settings). |
+| `secrets` | `{"KEY": {"label": "API key", "help": "...", "required": true}}` (1.20): API keys and tokens it needs, kept apart from its settings; see [secrets](#secrets). |
+| `python` | `{"requirements": "requirements.txt"}` (1.20): a file in the plugin naming the Python packages it needs, each pinned and hashed; see [Python packages](#python-packages). |
 
 `register(mv)` runs once in each process that loads the plugin: a command, the dashboard, a host worker or a helper (`mv.process` is `cli`, `dashboard`, `host` or `helper`). It only declares things. mv2 calls what it registered later, and guards each call.
 
@@ -149,13 +151,13 @@ A plugin adds; it never alters mv2. It adds commands, columns, status items, cap
 | `agent.id`, `.name`, `.harness`, `.live`, `.status`, `.phase`, `.summary`, `.task`, `.universe`, `.directory`, `.record` | The agent as it was read; `agent.reload()` reads it again | `agents.read` to reload |
 | `agent.terminal(lines=30)`, `agent.usage()`, `agent.capabilities()`, `universe.doctor()` | The terminal's last lines; usage, capability and doctor results; see [observed model](#observed-model) | `agents.read` |
 | `agent.resume(model=None, effort=None, wait=False)`, `agent.kill()` | `model` and `effort` (1.16) change the agent's own from that launch on | `agents.control` |
-| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`. A steer or follow-up to a focused agent is saved as inbox-only: `ok` is true, `delivery` is `"inbox-only"` and `state` is `"held"` | `messages.send` |
+| `agent.send(text, delivery="steer")` | `SendResult(ok, delivery, state, reason, record)`; the agent reads `Message from plugin NAME`, or `Message from plugin NAME, run by agent B` when agent B ran your command. A steer or follow-up reaches a focused agent too, as the person's does (1.20): a focus holds only agents' messages. Sent from inside an agent's session, such as by a command of yours an agent runs, it counts as that agent's and is held. Before 1.20 it was saved as inbox-only, with `state` `"held"` | `messages.send` |
 | `agent.ask(question)` | The answer to a side question that never enters the conversation | `messages.ask` |
 | `agent.slash(command, args="", timeout=600, wait=True)`, `agent.slash_result(id)` | A `CommandResult`: the harness's own command run in the agent (1.16); see [harness commands](#harness-commands) | `agents.control`; `agents.read` for the result |
 | `agent.slash_commands()` | A `CommandList` of what the agent's harness offers, and why mv2 refuses any (1.16) | `agents.read` |
 | `agent.waiting_prompts()`, `agent.prompt_result(id)` | A `PromptList` of the prompts the agent waits on now; an earlier answer's `PromptResult` (1.17); see [waiting prompts](#waiting-prompts) | `agents.read` |
 | `agent.answer_prompt(id, choice=None, message=None, answers=None, notes=None, timeout=30, wait=True)` | A `PromptResult`: the answer, given through the harness's own answer path (1.17) | `prompts.answer` |
-| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`; `inbox()` leaves them unread | `messages.read` |
+| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`, and neither marks any read. `inbox()` gives the unread inbox-only ones; `history()` the last `last` messages, read or not, each also with `unread` (1.20): whether the agent's inbox would still show it | `messages.read` |
 | `agent.transcript()`, `transcript_rows(...)`, `iter_transcript_rows(...)`, `transcript_turns(...)`, `transcript_turn(id, ...)` | The agent's conversation, by cursor (1.13); see [transcripts](#transcripts) | `transcripts.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |
 
@@ -288,7 +290,7 @@ agent.resume(model="sonnet", effort="high")     # an agent's own model and effor
 - **The command** is named without its slash, and `args` is the rest of the line as a person would type it. It joins the harness's own queue, after anything queued before it, and runs once the agent is idle, never mid-turn.
 - **`CommandResult`:** `state` is `ran`, `queued`, `refused`, `failed` or `lost` (the agent stopped before it ran); treat one you don't know like `failed`. `output` is what it printed (at most 64 KiB), `prompted` says it became a prompt (its answer is the agent's next turn), `changed` names what mv2 recorded because of it (`session` after `/clear`, `model`, `effort`), `saved_default` says it was also saved as the person's own default, and `reason` says why it didn't run.
 - **Waiting:** `slash()` waits up to `timeout` seconds. When the wait ends first, or with `wait=False`, the command stays queued and may still run: read it later with `slash_result(id)`, and never run it again.
-- **Refused before anything reaches the harness:** commands mv2 manages (`exit`, `quit`, `resume`, `login`, `logout`, Claude's `restart`, `/plugin` changes to mv2's own plugin, `/multiverse`), a bare command that only opens a screen (`/model` alone), a name the harness doesn't list, and any command to a focused agent: a plugin counts as not the person there, as for `send`. `slash_commands()` says which are refused and why.
+- **Refused before anything reaches the harness:** commands mv2 manages (`exit`, `quit`, `resume`, `login`, `logout`, Claude's `restart`, `/plugin` changes to mv2's own plugin, `/multiverse`), a bare command that only opens a screen (`/model` alone), a name the harness doesn't list, and any command to a focused agent: a plugin counts as not the person there. `slash_commands()` says which are refused and why.
 - **Settings:** a command with `changes_settings` (Claude's `/model`, `/effort`, ...) also saves the person's own Claude defaults, so it runs only when the person runs it. A plugin's is refused; change an agent's own model or effort with `agent.resume(model=, effort=)` instead. `effort="default"` clears the agent's saved effort. A model change without an effort drops an incompatible saved level and reports it.
 - **Where:** Claude agents launched with mv2's bridge. Codex and Pi say unavailable. Call `slash()` from a command, a helper action or a service thread; it's `act`, so column, panel and settings-check code can't call it.
 
@@ -337,6 +339,38 @@ A checked call that the manifest didn't ask for raises `api.Error`. Declared-onl
 mv2 loads a plugin when the major version of its `api` is mv2's (`api.VERSION`) and its minor version is no higher. Otherwise the plugin is `incompatible`, and the reason says whether to update mv2 or the plugin. `mv2 plugins new` writes this mv2's version.
 
 A minor version only adds things. Changing or removing anything needs a new major version. That rule covers the public names of `multiverse.plugins.api`, `multiverse.plugins.ui` and `multiverse.plugins.testing`, what `multiverse.plugins.dashboard_testing` documents, the manifest, `plugins.json`, settings files, status-item files, the event record and `python -m multiverse.plugins run`. It doesn't cover names starting with `_`, a result's `record`, or anything else in `multiverse`.
+
+## Python packages
+
+A plugin that needs packages mv2 doesn't have names them in a requirements file, with `"python": {"requirements": "requirements.txt"}` in `plugin.json` (1.20). Write the file with `uv pip compile --generate-hashes requirements.in -o requirements.txt`, so it lists every package, those it needs included, each:
+
+- pinned to one version with `==`, and
+- followed by the `--hash=sha256:` of every file it may install.
+
+A package without a version or a hash, a range such as `>=`, a wildcard such as `==1.*`, a second clause, extras such as `pkg[extra]`, or an installer option such as `-r` or `--index-url` makes the manifest unusable, and `mv2 plugins check` says which line. An environment marker such as `; python_version < "3.12"` is kept, and the installer decides it. A marker may hold only marker variables, comparisons, quoted values, `and`, `or`, `not in` and parentheses, so no installer option can hide in one.
+
+- **Only with the person's yes.** Installing a package runs none of its code, since mv2 takes only wheels, but the plugin imports it, so its code runs inside mv2 with the plugin's own trust. `mv2 plugins enable NAME` lists the packages and asks before it installs them, and `mv2 plugins packages NAME` shows them and asks the same. The yes is for the list shown: if the file changes before the install, nothing installs. `--install-packages` says yes without asking. An agent can't say yes, and listing, loading or refreshing never installs anything.
+- **Where they go.** Into a folder of the plugin's own under `~/.multiverse/plugin-packages/`, never into mv2's environment, which `mv2 update` would empty. The folder's name comes from the plugin's name, its requirements file and the Python that runs mv2. So changing the list, or running mv2 on another Python, needs the person's yes again.
+- **What it imports.** When the plugin loads, its folder goes on the import path after mv2's own packages, so mv2's always win. A package mv2 already has at the same version is left out of the folder and mv2's copy is used; a list that is all such packages needs no yes, since nothing installs. At another version, the install is refused. Each load checks this again, against mv2's packages as they are then, the packages left out included, and so do `mv2 plugins`, `info`, the Plugins screen and `mv2 doctor`, without loading the plugin. When a package left out as mv2's has changed in mv2, `mv2 plugins packages NAME` installs the list again. Plugins share one Python process: when two plugins that are on hold one package at two versions, `mv2 plugins`, `info` and `mv2 doctor` name it for both, and whichever loads second fails and names the first. A plugin whose list moved to a new version of a package this process already loaded for it fails to load until that process restarts.
+- **When they're missing.** A plugin that is on but whose packages aren't installed fails to load, saying `run mv2 plugins packages NAME to review and install them`. `mv2 plugins` and `mv2 doctor` show it.
+- **When an install fails.** For example, the network, a hash that doesn't match or a package without a wheel. Nothing is left behind, and the installer's last lines say why. `enable` leaves a plugin that was off off, and one already on stays on but can't load until they install, which it says. mv2 uses `uv` when it is on `PATH`, otherwise this Python's `pip`, with their own index settings.
+- **Disabling.** Disabling keeps the folder, ready for when the plugin is turned on again. A folder no process has used for 14 days is removed at the next install.
+
+## Secrets
+
+API keys and tokens never belong in a plugin's settings, which are plain JSON in the universe. Declare each in `plugin.json` instead (1.20):
+
+```json
+"secrets": {"api_key": {"label": "API key", "help": "From your provider's console.", "required": true}}
+```
+
+- **The key** is lowercase letters, digits and `_`, starting with a letter. **The label** is what the person sees, at most 60 characters, and **help** one line. **required** is `false` unless you say so.
+- **Reading one.** `mv.universe(root).secret("api_key")` returns the value set for that universe, or its nearest parent's. Only your plugin reads its own, only for keys it declares, and only while it is on and trusted there: another plugin, or yours where it is off, gets `api.Error`. Not set: `api.SecretMissing`, whose message says how to set it.
+- **A required one missing** makes your plugin unusable in that universe, like settings that can't be used, with `NAME needs its LABEL: set it with mv2 plugins secret NAME KEY, or with Enter on the Plugins screen`. It still loads, so its screens work.
+- **Where the person sets them.** `mv2 plugins secret NAME KEY` from a hidden prompt or stdin, or the Plugins screen. Never as an argument, and never by an agent. mv2 keeps them in the system keychain, or a file only the user can read where there's no keychain. They are never in the universe, a settings file, a log or an agent's environment.
+- **Your part.** Never log a secret, put it in an error, a record or a settings file, or hand it to an agent. Read it when you need it, rather than keeping it in a module variable.
+- **Changes from elsewhere.** A secret set or cleared by any process changes what every listing says, here and in subverses that read it. `plugins.secrets_stamp()` changes with it, for a screen to watch; it never holds a value.
+- **In tests,** `PluginTestCase` keeps secrets in a file in the test's own home, never the keychain: set one with `tool.run(root, plugin_action="secret", name=NAME, level=KEY, secret_value=VALUE)`.
 
 ## Settings
 

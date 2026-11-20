@@ -316,8 +316,10 @@ remain internal. Local adapters rely on termination of their native process and
 report that nothing was running for stopped or dormant sessions.
 
 Core then sends SIGTERM only to the recorded native child after checking its
-parent against the owned tmux runner. If it has not exited after two seconds,
+parent against the owned tmux runner. If it has not exited after ten seconds,
 core rechecks ownership and sends SIGKILL, with another five-second exit bound.
+The wait polls, so a process that exits sooner is never kept waiting; the ten
+seconds let a busy Claude finish writing its transcript instead of being cut off.
 No text or control keys are injected into the pane. Core releases the launch
 lock while waiting, so the runner's binding and shutdown callbacks can finish.
 Every later mutation checks the original launch again; a concurrent replacement
@@ -821,6 +823,19 @@ seven recorded transitions, including reattachment. Outside-workspace bind, repo
 and inbox callbacks succeed after new; untouched fresh-thread stop and private
 process cleanup retain their existing checks.
 
+
+### Codex 0.170.0 compatibility audit
+
+This compares official tags rust-v0.169.0 (d32063f96c2dff1dc96af839b3952abb6acfeda4) and rust-v0.170.0 (29eb79e9866b3262a777fdf8195c1b9e63684c91). All five recorded CLI help outputs match. Both installed experimental exports contain 479 JSON schemas; 27 change. The source export keeps 329 files, with changes mainly in nested moderation display types. The selected plugin configuration schemas and allowlist are unchanged. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.170.0).
+
+The model catalogs regenerate from the release metadata with the same public shape and 14 entries. GPT-6.2-Sol and GPT-6.2-Astra are added, GPT-6.2-Sol is the default, and GPT-6.1-Sol's reported window increases to 500,000 tokens. Private catalogs retain the same explicit tool and discovery restrictions. The newly enabled legacy incremental-tool mode is provider-specific; the private OpenAI recipe still advertises no tools, including a fresh request for the new default model and replayed histories.
+
+Permission internals add portable legacy-template conversions, but start/resume and settings responses retain the cwd-aware effective Ready projection. Loaded-resume checks use a diagnostic sandbox label and add an active-turn safeguard; mv2 still validates actual full replies rather than treating that label as authority. The strict singleton built-in local environment, ordinary-root provenance, complete grants and roots, sticky invalidation and launch ceiling remain required for both releases. New/clear pin the known local selection; resume retains its existing request semantics. This does not extend navigation to remote environments, inherited feature threads or opt-in multiple side tabs.
+
+Agent-message moderation display becomes a versioned show/hide/block enum. The question codec does not consume that display field, and native asynchronous question emission still has no moderation. Callback/async IDs, local skip behavior and queue client IDs keep their existing contracts. Stored response items add allocation metadata while their wire IDs remain strings; generated context-window IDs can carry allocation data. Captured private rollout rows and bodies remain equal in plain and compressed form, with no plain file created by reading the compressed copy.
+
+The authorized fixtures used a byte-verified private release package, disposable homes and daemons, and localhost scripted providers. They covered startup/resume, navigation and full local grant envelopes, queue continuation, permissions, side routing, shared identity, recovery, private ask/run and tool-free requests. Exact newer and retained release gates remain explicit; navigation, prompt and queue operations require matched CLI/daemon versions and the verified greeting. Unchecked and mixed pairs stay refused. The refusal fixture is the upstream renderer snapshot, not a tmux capture.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -904,8 +919,10 @@ and so is an inherited `CLAUDE_CODE_CHILD_SESSION` (Claude Code sets it for its 
 tool subprocesses, and a Claude that inherits it saves no transcript), and a
 parent Claude's `CLAUDE_CODE_SSE_PORT` (its IDE connection) and
 `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` (its inbox and
-its secret), which an agent spawned from inside Claude inherits; a harness that
-sets one in `env` keeps its value.
+its secret), which an agent spawned from inside Claude inherits, and since Claude
+Code 2.1.328 `CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS` and `CLAUDE_CODE_CHILD_NOTES_DIR`
+(the sessions that launched it, which a Claude records itself as derived from,
+and their notes folder); a harness that sets one in `env` keeps its value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
@@ -1687,8 +1704,20 @@ eight most recently read transcripts. History versions come from one counter
 that only grows, so an index built again after its eviction never reuses a
 version a reader holds.
 
+A new process would parse every transcript from its start, about a second per
+large agent, so each agent's usage indexes are also kept in its folder
+(`claude-usage.json`): per transcript, the inode, how far it was read and a
+SHA-256 of those bytes, the latest time and turn, and each response's counted
+usage, never transcript text. A new process takes one over only after hashing
+the file's bytes up to that point and finding the same digest, which costs no
+parse, then parses only what Claude wrote since; another inode, a shorter file,
+another digest or a damaged entry means a read from the start, as before. Any
+process that reads usage writes it, whole and moved over the old one, at most
+every few seconds, for the session's current transcripts only; past 32 MiB it is
+neither written nor read.
+
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.325; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.329; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

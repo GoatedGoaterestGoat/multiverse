@@ -1005,6 +1005,30 @@ class Universe:
         from .. import universe as universes
         return [Universe(child, self._plugin) for child in universes.children(self.path)]
 
+    def secret(self, key):
+        """This plugin's secret `key` here, or the nearest parent universe's (1.20): the value, for this plugin only.
+
+        Only the plugin that declared it in its manifest reads it, while it is on and trusted here. Never log it,
+        put it in an error, a record, a settings file or an agent's environment. Raises api.SecretMissing when it
+        isn't set, naming how to set it; api.Error for a key it doesn't declare, or while it is off here."""
+        from . import loader, secrets
+        declared = {secret.key: secret for secret in self._plugin._loaded.manifest.secrets}
+        if key not in declared:
+            raise Error(f"{self._plugin.name} declares no secret {key!r} in its manifest")
+        name = self._plugin.name
+        with _acting(self._plugin._loaded, "observe", self, "reading its secret"):
+            found = _call(loader.entry, self.path, name)
+            if not found.on or found.state not in ("on", "loaded", "unusable"):  # off, untrusted or changed here
+                raise Error(f"{name} is not on and trusted in {self.path}, so it can't read its secrets there")
+            try:
+                value = secrets.read(self.path, name, key)
+            except secrets.SecretsError as error:
+                raise Error(f"{name}'s {declared[key].label} can't be read: {error}") from None
+        if value is None:
+            raise SecretMissing(f"{name}'s {declared[key].label} isn't set here: the person sets it with "
+                                f"mv2 plugins secret {name} {key}, or with Enter on the Plugins screen")
+        return value
+
     def harness(self, name):
         """A harness configured here (1.13): .info is what mv.harness_info(universe, name) gives, and
         .models() and .check() say which models it takes. An unknown name raises api.Error."""
@@ -1068,6 +1092,10 @@ class Universe:
         from ..tools import doctor
         with _acting(self._plugin._loaded, "observe", self, "doctor"):
             return _call(doctor.run, self.path)
+
+
+class SecretMissing(Error):
+    """A secret the plugin declared isn't set here or in a parent universe (1.20); the message says how to set it."""
 
 
 class TranscriptChanged(Error):
@@ -1896,7 +1924,9 @@ class Agent:
     def send(self, text, delivery="steer"):
         """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
 
-        steer and follow-up wake a stopped or dormant agent; inbox-only never does."""
+        steer and follow-up wake a stopped or dormant agent; inbox-only never does. They reach a focused agent too,
+        as the person's do (1.20): a focus holds only agents' messages, so one sent inside an agent's session (a
+        command of this plugin's that an agent runs) is held as that agent's."""
         self._plugin._need("messages.send")
         from ..tools import send
         sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
@@ -1998,10 +2028,13 @@ class Agent:
                                                     generation=generation))
 
     def history(self, last=20):
-        """The last messages, read or not, oldest first (needs messages.read)."""
+        """The last `last` messages, read or not, oldest first (needs messages.read): [{at, from, text, delivery,
+        unread}]. `unread` (1.20) says whether the agent's inbox would still show it; reading marks nothing read."""
         self._plugin._need("messages.read")
+        if type(last) is not int or last <= 0:
+            raise Error("history takes a positive number of messages: last=20")
         from ..universe import mailbox
         with _acting(self._plugin._loaded, "observe", self.universe, "reading message history"):
-            found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
-        return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
-                for message in found["messages"][-last:]]
+            found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, last=last, unread=True)
+        return [{**{key: message[key] for key in ("at", "from", "text", "delivery") if key in message},
+                 "unread": message["unread"]} for message in found["messages"]]

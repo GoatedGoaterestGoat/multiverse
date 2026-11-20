@@ -302,9 +302,14 @@ class NativeExecutor:
         return write_answer(self, session, answer)
 
 
-def framed_text(root, message, *, at=None):
-    """The recipient's text: who sent the message, then the message as written."""
+def framed_text(root, message, *, at=None, listing=False):
+    """The recipient's text: who sent the message, then the message as written.
+
+    mv2's own note about a focus's held messages reaches the agent as its one line, with no sender line;
+    `listing` (mv2 inbox) still names mv2 as its sender."""
     sender = message.get('from') or {}
+    if not listing and message.get('focus_note') and sender.get('core') is True:
+        return message['text']
     name = sender.get('name') or 'user'
     scope = sender.get('universe')
     if sender.get('agent_id') and scope:
@@ -904,8 +909,14 @@ def _receipt_attempt(tracking):
     """Pre-submission diagnostic attempts do not replace the last native submission's identity."""
     attempts = tracking.get('attempts') or []
     for index in range(len(attempts) - 1, -1, -1):
-        if 'native_message_id' in attempts[index]:
-            return index, attempts[index]
+        attempt = attempts[index]
+        # Older adapters used the logical message ID on the wire. Their real
+        # submission still carries these markers; a pre-submission diagnostic does not.
+        legacy = (attempt.get('mode') in ('steer', 'follow-up')
+                  and all(isinstance(attempt.get(key), str) and attempt[key]
+                          for key in ('message_id', 'native_session_id', 'launch_id')))
+        if 'native_message_id' in attempt or legacy:
+            return index, attempt
     return len(attempts) - 1, attempts[-1] if attempts else {}
 
 

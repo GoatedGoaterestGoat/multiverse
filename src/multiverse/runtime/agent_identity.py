@@ -8,9 +8,121 @@ from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import re
+import subprocess
 
 from ..harnesses.types import AgentIdentitySpec, SessionHandle, normalize_session_id
 from ..store import read
+
+
+# Set only in an agent's launch, and kept by what it runs: any one, stale or partial included, means an agent.
+AGENT_MARKERS = ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_IDENTITY_MODE', 'MV2_CONTROL_SOCKET')
+SCAN_SECONDS = 1.0  # what the pane scan may spend retrying records caught mid-replacement
+
+
+def runs_in_agent(environment=None, root=None):
+    """Whether this process runs for an agent, by what its launch leaves behind: one of mv2's launch markers, or,
+    given `root`, a tmux pane (on its own socket) that an agent of root's universe tree records as its own, on the
+    very server that created it. A person's terminal, a sibling pane on the same tmux server, the plugin host and a
+    pane that only reuses a stopped agent's pane ID on a restarted server have none of these.
+
+    A guard against mistakes, as the rest of this module: it reads no process table, argv or other environment, and
+    asks a tmux server only read-only, never repairing a socket or signalling anything."""
+    environment = os.environ if environment is None else environment
+    if any(environment.get(key) for key in AGENT_MARKERS):
+        return True
+    tmux, pane = environment.get('TMUX'), environment.get('TMUX_PANE')
+    # Only a literal pane ID is ever matched or put in the query below, which bypasses Tmux.command's checks.
+    if not (tmux and isinstance(pane, str) and re.fullmatch(r'%[0-9]+', pane, re.ASCII) and root is not None):
+        return False
+    try:
+        # TMUX is SOCKET,PID,SESSION: split from the right, as the socket's path may hold a comma itself.
+        parts = tmux.rsplit(',', 2)
+        socket, top = Path(parts[0]).resolve(), Path(root).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    pid = parts[1] if len(parts) == 3 else ''
+    server_pid = int(pid) if pid.isascii() and pid.isdecimal() and len(pid) <= 10 else None
+    answered = []  # what the server says of this pane, asked at most once
+    import time
+    from .. import universe as universes
+    from ..store import retry_missing
+    while universes.parent(top) is not None:
+        top = universes.parent(top)
+    deadline = time.monotonic() + SCAN_SECONDS  # one budget for the scan's retries, however many agents
+    unsure = False  # a record that read missing once its retries were spent: it may be this pane's agent's
+    for scope in universes.tree(top):
+        try:
+            directories = list((scope / 'state' / 'agents').iterdir())
+        except OSError:
+            continue
+        for directory in directories:
+            path = directory / 'runtime.json'
+            try:
+                # A record caught being replaced reads as missing for a moment: retried, never taken as no agent.
+                record = retry_missing(lambda: read(path), deadline=deadline, path=path)
+                recorded = record.get('tmux') or {}
+            except FileNotFoundError:
+                # Missing once the retries ran out of time proves nothing: it counts as an agent's. Judged now, not
+                # before the read, since the deadline can pass during it.
+                unsure = unsure or time.monotonic() >= deadline
+                continue
+            except (OSError, ValueError, AttributeError):
+                continue
+            try:
+                mine = (isinstance(recorded, dict) and recorded.get('pane') == pane
+                        and isinstance(recorded.get('socket'), str) and Path(recorded['socket']).resolve() == socket)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            # Pane IDs start again at %0 when the server restarts, and a stopped agent keeps its record: the pane is
+            # its own only on the server that created it (the PID and start time it recorded), and only while it
+            # carries this agent's, universe's and launch's tags, as start times are whole seconds. A record without
+            # them, or a server that doesn't answer with them, proves nothing, so the pane stays a person's.
+            if mine and _same_pane(record, directory, scope, server_pid, socket, pane, answered, deadline):
+                return True  # only ever a refusal to treat it as the person: never a sender, an identity or authority
+    return unsure
+
+
+def _same_pane(record, directory, scope, server_pid, socket, pane, answered, deadline):
+    identity, launch = record['tmux'].get('server_identity'), record.get('launch_id')
+    if (not isinstance(identity, dict) or any(type(identity.get(key)) is not int or identity[key] <= 0
+                                              for key in ('pid', 'epoch'))
+            or server_pid != identity['pid'] or not isinstance(launch, str) or not launch):
+        return False
+    from ..store import retry_missing
+
+    def replaced(path):  # an atomically replaced record reads as missing for a moment: retried, within the budget
+        return retry_missing(lambda: read(path), deadline=deadline, path=path)
+    try:
+        # The tags lifecycle put on the pane are the agent's stored identity, not its folder's name, which a
+        # recovered folder needn't share; and that agent must belong to the universe it sits in.
+        properties, universe = replaced(directory / 'properties.json'), replaced(scope / 'universe.json').get('id')
+        agent, owner = properties.get('id'), properties.get('universe_id')
+    except (OSError, ValueError, AttributeError):
+        return False  # missing or damaged for good: no proof, so no match
+    if not (isinstance(agent, str) and agent and isinstance(universe, str) and universe and owner == universe):
+        return False
+    if not answered:
+        answered.append(_pane(socket, pane))
+    expected = (identity['pid'], identity['epoch'], pane, agent, universe, launch)
+    return answered[0] is not None and answered[0] == expected
+
+
+def _pane(socket, pane):
+    """What the tmux server at `socket` says of `pane`: (pid, start time, pane, agent, universe, launch), or None.
+    Read-only: one plain query, never the backend's recovery path, so classifying a caller can't repair a socket
+    or signal a process."""
+    from ..terminal.tmux import IDENTITY_FORMAT
+    try:
+        reply = subprocess.run(['tmux', '-S', str(socket), 'display-message', '-p', '-t', pane, IDENTITY_FORMAT],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=2)
+        # Decoded here, so output that isn't text is an unproven answer rather than an error for the caller.
+        fields = reply.stdout.decode().rstrip('\n').split('\t')
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+    if (reply.returncode or len(fields) != 7
+            or not all(field.isascii() and field.isdecimal() and len(field) <= 20 for field in fields[:2])):
+        return None
+    return int(fields[0]), int(fields[1]), fields[3], fields[4], fields[5], fields[6]
 
 
 def specification(value):
@@ -92,7 +204,7 @@ def calling_socket(environment=None):
     return calling_paths(environment)[0]
 
 
-def calling_paths(environment=None, *, require_recorded_run=False):
+def calling_paths(environment=None, *, require_recorded_run=False, acting="select the calling agent's tmux server"):
     """Resolve terminal and run directory from the same verified current runtime."""
     from . import paths
     env = os.environ if environment is None else environment
@@ -120,7 +232,7 @@ def calling_paths(environment=None, *, require_recorded_run=False):
     except records.RecordError as error:
         raise ValueError(f"Calling agent's {path}: {error.reason}; restore its runtime record before spawning a child") from None
     if caller is None and facts.get('launch_id') != env['MV2_LAUNCH_ID']:
-        raise ValueError('Outdated launch; cannot select the calling agent\'s tmux server')
+        raise ValueError(f'Outdated launch; cannot {acting}')
     terminal = facts.get('tmux')
     socket = terminal.get('socket') if isinstance(terminal, dict) else None
     if not isinstance(socket, str) or not socket or '\0' in socket:

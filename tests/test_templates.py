@@ -90,6 +90,10 @@ class BaseTemplateTest(unittest.TestCase):
                 self.assertTrue(overrides)
                 self.assertEqual([key for key in overrides if key not in names], [])
                 self.assertEqual([key for key in overrides if overrides[key] == names[key]], [])
+                if harness == "codex":
+                    for model, expected in (("gpt-6.2-sol", "Sol"), ("gpt-6.2-astra", "Astra"),
+                                            ("gpt-6.1-sol", "GPT 6.1 Sol"), ("gpt-6-astra", "GPT 6 Astra")):
+                        self.assertEqual(model_choices.model_name(root, {"harness": harness}, model, {}), expected)
 
     def test_bundled_default_models_are_ones_their_subsets_allow(self):
         """A bundled template's default model outside its subset would get every launch from that template refused."""
@@ -98,10 +102,10 @@ class BaseTemplateTest(unittest.TestCase):
         environment = dict(os.environ)
         allowed = {"claude": ({"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"},
                               ("fable", "opus", "sonnet", "haiku"), "claude-opus-4-7"),
-                   "codex": ({"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"}, (), "gpt-6-sol")}
+                   "codex": ({"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"}, (), "gpt-6-sol")}
         for template in ("base", "Silicon23"):
             root = templates.create(self.work / template, template, template, self.work)
-            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.1-sol")):
+            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.2-sol")):
                 with self.subTest(f"{template} {harness}"):
                     adapter = harnesses.load(root, harness)
                     self.assertEqual(adapter.default_model, default)

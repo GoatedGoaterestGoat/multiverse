@@ -53,7 +53,8 @@ function tagged(text: string): Message | undefined {
 // An older mod's tag around a whole message, as Claude stored it: nothing before the tag but Claude's own peer header
 // (inside its system reminder, or no wrapper at all for a prompt row), nothing after it but Claude's trailer. A tag
 // anywhere else is quoted in the message's own text: an mv2 message starts with its "Message from" line, so a tag it
-// quotes always has text before it.
+// quotes always has text before it. The one without that line, mv2's note when a focus ends, is a fixed sentence
+// that quotes no tag.
 const HEAD = /^\s*(?:<system-reminder>\s*)?(?:Another Claude session sent a message[^\n]*:\s*)?$/
 const TAIL = /^\s*(?:This came from another Claude session[\s\S]*|<\/system-reminder>\s*)?$/
 

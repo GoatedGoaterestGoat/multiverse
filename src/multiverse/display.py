@@ -56,9 +56,10 @@ def model_parts(row):
     """(name, effort) for an agent's Model cell, or (None, None) when nothing is known:
 
     1. a running agent: the model and effort its session last reported (`usage.value`);
-    2. otherwise, or before a reading lands: its recorded model;
-    3. no recorded model: its harness's default (`settings.model`), what a launch would use;
-    4. none of these: nothing, which reads `-`.
+    2. before a reading lands: its choice before a next-resume edit, for this launch only;
+    3. otherwise: its recorded model;
+    4. no recorded model: its harness's default (`settings.model`), what a launch would use;
+    5. none of these: nothing, which reads `-`.
 
     The name is the listing's display name for that model (custom, else the table's), else the spelling as
     recorded. The effort is a running agent's session's where it reports one (with or without its model), else
@@ -69,14 +70,19 @@ def model_parts(row):
     usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
     observed = usage.get("value") if usage.get("state") == "ok" and isinstance(usage.get("value"), dict) else {}
     running = row.get("live") == "alive"
+    before_edit = row.get("model_before_edit")
+    facts = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
+    snapshot = (running and isinstance(before_edit, dict) and isinstance(before_edit.get("launch_id"), str)
+                and bool(before_edit["launch_id"]) and before_edit["launch_id"] == facts.get("launch_id"))
+    fallback = before_edit if snapshot else row
     # The effort follows the session on its own: a session can report its effort without its model.
     effort = (observed["effort"] if running and text(observed.get("effort")) else
-              row.get("effort") if text(row.get("effort")) else None)
+              fallback.get("effort") if text(fallback.get("effort")) else None)
     if running and text(observed.get("model")):
         name, model = row.get("observed_model_name"), observed["model"]
-    elif text(row.get("model")):
-        name, model = row.get("model_name"), row["model"]
-    elif text(row.get("default_model")):
+    elif text(fallback.get("model")):
+        name, model = fallback.get("model_name"), fallback["model"]
+    elif not snapshot and text(row.get("default_model")):
         name, model = row.get("default_model_name"), row["default_model"]
     else:
         return None, None

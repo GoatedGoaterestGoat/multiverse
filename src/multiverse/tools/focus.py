@@ -1,4 +1,4 @@
-"""Focus an agent while it needs the user: steer and follow-up messages to it wait in its inbox."""
+"""Focus an agent while it needs the user: steer and follow-up messages from agents wait in the agent's inbox."""
 from datetime import datetime
 
 from .. import display, universe
@@ -96,7 +96,7 @@ def queued(root, directory, name, own, turn):
             note += (", before the user answers. To stay focused until the user answers, run mv2 focus instead, "
                      "and mv2 unfocus once they have." if own else ".")
         else:
-            note += ". The focus holds only messages sent from now on."
+            note += ". The focus holds only agents' messages sent from now on."
     elif not complete and (unconfirmed is None or unconfirmed):
         reason = display.clean(report.reason or "The harness queue is unknown").rstrip(".")
         note = (f"mv2 couldn't check whether follow-up messages are already queued for {whom}: {reason}. "
@@ -111,12 +111,12 @@ def cli_run(root=None, *, json=False, **options):
     if json:
         return result
     if result["by"] == "agent":
-        line = f"Focused {result['ends']}. Steer and follow-up messages to you wait in your inbox."
+        line = f"Focused {result['ends']}. Steer and follow-up messages from other agents wait in your inbox."
         line += (" Run mv2 unfocus once the user has answered." if result["ends"] == "until unfocused"
                  else " It ends by itself; mv2 unfocus ends it sooner.")
     else:
-        line = (f"Focused {result['agent']} {result['ends']}. Steer and follow-up messages to it wait in its inbox, "
-                f"with its inbox-only messages.")
+        line = (f"Focused {result['agent']} {result['ends']}. Steer and follow-up messages to it from agents wait "
+                f"in its inbox, with its inbox-only messages.")
     return line + ("\n" + result["queue_note"] if result.get("queue_note") else "")
 
 

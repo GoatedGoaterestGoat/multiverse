@@ -1,6 +1,7 @@
 """List, turn on or off, configure, trust and check plugins."""
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -10,18 +11,20 @@ from ..plugins import access as levels, loader, manifest as manifests, settings 
 from ..store import is_file_replaced
 
 ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
-           "install", "migrate", "new")
+           "install", "migrate", "new", "packages", "secrets", "secret")
 HOST_ACTIONS = ("status", "start", "stop")
-NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust")
+NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "packages", "secrets", "secret")
 
 
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
                         help="list (default), info, enable, disable, grant, settings, trust, untrust, check, host, "
-                             "events, install, migrate or new")
+                             "events, install, migrate, new, packages, secrets or secret")
     parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
                                                "for new: the new plugin's name)")
-    parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act")
+    parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act; secret: the KEY")
+    # Words past these are refused by run() without repeating them: `secret NAME KEY VALUE` must never echo VALUE.
+    parser.add_argument("extra", nargs="*", help=argparse.SUPPRESS, metavar=argparse.SUPPRESS)
     parser.add_argument("--grant", choices=levels.LEVELS, dest="grant",
                         help="enable: the access level to grant it here (otherwise a terminal asks; without one, "
                              "its minimum)")
@@ -37,6 +40,10 @@ def configure(parser):
     parser.add_argument("--apply", action="store_true", help="migrate: make the changes (otherwise only show them)")
     parser.add_argument("--recursive", action="store_true", help="migrate: this universe and every subverse")
     parser.add_argument("--dir", dest="directory", help="new: where to create it (default: the current directory)")
+    parser.add_argument("--install-packages", action="store_true", dest="install_packages",
+                        help="enable, packages: install the plugin's Python packages without asking (the person only)")
+    parser.add_argument("--clear", action="store_true", dest="clear",
+                        help="secret: remove this universe's value (a parent's, if set, is used again)")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -65,17 +72,31 @@ def _changes(assignments, removals):
 
 
 def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-        recursive=False, directory=None, load=False, level=None, grant=None, json=False):
+        recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, approved=None,
+        clear=False, secret_value=None, extra=(), json=False):
+    """`approved`: the folder name of the package list the person said yes to on a terminal (cli_run).
+    `secret_value` comes only from cli_run's hidden prompt or stdin, never from an argument."""
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
-    if level is not None and plugin_action != "grant":
+    if extra:  # never repeated: for secret, it may be the value itself
+        if plugin_action == "secret":
+            raise ValueError(f"mv2 plugins secret never takes a value as an argument, so nothing was saved and it "
+                             f"isn't shown here. Your shell may have kept it in its history: remove it there. Then "
+                             f"run mv2 plugins secret {name} {level} and type it, or pipe it in")
+        raise ValueError(f"mv2 plugins {plugin_action} was given {len(extra)} more "
+                         f"{'word' if len(extra) == 1 else 'words'} than it takes")
+    if level is not None and plugin_action not in ("grant", "secret"):
         raise ValueError(f"mv2 plugins {plugin_action} takes one name")
+    if clear and plugin_action != "secret":
+        raise ValueError("--clear belongs to mv2 plugins secret NAME KEY")
     if grant is not None and plugin_action != "enable":
         raise ValueError("--grant belongs to mv2 plugins enable; to change a grant: mv2 plugins grant NAME LEVEL")
     if (apply or recursive) and plugin_action != "migrate":
         raise ValueError("--apply and --recursive belong to mv2 plugins migrate")
     if directory and plugin_action != "new":
         raise ValueError("--dir belongs to mv2 plugins new")
+    if install_packages and plugin_action not in ("enable", "packages"):
+        raise ValueError("--install-packages belongs to mv2 plugins enable and mv2 plugins packages")
     if plugin_action == "check":
         if isinstance(load, str):  # check --load DIR
             name, load = name or load, True
@@ -175,12 +196,53 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             raise ValueError("mv2 plugins grant takes a plugin's name and a level: observe, spend or act")
         return {"universe": str(root), **plugins.set_grant(root, name, level),
                 "access": plugins.entry_access(root, name)}
+    if plugin_action == "secrets":
+        return {"universe": str(root), "name": name, "secrets": plugins.secrets_view(root, name)}
+    if plugin_action == "secret":
+        if not level:
+            raise ValueError(f"mv2 plugins secret takes a plugin and one of its secrets' keys: "
+                             f"mv2 plugins secret {name} KEY; mv2 plugins secrets {name} lists them")
+        if clear:
+            cleared = plugins.clear_secret(root, name, level)
+            return {"universe": str(root), "name": name, "key": level, "cleared": cleared,
+                    "secrets": plugins.secrets_view(root, name)}
+        if secret_value is None and plugins.from_agent(root):
+            plugins.set_secret(root, name, level, "")  # refuses, saying only the person sets one
+        if secret_value is None:
+            raise ValueError(f"No value given: mv2 plugins secret {name} {level} asks for it on a terminal, or reads "
+                             f"it from stdin; it never takes one as an argument")
+        store = plugins.set_secret(root, name, level, secret_value)
+        return {"universe": str(root), "name": name, "key": level, "set": True, "store": store,
+                "secrets": plugins.secrets_view(root, name)}
+    if plugin_action == "packages":
+        packages = plugins.packages_state(root, name)
+        wanted = install_packages and packages and not packages["installed"] and packages["folder"]
+        installed = plugins.install_packages(root, name, approved=approved) if wanted else None
+        return {"universe": str(root), "name": name, "packages": packages, "install": installed,
+                **({"now": plugins.packages_state(root, name)} if installed else {})}
     if plugin_action in ("enable", "disable"):
+        packages = plugins.packages_state(root, name) if plugin_action == "enable" else None
+        installed = None
+        if packages and packages["problem"] and not packages["folder"]:
+            raise ValueError(packages["problem"])  # a requirements file that can't be read
+        if packages and not packages["installed"]:
+            if not install_packages:
+                raise ValueError(f"{name} needs Python packages that aren't installed: "
+                                 + ", ".join(packages["packages"]) + f". Review them with mv2 plugins packages {name}; "
+                                 f"to install them and turn it on, run mv2 plugins enable {name} --install-packages")
+            # Before it is turned on, so a failure leaves it as it was: off, or on but unable to load.
+            try:
+                installed = plugins.install_packages(root, name, approved=approved)
+            except plugins.PluginError as error:
+                if plugins.entry(root, name).on:
+                    raise plugins.PluginError(f"{error}. {name} stays on here, but can't load until they install"
+                                              ) from None
+                raise
         defaulted = False
         if plugin_action == "enable" and grant is None:
             # No terminal asked (cli_run asks on one): its minimum, raised later with mv2 plugins grant.
             wanted = plugins.entry(root, name).manifest
-            if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent():
+            if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent(root):
                 grant, defaulted = wanted.access.minimum, True
         result = plugins.set_enabled(root, name, plugin_action == "enable", grant=grant)
         found = plugins.entry(root, name)
@@ -190,6 +252,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             top = universe.parent(top)
         needs_host = bool(found.manifest and host.NEEDS & found.manifest.extends)
         return {"universe": str(root), **result, "state": found.state, "problem": found.problem,
+                **({"packages_installed": installed} if installed else {}),
                 "access": plugins.entry_access(root, name), "defaulted": defaulted,
                 "permissions": found.manifest.permission_texts() if found.manifest else [],
                 "needs_host": needs_host, "host_running": host.running(top) if needs_host else None}
@@ -343,11 +406,22 @@ def check(directory, load=False):
 
 
 def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-            recursive=False, directory=None, load=False, level=None, grant=None, json=False):
+            recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, clear=False,
+            extra=(), json=False):
+    secret_value = _read_secret(root, name, level) if (plugin_action == "secret" and not clear and name and level
+                                                        and not extra) else None
+    approved = None
+    if plugin_action in ("enable", "packages") and not install_packages and not json and name:
+        asked = _ask_packages(root, name, plugin_action)
+        if asked is False:
+            raise SystemExit(1)
+        install_packages, approved = bool(asked), asked or None  # the yes is for the list shown, and only it
     if plugin_action == "enable" and grant is None and not json and name:
         grant = _ask_grant(root, name)
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
-                 apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant)
+                 apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant,
+                 install_packages=install_packages, approved=approved, clear=clear, secret_value=secret_value,
+                 extra=extra)
     if json:
         return result
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
@@ -356,10 +430,81 @@ def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), remov
     return text(plugin_action, result)
 
 
+def _selected(root):
+    """The universe these words name, for the person-only checks; None when there is none to find."""
+    try:
+        return universe.resolve(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _read_secret(root, name, key):
+    """The value, from a hidden prompt on a terminal or else stdin (one trailing newline dropped); never echoed."""
+    if plugins.from_agent(_selected(root)):
+        return None  # run() refuses it, naming who can
+    if sys.stdin.isatty():
+        import getpass
+        try:
+            label = next((item["label"] for item in plugins.secrets_view(universe.resolve(root), name)
+                          if item["key"] == key), key)
+        except plugins.PluginError:
+            label = key
+        import warnings
+        try:
+            # getpass falls back to reading with the typing shown when it can't hide it, warning first: that
+            # warning is turned into a refusal, before anything is read.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                return getpass.getpass(f"{name}'s {label} (typing is hidden): ") or None
+        except getpass.GetPassWarning:
+            raise ValueError(f"This terminal can't hide what you type, so nothing was read. Pipe the value in "
+                             f"instead: some-command | mv2 plugins secret {name} {key}") from None
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+    value = sys.stdin.read()
+    return value[:-1] if value.endswith("\n") else value or None
+
+
+def _ask_packages(root, name, action):
+    """On a terminal, for a person, when plugin `name` needs packages that aren't installed: list them and ask.
+    The shown list's folder name (yes: install exactly that list), False (they said no: nothing done), or None
+    (nothing to ask: no terminal, an agent, none needed)."""
+    if plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        packages = plugins.packages_state(universe.resolve(root), name)
+    except plugins.PluginError:
+        return None
+    if not packages or packages["installed"] or packages["problem"] and not packages["folder"]:
+        return None
+    print(packages_prompt(name, packages))
+    try:
+        answer = input("Install them? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""  # no answer is a no
+        print()
+    if answer in ("y", "yes"):
+        return Path(packages["folder"]).name
+    print(f"Nothing installed{'; ' + name + ' stays off' if action == 'enable' else ''}.")
+    return False
+
+
+def packages_prompt(name, packages):
+    """The person's view of what installing a plugin's packages means, before they say yes."""
+    one = len(packages["packages"]) == 1
+    return "\n".join([f"{name} needs {len(packages['packages'])} Python {'package' if one else 'packages'}, "
+                      f"{'pinned' if one else 'each pinned'} to one version and hashed:",
+                      *(f"  {line}" for line in packages["packages"]),
+                      f"They go in a folder of {name}'s own ({packages['folder']}), never into mv2's environment.",
+                      f"Installing runs none of their code, but {name} imports them: their code then runs inside mv2 "
+                      f"with {name}'s own trust. Say yes only if you trust {name} and these packages."])
+
+
 def _ask_grant(root, name):
     """On a terminal, for a person: the level to grant, asked from the plugin's request down to its minimum.
     None (no terminal, an agent, or nothing to choose): run() decides."""
-    if plugins.from_agent() or not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     found = plugins.entry(universe.resolve(root), name)
     if found.manifest is None:
@@ -481,6 +626,10 @@ def text(action, result):
                              + (" (no terminal asked, so it has its minimum)" if result.get("defaulted") else ""))
         if result["permissions"]:
             lines.extend(_permission_lines(result))
+        if result.get("packages_installed"):
+            done = result["packages_installed"]
+            lines.append(f"Installed its Python packages in {done['folder']}"
+                         + (f"; left out, as mv2 has them: {', '.join(done['skipped'])}." if done["skipped"] else "."))
         lines.extend(f"Installed its default settings: {path}" for path in result["installed"])
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
@@ -495,6 +644,45 @@ def text(action, result):
                 + (f'; it has {level} here now.' if level and level != result["granted"]
                    else "." if level else "; it has none while it is off.")
                 + " Agents launched from now on use it; restart running agents to use it there.")
+    if action == "secrets":
+        if not result["secrets"]:
+            return f"{result['name']} declares no secrets."
+        return "\n".join([f"{result['name']}'s secrets in {result['universe']}:",
+                          *(f"  {item['key']} ({item['label']}"
+                            + (", required" if item["required"] else "") + "): "
+                            + ("set" + (f", from {item['from']}" if item.get("inherited") else "") if item["set"]
+                               else "not set")
+                            for item in result["secrets"])])
+    if action == "secret":
+        if "cleared" in result:
+            if not result["cleared"]:
+                return f"{result['name']}'s {result['key']} wasn't set in {result['universe']}; nothing cleared."
+            still = next((item for item in result["secrets"] if item["key"] == result["key"]), None)
+            return (f"Cleared {result['name']}'s {result['key']} in {result['universe']}."
+                    + (f" {still['from']}'s is used now." if still and still["set"] else ""))
+        from ..plugins import secrets
+        chosen = os.environ.get(secrets.STORE) == "file"
+        where = ("the system keychain" if result["store"] == "keychain"
+                 else f"a file only you can read ({secrets.STORE}=file)" if chosen
+                 else "a file only you can read (no keychain here)")
+        return f"Set {result['name']}'s {result['key']} in {result['universe']}, kept in {where}."
+    if action == "packages":
+        packages, name = result["packages"], result["name"]
+        if packages is None:
+            return f"{name} declares no Python packages."
+        if packages["problem"] and not packages["folder"]:
+            return f"! {packages['problem']}"
+        lines = [f"{name}'s Python packages, in {packages['folder']}:", *(f"  {line}" for line in packages["packages"])]
+        done = result.get("install")
+        if done:
+            lines.append("Installed." + (f" Left out, as mv2 has them: {', '.join(done['skipped'])}." if done["skipped"]
+                                         else ""))
+        elif packages["installed"]:
+            lines.append("Installed.")
+        else:
+            lines.append(f"Not installed. To install them: mv2 plugins packages {name} --install-packages "
+                         f"(or answer the question on a terminal).")
+        return "\n".join(lines)
     if action == "settings":
         lines = [f'{result["name"]} settings: {result["path"]}']
         if result["changed"]:

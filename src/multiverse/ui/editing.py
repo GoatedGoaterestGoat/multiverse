@@ -4,7 +4,7 @@ from pathlib import Path
 from textual.widgets import DataTable, Input
 
 from ..display import clean
-from .drafts import AgentDraft, SubverseDraft
+from .drafts import AgentDraft, ModelDraft, SubverseDraft
 from .screens import Form
 from .tree import agent_key, group_key
 
@@ -25,6 +25,19 @@ class TreeEditing:
             self.start_draft(AgentDraft(root, self.selected_key, {"name": self.unused("worker", names), "harness": harness,
                                                                   "model": ""}, options),
                              f"New agent in {self.scope_name(root)} · Tab field · Enter create · Esc cancel")
+
+    def action_set_model(self):
+        """e: the selected agent's saved model and effort, chosen in its row as for a new agent."""
+        if not self.ready() or not self.selected or self.damaged_selection():
+            return
+        row = dict(self.selected)
+        if row["harness"] not in self.scope_harnesses(Path(row["universe"])):
+            self.set_status(f"{clean(row['harness'])} isn't configured in {self.scope_name(Path(row['universe']))}, "
+                            f"so {clean(row['name'])}'s model can't be chosen here.", error=True)
+            return
+        running = " · its session keeps its model until it's stopped and resumed" if row.get("live") == "alive" else ""
+        self.start_draft(ModelDraft(Path(row["universe"]), self.selected_key, row),
+                         f"Model for {clean(row['name'])} · Tab field · Enter save · Esc cancel{running}")
 
     @staticmethod
     def unused(base, names):
@@ -86,10 +99,17 @@ class TreeEditing:
             self.set_status(message, error=True)
             self.populate_table()
             return
-        self.submit_operation(draft.verb, getattr(self.backend, draft.operation), draft.scope, values, after=self.created)
+        if hasattr(draft, "changed") and not draft.changed(values):
+            self.cancel_draft()
+            self.set_status(f"{clean(values['name'])}'s model and effort are unchanged.")
+            return
+        self.submit_operation(draft.verb, getattr(self.backend, draft.operation), *draft.arguments(values),
+                              after=self.created, describe=draft.describe)
 
     def created(self, result):
         draft, self.draft = self.draft, None
+        if draft is None:  # it ended while its operation ran (its agent left the list)
+            return
         self.collapsed.discard(str(draft.scope))
         self.selected_key = draft.created_key(result)
 

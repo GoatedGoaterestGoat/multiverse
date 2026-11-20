@@ -110,6 +110,24 @@ def unread(root, agent, *, blocking=True):
             for message in mailbox.unread(directory, blocking=blocking)]
 
 
+def unread_many(root, references):
+    """Read-only nonblocking fleet peek; return each reference's messages or its local read error."""
+    access.require('observe', 'read inbox')
+    root = universe.resolve(root)
+    directories, result = {}, {}
+    for reference in references:
+        try:
+            directories[reference] = agents.directory(root, reference, allow_damaged=True)
+        except (OSError, ValueError) as error:
+            result[reference] = error
+    readings = mailbox.unread_many(directories.values())
+    for reference, directory in directories.items():
+        value = readings[directory]
+        result[reference] = (value if isinstance(value, Exception) else
+                             [{key: message[key] for key in FIELDS if key in message} for message in value])
+    return result
+
+
 def timeout_seconds(value):
     if value is None:
         return None
@@ -132,14 +150,29 @@ def nothing(all_messages=False, since=None):
             else f'No messages since {since}.')
 
 
+def _shown_name(sender):
+    """Who a sender with no agent of its own reads as: the name send saved for an agent's session, only when it
+    marked it as its own (`labelled`); an older flagged record, as an agent's session; a plugin's, as that plugin;
+    anyone else, as the person."""
+    from ..plugins import manifest
+    if sender.get('agent_process') is True:
+        return str(sender.get('name')) if sender.get('labelled') is True else "an agent's session"
+    plugin = sender.get('plugin')
+    if isinstance(plugin, str) and manifest.NAME.fullmatch(plugin):
+        return f'plugin {plugin}'
+    return 'user'
+
+
 def readable(root, result, empty='No unread messages.'):
     from ..runtime.native import framed_text
     blocks = []
     for message in result['messages']:
         sender = message.get('from') or {}
+        # A sender with no agent of its own reads as the person, unless it is mv2's, a plugin's (its name says so),
+        # or was sent from inside an agent's session (its name says whose, never the person's).
         if not sender.get('agent_id') and sender.get('core') is not True:
-            sender = {**sender, 'name': 'user'}
-        blocks.append(framed_text(root, {**message, 'from': sender}))
+            sender = {**sender, 'name': _shown_name(sender)}
+        blocks.append(framed_text(root, {**message, 'from': sender}, listing=True))
     return '\n\n'.join(blocks) if blocks else empty
 
 

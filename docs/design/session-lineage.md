@@ -160,8 +160,8 @@ commit publishes the selected thread's permission metadata.
 Incomplete or unmappable grants disable navigation without rejecting ordinary
 startup or `/btw`. An observed current-thread permission change or malformed
 settings update also disables navigation until an ordinary `mv2 resume` verifies
-the current grants. Native settings notifications omit runtime workspace roots.
-Codex 0.169.0 also requires an ordinary root conversation: parent, attached and
+the current grants. Native settings notifications omit top-level runtime workspace roots.
+Codex 0.169.0 and 0.170.0 also require an ordinary root conversation: parent, attached and
 fork relations must be explicitly null, with no feature thread source. Each
 initial, selected or reselected reply must expose exactly one built-in `local`
 environment. Its native cwd and complete runtime root set must match the known

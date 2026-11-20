@@ -124,6 +124,26 @@ Codex's public events report every aborted turn as interrupted, without its orig
 
 **Queued follow-ups.** On a verified bridge with matching [checked Codex CLI and daemon releases](../reference/compatibility.md#checked-harness-versions), mv2 can check its own messages in the current conversation's after-turn queue before an agent sends a reply. It matches exact client message IDs to mv2's delivery records; an idle steer stays a steer. Active-turn steers, the terminal's local input and other clients' messages are outside this report. A missing entry does not prove it was read or consumed. The read has a total budget of 2 seconds and never starts, resumes or changes the queue. Plain, unverified or unchecked launches and incomplete or failed reads leave coverage unknown. Sends continue with a note only when mv2's records hold an unconfirmed follow-up from the recipient, or those records cannot be read.
 
+**Delivery confirmation.** On that verified bridge, mv2 saves a confirmation when
+Codex reports starting or completing a `userMessage` item with the exact client ID
+of an mv2 submission. It matches the primary conversation and saved delivery
+attempt, including a queued input retained across resume. A late receipt for an
+older retry cannot confirm a newer attempt. Only IDs are saved, without copying
+the item's text or marking the inbox read. This confirms that Codex recorded the
+input in its conversation, not that the model understood or acted on it, and is
+not an extra guarantee about Codex's own storage flush.
+
+The receipt is saved off the relay loop and stays confirmed on later checks;
+`deliver --check` need not search for it again. When no mv2 relay was connected,
+the launch predates this change, delivery records are unreadable, oversized or
+ambiguous (such as retries sharing one old client ID), or receipt publication
+fails or exceeds its bounded capacity, the existing lookup remains: up to 100
+queued entries and the newest 20 full turns. No full-history scan is added. A
+missing exact ID remains
+unknown, potentially indefinitely once it is outside that window. Leaving the
+queue, or a later turn running, does not by itself confirm delivery. Detaching
+from tmux alone does not stop a running terminal's relay.
+
 **Session binding.** With a live connection, mv2 records Codex's session ID automatically. A launch-only agent is asked to run `mv2 session-bind` at startup. If it never did, take the ID from Codex's `/status` and bind it with `mv2 session-bind --agent NAME --session-id UUID` before resuming.
 
 **Conversation switches.** A verified Codex bridge on [matching checked releases](../reference/compatibility.md#checked-harness-versions) follows terminal `/new`, `/clear` and `/resume` within this agent's own history, subject to the [switch limits](../design/session-lineage.md). New conversations preserve the launch's validated grants and changes mv2 observes. Another client can narrow runtime roots without a notification; a later `/new` or `/clear` may restore those roots up to the launch ceiling. Use an ordinary `mv2 resume` to re-read current grants before navigating after such a change. Codex 0.169.0 supports switches for ordinary root conversations with exactly one built-in local environment whose workspace and roots match the verified grants. New and clear explicitly retain that local environment. Missing, empty, remote, multiple or changed selections disable navigation; attached, forked and feature conversations are outside this mapping. Ordinary spawn and `mv2 resume` remain available. Earlier checked releases retain their qualified environment boundary. Attached side chats are not primary navigation targets; the opt-in workspace tabs remain outside mv2's supported single temporary side conversation.
@@ -140,7 +160,7 @@ Choices that save command, network or MCP approval rules are for the person only
 
 **Shared conversations.** Another Codex client on the same daemon can open an agent's conversation at the same time, for example `codex resume` in another window. It is still the same agent, so its `mv2 report` and `mv2 inbox` work from either client. While another client has it open, Codex keeps the conversation's current settings. A resume can't change its permissions then, and `mv2 inspect NAME` names the settings that differ. See [shared conversations](../design/shared-conversations.md).
 
-**Side conversations.** Connected Codex terminals on the [supported releases](../reference/compatibility.md) support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent, but it can run unscoped mv2 commands as the operator. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. For a text-only answer from an isolated copy, use [`mv2 ask`](#codexs-questions-and-one-shot-runs).
+**Side conversations.** Connected Codex terminals on the [supported releases](../reference/compatibility.md) support native `/btw`. The side chat is ephemeral and unmanaged: mv2 keeps sending messages to the main conversation and does not create an agent, inbox, status or delivery record for the side. It inherits the agent's tools and permissions. Its own thread ID cannot authorize it as the main agent. It is not isolated. Closing the side leaves the main conversation bound to the same agent. A persistent `/fork` is refused and recorded as a navigation error; use a separate mv2 launch. For a text-only answer from an isolated copy, use [`mv2 ask`](#codexs-questions-and-one-shot-runs).
 
 **Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it: a plain launch shows "This conversation is open in another app", and a connected one gets "thread … already has an active writer". mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
 
@@ -252,6 +272,16 @@ With a subset, an omitted model needs an allowed harness `model` setting or a re
 Without `models`, the built-in tables remain unchanged, native defaults remain available, and unlisted IDs can still be typed. Known models are checked for supported efforts. A harness without a catalog still accepts a typed model, but cannot have a model subset. Remove `models` to restore this behavior; an empty object is a configuration error. `mv2 doctor` reports invalid subsets and a configured `model` outside its subset.
 
 The subset limits choices mv2 submits. Native account policies, model remapping, environment overrides and effort clamps can still affect the settings actually served; it does not police later in-terminal changes. Claude's literal `--model default` is a native computed choice, distinct from omitting `--model`, and cannot be verified against a subset.
+
+The bundled base and Silicon23 templates default new Codex agents to `gpt-6.2-sol`.
+Silicon23 labels `gpt-6.2-sol` as Sol and `gpt-6.2-astra` as Astra. The older
+`gpt-6.1-sol` and `gpt-6-astra` remain allowed, with their table names, GPT 6.1 Sol
+and GPT 6 Astra. Existing universes receive template changes through
+`mv2 refresh --apply`; local settings are merged rather than overwritten.
+
+Changing a default or a display name never rewrites an agent's recorded model.
+An existing agent keeps its model on resume unless you explicitly change it,
+for example with `mv2 resume NAME --model gpt-6.2-sol`.
 
 ### Model display names
 

@@ -692,6 +692,12 @@ def main():
                 reconnected(agent_dir, launch.name)
             from multiverse.runtime.queue_continuation import record_primary_event
             from multiverse.runtime.navigation import handler as navigation_handler
+            from multiverse.runtime.delivery_observations import DeliveryPublisher
+            delivery_publisher = None
+            agent_id = env.get('MV2_AGENT_ID')
+            if getattr(adapter, 'family', None) == 'codex' and isinstance(agent_id, str) and agent_id:
+                delivery_publisher = DeliveryPublisher(agent_dir, launch.name, properties['harness'],
+                                                       agent_id=agent_id)
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
@@ -700,7 +706,9 @@ def main():
                 record_connection=attachments.connection_logger(launch, started=runner_started),
                 record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
                 navigation=navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name),
-                relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name})
+                relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name},
+                record_delivery_observation=delivery_publisher,
+                record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None)
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()

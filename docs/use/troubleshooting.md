@@ -98,10 +98,10 @@ For launch-scoped agents, `report`, `inbox` and `session-bind` print `mv2: Outda
 
 mv2 refuses so that an old process can't act as the current one.
 
-Run the command from the agent's current session instead. To run it yourself, clear those variables and name the agent:
+Run the command from the agent's current session instead. To run it yourself, use a terminal of your own, outside the agent's session, and name the agent:
 
 ```sh
-env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 inbox --agent NAME --peek
+mv2 inbox --agent NAME --peek
 ```
 
 `Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.

@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ...runtime.process import process_snapshot, process_started, start_matches
+from ...runtime.process import process_snapshot, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import RowFact, TranscriptRowsChanged, TranscriptSource, TranscriptView, Usage
 from ...store import read, retry_missing
@@ -49,7 +49,7 @@ from .transcripts import (  # every transcript reader reads through this one row
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
     has_saved_conversation, Transcript, _transcripts, _transcripts_lock, counted, context_reading, context_usage,
-    measured_usage, DAMAGED, raw_rows, USAGE_KEYS)
+    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE)
 
 MOD = Path(__file__).parent / 'mod'
 # The mod acts only on text between these tags and removes them. The opening
@@ -93,10 +93,10 @@ def peer_token(socket_path, home=None):
     return token if isinstance(token, str) and TOKEN.match(token) else None
 
 
-# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux,
-# `ps -o lstart=` in UTC elsewhere (macOS), the same form as the runner's pid_started there.
+# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux, the
+# ticks mv2's own start token ends in (`linux:<boot>:<ticks>`), and `ps -o lstart=` in UTC elsewhere (macOS), the
+# same form as the runner's pid_started there.
 LINUX = sys.platform.startswith('linux')
-PROC = Path('/proc')
 
 
 def process_file(session):
@@ -116,37 +116,19 @@ def process_file(session):
     return record if isinstance(record, dict) and isinstance(record.get('procStart'), str) else None
 
 
-def _proc_start(pid):
-    """Linux: (state, start in clock ticks) from /proc/<pid>/stat, or None.
-
-    Fields are counted after the last ')', since the command name can hold spaces and parentheses.
-    """
-    try:
-        stat = (PROC / str(pid) / 'stat').read_text()
-    except (OSError, ValueError):
-        return None
-    fields = stat[stat.rfind(')') + 2:].split(' ') if ')' in stat else []
-    if len(fields) < 20 or not fields[19].isdigit():
-        return None
-    return fields[0], fields[19]
-
-
 def same_process(record, pid):
     """mv2's start of `pid` (as the runner records pid_started) when Claude's file `record` is this live,
     non-zombie process, else None.
 
-    One ps on macOS. On Linux, /proc first and ps only when the file's ticks match it.
+    One observation of the process (process_snapshot): one ps on macOS, one read of /proc/<pid>/stat on Linux,
+    whose start token ends in the clock ticks Claude writes.
     """
     claimed = ' '.join(record['procStart'].split())
-    if LINUX:
-        proc = _proc_start(pid)
-        if proc is None or proc[0] == 'Z' or proc[1] != claimed:
-            return None
-        return process_started(pid)
     snapshot = process_snapshot(pid)
-    if snapshot is None or snapshot[1].startswith('Z') or snapshot[0] != claimed:
+    if snapshot is None or snapshot[1].startswith('Z'):
         return None
-    return snapshot[0]
+    start = snapshot[0].rsplit(':', 1)[-1] if LINUX else snapshot[0]
+    return snapshot[0] if start == claimed else None
 
 
 def process_record(session):
@@ -1702,8 +1684,10 @@ class ClaudeAdapter(ConfiguredAdapter):
             # The launch's own storage (session.home, pinned before it started), not this process's: a dashboard
             # or CLI with another CLAUDE_CONFIG_DIR would read another storage (LC-26).
             storage = launch_storage(session, None)
-            usage = measured_usage(session.native_id, (session.workspace,), storage)
-            reading = context_reading(session.native_id, (session.workspace,), storage)
+            # The agent's saved usage indexes, so a new process parses only what Claude wrote since (USAGE_STORE).
+            store = Path(session.session_file).parent / USAGE_STORE if session.session_file else None
+            usage = measured_usage(session.native_id, (session.workspace,), storage, store)
+            reading = context_reading(session.native_id, (session.workspace,), storage, store)
         except Unreadable as error:
             return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}

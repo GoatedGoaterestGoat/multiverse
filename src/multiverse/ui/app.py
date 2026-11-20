@@ -37,6 +37,8 @@ from .inspector import Inspector, plugin_outcomes
 from .panels import LocalView
 from .stale import CodeWatch
 from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
+from .columns_screen import ColumnsScreen
+from .views import plugin_column_choices, view_file
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, header_counts
@@ -44,6 +46,10 @@ from .widgets import AgentTable, Breadcrumb, DraftMenu, Fleet
 
 
 HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
+CHANGE_CHECK = 0.25  # seconds between checks of the agents' record stamps; a change lists again at once
+# Seconds a change-triggered listing waits after the last listing ended, so busy agents can't keep one running
+# back to back. In a working universe a record changes about once a second.
+CHANGE_GAP = 0.1
 
 
 # How long the refresh timer waits for the dashboard's first usage read, which parses every Claude transcript
@@ -108,6 +114,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("a", "answer", "Answer", show=False),
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
         Binding("r", "resume", "Resume", show=False), Binding("P", "plugins", "Plugins", show=False),
+        Binding("C", "columns", "Columns", show=False), Binding("e", "set_model", "Model", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -142,6 +149,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.usage_reading = False  # a usage read is running in its daemon thread
         self.prompt_outcomes = {}  # agent id -> (what the last answer sent from here came to, whether it took)
         self.first_usage_started, self.first_usage_done = None, False  # the dashboard's first read: cold, seconds long
+        self.change_stamp, self.scan_ended = None, 0.0  # the records' stamp taken before the last listing read them
+        self.stamping = False  # a change check's stat runs in its thread: the next tick waits for it, never restarts it
         self._table_signature = None
         self.history = []
         self._restore_scroll = None
@@ -180,6 +189,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         if self.refresh_interval:
             self.set_interval(self.refresh_interval, self.timed_refresh)
             self.set_interval(HOST_REFRESH, lambda: self.check_host(start=False))
+            if getattr(self.backend, "change_stamp", None):
+                self.set_interval(CHANGE_CHECK, self.check_changes)
         self.query_one("#agents", DataTable).focus()
 
     def apply_size(self, width, height):
@@ -229,6 +240,13 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     async def scan(self):
         root, generation = self.root, self._scope_generation
         try:
+            if getattr(self.backend, "change_stamp", None):
+                # Taken before the listing reads the records: a write during the listing lists once more. Only a
+                # hint: if it fails, the listing still runs and the timer stays the only trigger.
+                try:
+                    self.change_stamp = await asyncio.to_thread(self.backend.change_stamp, root)
+                except Exception:
+                    self.change_stamp = None
             snapshot = await asyncio.to_thread(self.backend.snapshot, root)
             if generation != self._scope_generation:
                 return
@@ -260,8 +278,29 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.set_status(f"Could not refresh: {self.code_watch.explain(error)}", error=True)
         finally:
             self.scanning = False
+            self.scan_ended = time.monotonic()
             if generation != self._scope_generation:
                 self.refresh_snapshot()
+
+    @work(group="changes", exit_on_error=False)
+    async def check_changes(self):
+        """List again as soon as an agent's records change: a status after a stop or resume shows within a tick
+        instead of on the timer's next listing. It runs while the first usage read holds the timer back, and waits
+        CHANGE_GAP after the last listing, so a fleet of busy agents can't keep a listing running. A check whose
+        stat is still running makes the next tick skip: cancelling it would leave its thread running anyway."""
+        if (self.stamping or self.scanning or self.change_stamp is None
+                or time.monotonic() - self.scan_ended < CHANGE_GAP):
+            return
+        root, before = self.root, self.change_stamp
+        self.stamping = True
+        try:
+            now = await asyncio.to_thread(self.backend.change_stamp, root)
+        except Exception:
+            return  # the timer's listing still runs and says what failed
+        finally:
+            self.stamping = False
+        if root == self.root and now != before and not self.scanning:
+            self.refresh_snapshot()
 
     def timed_refresh(self):
         """The refresh timer's tick. While the first usage read runs, for at most FIRST_USAGE_PATIENCE, it starts no
@@ -742,6 +781,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
+        yield SystemCommand("Columns", "Choose and order the agent list's columns", self.action_columns)
+        yield SystemCommand("Model", "Choose the selected agent's model and effort for its next resume",
+                            self.action_set_model)
 
     def plugin_palette(self):
         """[(title, help, callback)] of what plugins add to the command palette, in a stable order.
@@ -763,6 +805,22 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             root = self.target_scope()
             self.load_plugin_registry()  # a plugin repaired since the last look loads again
             self.push_screen(PluginsScreen(root, self.scope_name(root), self.plugin_service), self.plugins_changed)
+
+    @work(group="columns-screen", exclusive=True, exit_on_error=False)
+    async def action_columns(self):
+        """The Columns screen for the listed universe's view, the file its columns come from; the plugin columns it
+        offers are read off the event loop first, since loading plugins can wait."""
+        if not self.ready():
+            return
+        root = self.root
+        offered = await asyncio.to_thread(plugin_column_choices, root)
+        self.push_screen(ColumnsScreen(root, self.scope_name(root), offered), self.columns_changed)
+
+    def columns_changed(self, saved):
+        if saved:
+            self.set_status(f"Columns saved to {view_file(self.root)}")
+            columns.reset_plugin_caches()  # the plugin columns to resolve may have changed
+            self.refresh_snapshot()
 
     def plugins_changed(self, changed):
         if isinstance(changed, str) and changed:  # a plugin screen left a status line
