@@ -157,7 +157,7 @@ A plugin adds; it never alters mv2. It adds commands, columns, status items, cap
 | `agent.slash_commands()` | A `CommandList` of what the agent's harness offers, and why mv2 refuses any (1.16) | `agents.read` |
 | `agent.waiting_prompts()`, `agent.prompt_result(id)` | A `PromptList` of the prompts the agent waits on now; an earlier answer's `PromptResult` (1.17); see [waiting prompts](#waiting-prompts) | `agents.read` |
 | `agent.answer_prompt(id, choice=None, message=None, answers=None, notes=None, timeout=30, wait=True)` | A `PromptResult`: the answer, given through the harness's own answer path (1.17) | `prompts.answer` |
-| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`; `inbox()` leaves them unread | `messages.read` |
+| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`, and neither marks any read. `inbox()` gives the unread inbox-only ones; `history()` the last `last` messages, read or not, each also with `unread` (1.20): whether the agent's inbox would still show it | `messages.read` |
 | `agent.transcript()`, `transcript_rows(...)`, `iter_transcript_rows(...)`, `transcript_turns(...)`, `transcript_turn(id, ...)` | The agent's conversation, by cursor (1.13); see [transcripts](#transcripts) | `transcripts.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |
 

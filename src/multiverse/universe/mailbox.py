@@ -410,15 +410,20 @@ def inbox_fallback(message, state):
 
 
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
-          last=None, since=None, present=None, blocking=True):
+          last=None, since=None, present=None, blocking=True, unread=False):
     """Read unread manual messages; peek and full history do not consume them.
 
     blocking=False raises BlockingIOError on contention so a waiter can check
     its own deadline and lifetime without keeping another lock while waiting.
     A peek never recreates an agent directory removed before its lock opens.
+    unread=True (full history only) gives each message `unread`: whether an
+    ordinary inbox read would still show it. It marks nothing read, and like
+    a peek it never recreates a removed agent directory.
     """
     if peek and (all_messages or after is not None):
         raise ValueError('--peek cannot be combined with --all or --after')
+    if unread and not all_messages:
+        raise ValueError('unread flags come only with the full history')
     if (last is not None or since is not None) and not all_messages:
         raise ValueError('--last and --since require --all')
     if last is not None and (last <= 0 or after is not None):
@@ -426,13 +431,13 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
-    with lock(agent_dir / '.inbox.lock', blocking=blocking, create_parent=not peek):
+    with lock(agent_dir / '.inbox.lock', blocking=blocking, create_parent=not (peek or unread)):
         # These optional records share the inbox lock, so one absence snapshot covers this read/consume.
         observed_missing = missing_records(agent_dir / name for name in
             ('inbox.cursor', 'inbox-state.json', 'native-delivery.json', 'inbox-read.json'))
         result, consumed = _inbox_locked(agent_dir, observed_missing=observed_missing, limit=limit,
                                          after=after, all_messages=all_messages, peek=peek,
-                                         last=last, since=since, present=present)
+                                         last=last, since=since, present=present, unread=unread)
     if consumed and result['messages']:
         # Inbox-only messages read and marked read, after a successful present.
         _event(agent_dir, "message.read", {"count": len(result["messages"])})
@@ -440,7 +445,7 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
 
 
 def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_messages=False, peek=False,
-                  last=None, since=None, present=None):
+                  last=None, since=None, present=None, unread=False):
     """Read/consume a page under an already-held inbox lock; batch peeks always use peek=True."""
     data, read_cursor, records = _messages(agent_dir, observed_missing=observed_missing)
     states = _states(agent_dir, observed_missing=observed_missing)
@@ -480,6 +485,10 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
         if all_messages:
             messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
                                                      **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
+            if unread:  # what an ordinary inbox read would show now: an unread blocked-on copy, or an inbox-only
+                # message past the read position that mv2 held hasn't read ahead
+                messages[-1]['unread'] = bool(unread_copy or (_manual(message) and offset > read_cursor
+                                                              and message['id'] not in marks))
         elif unread_copy:
             messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
             copies.append(message['id'])

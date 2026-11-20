@@ -2028,10 +2028,13 @@ class Agent:
                                                     generation=generation))
 
     def history(self, last=20):
-        """The last messages, read or not, oldest first (needs messages.read)."""
+        """The last `last` messages, read or not, oldest first (needs messages.read): [{at, from, text, delivery,
+        unread}]. `unread` (1.20) says whether the agent's inbox would still show it; reading marks nothing read."""
         self._plugin._need("messages.read")
+        if type(last) is not int or last <= 0:
+            raise Error("history takes a positive number of messages: last=20")
         from ..universe import mailbox
         with _acting(self._plugin._loaded, "observe", self.universe, "reading message history"):
-            found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
-        return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
-                for message in found["messages"][-last:]]
+            found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, last=last, unread=True)
+        return [{**{key: message[key] for key in ("at", "from", "text", "delivery") if key in message},
+                 "unread": message["unread"]} for message in found["messages"]]
