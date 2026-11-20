@@ -322,7 +322,7 @@ bookkeeping is not evidence that the agent never received an older message.
 
 ## Listen for quiet messages
 
-When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. After reading and handling the messages, start it again when you are waiting.
+When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. If you run `mv2 report --phase working` while your listener is still running, mv2 reminds you to stop it. After reading and handling the messages, start it again when you are waiting.
 
 Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Ordinary steers and follow-ups do not end the wait; the unread inbox copy of a blocked-on upgrade does.
 
@@ -360,7 +360,9 @@ If the target is missing here but found in a related universe, the error suggest
 
 The dependency follows the agent's ID, so renaming it or reusing its old name cannot redirect a follow-up. The display finds moves within the known universe trees; a target that cannot be found shows its saved name with `gone`. For a move outside those trees, report the target's new universe to update its displayed address. Incoming messages still match by ID. A new `--phase` report clears the previous dependency unless it also supplies `--blocked-on`, including another plain `--phase blocked`. Updating only the summary keeps it.
 
-When an agent reports and has unread inbox messages from its blocked-on agent, its output ends with `Reminder: you have unread messages from NAME.` This is the same nonblocking peek as send's reminder: it never marks anything read, and a busy or damaged inbox skips it.
+When an agent reports and has unread inbox messages from its blocked-on agent, its output includes `Reminder: you have unread messages from NAME.` This is the same nonblocking peek as send's reminder: it never marks anything read, and a busy or damaged inbox skips it.
+
+When an agent runs `mv2 report --phase working`, mv2 reminds it to stop its `mv2 listen` background shell if its current launch still has a listener.
 
 A blocked report also gives guidance for its dependency:
 

@@ -6,6 +6,7 @@ from ..universe import agents, blocked, focus
 from ..universe import mailbox
 from ..store import lock
 from .. import display
+from . import listen
 from ._common import add_agent, callback
 
 def configure(parser):
@@ -65,7 +66,22 @@ def cli_run(root=None, *, agent=None, phase=None, summary=None, blocked_on=None,
                      "further messages from other agents.")
         elif dependency['kind'] == 'self' and not re.search(r'\bETA\b', record.get('summary') or '', re.IGNORECASE):
             line += ' You are encouraged, if possible, to report the ETA of the process you are blocked on.'
+    if phase == 'working' and _own_listener(directory):
+        line += '\nStop your mv2 listen background shell while you work.'
     return line
+
+
+def _own_listener(directory):
+    from ..runtime.agent_identity import sender_actor
+    try:
+        launch_id = agents.runtime(directory).get('launch_id')
+        if not launch_id:
+            return False
+        caller = sender_actor(acting='check the listener')
+        return (caller is not None and caller.directory.resolve() == directory.resolve()
+                and listen.running(directory, launch_id))
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
 
 
 if __name__ == "__main__":

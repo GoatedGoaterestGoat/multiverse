@@ -19,7 +19,7 @@ from multiverse import cli, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity, focus_note, native
 from multiverse.runtime.process import process_started
-from multiverse.tools import inbox as inbox_tool, listen, send
+from multiverse.tools import inbox as inbox_tool, listen, report, send
 from multiverse.universe import focus, mailbox
 
 
@@ -140,6 +140,57 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                 self.assertTrue(changed)
                 self.assertTrue(result.get('ok', True), result)
                 self.assertEqual([m['text'] for m in mailbox.inbox(self.directory)['messages']], ['original reply'])
+
+    def test_a_report_reminds_only_its_current_live_listener(self):
+        """An agent that starts work should stop its own listener, even when an old listener's lock remains."""
+        advice = "Stop your mv2 listen background shell while you work."
+        launch = self.directory / 'launches' / self.launch
+        launch.mkdir(parents=True)
+        self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+        with store.lock(launch / focus.LISTENING):
+            self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+        with self.listener(self.directory / '.launch.lock') as (process, _, polled):
+            until(polled.exists)
+            self.assertIsNone(process.poll())
+            focus.start(self.directory)
+            try:
+                line = report.cli_run(self.root, agent=self.agent, phase='working')
+                self.assertEqual(line.splitlines()[-1], advice)
+                self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, summary='Still working'))
+                self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='blocked', blocked_on='user'))
+                for phase in ('starting', 'blocked', 'done'):
+                    with self.subTest(phase=phase):
+                        self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase=phase))
+            finally:
+                focus.end(self.directory)
+            probe = os.open(launch, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+            finally:
+                os.close(probe)
+            stable_env = {key: value for key, value in os.environ.items() if key != 'MV2_LAUNCH_ID'}
+            stable = agent_identity.AgentActor(self.root, self.directory, self.agent, 'listener')
+            with patch.dict(os.environ, stable_env, clear=True), patch.object(agent_identity, 'actor', return_value=stable):
+                self.assertIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+            with patch.dict(os.environ, environment, clear=True):
+                self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+        self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+        current = store.uid()
+        (self.directory / 'launches' / current).mkdir()
+        real_running = listen.running
+
+        def replace_before_probe(directory, launch_id):
+            store.write(self.directory / 'runtime.json', {**self.facts, 'launch_id': current})
+            return real_running(directory, launch_id)
+
+        with focus.listening(self.directory, launch_id=current), \
+                patch.object(listen, 'running', side_effect=replace_before_probe):
+            self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
+        with focus.listening(self.directory, launch_id=self.launch), \
+                patch.dict(os.environ, {'MV2_LAUNCH_ID': current}):
+            self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
 
     def test_listen_notifies_only_for_unread_manual_messages_and_never_consumes_them(self):
         """A background notification must neither repeat native prompts nor mark quiet work read before the agent sees it."""
