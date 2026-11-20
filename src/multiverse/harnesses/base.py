@@ -19,14 +19,17 @@ RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
 # from one: its identity, which a Claude reads at startup (CLAUDECODE, the child-session marker that turns
 # transcript saving off, the session, attended and bridge IDs, the entry point and worktree, and since 2.1.328 the
 # sessions that launched it and their notes folder), its IDE port and inbox, and its tool shells' own values. Claude
-# Code removes the same identity when it starts a fresh Claude itself (2.1.303, 2.1.328). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
+# Code removes that identity when it starts a fresh Claude itself (2.1.303, 2.1.328). Also the project-folder name and
+# scratchpad folder a host sets for a session, which Claude keeps for a fresh Claude: with CLAUDE_CONFIG_DIR set, the
+# name moves its transcripts to projects/<name>/, where mv2 never looks (2.1.329). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
 # CLAUDE_CODE_TMPDIR: Claude sets it only for a sandboxed shell, and its errors tell users to set it themselves.
 PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
                  'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
                  'CLAUDE_CODE_HOST_WORKTREE_FENCE', 'CLAUDE_CODE_EVAL_INTERVIEW_SESSION',
                  'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
                  'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH',
-                 'CLAUDE_CODE_INVOKED_SKILLS', 'CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS', 'CLAUDE_CODE_CHILD_NOTES_DIR')
+                 'CLAUDE_CODE_INVOKED_SKILLS', 'CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS', 'CLAUDE_CODE_CHILD_NOTES_DIR',
+                 'CLAUDE_CODE_PROJECT_DIR_NAME', 'CLAUDE_CODE_SCRATCHPAD_DIR')
 
 
 def arguments(value, label, required=False):

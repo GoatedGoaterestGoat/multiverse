@@ -1116,11 +1116,14 @@ class LaunchIsolationTest(unittest.TestCase):
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
                    "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
-                   "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR")
-        # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through.
+                   "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR",
+                   "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_SCRATCHPAD_DIR")
+        # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through. So
+        # does a CLAUDE_CONFIG_DIR the parent session shares with its agents: it is where their transcripts are.
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
                   **{name: "parent" for name in markers}, "CLAUDE_CODE_CHILD_SESSION": "1", "NO_COLOR": "1",
-                  "TERM": "tmux-256color", "CLAUDE_CODE_TMPDIR": "/users-own/tmp"}
+                  "TERM": "tmux-256color", "CLAUDE_CODE_TMPDIR": "/users-own/tmp",
+                  "CLAUDE_CONFIG_DIR": "/shared/claude"}
         values = self.adapter_values()
         # environment.md suggests replacing unset_env (for NO_COLOR, say); the markers must stay removed then.
         variants = ({}, {"unset_env": ["NO_COLOR"]}, {"env": {"CLAUDE_CODE_CHILD_SESSION": "0"}})
@@ -1166,6 +1169,8 @@ class LaunchIsolationTest(unittest.TestCase):
                                      settings.get("env", {}))
                     self.assertEqual(env["TERM"], "tmux-256color")
                     self.assertEqual(env.get("CLAUDE_CODE_TMPDIR"), "/users-own/tmp")
+                    if name == 'claude':
+                        self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), "/shared/claude")
                     self.assertTrue(env["PATH"].startswith("/child/bin" + os.pathsep))
 
         # Claude Code (2.1.301+) saves no transcript when it inherits CLAUDE_CODE_CHILD_SESSION=1, the marker it

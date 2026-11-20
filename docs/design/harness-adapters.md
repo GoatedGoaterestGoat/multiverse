@@ -922,7 +922,13 @@ parent Claude's `CLAUDE_CODE_SSE_PORT` (its IDE connection) and
 its secret), which an agent spawned from inside Claude inherits, and since Claude
 Code 2.1.328 `CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS` and `CLAUDE_CODE_CHILD_NOTES_DIR`
 (the sessions that launched it, which a Claude records itself as derived from,
-and their notes folder); a harness that sets one in `env` keeps its value.
+and their notes folder), and the `CLAUDE_CODE_PROJECT_DIR_NAME` and
+`CLAUDE_CODE_SCRATCHPAD_DIR` a host may set for the parent: with
+`CLAUDE_CONFIG_DIR` set, the first moves a Claude's transcripts to
+`projects/<name>/`, where mv2 would no longer find the agent's, and the second is
+the parent's scratchpad. Claude itself removes the identity names when it starts
+a fresh Claude, but keeps these two. A harness that sets one in `env` keeps its
+value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
