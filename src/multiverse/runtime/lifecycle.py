@@ -1266,7 +1266,7 @@ def note_ready(root, agent_dir, launch_id):
         from ..plugins import events
         launch = agent_dir / 'launches' / launch_id
         marker = launch / 'ready-event'
-        if marker.exists() or not events.subscribers(root, 'agent.ready'):
+        if marker.exists() or not events.admits(root, 'agent.ready'):
             return
         properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
         if facts.get('launch_id') != launch_id:
@@ -1325,7 +1325,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             if screen_expired and launch_ready(adapter, result, facts, agent_dir, request, live):
                 try:
                     from ..plugins import events
-                    if events.subscribers(root, 'agent.ready'):
+                    if events.admits(root, 'agent.ready'):
                         _record_ready(agent_dir, launch_id, result)
                 except Exception:
                     pass  # Optional events never hold up readiness.

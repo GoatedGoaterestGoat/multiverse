@@ -75,6 +75,8 @@ class InstallerTest(PluginTestCase):
         result = tool.run(self.root, plugin_action="install", name=source, yes=True)["result"]
         self.assertEqual((result["name"], Path(result["target"])), ("notes", target))
         self.assertEqual(self.staging(), [])
+        self.assertEqual(trust._records()[str(target.resolve())].get("events"),
+                         sorted(json.loads((target / "plugin.json").read_text()).get("events", [])))  # for the journal
         self.enable("notes")
         self.assertEqual(self.state(), "on")
         listed = {item["name"]: item for item in plugins.listing(self.root, wait=0)}["notes"]
@@ -83,6 +85,10 @@ class InstallerTest(PluginTestCase):
                             target.resolve())  # it runs from a copy of exactly the pinned bytes
         (target / "plugin.py").write_text(CODE + "# edited\n")
         self.assertEqual(self.state(), "changed")
+        alias = {"MV2_PLUGIN_PATH": os.pathsep.join([str(target), os.environ["MV2_PLUGIN_PATH"]])}
+        with mock.patch.dict(os.environ, alias):  # found through a path naming it, and listed there
+            plugins.listing(self.root, wait=0)
+            self.assertEqual(trust.state(target), "changed")  # approves no edit: only the person's trust does
         with self.assertRaisesRegex(ValueError, "mv2 plugins remove"):
             tool.run(self.root, plugin_action="untrust", name="notes")  # would unpin it, not stop it
         tool.run(self.root, plugin_action="trust", name="notes")  # the person approves the edit
@@ -396,11 +402,11 @@ class InstallerTest(PluginTestCase):
             real_pin = installer.trust.pin
             pins = []
 
-            def pin_once(directory, value):  # the pin before placing works; putting the old one back doesn't
+            def pin_once(directory, value, events=None):  # the pin before placing works; putting back doesn't
                 pins.append(value)
                 if len(pins) > 1:
                     raise OSError(28, "No space left on device")
-                return real_pin(directory, value)
+                return real_pin(directory, value, events)
             before = (target / "plugin.py").read_text()
             with mock.patch.object(installer.Place, "save", side_effect=OSError(28, "No space left")), \
                     mock.patch.object(installer.trust, "pin", pin_once):

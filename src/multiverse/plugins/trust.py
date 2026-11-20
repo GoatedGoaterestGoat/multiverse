@@ -17,6 +17,7 @@ trusted plugin.
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -82,6 +83,27 @@ def fingerprint(directory):
     return "sha256:" + digest.hexdigest()
 
 
+def fingerprint_with(directory, name="plugin.json"):
+    """(fingerprint, the bytes of `name` exactly as hashed, or None): what a fingerprint approves, read in the same
+    pass. Reads only the plugin's regular files: writes nothing, takes no lock."""
+    digest, kept = hashlib.sha256(), None
+    for relative, path in _files(directory):
+        data = path.read_bytes()
+        if relative.as_posix() == name:
+            kept = data
+        _add(digest, relative, data)
+    return "sha256:" + digest.hexdigest(), kept
+
+
+def events_of(directory, raw):
+    """The sorted event types of plugin.json bytes `raw`, or None when they don't make a manifest."""
+    from . import manifest as manifests
+    try:
+        return sorted(manifests.load_bytes(directory, raw).events)
+    except (OSError, ValueError):
+        return None
+
+
 def signature(directory):
     """A digest of every file's path, size, modification and change times, inode and mode (no contents).
 
@@ -126,6 +148,103 @@ def _fingerprints():
     return data if isinstance(data, dict) else {}
 
 
+READ_LIMIT = 4 * 1024 * 1024  # a trust map or memo larger than this isn't read where nothing may wait
+
+
+def read_regular(path, limit=READ_LIMIT, raw=False):
+    """A JSON file (its bytes, with `raw`) read without ever waiting: opened without following a link or blocking
+    (a FIFO there is refused, never waited on), only as a regular file of at most `limit` bytes, never retried.
+    FileNotFoundError when it's absent; OSError or ValueError for anything else it can't be."""
+    import stat as stats
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    try:
+        status = os.fstat(descriptor)
+        if not stats.S_ISREG(status.st_mode) or status.st_size > limit:
+            raise OSError(f"{path} isn't a regular file of at most {limit} bytes")
+        data = os.read(descriptor, limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > limit:
+        raise OSError(f"{path} is larger than {limit} bytes")
+    return data if raw else json.loads(data)
+
+
+def pins_now():
+    """The paths trusted-plugins.json pins ({path: record}), read without waiting (read_regular): {} when it was
+    never written, None when it can't be read for sure (missing though its writers' lock is there, not a regular
+    file, damaged)."""
+    path = user_directory() / FILE
+    try:
+        data = read_regular(path)
+    except FileNotFoundError:
+        return None if (user_directory() / ".trusted-plugins.lock").exists() else {}
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    return plugins if isinstance(plugins, dict) else None
+
+
+def copy_events(value):
+    """The event types of the cached copy made at fingerprint `value`, from the plugin.json bytes inside the hash
+    that proves the copy is those bytes (its files as listed when it was made, or for an older copy its own files
+    or all of them, as _copy_intact checks); None when there's no complete copy or it doesn't hash to `value`."""
+    if not valid_fingerprint(value):
+        return None  # no path is made from a damaged pin
+    target = cache_directory(value)
+    if not (target / COMPLETE).is_file():
+        return None
+    try:
+        listed = read_regular(target / LISTED)
+    except FileNotFoundError:
+        listed = None
+    except (OSError, ValueError):
+        return None
+    present = _present(target)  # the files in the copy, as _copy_intact lists them: nothing outside it
+    if listed is not None:
+        if (not isinstance(listed, list) or not all(isinstance(item, str) for item in listed)
+                or not set(listed) <= set(present)):
+            return None  # a damaged list, or one naming what isn't a file of the copy: nothing read
+        candidates = [sorted(listed)]
+    else:
+        candidates = [[name for name in present if not _bookkeeping(target, Path(name))], present]
+    for names in candidates:
+        digest, kept = hashlib.sha256(), None
+        for name in names:
+            path = target / name
+            if path.is_symlink() or not path.is_file():
+                break
+            data = path.read_bytes()
+            if name == "plugin.json":
+                kept = data
+            _add(digest, Path(name), data)
+        else:
+            if "sha256:" + digest.hexdigest() == value:
+                return events_of(target, kept)
+    return None
+
+
+def keep_events(directory, value, events):
+    """Keep `events` with the pin of `directory` when it still pins `value` and keeps no types yet (a pin made
+    before they were kept): written under the trust lock; True when it wrote."""
+    directory = Path(directory).resolve()
+    path = user_directory() / FILE
+    with lock(user_directory() / ".trusted-plugins.lock"):
+        records = _records()
+        record = records.get(str(directory))
+        if not isinstance(record, dict) or record.get("fingerprint") != value or "events" in record:
+            return False
+        records[str(directory)] = {**record, "events": sorted(events)}
+        write(path, {"schema": 1, "plugins": records})
+    return True
+
+
+def _pin_record(value, events):
+    record = {"fingerprint": value, "trusted_at": now()}
+    if events is not None:
+        record["events"] = sorted(events)  # the approved copy's event types: the journal reads them, never hashes
+    return record
+
+
 def _remember(directory, value_signature, value):
     try:
         with lock(user_directory() / ".plugin-fingerprints.lock"):
@@ -145,6 +264,15 @@ def compiled(directory):
         elif relative.suffix in COMPILED:
             found.add(relative.as_posix())
     return sorted(found)
+
+
+FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")  # what fingerprint() writes, and so the only pin a pin can be
+
+
+def valid_fingerprint(value):
+    """Whether `value` is a fingerprint as fingerprint() writes it: only such a pin approves anything or names a
+    cached copy."""
+    return isinstance(value, str) and FINGERPRINT.fullmatch(value) is not None
 
 
 def cache_directory(value):
@@ -346,26 +474,49 @@ def trust(directory):
     """Trust the plugin at `directory` as it is now; returns its fingerprint."""
     directory = Path(directory).resolve()
     before = signature(directory)
-    value = fingerprint(directory)
+    value, raw = fingerprint_with(directory)
     if signature(directory) == before:
         _remember(directory, before, value)
+    events = events_of(directory, raw)  # of exactly the bytes trusted; no copy made, so an edit after still won't run
     path = user_directory() / FILE
     with lock(user_directory() / ".trusted-plugins.lock"):
         records = _records()
-        records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
+        records[str(directory)] = _pin_record(value, events)
         write(path, {"schema": 1, "plugins": records})
     prune_cache()
     return value
 
 
-def pin(directory, value):
+def pin(directory, value, events=None):
     """Trust whatever at `directory` has fingerprint `value`, without reading it: the installer pins what the
-    person approved before the files arrive there, so they're never there unpinned."""
+    person approved before the files arrive there, so they're never there unpinned. `events`: the event types of
+    those bytes, when known."""
     directory = Path(directory).resolve()
     with lock(user_directory() / ".trusted-plugins.lock"):
         records = _records()
-        records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
+        records[str(directory)] = _pin_record(value, events)
         write(user_directory() / FILE, {"schema": 1, "plugins": records})
+
+
+def pin_first(directory, value, events=None):
+    """Pin `directory` at fingerprint `value` only if nothing pins it yet, deciding and writing under the trust
+    lock; True when it pinned. A trust map that is there but can't be read pins nothing. `events`: the event types
+    of those bytes, when known."""
+    directory = Path(directory).resolve()
+    path = user_directory() / FILE
+    with lock(user_directory() / ".trusted-plugins.lock"):
+        try:
+            data = retry_missing(lambda: read(path))
+        except FileNotFoundError:
+            data = {"plugins": {}}
+        except (OSError, ValueError):
+            return False
+        records = data.get("plugins") if isinstance(data, dict) else None
+        if not isinstance(records, dict) or str(directory) in records:
+            return False
+        records[str(directory)] = _pin_record(value, events)
+        write(path, {"schema": 1, "plugins": records})
+        return True
 
 
 def forget(directory):

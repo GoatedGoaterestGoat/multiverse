@@ -669,7 +669,8 @@ def confirm(key, root=None):
     staged, keep = stage / "plugin", False
     try:
         summary = read(stage / "preview.json")
-        if trust.fingerprint(staged) != summary["fingerprint"]:
+        value, raw = trust.fingerprint_with(staged)  # its event types from exactly the bytes checked here
+        if value != summary["fingerprint"]:
             raise InstallError("the fetched files changed after they were shown, so nothing was installed: "
                                "fetch them again")
         name, target = summary["name"], where.target(summary["name"])
@@ -691,8 +692,9 @@ def confirm(key, root=None):
                     raise InstallError(f"{target} isn't the folder mv2 plugins install placed (moved or replaced "
                                        f"since): nothing was updated")
             previous = trust._records().get(str(target.resolve()))
-            # Pinned before the files arrive: in between, the old files read as changed, never as unpinned.
-            trust.pin(target, summary["fingerprint"])
+            # Pinned before the files arrive: in between, the old files read as changed, never as unpinned. With
+            # the event types of the staged bytes the fingerprint was just checked on.
+            trust.pin(target, summary["fingerprint"], trust.events_of(staged, raw))
             old = stage / "replaced"
             placed = replaced = False
             try:
@@ -728,7 +730,7 @@ def confirm(key, root=None):
                                        f"({rollback}): the previous version is in {kept}") from error
                 try:
                     if isinstance(previous, dict):
-                        trust.pin(target, previous["fingerprint"])
+                        trust.pin(target, previous["fingerprint"], previous.get("events"))
                     else:
                         trust.forget(target)
                 except OSError as pinning:

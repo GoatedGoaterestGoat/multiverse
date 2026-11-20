@@ -252,6 +252,21 @@ def load(directory):
         raise ManifestError(f"{path}: {error}") from None
 
 
+def load_bytes(directory, raw):
+    """The manifest whose plugin.json bytes are `raw` (as hashed by trust.fingerprint_with), or ManifestError."""
+    path = Path(directory) / FILE
+    if raw is None:
+        raise ManifestError(f"{path}: missing")
+    try:
+        data = json.loads(raw)
+    except ValueError as error:
+        raise ManifestError(f"{path}: not valid JSON: {error}") from None
+    try:
+        return _parse(Path(directory), data)
+    except ValueError as error:
+        raise ManifestError(f"{path}: {error}") from None
+
+
 def _parse(directory, data):
     if not isinstance(data, dict):
         raise ValueError("must be a JSON object")

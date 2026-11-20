@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import DataTable, Static
 
 from multiverse import plugins
-from multiverse.plugins import loader
+from multiverse.plugins import loader, trust
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen
 
@@ -127,6 +127,9 @@ class RepairTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.close_screen()
                 (self.broken / "plugin.py").write_text(BROKEN.replace("KIND", "int"))
                 (self.plugins_dir / "broken" / "plugin.py").write_text(RECOVERED)
+                for folder in (self.broken, self.plugins_dir / "broken"):  # on, so pinned: the person approves
+                    if trust.state(folder) == "changed":
+                        trust.trust(folder)
                 await d.press("f5")  # what a person does after fixing a plugin
                 self.assertNotIn("Could not refresh", d.status)
                 await d.until(lambda: "badfield: Repaired" in d.palette(), "the repaired plugin's palette entry")

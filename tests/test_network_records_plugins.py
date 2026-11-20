@@ -321,7 +321,7 @@ class NetworkPluginRecordsTest(PluginTestCase):
         self.assertEqual(set(store.read(path)["plugins"]), {str(directory)})
         path = trust.user_directory() / loader.INSTALLED
         signature = [["site", 1]]
-        saved = {"signature": signature, "directories": [str(directory)], "used": 0}
+        saved = {"signature": signature, "directories": [str(directory)], "origins": {}, "used": 0}
         with mock.patch.object(loader, "_environment_signature", return_value=signature), \
                 mock.patch.object(loader, "_scan_installed", return_value=[]) as scan:
             store.write(path, {"environments": {sys.executable: saved, "other-python": saved}})

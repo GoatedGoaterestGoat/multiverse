@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import plugins
-from multiverse.plugins import loader, manifest, settings as settings_files
+from multiverse.plugins import loader, manifest, settings as settings_files, trust
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import write
 from multiverse.tools import doctor, plugins as tool, refresh
@@ -62,9 +62,12 @@ class WaitingOldFileTest(PluginTestCase):
         with self.subTest("once converted it is on"):
             (self.root / "veteran.json").write_text(json.dumps({"level": 2}))
             loader.reset()
-            self.write_plugin("veteran", {"module": "plugin", "settings": {**SETTINGS, "legacy": "veteran.json"}}, {
+            settings = {**SETTINGS, "legacy": "veteran.json"}
+            edited = self.write_plugin("veteran", {"module": "plugin", "settings": settings}, {
                 "plugin.py": ("def register(mv):\n    @mv.settings.migrate\n    def migrate(data, source):\n"
                               "        return {'schema': 1, 'level': data['level']}\n")})
+            if trust.state(edited) == "changed":  # on, so recorded and pinned: the person approves their edit
+                trust.trust(edited)
             self.assertNotEqual(tool.run(self.root, plugin_action="migrate", apply=True).get("ok"), False)
             loader.reset()
             self.assertIn(self.listed()["state"], ("on", "loaded"))

@@ -99,20 +99,83 @@ def segments(root):
     return sorted(found)
 
 
-def subscribers(root, kind):
-    """Names of the plugins on here whose manifest subscribes to events of `kind`.
+def subscribers(root, kind, admit=False):
+    """Names of the enabled plugins subscribed to events of `kind`: the authority, from the types of
+    what runs (a pin made before types were kept with it counts for nothing until they're proved). With `admit`,
+    for journal admission (admits()), such a plugin counts too, conservatively.
 
-    From manifests alone (loader.declared), so recording costs a command no
-    trust check: a plugin that is on but cannot run yet (not trusted, say) has
-    its events recorded too, for when it can; the host verifies trust before it
+    From manifests alone, so recording costs a command no trust check and no import: a plugin that is on but cannot
+    run yet (not trusted, say) has its events recorded too, for when it can; the host verifies trust before it
     delivers anything."""
     if loader.safe_mode():
         return []
-    if not any(fnmatch.fnmatchcase(kind, pattern)
-               for manifest in loader.manifest_records(root) for pattern in manifest.events):
-        return []  # With no subscribing manifest, plugins.json cannot change the answer.
-    return sorted({found.name for found in loader.declared(root)
-                   if found.on and any(fnmatch.fnmatchcase(kind, pattern) for pattern in found.manifest.events)})
+    from . import config, registry, trust
+
+    def matches(patterns):
+        return any(fnmatch.fnmatchcase(kind, pattern) for pattern in patterns)
+
+    found = []
+
+    def pins():  # the paths trusted-plugins.json pins: read once, the first time it's needed, never waiting for
+        if not found:  # anything (trust.pins_now), None when they can't be read for sure
+            found.append(trust.pins_now())
+        return found[0]
+
+    # A plugin's event types are those of what runs. A folder the universe records runs at its pinned copy in every
+    # process: that copy's types, else the ones recorded for it, also where this process finds another copy of that
+    # name. A copy this process finds and runs verified (a universe plugin, one the installer placed, a plugin found
+    # only here) has its approved bytes' types, kept with its pin; one never approved, its manifest's; one whose
+    # approval can't be read, none. A pin made before types were kept with it is admitted conservatively (its
+    # manifest's and its record's types; nothing hashed here) until the person's listing proves and keeps its types.
+    # Any other plugin this process finds is found alike by every process, so its manifest as it is now decides: a
+    # type it starts or stops following counts at once, with no listing. The record decides for a plugin this
+    # process can't find only when another process found it where this one can't look (an agent's own find); a
+    # plugin of a shared source that is gone is gone.
+    recorded = (registry.known(root) or {}) if root is not None else {}
+    pinned = {name for name, value in recorded.items() if value.get("directory") is not None}
+    live, failed = {}, False
+    try:
+        for source, directory, manifest in loader.manifest_sources(root):
+            if manifest.name in pinned:
+                continue
+            default = manifest.default if source == "bundled" else "off"
+            patterns = manifest.events
+            if source in ("universe", "personal", "recorded") or not registry.shared(source, directory):
+                state, approved = registry.approved_events(directory, pins())
+                if state == "approved":
+                    patterns = approved
+                elif state == "unknown":  # its approval can't be read: no authority; admitted conservatively
+                    patterns = [*manifest.events, *recorded.get(manifest.name, {}).get("events", [])] if admit else []
+                elif state == "legacy":
+                    # A pin made before types were kept with it: nothing proves its types until the person's
+                    # listing keeps them (nothing is hashed here), so it subscribes to none; for journal admission
+                    # alone (admits), conservatively its manifest's and its record's.
+                    patterns = [*manifest.events, *recorded.get(manifest.name, {}).get("events", [])] if admit else []
+            live.setdefault(manifest.name, []).append((default, list(patterns)))
+    except (OSError, RuntimeError):
+        live, failed = {}, True  # discovery failed: the record alone
+    possible = set()
+    for name, value in recorded.items():
+        if name in pinned:
+            state, approved = registry.approved_events(value["directory"], pins())
+            if state == "approved":
+                patterns = approved
+            elif admit:  # not approved (older pin, no pin, pins unreadable): no authority, admitted by its record
+                patterns = [*value["events"], *(_manifest_events(value["directory"]) if state == "legacy" else [])]
+            else:
+                patterns = []
+        elif failed or name not in live and value.get("private"):
+            patterns = value["events"]
+        else:
+            continue
+        if matches(patterns):
+            possible.add(name)
+    visible = {(name, default) for name, copies in live.items() for default, patterns in copies if matches(patterns)}
+    if not possible and not visible:
+        return []  # No switch value can enable an applicable subscription.
+    settings = config.load(root, observed=True) if root is not None else config.Config()
+    return sorted({name for name in possible if settings.is_on(name)}
+                  | {name for name, default in visible if settings.is_on(name, default)})
 
 
 SPILL = "spill"  # state/events/spill/: events a process couldn't journal at once, merged in by the next writer
@@ -120,6 +183,24 @@ MERGE_BYTES = 2 * 1024 * 1024  # the most the plugin host's poll merges at once;
 EMIT_MERGE_BYTES = 64 * 1024  # the most a recorder merges before its own event: recording stays quick
 CLAIM = ".merging-"  # a spill file a merge took, renamed aside with an id of its own
 _spill_name = None  # (pid, file name, stamp): this process's own spill file
+
+
+def _manifest_events(directory):
+    """The event types in `directory`'s own plugin.json, read without waiting (trust.read_regular), or none."""
+    from . import manifest as manifests, trust
+    try:
+        return list(manifests.load_bytes(directory, trust.read_regular(Path(directory) / manifests.FILE,
+                                                                        raw=True)).events)
+    except (OSError, ValueError):
+        return []
+
+
+def admits(root, kind):
+    """Whether an event of `kind` is to be journaled: a subscriber, or, conservatively, a plugin
+    that is on whose pin was made before types were kept with it and whose manifest or record could follow it
+    (nothing proves which until the person's listing keeps them, and a lookup never hashes). More is journaled,
+    never lost; the host delivers only what the verified plugin follows."""
+    return bool(subscribers(root, kind, True))
 
 
 def _spill_path(root, fresh=False):
@@ -658,7 +739,7 @@ def emit(root, kind, agent=None, launch=None, data=None):
     event when it was journaled now, or None (nobody subscribes, spilled, or it couldn't be written).
     """
     try:
-        if root is None or not subscribers(root, kind):
+        if root is None or not admits(root, kind):
             return None
         agent_ref = None
         if agent:
@@ -736,7 +817,7 @@ def prompt_event(agent_dir, kind, launch, data, *, key, properties=None):
     root = None
     try:
         root = root_of(agent_dir)
-        if root is None or not subscribers(root, kind):
+        if root is None or not admits(root, kind):
             return "unsubscribed"
         if not isinstance(key, str) or not key:
             raise ValueError("a prompt event needs core's replay key")

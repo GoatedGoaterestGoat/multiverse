@@ -128,6 +128,7 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Written after the cursor: an interrupted write delivers again, never skips. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
 | `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
+| `registry.json` | Each plugin that's on here: the event types it subscribes to, the source that found it, and, for one found only in your own environment (`MV2_PLUGIN_PATH`, a package found only through your `PYTHONPATH`), its folder. Every process here records the plugin's events from it, and finds it there, at the content pinned for it when you turned it on (`mv2 plugins trust NAME` approves an edit). One only an agent's own environment finds is marked `private`: its event types are recorded for it, never its folder. Written when you turn a plugin on or off and when you list the plugins. |
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
 
@@ -318,7 +319,7 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | --- | --- |
 | `~/.multiverse/templates/NAME/` | Your own templates, found by `init --template NAME` before the bundled ones. |
 | `~/.multiverse/plugins/NAME/` | Your own plugins, which every universe can turn on. |
-| `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted, and the plugins `mv2 plugins install` placed: each one's path, the SHA-256 of its files and when. Written by `mv2 plugins trust`, `untrust`, `install`, `update` and `remove`. |
+| `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted, the plugins `mv2 plugins install` placed, and the folders a universe records: each one's path, the SHA-256 of its files, when, and the event types those files follow, which the journal reads instead of hashing anything. Written by `mv2 plugins trust`, `untrust`, `install`, `update`, `remove`, and by turning on a plugin a universe records. |
 | `~/.multiverse/plugin-installs.json` | What `mv2 plugins install` placed in `~/.multiverse/plugins/`: each plugin's source, the ref asked for, the commit, the folder inside the repository, the SHA-256 of its files and what it could do then. `update` and `remove` act only on what it names. A universe's own installs (`--here`) are in its `state/plugin-installs.json`. |
 | `~/.multiverse/plugin-staging/` | Plugins fetched by `mv2 plugins install` or `update`, waiting for your yes. Anything left there for a day is removed. A universe's own installs stage in its `state/plugin-staging/`. |
 | `~/.multiverse/plugin-cache/SHA256/` | The copy of a trusted universe plugin that actually runs, with `.mv2-files`, the files it was made with. A copy whose listed files were edited doesn't run. A copy nothing trusts and nothing used for 14 days is removed. |

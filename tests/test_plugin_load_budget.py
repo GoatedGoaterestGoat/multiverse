@@ -151,6 +151,9 @@ class LoadBudgetTest(PluginTestCase):
             self.assertIsNone(loader.loaded_by_package("mv2_plugins.nothing_here"))
         with self.subTest("a widget and the plugins list never wait for it"):
             root = self.case("widget", "widgets")
+            # What the first listing does once for a path plugin that's on (record and pin it), so the clock holds
+            # only the waits; recording starts no load, so the panel still starts this one cold.
+            plugins._record(root, plugins.entries(root))
             start = time.monotonic()
             with self.assertRaisesRegex(loader.StillLoading, "needs plugin widgets, which is still loading"):
                 plugins.dashboard_panel(root, "widgets:thing", wait=loader.REFRESH_WAIT)
