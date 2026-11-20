@@ -927,8 +927,18 @@ and their notes folder), and the `CLAUDE_CODE_PROJECT_DIR_NAME` and
 `CLAUDE_CONFIG_DIR` set, the first moves a Claude's transcripts to
 `projects/<name>/`, where mv2 would no longer find the agent's, and the second is
 the parent's scratchpad. Claude itself removes the identity names when it starts
-a fresh Claude, but keeps these two. A harness that sets one in `env` keeps its
-value.
+a fresh Claude, but keeps these two. Also removed is what Claude's background-session
+host gives a session, which Claude removes for a fresh Claude too: its credential
+(`CLAUDE_BG_SESSION_CREDENTIAL`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`), the pipes its
+tokens come through (five `*_FILE_DESCRIPTOR` names; an inherited
+pipe number means nothing in an agent's pane), and its permission rules, memory
+toggles and gateway routing (`CLAUDE_BG_SESSION_PERMISSION_RULES`,
+`CLAUDE_BG_MEMORY_TOGGLED_OFF`, `CLAUDE_BG_AUTO_MEMORY_OFF`,
+`CLAUDE_BG_GATEWAY_WITHHELD`, `CLAUDE_BG_GATEWAY_ROUTED`). The plugin folders and
+claude.ai Project a person names (`CLAUDE_CODE_PLUGIN_DIRS`,
+`CLAUDE_CODE_ATTRIBUTION_PROJECT`) pass through, although Claude removes them for a
+fresh Claude: they are the person's own choice for their sessions. A harness that
+sets one in `env` keeps its value.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.

@@ -21,7 +21,10 @@ RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
 # sessions that launched it and their notes folder), its IDE port and inbox, and its tool shells' own values. Claude
 # Code removes that identity when it starts a fresh Claude itself (2.1.303, 2.1.328). Also the project-folder name and
 # scratchpad folder a host sets for a session, which Claude keeps for a fresh Claude: with CLAUDE_CONFIG_DIR set, the
-# name moves its transcripts to projects/<name>/, where mv2 never looks (2.1.329). Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
+# name moves its transcripts to projects/<name>/, where mv2 never looks (2.1.329). And what Claude's background-session
+# host gives a session, which Claude removes for a fresh Claude too (2.1.329): its credential and the pipes its tokens
+# come through (an inherited pipe number means nothing in an agent's pane), its permission rules, memory toggles and
+# gateway routing. Generic names a user may set on purpose (TRACEPARENT, BUN_OPTIONS, AI_AGENT) are left alone, and so is
 # CLAUDE_CODE_TMPDIR: Claude sets it only for a sandboxed shell, and its errors tell users to set it themselves.
 PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED',
                  'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
@@ -29,7 +32,12 @@ PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION
                  'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
                  'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH',
                  'CLAUDE_CODE_INVOKED_SKILLS', 'CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS', 'CLAUDE_CODE_CHILD_NOTES_DIR',
-                 'CLAUDE_CODE_PROJECT_DIR_NAME', 'CLAUDE_CODE_SCRATCHPAD_DIR')
+                 'CLAUDE_CODE_PROJECT_DIR_NAME', 'CLAUDE_CODE_SCRATCHPAD_DIR',
+                 'CLAUDE_BG_SESSION_CREDENTIAL', 'CLAUDE_BG_AUTH_SNAPSHOT_PATH', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+                 'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR', 'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+                 'CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR', 'CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR',
+                 'CLAUDE_BG_SESSION_PERMISSION_RULES', 'CLAUDE_BG_MEMORY_TOGGLED_OFF', 'CLAUDE_BG_AUTO_MEMORY_OFF',
+                 'CLAUDE_BG_GATEWAY_WITHHELD', 'CLAUDE_BG_GATEWAY_ROUTED')
 
 
 def arguments(value, label, required=False):
