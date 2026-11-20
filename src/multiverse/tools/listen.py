@@ -26,15 +26,20 @@ def _current(directory, launch_id):
     return facts
 
 
+UNKNOWN_SECONDS = 30
+
+
 def _processes(facts):
+    """True once the frontend and its runner are both proven running; False when either cannot be told now."""
     # Observe the frontend and its runner, never the shared native daemon. A
     # listener must also end if a crash left runtime.json saying "running".
+    proven = True
     for pid, started in (('pid', 'pid_started'), ('runner_pid', 'runner_started')):
         gone = ended({'pid': facts.get(pid), 'started': facts.get(started)})
         if gone is True:
             raise ValueError('Listening launch has ended')
-        if gone is None:
-            raise ValueError('Cannot verify that the listening launch is still running')
+        proven = proven and gone is False
+    return proven
 
 
 def _signature(directory):
@@ -80,6 +85,10 @@ def run(root=None, *, timeout=None, _present=None):
 
 def _wait(directory, launch_id, deadline, started, registration, present):
     previous = None
+    # A process check that cannot be told (ps slower than its timeout on a loaded machine) reads nothing and is
+    # tried again on the next poll. No check starts once the first unanswered one began this long ago; the one in
+    # flight then decides.
+    unknown_since = None
     # A focus was seen since the last read: what it held is read, with fresh process proof, before any timeout.
     owed = False
     next_process_check = 0
@@ -94,9 +103,20 @@ def _wait(directory, launch_id, deadline, started, registration, present):
         wanted = not focused and (owed or _signature(directory) != previous)
         # A cached observation keeps quiet polling cheap, but never authorizes
         # success: every prospective inbox read gets fresh process proof.
+        proven = unknown = False
         if wanted or time.monotonic() >= next_process_check:
-            _processes(facts)
-            next_process_check = time.monotonic() + 1
+            if unknown_since is not None and time.monotonic() - unknown_since >= UNKNOWN_SECONDS:
+                raise ValueError('Cannot verify that the listening launch is still running')
+            checked = time.monotonic()
+            proven = _processes(facts)
+            unknown = not proven
+            if proven:
+                next_process_check = time.monotonic() + 1
+            elif unknown_since is None:
+                unknown_since = checked
+        # "Timed out" claims nothing was missed, so the timeout waits while something may still be unread: after an
+        # unknown check, after proof of processes the launch no longer records, or for what arrived during the check.
+        pending = unknown
         expired = deadline is not None and time.monotonic() >= deadline
         # No lock can wait here: contention falls through to the bounded sleep, holding nothing, and the
         # launch, identity and process checks run again. The focus lock is held through the output, so no focus
@@ -107,7 +127,13 @@ def _wait(directory, launch_id, deadline, started, registration, present):
                 sender_actor(acting='listen')
                 same_processes = all(current.get(key) == facts.get(key)
                     for key in ('pid', 'pid_started', 'runner_pid', 'runner_started'))
-                if wanted and same_processes:
+                if not same_processes:
+                    pending, next_process_check = True, 0  # proof of replaced processes proves nothing
+                elif proven:
+                    unknown_since = None
+                if not wanted and not pending and _signature(directory) != previous:
+                    pending = True  # arrived during this poll's check: the next poll reads it, with fresh proof
+                if wanted and proven and same_processes:
                     with ExitStack() as fence:
                         try:
                             fence.enter_context(focus.locked(directory, blocking=False))
@@ -130,10 +156,13 @@ def _wait(directory, launch_id, deadline, started, registration, present):
                                             focus.claim_locked(directory, claim, 'listener')
                                         return result
         except BlockingIOError:
+            pending = unknown  # busy locks never hold the timeout back
+            if proven:
+                unknown_since = None  # an answered check, though the pair waits for the lock
             # A busy launch or inbox lock: the read after the focus was tried. It comes on a later poll, since
             # `previous` is still from before the focus, and meanwhile an expired timeout may finish.
             owed = owed and not wanted
-        if expired and not owed:
+        if expired and not owed and not pending:
             # A timeout that runs out during a focus waits for it to end and for one try at reading after it;
             # a busy focus lock may be a focus starting. Busy launch or inbox locks never hold it back.
             try:
