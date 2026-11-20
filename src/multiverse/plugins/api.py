@@ -915,6 +915,24 @@ class Plugin:
             raise Error(f"{directory} is not an agent's directory")
         return self.universe(root).agent(directory.name)
 
+    def in_agent_session(self, universe=None):
+        """Whether this process runs inside an agent's session (1.21): mv2's launch markers, or an agent's own tmux
+        pane in that universe's tree (by default the universe this process is in), as core tells an agent from the
+        person. For a command that only the person should run, such as one that shows a credential. A guard against
+        mistakes, not a sandbox."""
+        from ..runtime import agent_identity
+        if agent_identity.runs_in_agent():  # a launch marker: no universe needed
+            return True
+        if universe is None:
+            from .. import universe as universes
+            try:
+                root = universes.resolve()
+            except Exception:
+                return False  # no universe here: no agent's pane to be in
+        else:
+            root = _root(universe)
+        return agent_identity.runs_in_agent(root=root)
+
     def current_agent(self):
         """The agent this process runs for (MV2_AGENT_DIR, else MV2_AGENT_ID), or None outside an agent."""
         if os.environ.get("MV2_AGENT_DIR"):
@@ -1921,17 +1939,22 @@ class Agent:
     def _prompt_caller(self):
         return {"kind": "plugin", "name": self._plugin.name}  # never a person: no rule-saving choice
 
-    def send(self, text, delivery="steer"):
-        """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
+    def send(self, text, delivery="steer", *, as_user=False):
+        """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send). With `as_user`
+        (1.21), it reads the text as the person's own, bare, as if typed, and its inbox lists it as the user's; mv2's
+        record and events still name this plugin. For relaying what the person wrote, never your own words.
 
         steer and follow-up wake a stopped or dormant agent; inbox-only never does. They reach a focused agent too,
         as the person's do (1.20): a focus holds only agents' messages, so one sent inside an agent's session (a
-        command of this plugin's that an agent runs) is held as that agent's."""
+        command of this plugin's that an agent runs) is held as that agent's, and as_user does nothing there."""
         self._plugin._need("messages.send")
+        if type(as_user) is not bool:
+            raise Error("send(..., as_user=True or False)")
         from ..tools import send
         sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
         with _acting(self._plugin._loaded, "act", self.universe, "send"):
-            record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery)
+            record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery,
+                           as_user=as_user)
         native = record.get("native_delivery") or {}
         return SendResult(bool(record.get("ok", True)), record.get("delivery", delivery), str(record.get("state", "")),
                           str(record.get("reason") or native.get("reason") or ""), record)

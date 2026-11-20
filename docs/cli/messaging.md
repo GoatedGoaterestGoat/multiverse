@@ -89,6 +89,11 @@ The match follows the recipient's agent ID across renames and moves. People, plu
 Failed delivery and check lines go to stderr and exit nonzero; successful lines
 go to stdout. With `--json`, the result stays on stdout.
 
+What you send yourself, from your own terminal, reaches the agent bare, as if you
+typed it: no sender line and no age. So does what a plugin relays as yours
+(`as_user`). `mv2 inbox` still lists both under `Message from user`, and mv2's
+records name a plugin that relayed one. Every other message has a sender line.
+
 A message prepared more than 10 minutes after it was sent adds its age to the
 sender line: `Message from lead (sent 25 min ago):`, or `Message from lead
 (in universe review) (sent 25 min ago):`. Whole minutes are shown below an hour,
@@ -283,7 +288,7 @@ mv2 held
 
 Inside an agent session, `held` shows the unread `steer` and `follow-up` messages that the agent's last focus held, however that focus ended, and marks only those read. Other unread messages stay unread for `mv2 inbox`. `held` is refused while the agent is focused.
 
-A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. A plugin's message names the plugin, and the agent that ran it, as in `Message from plugin notes, run by agent worker`. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
+A held message's header says what it was sent as, such as `Message from lead (steer, held while you were focused):`. A plugin's message names the plugin, and the agent that ran it, as in `Message from plugin notes, run by agent worker`. A plugin relaying what the person wrote can send it as the user's: the agent reads it bare, as if typed, and its inbox lists it as `Message from user`, while mv2's record still names the plugin. Inside an agent's session it never reads as the person's. Plain `mv2 inbox` shows held messages too, so after `mv2 inbox`, `held` has nothing left to show.
 
 When a focus ends with held messages unread, the agent is told in these cases:
 

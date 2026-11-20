@@ -252,7 +252,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                 self.assertIn(reason, tracking['attempts'][-1]['reason'])
                 self.assertIn(agents.runtime(directory)['reason'], tracking['attempts'][-1]['reason'])
                 request = read(directory / 'launches' / tracking['wake_launch_id'] / 'request.json')
-                self.assertEqual(request['argv'][-1], 'Message from user:\nPreserve this prompt')
+                self.assertEqual(request['argv'][-1], 'Preserve this prompt')
                 self.assertEqual(read(directory / 'properties.json')['task'], 'original task')
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
                         self.assertRaises(SystemExit) as checked:

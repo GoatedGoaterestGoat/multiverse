@@ -12,10 +12,11 @@ from . import records
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None, intended=None, focus=None,
-                   focus_note=None, inbox_only_text=None):
+                   focus_note=None, inbox_only_text=None, as_user=False):
     """Append a message. `intended` and `focus` mark a steer or follow-up that a focus held as inbox-only;
-    `focus_note` marks mv2's follow-up about that focus's held messages. `inbox_only_text` preserves the original
-    input when an inbox-only send was upgraded; it remains readable until delivery is confirmed."""
+    `focus_note` marks mv2's follow-up about that focus's held messages. `as_user` marks a plugin's message the
+    agent reads as the person's own (native.framed_text); its sender stays the plugin. `inbox_only_text` preserves
+    the original input when an inbox-only send was upgraded; it remains readable until delivery is confirmed."""
     if not text.strip():
         raise ValueError("Message cannot be empty")
     if delivery not in ("steer", "follow-up", "inbox-only"):
@@ -30,6 +31,7 @@ def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_ses
     message = {"schema": 2, "target_session": target_session, "delivery": delivery, "id": uid(), "at": now(), "from": sender, "text": text,
                **({"intended": intended, "focus": focus} if intended else {}),
                **({"focus_note": focus_note} if focus_note else {}),
+               **({"as_user": True} if as_user else {}),
                **({'inbox_only_text': inbox_only_text} if inbox_only_text is not None else {})}
     agent_dir = Path(agent_dir)
     with lock(agent_dir / ".inbox.lock"):

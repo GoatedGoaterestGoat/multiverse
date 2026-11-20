@@ -130,8 +130,8 @@ class InboxDeliveryTest(DeliveryFixture):
                                  f'Message from lead{suffix}:\nKeep the body unchanged.')
         for timestamp in (None, '', 'broken', '2026-10-22T12:00:00', 123, (clock + timedelta(days=1)).isoformat()):
             with self.subTest(unproven_time=timestamp):
-                self.assertEqual(native.framed_text(self.root, {'text': 'body', 'at': timestamp}, at=clock),
-                                 'Message from user:\nbody')
+                self.assertEqual(native.framed_text(self.root, {'text': 'body', 'from': {'name': 'lead'}, 'at': timestamp},
+                                                    at=clock), 'Message from lead:\nbody')
         sent_at = (clock - timedelta(minutes=25)).isoformat()
         origin = self.work / 'age-origin'
         write(origin / 'universe.json', {'name': 'review'})

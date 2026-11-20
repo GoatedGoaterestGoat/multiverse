@@ -590,6 +590,32 @@ class ApiTest(PluginTestCase):
             worker.history()
         self.assertFalse(directory.exists())  # a removed agent's folder isn't made again
 
+    def test_a_plugin_sends_as_the_user_only_when_it_asks(self):
+        """agent.send(as_user=True) marks the message as the person's while mv2 records the plugin (1.21); a lost mark sends the person's relayed words as a plugin's, and a lost sender hides who sent it."""
+        from multiverse.universe import mailbox
+        self.write_plugin("relay", {"module": "plugin", "permissions": ["agents.read", "messages.send"],
+                                    "access": {"request": "act", "minimum": "act"}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("relay")
+        directory = self.agent("worker")
+        worker = api.Plugin(loader.load(self.entry("relay"))).universe(self.root).agent("worker")
+        worker.send("plain", delivery="inbox-only")
+        worker.send("typed by the person", delivery="inbox-only", as_user=True)
+        sent = mailbox.inbox(directory, all_messages=True, limit=None)["messages"][-2:]
+        self.assertEqual([(message["from"]["plugin"], message.get("as_user")) for message in sent],
+                         [("relay", None), ("relay", True)])
+        with self.assertRaisesRegex(api.Error, "as_user"):
+            worker.send("x", delivery="inbox-only", as_user="yes")
+        relay = api.Plugin(loader.load(self.entry("relay")))
+        self.assertFalse(relay.in_agent_session(self.root))  # the person's shell (1.21)
+        with mock.patch.dict(os.environ, {"MV2_CONTROL_SOCKET": str(self.work / "s.sock")}):  # an agent's mark
+            self.assertTrue(relay.in_agent_session(self.root))
+        from multiverse.runtime import agent_identity
+        with mock.patch.dict(os.environ, {"MV2_UNIVERSE": str(self.root)}), \
+                mock.patch.object(agent_identity, "runs_in_agent", return_value=False) as checked:
+            relay.in_agent_session()  # no universe given: the pane check still runs, in the current one
+        self.assertEqual(checked.call_args_list[-1], mock.call(root=self.root))
+
     def test_an_agents_harness_home_is_its_recorded_storage(self):
         """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
         storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown
