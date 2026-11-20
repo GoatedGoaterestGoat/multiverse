@@ -166,6 +166,10 @@ class PromptCodecTest(unittest.TestCase):
         self.assertEqual(form.response(answer(answers={'name': ['Pat'], 'enabled': ['True'], 'mode': ['B']})),
                          {'action': 'accept', 'content': {'name': 'Pat', 'enabled': True, 'mode': 'b'}, '_meta': None})
         self.assertEqual(form.response(answer('cancel')), {'action': 'cancel', 'content': None, '_meta': None})
+        for environment in (None, 'registration-scope'):
+            scoped = codec.describe(MCP, params(mode='form', serverName='server', turnId=None,
+                requestedSchema=schema, environmentId=environment))
+            self.assertEqual(scoped.response(answer('cancel')), form.response(answer('cancel')))
         self.assertEqual(form.person_answer({'action': 'accept', 'content': {'name': 'Pat', 'enabled': True, 'mode': 'b'}}),
                          {'answers': {'name': ['Pat'], 'enabled': ['True'], 'mode': ['B']}})
         for decision in ('decline', 'cancel'):
@@ -478,7 +482,9 @@ class PromptRelayTest(unittest.TestCase):
                                       ('0.167.2', '0.169.0', False), ('0.168.0', '0.168.0', False),
                                       ('0.169.1', '0.169.1', False), ('0.170.0', '0.170.0', True),
                                       ('0.170.0', '0.169.0', False), ('0.169.0', '0.170.0', False),
-                                      ('0.170.1', '0.170.1', False)):
+                                      ('0.171.0', '0.171.0', True), ('0.171.0', '0.170.0', False),
+                                      ('0.170.0', '0.171.0', False), ('0.170.1', '0.170.1', False),
+                                      ('0.171.1', '0.171.1', False)):
             with self.subTest(prompt_versions=(cli, daemon)):
                 self.assertEqual(prompts.available(replace(self.session,
                     native_versions={'cli': cli, 'daemon': daemon})), expected)

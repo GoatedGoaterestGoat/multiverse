@@ -149,7 +149,7 @@ class CodexUsageRuntimeTest(unittest.TestCase):
                          + json.dumps(context('Side', 'high', '2026-11-12T10:05:00Z')) + '\n')
         self.assertEqual(observe(), expected)
         self.assertEqual(self.adapter.get_usage(session).value.get('native_session_id'), native)
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(checked_version=version):
                 value = self.adapter.get_usage(replace(session,
                     native_versions={'cli': version, 'daemon': version})).value
@@ -165,6 +165,9 @@ class CodexUsageRuntimeTest(unittest.TestCase):
                          {'cli': '0.169.1', 'daemon': '0.169.1'},
                          {'cli': '0.170.0', 'daemon': '0.169.0'},
                          {'cli': '0.169.0', 'daemon': '0.170.0'},
+                         {'cli': '0.171.0', 'daemon': '0.170.0'},
+                         {'cli': '0.170.0', 'daemon': '0.171.0'},
+                         {'cli': '0.171.1', 'daemon': '0.171.1'},
                          {'cli': '0.170.1', 'daemon': '0.170.1'},
                          {'cli': '0.167.2', 'daemon': '0.167.1'}):
             with self.subTest(versions=versions):

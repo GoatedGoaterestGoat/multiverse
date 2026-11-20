@@ -836,6 +836,41 @@ Agent-message moderation display becomes a versioned show/hide/block enum. The q
 
 The authorized fixtures used a byte-verified private release package, disposable homes and daemons, and localhost scripted providers. They covered startup/resume, navigation and full local grant envelopes, queue continuation, permissions, side routing, shared identity, recovery, private ask/run and tool-free requests. Exact newer and retained release gates remain explicit; navigation, prompt and queue operations require matched CLI/daemon versions and the verified greeting. Unchecked and mixed pairs stay refused. The refusal fixture is the upstream renderer snapshot, not a tmux capture.
 
+### Codex 0.171.0 compatibility audit
+
+The official 0.170.0 and 0.171.0 tags are `29eb79e9866b` and `ccf9be8cc458`.
+The five recorded CLI help outputs match. The installed experimental schema
+export goes from 479 to 483 files, with six additions, two removals and 47
+changed files. The two bundled catalogs regenerate with only the release stamp
+changed. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.171.0).
+
+The current-directory update now retains the stored permission profile while
+environment and root selection can change. The bridge invalidates cached
+navigation grants before forwarding an explicit primary directory override
+that cannot be verified against the agent workspace. Even equal cwd and
+roots can trigger daemon default selection. The bridge pins the verified local
+selection on an owning terminal's turn start when the explicit cwd and roots
+and any grant settings match. Other unproven reselections invalidate grants
+before forwarding. In-terminal navigation
+still requires the owning verified bridge, matching checked releases, an
+ordinary root and one built-in local environment with the exact cwd and grant
+roots. A settings notification cannot restore invalidated grants. Task mention
+search cancellation can be refused by the stale-conversation fence during or
+after a switch.
+
+Prompt callbacks, retained async question identities and response formats keep
+their existing contracts. MCP registration scope is additive metadata. A late
+completion for an older turn cannot settle a newer turn's callback. Exact
+primary user-item and client IDs still support durable delivery observations.
+The queue's single-page read contract is unchanged. Codex now resolves local
+media paths in queued inputs using the thread cwd. mv2 queues text.
+
+Private macOS fixtures used isolated homes and daemons with updates disabled
+and localhost scripted providers. The checkout tests covered mixed and
+unchecked version refusal, launch and resume, permission and lineage checks,
+navigation, side conversations, queue continuation, prompt routing, delivery
+observations, rollout reading and private requests with empty tool lists.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other

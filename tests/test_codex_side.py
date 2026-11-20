@@ -79,7 +79,7 @@ class CodexSideTest(unittest.TestCase):
             **({'environments': [{'environmentId': 'local', 'cwd': '/fixture/workspace',
                 'runtimeWorkspaceRoots': policy['runtimeWorkspaceRoots']}], 'ephemeral': False,
                 'parentThreadId': None, 'attachedToThreadId': None, 'forkedFromId': None, 'threadSource': 'user'}
-               if root.settings['navigation_cli'] in ([0, 169, 0], [0, 170, 0]) else {})}, **policy}})
+               if root.settings['navigation_cli'] in ([0, 169, 0], [0, 170, 0], [0, 171, 0]) else {})}, **policy}})
         owner[0] = True  # Core accepted the exact initial binding before calling after_bind.
         view.after_bind('/fixture/native.sock')
         return root, view
@@ -112,14 +112,14 @@ class CodexSideTest(unittest.TestCase):
             owner[0] = True
             view.after_bind('/fixture/native.sock')
             return root, view
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(initial_attached=version):
                 root, view = bound(version, [], attached=True)
                 self.assertTrue(root.bound)
                 self.assertIsNone(root.current_grants)
-            seed = canonical if version in ('0.169.0', '0.170.0') else []
+            seed = canonical if version in ('0.169.0', '0.170.0', '0.171.0') else []
             for name, value in cases:
-                expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                 with self.subTest(initial=(version, name)):
                     root, view = bound(version, value)
                     self.assertTrue(root.bound, 'Unmapped navigation evidence must leave ordinary binding usable')
@@ -154,7 +154,7 @@ class CodexSideTest(unittest.TestCase):
                     if name == 'attached':
                         selected['attachedToThreadId'] = self.main
                     view.incoming({'id': 20, 'result': {'thread': selected, **deepcopy(policy)}})
-                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                     self.assertEqual(root.native_id, self.main)
                     self.assertEqual(root.grant_ceiling, ceiling)
                     self.assertEqual(root.current_grants, policy if expected else None)
@@ -179,7 +179,7 @@ class CodexSideTest(unittest.TestCase):
                     if name == 'attached':
                         selected['attachedToThreadId'] = self.main
                     reply = {'id': 20, 'result': {'thread': selected, 'cwd': '/fixture/workspace', **deepcopy(policy)}}
-                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                     if expected:
                         view.incoming(reply)
                         self.assertEqual(view.navigation('incoming', reply)['action'], 'commit')
@@ -287,6 +287,90 @@ class CodexSideTest(unittest.TestCase):
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing({'id': 20, 'method': 'thread/start', 'params': {**full,
                         'threadSource': 'user', 'ephemeral': False, 'historyMode': 'paginated', 'environments': supplied}})
+
+    def test_primary_environment_override_invalidates_navigation_before_native_notification(self):
+        """An outgoing request can reselect the environment before its settings notification arrives."""
+        cwd = '/fixture/workspace'
+        local = [{'environmentId': 'local', 'cwd': cwd, 'runtimeWorkspaceRoots': []}]
+        for method in ('thread/settings/update', 'turn/start'):
+            cases = [
+                ('omitted selectors', self.main, {}, True),
+                ('null cwd', self.main, {'cwd': None}, True),
+                ('foreign thread', self.side, {'cwd': '/another/workspace'}, True),
+                ('explicit same local', self.main, {'cwd': cwd, 'environments': local}, True),
+                ('same cwd with defaults', self.main, {'cwd': cwd}, False),
+                ('same cwd with null environments', self.main, {'cwd': cwd, 'environments': None}, False),
+                ('new cwd', self.main, {'cwd': '/another/workspace'}, False),
+                ('new cwd with explicit local', self.main, {'cwd': '/another/workspace', 'environments': local}, False),
+                ('relative cwd', self.main, {'cwd': 'relative'}, False),
+                ('empty cwd', self.main, {'cwd': ''}, False),
+                ('invalid cwd', self.main, {'cwd': []}, False),
+            ]
+            if method == 'turn/start':
+                cases.extend((
+                    ('null roots', self.main, {'runtimeWorkspaceRoots': None}, True),
+                    ('same roots with defaults', self.main, {'runtimeWorkspaceRoots': []}, False),
+                    ('same roots with explicit local', self.main,
+                     {'runtimeWorkspaceRoots': [], 'environments': local}, True),
+                    ('other roots with explicit local', self.main,
+                     {'runtimeWorkspaceRoots': ['/another/workspace'], 'environments': local}, False),
+                ))
+            for name, target, selectors, preserves in cases:
+                with self.subTest(method=method, case=name):
+                    root, view = self.navigation_bound(navigation_cli=[0, 171, 0])
+                    self.initialize(view, 'codex/0.171.0')
+                    policy, epoch = deepcopy(root.grant_ceiling), root.grants_epoch
+                    self.assertIsNotNone(root.current_grants)
+                    request = {'id': 20, 'method': method, 'params': {'threadId': target, **selectors}}
+                    self.assertEqual(view.outgoing(request), request)
+                    self.assertEqual(root.current_grants, policy if preserves else None)
+                    self.assertEqual(root.grant_ceiling, policy)
+                    self.assertEqual(root.grants_epoch, epoch if preserves else epoch + 1)
+                    self.assertEqual(root.native_id, self.main)
+                    if not preserves:
+                        view.incoming({'id': 20, 'result': {}})
+                        with self.assertRaisesRegex(LocalProtocolError, 'permissions changed'):
+                            view.outgoing({'id': 21, 'method': 'thread/start', 'params': {
+                                'cwd': cwd, 'threadSource': 'user', 'ephemeral': False,
+                                'historyMode': 'paginated'}})
+                        self.assertIsNone(getattr(root, '_selection', None))
+
+    def test_owner_turn_start_pins_the_verified_local_environment(self):
+        """Stock terminal input should keep navigation usable without trusting daemon defaults."""
+        cwd = '/fixture/workspace'
+        for name, owner, cli, daemon, changes, outcome in (
+                ('matching', True, [0, 171, 0], '0.171.0', {}, 'pinned'),
+                ('null environments', True, [0, 171, 0], '0.171.0', {'environments': None}, 'pinned'),
+                ('retained release', True, [0, 170, 0], '0.170.0', {}, 'pinned'),
+                ('permission override', True, [0, 171, 0], '0.171.0',
+                 {'approvalPolicy': 'on-request'}, 'invalidated'),
+                ('changed roots', True, [0, 171, 0], '0.171.0',
+                 {'runtimeWorkspaceRoots': ['/other']}, 'invalidated'),
+                ('nonowner', False, [0, 171, 0], '0.171.0', {}, 'invalidated'),
+                ('mixed', True, [0, 170, 0], '0.171.0', {}, 'invalidated'),
+                ('unchecked CLI', True, [0, 166, 0], '0.171.0', {}, 'invalidated')):
+            with self.subTest(name=name):
+                root, view = self.navigation_bound(navigation_cli=cli)
+                self.initialize(view, 'codex/' + daemon)
+                view.owns_primary = lambda: owner
+                grants, epoch = deepcopy(root.current_grants), root.grants_epoch
+                self.assertIsNotNone(grants)
+                request = {'id': 20, 'method': 'turn/start', 'params': {
+                    'threadId': self.main, 'cwd': cwd, 'runtimeWorkspaceRoots': [],
+                    'clientUserMessageId': 'message', 'input': [{'type': 'text', 'text': 'input'}], **changes}}
+                original = deepcopy(request)
+                forwarded = view.outgoing(request)
+                self.assertEqual(request, original)
+                if outcome == 'pinned':
+                    self.assertEqual(forwarded, {**request, 'params': {**request['params'],
+                        'environments': [{'environmentId': 'local', 'cwd': cwd, 'runtimeWorkspaceRoots': []}]}})
+                    self.assertEqual(root.current_grants, grants)
+                    self.assertEqual(root.grants_epoch, epoch)
+                else:
+                    self.assertEqual(forwarded, request)
+                    self.assertIsNone(root.current_grants)
+                self.assertEqual(root.grant_ceiling, grants)
+                self.assertEqual(root.native_id, self.main)
 
     def test_side_thread_lifecycle_leaves_the_primary_untouched(self):
         """A /btw side thread's whole lifecycle, down to closing one saturated with requests, leaves the primary
@@ -511,7 +595,7 @@ class CodexSideTest(unittest.TestCase):
                     with self.assertRaises(LocalProtocolError):
                         view.outgoing(input)
 
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(navigation_version=version):
                 root, view = self.navigation_bound(navigation_cli=list(map(int, version.split('.'))))
                 self.initialize(view, 'codex/' + version)
@@ -532,7 +616,8 @@ class CodexSideTest(unittest.TestCase):
                 (True, [0, 169, 0], '0.167.2', False), (True, [0, 167, 2], '0.169.0', False),
                 (True, [0, 168, 0], '0.168.0', False), (True, [0, 169, 1], '0.169.1', False),
                 (True, [0, 170, 0], '0.169.0', False), (True, [0, 169, 0], '0.170.0', False),
-                (True, [0, 170, 1], '0.170.1', False),
+                (True, [0, 171, 0], '0.170.0', False), (True, [0, 170, 0], '0.171.0', False),
+                (True, [0, 170, 1], '0.170.1', False), (True, [0, 171, 1], '0.171.1', False),
                 (True, [0, 166, 0], '0.166.0', True)):
             with self.subTest(owner=owner, cli=cli, daemon=daemon, side=side):
                 root, view = self.navigation_bound(navigation_cli=cli)
@@ -902,7 +987,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(supported=version):
                 view = self.connection('checked-' + version, lambda: True)
                 self.initialize(view, 'codex/' + version)

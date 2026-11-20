@@ -722,7 +722,7 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(directory.is_relative_to(work))
             for row in primary_replies:
                 self.assertEqual(grant_set(row), effective_grants, row)
-                if CHECKED_VERSION in ((0, 169, 0), (0, 170, 0)):
+                if CHECKED_VERSION in ((0, 169, 0), (0, 170, 0), (0, 171, 0)):
                     for relation in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'):
                         self.assertIn(relation, row['thread'], row)
                         self.assertIsNone(row['thread'][relation], row)
@@ -737,6 +737,13 @@ class NativeNavigationTest(TerminalBase):
                     self.assertEqual(selected['cwd'], str(work), row)
                     self.assertEqual(sorted(set(selected['runtimeWorkspaceRoots'])),
                                      effective_grants['runtimeWorkspaceRoots'], row)
+            if CHECKED_VERSION >= (0, 171, 0):
+                initial_input = next(row for row in wire.records if row.get('direction') == 'request'
+                    and row.get('method') == 'turn/start' and row.get('params', {}).get('threadId') == original)
+                self.assertEqual(initial_input['params'].get('environments'), [{
+                    'environmentId': 'local', 'cwd': str(work),
+                    'runtimeWorkspaceRoots': effective_grants['runtimeWorkspaceRoots'],
+                }], initial_input)
             starts = [row for row in wire.records if row.get('direction') == 'request'
                       and row.get('method') == 'thread/start' and type(row.get('id')) is int]
             self.assertEqual([row['params'].get('sessionStartSource') for row in starts], [None, 'clear', None, None])
