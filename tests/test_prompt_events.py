@@ -67,17 +67,17 @@ class PromptEventsTest(BaseTest):
                 prompt_events.stage(self.agent, 'launch', native_id, edges, generation=generation)
 
         relay = rpc.LaunchProxy({}, None, None, record_prompt_transitions=stage)
-        relay.prompt_batches.append(('first', 0, (
+        relay.prompt_batches.append((stage, 'first', 0, (
             PromptOpened(id='p', kind='permission', requires_waiting=True),
             PromptClosed(id='p', kind='permission', state='person'),
         )))
 
-        def fence():
+        def fence(new_status):
             status_fence.set()
-            relay.stage_prompt_transitions()
+            relay.stage_status_events(new_status)
 
         watcher = runner.StatusWatcher(self.agent, 'launch', self.root, before_status_event=fence)
-        publisher = Thread(target=relay.stage_prompt_transitions)
+        publisher = Thread(target=relay.stage_adapter_events)
         status = Thread(target=watcher._publish, args=('working', 'first', 0))
         publisher.start()
         try:
@@ -262,16 +262,16 @@ class PromptEventsTest(BaseTest):
         """Backpressure must not relabel an adapter's old buffered edge after returning to the same conversation."""
         stage = Mock()
         relay = rpc.LaunchProxy({}, None, None, record_prompt_transitions=stage)
-        relay.MAX_PROMPT_BATCHES = 1
-        relay.prompt_ready = Mock()
+        relay.MAX_EVENT_BATCHES = 1
+        relay.event_ready = Mock()
         edge = (PromptOpened(id='q', kind='permission', requires_waiting=True),)
         drain = Mock(return_value=('first', edge))
-        relay._admit_prompt_transitions(drain, 0)
-        self.assertIsNotNone(relay.prompt_drain)
-        relay.stage_prompt_transitions()
+        relay._admit_event_transitions(stage, drain, 0)
+        self.assertIn(stage, relay.event_drains)
+        relay.stage_adapter_events()
         stage.assert_called_once_with('first', 0, edge)
-        relay.prompt_generation = 2
-        relay._retry_prompt_drain()
+        relay.event_generation = 2
+        relay._retry_event_drains()
         self.assertEqual(drain.call_count, 1)
         self.assertFalse(relay.prompt_batches)
 

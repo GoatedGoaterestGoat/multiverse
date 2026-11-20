@@ -8,7 +8,10 @@ from uuid import uuid4
 
 from multiverse import harnesses
 from multiverse.harnesses.codex import transcripts as t
-from multiverse.harnesses.types import SessionHandle, TranscriptRowsChanged
+from multiverse.harnesses.types import (SessionHandle, TranscriptRowsChanged, TurnEnded,
+                                        TurnProjection, TurnStarted)
+from multiverse.runtime import transcripts as core
+from multiverse.store import write
 from test_multiverse import BaseTest
 
 
@@ -118,6 +121,103 @@ class CodexTranscriptReadingTest(BaseTest):
             with self.subTest(name):
                 self.write([event('task_started', turn_id='t'), message('go'), event('user_message', message='go'), ending])
                 self.assertEqual(self.adapter.transcript_view(self.session).rows[-1].ends_turn, end)
+
+    def test_turn_start_waits_for_an_unwritten_rollout_header(self):
+        """An empty or partial first write can finish within budget, while a complete foreign header proves nothing."""
+        agent = self.root / 'state' / 'agents' / str(uuid4())
+        launch = str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'worker', 'harness': 'codex',
+              'workspace': str(self.work), 'native_session_id': self.native, 'native_session_home': str(self.home)})
+        write(agent / 'runtime.json', {'launch_id': launch, 'state': 'starting'})
+        edge = TurnStarted(turn='native-turn', kind='prompt', ref='wire-input', source='person')
+        rows = [event('task_started', turn_id='native-turn'), message('input', id='model-input'),
+                event('item_completed', thread_id=self.native, turn_id='native-turn',
+                      item={'type': 'UserMessage', 'id': 'wire-input', 'content': [{'type': 'text', 'text': 'input'}]})]
+        self.write(rows)
+        own = self.path.read_text()
+        deadline = core.time.monotonic() + .5
+        expected, = core.turn_references(self.root, agent, launch, self.native, 0, (edge,), deadline=deadline)
+        self.assertIsNotNone(expected.ref)
+        foreign = own.replace(self.native, str(uuid4()))
+        for initial, retries in (('', 1), ('{"type":"session_meta"', 1), (foreign, 0)):
+            with self.subTest(retries=retries, initial=initial[:22]):
+                self.path.write_text(initial)
+                elapsed = 0.0
+
+                def finish_write(delay):
+                    nonlocal elapsed
+                    elapsed += delay
+                    self.write(rows)
+
+                with patch.object(core, 'time') as clock:
+                    clock.monotonic.side_effect = lambda: elapsed
+                    clock.sleep.side_effect = finish_write
+                    got, = core.turn_references(self.root, agent, launch, self.native, 0, (edge,), deadline=.5)
+                self.assertEqual(clock.sleep.call_count, retries)
+                self.assertEqual(got, expected if retries else core.TurnReference())
+
+    def test_incomplete_rollout_copy_cannot_mask_foreign_metadata(self):
+        """A complete foreign header is terminal in either scan order."""
+        archive = self.home / 'archived_sessions' / self.path.name
+        archive.parent.mkdir()
+        foreign = json.dumps({'type': 'session_meta', 'payload': {'id': str(uuid4())}}) + '\n'
+        for archive_header, active_header in (('', foreign), (foreign, '')):
+            with self.subTest(archive_incomplete=not archive_header):
+                archive.write_text(archive_header)
+                self.path.write_text(active_header)
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(view.source.state, 'error')
+                self.assertFalse(view.source.retry)
+
+    def test_turn_projection_uses_the_validated_echo_and_the_exact_recovered_end(self):
+        """Wire item IDs do not address model rows and a recovered turn can have two distinct durable ends."""
+        def echo(identity, thread=None):
+            return event('item_completed', thread_id=thread or self.native, turn_id='native-turn',
+                         item={'type': 'UserMessage', 'id': identity, 'client_id': 'private-client',
+                               'content': [{'type': 'text', 'text': 'input'}]})
+        start = TurnStarted(turn='native-turn', kind='prompt', ref='wire-input', source='person')
+        prefix = [event('task_started', turn_id='native-turn'), message('input', id='model-input')]
+        first = event('turn_aborted', turn_id='native-turn', completed_at=100, duration_ms=25)
+        later = event('task_complete', turn_id='native-turn', completed_at=105, duration_ms=30)
+        self.write([*prefix, echo('wire-input'), echo('wire-input', str(uuid4())), first,
+                    event('task_started', turn_id='native-turn'), later])
+        view = self.adapter.transcript_view(self.session)
+        anchor = view.rows[2].position
+        actual = self.adapter.project_turn_event(self.session, view, start)
+        self.assertEqual(actual, TurnProjection(turn_position=anchor, row_position=view.rows[3].position))
+        self.assertEqual(view.rows[2].ref, 'model-input')
+        self.assertIsNone(view.rows[3].ref)
+        for ref, state, index in [('end_100_25', 'interrupted', 5), ('end_105_30', 'finished', 7),
+                                  ('end_110_25', 'finished', None), ('end_100_25', 'error', None)]:
+            with self.subTest(ref=ref, state=state):
+                end = TurnEnded(turn='native-turn', kind='prompt', ref=ref, state=state)
+                self.assertEqual(self.adapter.project_turn_event(self.session, view, end),
+                                 TurnProjection(turn_position=anchor,
+                                                row_position=view.rows[index].position if index is not None else None))
+        self.assertEqual(self.adapter.project_turn_event(replace(self.session, native_id=str(uuid4())), view, start),
+                         TurnProjection())
+
+        self.write([*prefix, echo('wire-input'), first, event('task_started', turn_id='native-turn')])
+        view = self.adapter.transcript_view(self.session)
+        unknown_occurrence = TurnEnded(turn='native-turn', kind='prompt', ref=None, state='interrupted')
+        self.assertEqual(self.adapter.project_turn_event(self.session, view, unknown_occurrence),
+                         TurnProjection(turn_position=view.rows[2].position))
+
+        # The first duplicate precedes the anchor and would be hidden by a
+        # truncated echo index, even though both still belong to this turn.
+        self.write([prefix[0], echo('wire-input'), prefix[1],
+                    *(echo(f'other-{number}') for number in range(4094)), echo('wire-input')])
+        view = self.adapter.transcript_view(self.session)
+        self.assertEqual(self.adapter.project_turn_event(self.session, view, start),
+                         TurnProjection(turn_position=view.rows[3].position))
+
+        for name, rows in [('legacy', [event('user_message', message='input')]),
+                           ('duplicate item', [echo('wire-input'), echo('wire-input')])]:
+            with self.subTest(name=name):
+                self.write([*prefix, *rows])
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(self.adapter.project_turn_event(self.session, view, start),
+                                 TurnProjection(turn_position=view.rows[2].position))
 
     def test_checked_native_rollout_labels_steering_followups_and_interruptions(self):
         """The checked release uses provenance and item_completed echoes, so legacy-only parsing silently loses every prompt."""

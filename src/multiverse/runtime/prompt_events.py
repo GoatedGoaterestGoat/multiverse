@@ -4,10 +4,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 import re
+import time
 from uuid import uuid4
 
-from ..harnesses.types import NativeResult, PromptClosed, PromptOpened, PromptOutcomeQuery
-from ..store import lock, open_replaced
+from ..harnesses.types import NativeResult, PromptClosed, PromptOpened, PromptOutcomeQuery, SessionHandle, TurnStarted
+from ..store import lock, open_replaced, read
+from . import turn_events
 
 
 _ID = re.compile(r'[A-Za-z0-9_-]{1,128}')
@@ -16,6 +18,7 @@ _STATES = frozenset(('person', 'gone', 'answered', 'submitted', 'sent_first', 'u
 _MAX_TRANSITIONS = 256
 _MAX_JSON = 64 * 1024
 _CLOSED_LIMIT = 512
+_TURN_READ_SECONDS = .5
 
 
 def _valid(transition):
@@ -106,13 +109,18 @@ def _edge(agent_dir, ledger, transition, *, observed=True):
 def _close_open(agent_dir, ledger, cause):
     for opened in tuple(ledger['open'].values()):
         _edge(agent_dir, ledger, PromptClosed(**opened, state='gone', cause=cause), observed=False)
+    end = turn_events.close_active(ledger.get('turns', {}))
+    if end is not None:
+        _enqueue(ledger, 'turn.ended', ledger['launch'], end)
 
 
 def _select(agent_dir, ledger, launch, native_id, generation):
     if (ledger['launch'], ledger['native_id'], ledger['generation']) == (launch, native_id, generation):
         return False
     _close_open(agent_dir, ledger, 'switched' if ledger['launch'] == launch else 'stopped')
+    task_seen = ledger['launch'] == launch and ledger.get('turns', {}).get('task_seen') is True
     ledger.update(launch=launch, native_id=native_id, generation=generation, closed=[])
+    ledger['turns'] = {'task_seen': task_seen} if task_seen else {}
     return True
 
 
@@ -124,7 +132,8 @@ def _load(path):
         return _new_ledger()
     if (not isinstance(ledger, dict) or type(ledger.get('schema')) is not int or ledger['schema'] != 1
             or not isinstance(ledger.get('open'), dict) or not isinstance(ledger.get('closed'), list)
-            or not isinstance(ledger.get('pending'), list) or 'generation' not in ledger):
+            or not isinstance(ledger.get('pending'), list) or 'generation' not in ledger
+            or not isinstance(ledger.get('turns', {}), dict)):
         raise ValueError('Invalid saved prompt events')
     return ledger
 
@@ -184,10 +193,79 @@ def record(agent_dir, launch_id, native_session_id, transitions):
     publish(agent_dir)
 
 
+def _task_launch(agent_dir, launch_id):
+    from ..harnesses.types import normalize_session_id
+
+    try:
+        if normalize_session_id(launch_id) != launch_id:
+            return False
+        request = read(agent_dir / 'launches' / launch_id / 'request.json')
+        return isinstance(request, dict) and request.get('task_launch') is True
+    except (OSError, ValueError):
+        return False
+
+
+def stage_turns(root, agent_dir, launch_id, native_id, edges, *, generation=None, task_launch=None, deadline=None):
+    """Resolve observed turn metadata off-loop, and stage it only in its original conversation."""
+    from ..universe import agents, records
+    from . import transcripts
+
+    limit = turn_events.MAX_BATCH
+    if generation is not None:
+        limit *= turn_events.MAX_RELAY_BATCHES
+    if (not edges or len(edges) > limit or not all(turn_events.valid(edge) for edge in edges)
+            or not isinstance(native_id, str) or not native_id):
+        return
+
+    def scope():
+        facts = agents.runtime(agent_dir)
+        if (facts.get('launch_id') != launch_id or facts.get('state') not in ('starting', 'running', 'ending')
+                or type(facts.get('session_generation', 0)) is not int
+                or generation is not None and facts.get('session_generation', 0) != generation):
+            return None
+        props = records.properties(agent_dir / 'properties.json')
+        if props.get('native_session_id') == native_id:
+            return facts, props
+        return None
+
+    try:
+        current = scope()
+        if current is None:
+            return
+        facts, props = current
+        generation = facts.get('session_generation', 0)
+        session = SessionHandle.from_records(props, facts, agent_dir)
+        if deadline is None:
+            deadline = time.monotonic() + _TURN_READ_SECONDS
+        joined = turn_events.attribution(agent_dir, session, generation, edges, deadline=deadline)
+        references = transcripts.turn_references(root, agent_dir, launch_id, native_id, generation, edges,
+                                                 deadline=deadline)
+        if task_launch is None:
+            task_launch = (any(isinstance(edge, TurnStarted) and edge.first_task for edge in edges)
+                           and _task_launch(agent_dir, launch_id))
+
+        def update(ledger):
+            live = scope()
+            if live is None or any(live[1].get(key) != props.get(key) for key in ('id', 'harness', 'workspace')):
+                return False
+            changed = _select(agent_dir, ledger, launch_id, native_id, generation)
+            turns = ledger.setdefault('turns', {})
+            for index, (edge, reference) in enumerate(zip(edges, references)):
+                for kind, data in turn_events.reduce(turns, edge, reference, mv2=index in joined,
+                                                     message=joined.get(index), task_launch=task_launch):
+                    _enqueue(ledger, kind, launch_id, data)
+                    changed = True
+            return changed
+
+        _edit(agent_dir, update)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
+        pass  # Unavailable turn observations leave the status and lifecycle path usable.
+
+
 def finish(agent_dir, launch_id, *, native_id=None, cause='stopped', previous=False):
     """Close the exact ending scope, or the older scope when a launch replaces it."""
     def update(ledger):
-        if (not ledger['open'] or (ledger['launch'] == launch_id) == previous
+        if (not (ledger['open'] or ledger.get('turns', {}).get('active')) or (ledger['launch'] == launch_id) == previous
                 or native_id is not None and ledger['native_id'] != native_id):
             return False
         if previous:

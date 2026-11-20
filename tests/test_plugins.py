@@ -1384,6 +1384,38 @@ class ApiTest(PluginTestCase):
             relay.in_agent_session()  # no universe given: the pane check still runs, in the current one
         self.assertEqual(checked.call_args_list[-1], mock.call(root=self.root))
 
+    def test_a_plugin_reads_one_messages_sender_by_its_id_never_its_text(self):
+        """agent.message(id) gives a turn event's message's sender as mv2 records it, without its text (1.21); else a plugin matches 'Message from' text, or reads what it may not."""
+        from multiverse.universe import mailbox
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read", "messages.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.write_plugin("blind", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        for name in ("reader", "blind"):
+            self.enable(name)
+        directory = self.agent("worker")
+        sent = mailbox.append_message(directory, "the secret plan", {"name": "plugin relay", "plugin": "relay",
+                                                                     "agent_id": None}, "steer")
+        worker = api.Plugin(loader.load(self.entry("reader"))).universe(self.root).agent("worker")
+        found = worker.message(sent["id"])
+        self.assertEqual(found, {"at": sent["at"], "delivery": "steer", "as_user": False,
+                                 "from": {"name": "plugin relay", "plugin": "relay", "agent_id": None}})
+        self.assertNotIn("the secret plan", repr(found))
+        with self.assertRaises(api.Error):
+            worker.message("not-a-message")
+        with self.assertRaisesRegex(api.Error, "messages.read"):
+            api.Plugin(loader.load(self.entry("blind"))).universe(self.root).agent("worker").message(sent["id"])
+        real, moved = mailbox.lock, self.work / "worker-moved"
+
+        def removed_meanwhile(path, **keywords):  # the agent's folder goes after the check, before the read's lock
+            if not moved.exists():
+                directory.rename(moved)
+            return real(path, **keywords)
+        with mock.patch.object(mailbox, "lock", side_effect=removed_meanwhile):
+            with self.assertRaises(api.AgentGone):
+                worker.message(sent["id"])
+        self.assertFalse(directory.exists())  # and the read never made it again
+
     def test_an_agents_harness_home_is_its_recorded_storage(self):
         """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,
         storage, or the legacy evidence resume adopts; an unset default only under a recorded launch HOME), unknown

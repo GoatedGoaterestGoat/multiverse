@@ -50,6 +50,8 @@ def configure(parser):
     parser.add_argument("--usage-json", help="JSON context/cost/rate-limit usage from the harness")
     parser.add_argument("--prompt-events-json", help="ordered prompt transition metadata from the harness")
     parser.add_argument("--prompt-session-id", metavar="ID", help="native session that reported the prompt transitions")
+    parser.add_argument("--turn-events-json", help="ordered turn transition metadata from the harness")
+    parser.add_argument("--turn-session-id", metavar="ID", help="native session that reported the turn transitions")
 
     parser.add_argument("--bridge", type=bridge_argument, metavar="ID",
                         help="the integration's own bridge id, for example claude-mod-v1, or none")
@@ -84,30 +86,35 @@ def usage(text):
     return value
 
 
-def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
-        native_session_id=None, previous_session_id=None, session_reason=None,
-        prompt_events_json=None, prompt_session_id=None):
-    session = (native_session_id, previous_session_id, session_reason)
-    if any(session) and not all(session):
-        raise ValueError("--native-session-id, --previous-session-id and --session-reason go together")
-    if (prompt_events_json is None) != (prompt_session_id is None):
+def _event_batch(kind, raw, session_id, parse, status):
+    if (raw is None) != (session_id is None):
         if status is None:
-            raise ValueError("--prompt-events-json and --prompt-session-id go together")
-        logging.getLogger(__name__).warning('Ignored incomplete prompt-event metadata')
-        prompt_events_json = prompt_session_id = None
-    if native_session_id is not None and prompt_events_json is not None:
-        raise ValueError("Report prompt transitions separately from a native session switch")
-    if status is None and usage_json is None and native_session_id is None and prompt_events_json is None:
-        raise ValueError("Specify --status, --usage-json or --native-session-id")
-    prompt_batch = None
-    if prompt_events_json is not None:
-        from ..runtime.prompt_events import parse
+            raise ValueError(f"--{kind}-events-json and --{kind}-session-id go together")
+        logging.getLogger(__name__).warning('Ignored incomplete %s-event metadata', kind)
+    elif raw is not None:
         try:
-            prompt_batch = prompt_session_id, parse(prompt_events_json)
+            return session_id, parse(raw)
         except ValueError:
             if status is None:
                 raise
-            logging.getLogger(__name__).warning('Ignored invalid prompt-event metadata')
+            logging.getLogger(__name__).warning('Ignored invalid %s-event metadata', kind)
+    return None
+
+
+def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
+        native_session_id=None, previous_session_id=None, session_reason=None,
+        prompt_events_json=None, prompt_session_id=None, turn_events_json=None, turn_session_id=None):
+    from ..runtime import prompt_events, turn_events
+
+    session = (native_session_id, previous_session_id, session_reason)
+    if any(session) and not all(session):
+        raise ValueError("--native-session-id, --previous-session-id and --session-reason go together")
+    prompt_batch = _event_batch('prompt', prompt_events_json, prompt_session_id, prompt_events.parse, status)
+    turn_batch = _event_batch('turn', turn_events_json, turn_session_id, turn_events.parse, status)
+    if native_session_id is not None and (prompt_batch or turn_batch):
+        raise ValueError("Report transitions separately from a native session switch")
+    if status is None and usage_json is None and native_session_id is None and not (prompt_batch or turn_batch):
+        raise ValueError("Specify --status, --usage-json, --native-session-id or event metadata")
     root, directory, launch_id = callback(root, agent)
     if native_session_id is not None:
         return rebind(root, directory, launch_id, previous_session_id, native_session_id, session_reason)
@@ -118,10 +125,22 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
         changes["usage"] = usage(usage_json)
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
+    # The mod serializes these reports. Publish activity before waiting for rows, while keeping this batch in
+    # front of the next one. An idle report still follows the end it carries.
+    active = status in ('working', 'waiting')
+    if turn_batch is not None and not active:
+        prompt_events.stage_turns(root, directory, launch_id, *turn_batch)
     if prompt_batch is not None:
-        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
-                                     status_observed=status is not None)
-    return agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes)
+        result = agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
+                                       status_observed=status is not None)
+    else:
+        result = agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes) if changes else None
+    if turn_batch is not None:
+        if active:
+            prompt_events.stage_turns(root, directory, launch_id, *turn_batch)
+        if active or status is None:
+            prompt_events.publish(directory)
+    return result
 
 
 def rebind(root, directory, launch_id, previous, session_id, reason):

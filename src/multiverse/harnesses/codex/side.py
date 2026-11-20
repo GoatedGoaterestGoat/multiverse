@@ -9,6 +9,7 @@ from copy import deepcopy
 from ..types import NativeResult, normalize_session_id
 from .launch import (LaunchProtocol, grant_policy, local_environment, navigation_environments, navigation_root,
                      navigation_workspace, requires_local_environment)
+from . import receipt_events
 from .plugins import server_version
 from .protocol import object_field, result
 from .refusal import SCREEN_VERSIONS
@@ -42,6 +43,7 @@ class LaunchConnection:
         self.primary_frame = False
         self.ended = False
         self.prompts = None
+        self.turn_observations = None
         from .navigation import Selection
         self.selection = Selection(self)
 
@@ -260,6 +262,10 @@ class LaunchConnection:
         if self.prompts is not None:
             self.prompts.observe('incoming', value)
         self._grant_update(value)
+        if (self.turn_observations is not None and self.observes_primary(receipt_events.VERSIONS)
+                and getattr(self.root, '_selection', None) is None):
+            self.turn_observations.synchronize(self.root.native_id)
+            self.turn_observations.incoming(value)
         if self.selection.incoming(value):
             return None
         response = 'method' not in value
@@ -335,10 +341,16 @@ class LaunchConnection:
 
     def navigation_done(self, event, result):
         self.selection.done(event, result)
+        if self.turn_observations is not None:
+            self.turn_observations.synchronize(self.root.native_id)
         if self.prompts is not None:
             self.prompts.synchronize()
 
     def relay_context(self, context):
+        if callable(context.get('notify_turn_transitions')):
+            from .turn_events import Observations
+            startup = self.root.settings.get('turn_task_digest') if context.get('task_launch') is True else None
+            self.turn_observations = Observations(startup)
         from .prompts import Relay
         try:
             self.prompts = Relay(self, context)
@@ -352,9 +364,20 @@ class LaunchConnection:
     def relay_prompt_transitions(self):
         return self.prompts.take_transitions() if self.prompts is not None else None
 
+    def relay_turn_transitions(self):
+        if (self.turn_observations is not None and self.observes_primary(receipt_events.VERSIONS)
+                and getattr(self.root, '_selection', None) is None):
+            self.turn_observations.synchronize(self.root.native_id)
+            return self.turn_observations.take()
+        return None
+
     async def relay_before_send(self, value):
         if self.prompts is not None:
             await self.prompts.before_send(value)
+        if (self.turn_observations is not None and self.observes_primary(receipt_events.VERSIONS)
+                and getattr(self.root, '_selection', None) is None):
+            self.turn_observations.synchronize(self.root.native_id)
+            self.turn_observations.outgoing(value)
 
     def relay_claim(self, candidate):
         return self.prompts.claim(candidate) if self.prompts is not None else None
@@ -379,13 +402,15 @@ class LaunchConnection:
     def usage(self, value):
         return self.root.usage(value) if self.primary_frame else None
 
-    def delivery_observation(self, value):
-        from . import receipt_events
+    def observes_primary(self, releases):
         cli = self.root.settings.get('navigation_cli')
-        if (self.ended or self.root.bound is not True or self.owns_primary() is not True
-                or self.root.launch_refusal is not None
-                or not isinstance(cli, (list, tuple)) or any(type(part) is not int for part in cli)
-                or tuple(cli) not in receipt_events.VERSIONS or self.version != tuple(cli)):
+        return (not self.ended and self.root.bound is True and self.owns_primary() is True
+                and self.root.launch_refusal is None and isinstance(cli, (list, tuple))
+                and all(type(part) is int for part in cli) and tuple(cli) in releases
+                and self.version == tuple(cli))
+
+    def delivery_observation(self, value):
+        if not self.observes_primary(receipt_events.VERSIONS):
             return None
         observed = receipt_events.observation(value, self.root.native_id)
         return {'kind': 'user_message', **observed} if observed is not None else None

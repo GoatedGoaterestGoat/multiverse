@@ -568,7 +568,8 @@ def focus_note(agent_dir, focus_id, *, blocking=True):
 
 def message_record(agent_dir, message_id):
     agent_dir = Path(agent_dir)
-    with lock(agent_dir / '.inbox.lock'):
+    # A read: never makes the agent's folder again (FileNotFoundError once it's gone).
+    with lock(agent_dir / '.inbox.lock', create_parent=False):
         observed_missing = missing_records(agent_dir / name for name in
                                            ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
         _, _, records = _messages(agent_dir, observed_missing=observed_missing)

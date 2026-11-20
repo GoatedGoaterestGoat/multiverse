@@ -359,9 +359,9 @@ def _deadline(reader):
 VIEWS = 4  # views kept per transcript index, one per tip a reader asked for
 
 
-def _empty_view(state, reason):
-    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(), context_from=0,
-                          tip=None, gap=None, history_version=0)
+def _empty_view(state, reason, *, retry=False):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason, retry=retry), rows=(), history=(),
+                          context_from=0, tip=None, gap=None, history_version=0)
 
 
 def _fact(item, label, source):
@@ -1620,12 +1620,18 @@ class ClaudeAdapter(ConfiguredAdapter):
         home, why = reading_storage(session)
         if home is None:
             return _empty_view('unavailable', why)
+        # One deadline, core's reader's, never re-armed here: it is checked right before every step that can block or
+        # grow with the transcript (finding its copies, opening and reading it, each row, each analysis phase, the
+        # view's facts) and once more before anything is kept. A cold index of a large transcript takes tens of
+        # seconds, which a 0.5 s turn-event read must never wait out.
+        check = (lambda: _deadline(reader)) if reader is not None else None
         try:
-            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check)
         except rows_source.CantTell as error:
             return _empty_view('error', str(error))
         if index is None:
-            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet')
+            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet', retry=True)
         _check(reader)  # indexing a large copy cold takes a moment
         # A read takes several pages, each asking again for an unchanged transcript: keep the view while the index
         # is as it was (a change to the file, or to which copy is newest, rebuilds it).
@@ -1633,9 +1639,16 @@ class ClaudeAdapter(ConfiguredAdapter):
                tuple(getattr(index, 'copies', None) or ()))
         if key in index.views:
             return index.views[key]
-        analysis = rows_source.analyse(index, tip)
+        analysis = rows_source.analyse(index, tip, check)
         entries = index.entries
-        facts = tuple(_fact(item, *labelled) for item, labelled in zip(entries, analysis.labels))
+        made = []
+        for item, labelled in zip(entries, analysis.labels):
+            if check is not None:
+                check()  # every row, as the parse does
+            made.append(_fact(item, *labelled))
+        facts = tuple(made)
+        if check is not None:
+            check()  # before the view's last fields
         source = TranscriptSource(state='supported', home=home, format='claude-jsonl',
                                   version=next((item.version for item in reversed(entries) if item.version), None),
                                   size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
@@ -1643,6 +1656,8 @@ class ClaudeAdapter(ConfiguredAdapter):
                               context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
                               gap=analysis.history.gap, summary=analysis.history.summary,
                               history_version=analysis.version)
+        if check is not None:
+            check()  # last, right before the view is kept
         while len(index.views) >= VIEWS:
             index.views.pop(next(iter(index.views)))
         index.views[key] = view
@@ -1656,12 +1671,16 @@ class ClaudeAdapter(ConfiguredAdapter):
         _check(reader)
         home, _ = reading_storage(session)
         try:
-            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)) if home else None
+            check = (lambda: _deadline(reader)) if reader is not None else None
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check) if home else None
         except rows_source.CantTell as error:  # the copies stopped agreeing since the view
             raise TranscriptRowsChanged() from error
         if index is None:
             raise TranscriptRowsChanged()
         out = []
+        if check is not None:
+            check()  # right before the body file opens
         with rows_source.open_regular(index.path) as handle:
             for number in indexes:
                 _deadline(reader)

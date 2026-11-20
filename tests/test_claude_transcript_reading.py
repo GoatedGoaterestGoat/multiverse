@@ -3,12 +3,18 @@ import json
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse import harnesses
+from multiverse.harnesses import claude
 from multiverse.harnesses.claude import NO_STORAGE, transcripts as t
 from multiverse.harnesses.types import SessionHandle, TranscriptRowsChanged
+from multiverse.runtime import prompt_events, transcripts as core
+from multiverse.store import read, write
+from multiverse.tools import runtime_update
+from multiverse.universe import agents
 from test_multiverse import BaseTest
 
 
@@ -42,10 +48,242 @@ class ClaudeTranscriptReadingTest(BaseTest):
         index = t.newest_copy(self.native, self.environment, (str(self.work),))
         return index, t.analyse(index, tip)
 
+    def test_a_read_past_its_deadline_starts_no_further_step_keeps_nothing_and_its_retry_reads_it_all(self):
+        """A turn event's read has 0.5 s and a cold index of a large transcript takes tens of seconds: one deadline must
+        stop every step that can block or grow, wherever the time runs out, and leave nothing partial behind, or a
+        report overruns its 10 s kill or a later read trusts half a transcript."""
+        import contextlib
+
+        class Cut(Exception):
+            pass
+
+        rows, parent = [], None
+        for n in range(600):
+            kind = 'user' if n % 2 == 0 else 'assistant'
+            rows.append({'type': kind, 'uuid': f'00000000-0000-4000-8000-{n:012d}', 'parentUuid': parent,
+                         'sessionId': self.native, 'message': {'role': kind, 'content': f'row {n}'}})
+            parent = rows[-1]['uuid']
+        self.write(rows)
+        other = self.project.with_name(self.project.name + '-other')  # two project folders: the scan loops
+        other.mkdir()
+        self.addCleanup(other.rmdir)
+        adapter = self.adapter()
+        t._transcripts.clear()
+        fresh = adapter.transcript_view(self.session())
+        clock, log = [0.0], []
+        state = {'slow': None, 'when': None}  # the step made slow, and on which call
+
+        class Reader:  # core's reader: one deadline, which the fake clock passes when the slow step runs
+            deadline = 1.0
+
+            def check(self):
+                if clock[0] >= self.deadline:
+                    raise Cut()
+
+        def timed(name, call):  # a step: logs when it starts; the slow one takes the rest of the budget
+            def run(*args, **kwargs):
+                log.append((name, clock[0]))
+                calls = sum(1 for each, _ in log if each == name)  # this call's number
+                late = name == state['slow'] and clock[0] < Reader.deadline
+                if late and state['when'] == 'start' and calls == 1:
+                    clock[0] = 2.0
+                result = call(*args, **kwargs)
+                if late and state['when'] == calls:
+                    clock[0] = 2.0  # at the end of that call: it finished, and nothing after it may start
+                return result
+            return run
+
+        real_scandir, real_open = os.scandir, t.open_regular
+
+        def listing(path):
+            opened = timed('opening the listing', real_scandir)(path)
+
+            class Taken:
+                def __iter__(self):
+                    for item in opened:
+                        timed('taking an entry', lambda: None)()
+                        yield item
+
+                def close(self):
+                    opened.close()
+            return Taken()
+
+        @contextlib.contextmanager
+        def opening(path):
+            with timed('opening the transcript', real_open)(path) as handle:
+                class Reading:
+                    def __getattr__(self, name):
+                        return getattr(handle, name)
+
+                    def read(self, *args):
+                        return timed('reading a chunk', handle.read)(*args)
+                yield Reading()
+
+        steps = {'finding the project keys': (t, 'project_keys'), 'opening the listing': None, 'taking an entry': None,
+                 'checking a project folder': (t, 'holds_name'), 'opening the transcript': None,
+                 'reading a chunk': None, 'parsing a row': (t, 'entry'), 'labelling': (t, 'labels'),
+                 'the history walk': (t, 'walk'), 'the history membership': (t, '_on_history'),
+                 'the context': (t, 'in_context'), 'the history refs': (t, '_history_refs'),
+                 "the view's start of context": (t, 'context_from'), 'a view fact': (claude, '_fact')}
+        analysis_steps = set(list(steps)[:steps.__len__() - 2])
+
+        def read(reader, bodies=None):
+            t._transcripts.clear()
+            clock[0], log[:] = 0.0, []
+            patches = [patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: clock[0])),
+                       patch.object(t.os, 'scandir', listing), patch.object(t, 'open_regular', opening)]
+            patches += [patch.object(module, name, timed(step, getattr(module, name)))
+                        for step, (module, name) in ((s, w) for s, w in steps.items() if w)]
+            with contextlib.ExitStack() as stack:
+                for each in patches:
+                    stack.enter_context(each)
+                if bodies is not None:  # the body read: its own index refresh, then the body file
+                    return adapter.transcript_bodies(self.session(), fresh, bodies, max_bytes=1 << 20, reader=reader)
+                return adapter.transcript_view(self.session(), reader=reader)
+
+        def boundaries():
+            # Every boundary between two steps in a whole read: each distinct pair of steps one after the other,
+            # at its first occurrence, as (the earlier step, its call number then). The time runs out at that end.
+            seen, calls, out = set(), {}, [(name, 'start') for name in dict.fromkeys(name for name, _ in log)]
+            for (before, _), (after, _) in zip(log, log[1:]):
+                calls[before] = calls.get(before, 0) + 1
+                if (before, after) not in seen:
+                    seen.add((before, after))
+                    out.append((before, calls[before]))
+            return out
+
+        read(None)  # a dry run: the order the steps run in
+        self.assertEqual({name for name, _ in log}, set(steps))  # every step runs in a whole read
+        for slow, when in boundaries():
+            with self.subTest(slow=slow, when=when):
+                state.update(slow=slow, when=when)
+                with self.assertRaises(Cut):
+                    read(Reader())
+                state.update(slow=None)
+                self.assertIn(slow, [name for name, _ in log])
+                self.assertEqual([name for name, at in log if at >= Reader.deadline], [])  # nothing started after
+                kept = t._transcripts.get(self.path)
+                if kept is not None:  # no view, no part of a read, and an analysis only if it finished in time
+                    self.assertEqual(kept.views, {})
+                    self.assertIn(kept.offset, (0, self.path.stat().st_size))
+                    if slow in analysis_steps:
+                        self.assertIsNone(getattr(kept, 'analysis', None))
+                view = read(None)
+                self.assertEqual((view.rows, view.history), (fresh.rows, fresh.history))
+
+        everything = list(range(len(fresh.rows)))
+        read(None, everything)
+        for slow, when in boundaries():
+            with self.subTest(bodies=slow, when=when):
+                # A body read keeps nothing, so one whose last step ends past the deadline may return; but no
+                # step starts after it.
+                state.update(slow=slow, when=when)
+                try:
+                    read(Reader(), everything)
+                except Cut:
+                    pass
+                state.update(slow=None)
+                self.assertEqual([name for name, at in log if at >= Reader.deadline], [])
+                self.assertEqual(len(read(None, everything)), len(fresh.rows))
+
+        with self.subTest(case='a read past its deadline never waits on another read holding the index lock'):
+            import threading
+            t._transcripts.clear()
+            clock[0], outcome = 0.0, []
+
+            def waiting():
+                try:
+                    with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: clock[0])):
+                        adapter.transcript_view(self.session(), reader=Reader())
+                except Cut:
+                    outcome.append('cut')
+            with t._transcripts_lock:
+                worker = threading.Thread(target=waiting)
+                worker.start()
+                time.sleep(.1)  # it reaches the lock and waits
+                clock[0] = 2.0  # the deadline passes while it waits
+                worker.join(5)
+                self.assertFalse(worker.is_alive())  # it gave up without the lock being released
+            self.assertEqual(outcome, ['cut'])
+
+        with self.subTest(case='a read cut off after half was read keeps exactly that half'):
+            class Halfway:
+                calls = 0
+                deadline = 0
+
+                def check(self):
+                    Halfway.calls += 1
+                    if Halfway.calls > 40:  # inside the second half's rows
+                        raise Cut()
+            t._transcripts.clear()
+            self.write(rows[:300])
+            index = t._index(self.path, rows=True).read(prove=True)
+            half = (len(index.entries), index.offset, index.prefix.hexdigest(), index.chain)
+            self.write(rows)
+            with self.assertRaises(Cut):
+                index.read(check=Halfway().check)
+            self.assertEqual((len(index.entries), index.offset, index.prefix.hexdigest(), index.chain), half)
+            self.assertEqual([e.ref for e in index.read().entries], [e.ref for e in t.Transcript(self.path, True).read().entries])
+
+        with self.subTest(case='a deadline that is an OSError, raised mid-discovery, comes out as itself'):
+            class Expiring:
+                calls = 0
+                deadline = 0
+
+                def check(self):
+                    Expiring.calls += 1
+                    if Expiring.calls > 1:  # the first check is transcript_view's own, at its start
+                        raise TimeoutError('deadline')
+            t._transcripts.clear()
+            with self.assertRaises(TimeoutError):
+                adapter.transcript_view(self.session(), reader=Expiring())
+
+    def test_fresh_task_start_waits_for_its_transcript_row(self):
+        """The launch-task start can arrive before the transcript exists or its first row can be read."""
+        agent = self.root / 'state' / 'agents' / str(uuid4())
+        launch, row_ref = str(uuid4()), str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'worker', 'harness': 'claude',
+              'workspace': str(self.work), 'native_session_id': self.native, 'native_session_home': str(self.storage)})
+        write(agent / 'runtime.json', {'launch_id': launch, 'state': 'starting'})
+        write(agent / 'launches' / launch / 'request.json', {'task_launch': True})
+        edge = {'type': 'started', 'turn': row_ref, 'ref': row_ref, 'kind': 'prompt',
+                'source': 'person', 'first_task': True}
+        start = time.monotonic()
+        elapsed = 0.0
+
+        def make_row_visible(delay):
+            nonlocal elapsed
+            self.assertEqual(read(agent / 'runtime.json')['status'], 'working')
+            status.assert_called_once_with(agent, 'agent.status', launch, {'from': None, 'to': 'working'})
+            elapsed += delay
+            if self.path.exists():
+                self.write([{'type': 'user', 'uuid': row_ref, 'sessionId': self.native,
+                             'origin': {'kind': 'human'}, 'message': {'role': 'user', 'content': 'Launch task'}}])
+            else:
+                self.path.touch()
+
+        with patch.object(core, 'time') as clock, patch.object(agents, '_event') as status, \
+                patch.object(prompt_events, '_journal_event', return_value='retry'), \
+                patch.object(runtime_update, 'callback', return_value=(self.root, agent, launch)):
+            clock.monotonic.side_effect = lambda: start + elapsed
+            clock.sleep.side_effect = make_row_visible
+            runtime_update.run(status='working', turn_session_id=self.native, turn_events_json=json.dumps([edge]))
+
+        [event] = read(agent / 'prompts' / 'journal' / 'events.json')['pending']
+        self.assertEqual(event['kind'], 'turn.started')
+        self.assertEqual((event['data']['source'], event['data']['message'], event['data']['first_task']),
+                         ('mv2', None, True))
+        self.assertEqual(clock.sleep.call_count, 2)
+        page = core.rows(self.root, agent, bodies=False)
+        [row] = page.rows
+        self.assertEqual((event['data']['turn'], event['data']['ref'], event['data']['generation']),
+                         (row.turn, row.cursor, page.generation))
+
     def test_each_row_is_labelled_by_claudes_own_fields(self):
         """Labels decide what a plugin counts as a prompt or a turn's end; fragile because Claude marks them only by
-        loose fields (origin, promptId, attachment types, a compaction's span), and a wrong rule turns a compaction's
-        hundreds of stored rows into mid-turn messages, or an interrupted turn into one that never ends."""
+        loose fields (origin, promptId, attachment types, a compaction's span, a parent link), and a wrong rule turns a
+        compaction's hundreds of stored rows into mid-turn messages, an interrupted turn into one that never ends, or a
+        local command's report into the turn before it."""
         rows = [
             ('typed prompt', {'type': 'user', 'uuid': 'u1', 'promptId': 'p1', 'origin': {'kind': 'human'},
                               'message': {'role': 'user', 'content': 'Fix the bug.'}}, ('prompt', 'human')),
@@ -90,6 +328,15 @@ class ClaudeTranscriptReadingTest(BaseTest):
              ('prompt', 'plugin')),
             ('a later row of that turn', {'type': 'user', 'uuid': 'u3', 'parentUuid': 'u2', 'promptId': 'p3',
                                           'message': {'role': 'user', 'content': 'Also this.'}}, ('injected', None)),
+            ('a local command', {'type': 'system', 'subtype': 'local_command', 'uuid': 'l1', 'parentUuid': None,
+                                 'content': '<command-name>/context</command-name>'}, ('command', None)),
+            ('its stdout', {'type': 'system', 'subtype': 'local_command', 'uuid': 'l2', 'parentUuid': 'l1',
+                            'content': '<local-command-stdout>Context usage</local-command-stdout>'}, ('command_output', None)),
+            # /context's report for the model: a meta row under the command's output, so it is the command's too.
+            ('its report', {'type': 'user', 'uuid': 'l3', 'parentUuid': 'l2', 'promptId': 'p4', 'isMeta': True,
+                            'message': {'role': 'user', 'content': '## Context Usage'}}, ('command_output', None)),
+            ('a meta row under anything else', {'type': 'user', 'uuid': 'l4', 'parentUuid': 'u3', 'promptId': 'p3', 'isMeta': True,
+                                                'message': {'role': 'user', 'content': 'A reminder'}}, ('injected', None)),
             ('a title', {'type': 'ai-title', 'aiTitle': 'x'}, ('meta', None)),
         ]
         self.write([row for _, row, _ in rows])

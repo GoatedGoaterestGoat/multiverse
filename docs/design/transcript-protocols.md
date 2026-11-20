@@ -102,7 +102,7 @@ which rows are real prompts.
 | `mid_turn` | Joins the running turn: a steer, or a prompt typed while the model works |
 | `tool_result` | A tool's result |
 | `command` | Starts a slash command; core makes it a turn of its own |
-| `command_output` | That command's echo, caveat or output |
+| `command_output` | That command's echo, caveat or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
 | `injected` | Context the harness added: reminders, file and environment notes, a background notice merged mid-turn, a skill's instructions |
 | `compaction` | Written by a compaction: the boundary, a summary, rows it stored |
 | `response` | The model's output |
@@ -232,6 +232,63 @@ plugin slices one history read by turn instead of reading turn by turn.
   `turn_duration`.
 - Claude writes a turn's last rows after its Stop hooks run, so a turn never
   counts as finished from the Stop hook or the agent's status alone.
+
+## Turn events
+
+A plugin follows conversations through the event journal: an event when an
+input starts or joins a turn, and one when the turn ends (asked for by a
+plugin author, 2026-11-20). Any harness that provides transcripts and reports
+these edges gets them the same way. They carry no text: a plugin reads the
+rows through this protocol, with `transcripts.read`.
+
+| Event | `data` |
+| --- | --- |
+| `turn.started` | `turn`, `kind`, `ref`, `generation`, `source`, `message`, `first_task` |
+| `turn.joined` | `turn`, `ref`, `generation`, `source`, `message` |
+| `turn.ended` | `turn`, `kind`, `ref`, `generation`, `state` |
+
+- `turn` and `kind` are the turn's ID and kind as the turns above group it, so
+  a skill a harness stores as a prompt is a `prompt` turn. `ref` and
+  `generation` are the row's cursor: the input's row for a start or join, the
+  turn's last stored row for an end, its own turn-end row included where the
+  harness has stored one. For a reported row, mv2 retries within the event's
+  existing read deadline if the row isn't visible yet. Any of these
+  fields is null when mv2 can't prove which row it is. The event still says
+  what happened, and a plugin pairs a null-turn start and end by order, since
+  a conversation runs one turn at a time.
+- `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
+  a message, a plugin's send, an answer, a command run with `mv2 slash`, the
+  launch's task) or `harness` (anything else). `message` is the mv2 message ID
+  for a message, from which a plugin reads its sender, and null otherwise; mv2
+  matches the delivery from its own records and never adds the ID to the row
+  or anything the agent sees. `first_task` marks the start of the turn that
+  ran the launch's task, when the harness proves that input was the task.
+- `state` is `finished`, `interrupted`, `error` (a model or harness error
+  ended it, where the harness records one) or `unknown` (the harness can't
+  tell, or mv2 closed the turn because its end was never reported). A plugin
+  never matches a harness's interruption text.
+
+**Order.** A turn starts once, before its joins and its end. A turn's end is
+recorded once its rows are stored and before the status change to `idle` that
+follows it, whenever mv2 can see the end by then. A start or join is recorded
+once its row is readable, within the read deadline, or with null fields when
+the deadline runs out. Working and waiting status can publish while the row
+is pending. Later edges of that turn in that conversation come after it.
+A harness may continue a turn on its own after it ended, with no new input.
+The turn then ends again with a later `ref`, and the latest end wins.
+
+**Missed ends.** A new turn whose predecessor's end was never reported records
+that end as `unknown` first. A launch's end, a crash noticed later, or a
+conversation switch ends an open turn as `unknown` before `agent.exited`,
+`agent.killed`, the next `agent.launched` or `agent.session`. An end or a join
+whose turn's start mv2 never saw (the in-session part reloaded mid-turn) is
+recorded alone. After a gap the journal no longer holds, a plugin reads the
+turns once.
+
+**How it's kept.** Harnesses report each edge with its native row and turn;
+core builds the public turn ID, cursor and generation, maps the delivery to
+the message, and keeps a ledger per agent and launch with the prompt events,
+written in order and never held up by the change it reports.
 
 ## The adapter's part
 
@@ -452,7 +509,6 @@ The question's model and effort come from the latest `turn_context` or `thread_s
 
 ## Later
 
-- **Conversation entries** (API 1.15): each row's content in one form for
-  every harness.
+- **Conversation entries**: each row's content in one form for every harness.
 - **Pi reading, models and one-shot runs; a schema for the reply; provider routing recorded at
   launch for per-agent runs** ([future work](future-work.md)).

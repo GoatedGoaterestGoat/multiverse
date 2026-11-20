@@ -2004,6 +2004,27 @@ class Agent:
             raise Error(result.get("reason") or "The agent did not answer")
         return (result.get("value") or {}).get("answer", "")
 
+    def message(self, id):
+        """One message this agent received, by its mv2 ID, as a turn event's `message` names it (1.21; needs
+        messages.read): {at, from, delivery, as_user}. `from` is the sender as mv2 records it ({name, agent_id,
+        plugin}), so a message a plugin sent as the person's names that plugin; never the text."""
+        self._plugin._need("messages.read")
+        if not isinstance(id, str) or not id:
+            raise Error("message(id) takes a message's ID, as a turn event's data names it")
+        from ..universe import mailbox
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading a message"):
+            if not self.directory.is_dir():
+                raise AgentGone(f"{self.name} is gone")
+            try:
+                found, _ = _call(mailbox.message_record, self.directory, id)
+            except Error:
+                if not self.directory.is_dir():  # removed meanwhile: gone, and never made again by this read
+                    raise AgentGone(f"{self.name} is gone") from None
+                raise
+        sender = found.get("from") if isinstance(found.get("from"), dict) else {}
+        return {"at": found.get("at"), "delivery": found.get("delivery"), "as_user": found.get("as_user") is True,
+                "from": {key: sender.get(key) for key in ("name", "agent_id", "plugin") if key in sender}}
+
     def inbox(self):
         """Unread inbox-only messages, left unread (needs messages.read): [{at, from, text, delivery}]."""
         self._plugin._need("messages.read")
