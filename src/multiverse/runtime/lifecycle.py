@@ -1,5 +1,6 @@
 """An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from contextlib import contextmanager
 import inspect
 import json
@@ -117,6 +118,7 @@ def damaged_row(scope, error, properties=None):
         pass  # Unreadable authority is not an orphan-removal hint.
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
             "live": "unknown", "status": "unknown", "phase": text("phase") or "unknown",
+            "status_changed_at": None, "active_now": False,
             "summary": summary, "damaged": {"file": shown, "reason": reason, **recover}}
 
 
@@ -181,10 +183,18 @@ ROW_FIELDS = frozenset((
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
-    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error', 'identity_error',
+    'universe', 'live', 'status', 'status_changed_at', 'active_now', 'reason', 'launch_error', 'connection_error', 'identity_error',
     'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
     *USAGE_FIELDS, 'default_model', 'default_model_name',
 ))
+
+
+def _status_changed_at(facts):
+    try:
+        at = datetime.fromisoformat(facts.get('status_changed_at'))
+        return at.astimezone(timezone.utc).isoformat() if at.utcoffset() is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def row_usage(row, *, model_names=None):
@@ -276,6 +286,8 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                     scope, properties, before_edit.get('model'), model_names)}} if isinstance(before_edit, dict) else {})
                 relay = facts.get('native_relay') or {}
                 relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
+                status = (('disconnected' if relay.get('state') == 'lost' else facts.get('status', 'unknown'))
+                          if observation['live'] == 'alive' else '-')
                 if relay_problem and observation['live'] == 'alive':
                     relay_problem = native.missing_socket_problem(scope, properties, facts) or relay_problem
                 recovery = facts.get('auto_recovery') or {}
@@ -289,8 +301,8 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                     delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, **model_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
-                             "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
-                                       if observation["live"] == "alive" else "-",
+                             "status": status, "active_now": status == 'working',
+                             "status_changed_at": _status_changed_at(facts),
                              "connection_error": (facts.get('native_refusal') or {}).get('message')
                                  or relay_problem
                                  or facts.get('binding_conflict') or identity_problem

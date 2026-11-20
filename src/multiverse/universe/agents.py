@@ -242,12 +242,13 @@ def preparation_snapshot(agent_dir, facts):
         return {**facts, 'preparing': False}  # Unknown ownership remains unknown.
 
 
-def update_runtime(agent_dir, launch_id, **changes):
-    return mutate_runtime(agent_dir, launch_id, lambda data: changes, create_parent=True)
+def update_runtime(agent_dir, launch_id, *, status_observed=False, **changes):
+    return mutate_runtime(agent_dir, launch_id, lambda data: changes, create_parent=True,
+                          status_observed=status_observed)
 
 
-def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, blocking=True, prompt_batch=None,
-                   before_status_event=None):
+def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, blocking=True, status_observed=False,
+                   prompt_batch=None, before_status_event=None):
     """Reduce current facts under the runtime lock; None leaves the record alone.
 
     Reducers are core bookkeeping only: no native calls or plugin callbacks.
@@ -272,6 +273,7 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, bl
         changes = changes_for(data)
         if changes is not None:
             before = data.get("status")
+            last_reported = data.get('last_reported_status', data.get('native_status_value', before))
             primary = data.get('native_refusal')
             data.update(changes, observed_at=now())
             if primary or data.get('native_refusal'):
@@ -280,6 +282,11 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, bl
                 data['startup_delivery'] = 'failed'
                 data['delivery_error'] = data['reason']
                 data['status'] = 'unknown'
+            if status_observed and 'status' in changes and data.get('status') in ('working', 'waiting', 'idle'):
+                # Track the harness report when received, even if stop defers its effect on the displayed status.
+                data['last_reported_status'] = data['status']
+                if data['status'] != last_reported:
+                    data['status_changed_at'] = data['observed_at']
             if before == 'waiting' and data.get('state') == 'ending':
                 # A stopping harness can report activity before cancellation
                 # succeeds. Keep its wait until a terminal state confirms exit.

@@ -226,7 +226,8 @@ class StatusWatcher:
                 lost = (facts.get('native_relay') or {}).get('state') == 'lost'
                 changes['status'] = 'unknown' if lost else status
                 return changes if any(facts.get(key) != value for key, value in changes.items()) else None
-            mutate_runtime(self.agent_dir, self.launch_id, changes_for, before_status_event=self.before_status_event)
+            mutate_runtime(self.agent_dir, self.launch_id, changes_for, status_observed=True,
+                           before_status_event=self.before_status_event)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 

@@ -119,8 +119,9 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
     if prompt_batch is not None:
-        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch)
-    return agents.update_runtime(directory, launch_id, **changes)
+        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
+                                     status_observed=status is not None)
+    return agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes)
 
 
 def rebind(root, directory, launch_id, previous, session_id, reason):

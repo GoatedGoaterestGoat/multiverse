@@ -271,6 +271,11 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 A newer `waiting` or `unknown` report clears the deferral. A refused
 cancellation applies the deferred report to the continuing launch.
 
+`last_reported_status` and `status_changed_at` track the last known harness
+status and when it changed. The time comes from the harness callback,
+including a report whose effect on the displayed status is deferred
+during a stop. Other runtime updates leave the time alone.
+
 For a bridged conversation switch, `runtime.json` also holds a `navigation`
 record with its request correlation and admission token. `checking` and
 `admitted` block new submission until a definite result; an unknown result

@@ -5,11 +5,13 @@ from unittest.mock import patch
 
 from multiverse import display, harnesses
 from multiverse.harnesses.types import NativeResult
+from multiverse.plugins.api import Agent
 from types import SimpleNamespace
-from multiverse.runtime import lifecycle, native, missing_runtime
+from multiverse.runtime import lifecycle, native, missing_runtime, runner
 from multiverse.store import lock, read, uid, write
 from multiverse.terminal.tmux import Tmux
-from multiverse.tools import list_agents
+from multiverse.tools import list_agents, runtime_update
+from multiverse.universe import agents
 from test_multiverse import BaseTest, TerminalBase
 
 
@@ -35,6 +37,79 @@ class LaunchDisplayFollowupTest(BaseTest):
                 '@mv2_agent_id': identity, '@mv2_universe_id': properties['universe_id'],
                 '@mv2_launch_id': facts['launch_id'], 'pane_pid': str(number)}
         return directory, facts, pane
+
+    def test_activity_time_changes_only_when_the_harness_reports_a_new_status(self):
+        """Usage and cleanup can write runtime after a harness goes idle and must never reset its activity age."""
+        directory, facts, _ = self.record(1, state='running')
+        path = directory / 'runtime.json'
+        launch = facts['launch_id']
+        first, later = '2026-01-01T00:00:00+00:00', '2026-01-01T01:00:00+00:00'
+        with patch.object(runtime_update, 'callback', return_value=(self.root, directory, launch)):
+            with patch.object(agents, 'now', return_value=first):
+                runtime_update.run(status='working')
+            self.assertEqual(read(path)['status_changed_at'], first)
+            with patch.object(agents, 'now', return_value=later):
+                runtime_update.run(status='working', usage_json='{}')
+                self.assertEqual(read(path)['observed_at'], later)
+                self.assertEqual(read(path)['status_changed_at'], first)
+                agents.update_runtime(directory, launch, status='unknown')
+                runtime_update.run(status='working')
+                self.assertEqual(read(path)['status'], 'working')
+                self.assertEqual(read(path)['status_changed_at'], first)
+                runner.StatusWatcher(directory, launch, self.root)._publish('idle')
+            self.assertEqual(read(path)['status_changed_at'], later)
+        agents.update_runtime(directory, launch, state='dormant', status='unknown')
+        self.assertEqual(read(path)['status_changed_at'], later)
+
+    def test_activity_uses_the_harness_report_time_even_during_a_deferred_stop(self):
+        """A status reported with a prompt batch keeps its original time when a refused stop later applies it."""
+        directory, facts, _ = self.record(1, state='running')
+        path = directory / 'runtime.json'
+        properties = directory / 'properties.json'
+        write(properties, {**read(properties), 'native_session_id': 'conversation'})
+        launch = facts['launch_id']
+        waiting = '2026-01-01T00:00:00+00:00'
+        reported = '2026-01-01T00:01:00+00:00'
+        resumed = '2026-01-01T00:02:00+00:00'
+        batch = {'prompt_events_json': '[]', 'prompt_session_id': 'conversation'}
+        with patch.object(runtime_update, 'callback', return_value=(self.root, directory, launch)):
+            with patch.object(agents, 'now', return_value=waiting):
+                runtime_update.run(status='waiting', **batch)
+            self.assertEqual(read(path)['status_changed_at'], waiting)
+            agents.update_runtime(directory, launch, state='ending')
+            with patch.object(agents, 'now', return_value=reported):
+                runtime_update.run(status='working', **batch)
+            self.assertEqual(read(path)['status'], 'waiting')
+            self.assertEqual(read(path)['status_changed_at'], reported)
+            with patch.object(agents, 'now', return_value=resumed):
+                runtime_update.run(status='working', **batch)
+                agents.mutate_runtime(directory, launch,
+                                      lambda current: {'state': 'running', 'status': current['deferred_stop_status']})
+            self.assertEqual(read(path)['status'], 'working')
+            self.assertEqual(read(path)['observed_at'], resumed)
+            self.assertEqual(read(path)['status_changed_at'], reported)
+
+    def test_activity_listing_fields_use_live_status_and_a_readable_utc_time(self):
+        """A dormant agent's saved working status and malformed or legacy timestamps must not masquerade as activity."""
+        directory, facts, pane = self.record(1, state='running')
+        path = directory / 'runtime.json'
+        stored, utc = '2026-01-01T03:30:00+03:30', '2026-01-01T00:00:00+00:00'
+        for live, status, timestamp, active, expected in (
+                (True, 'working', stored, True, utc), (True, 'waiting', stored, False, utc),
+                (False, 'working', stored, False, utc), (True, 'idle', '2026-01-01', False, None),
+                (True, 'idle', 'broken', False, None), (True, 'idle', None, False, None)):
+            with self.subTest(live=live, status=status, timestamp=timestamp):
+                values = {**facts, 'status': status}
+                if timestamp is not None:
+                    values['status_changed_at'] = timestamp
+                write(path, values)
+                with patch.object(Tmux, 'snapshot', return_value=({'%1': pane} if live else {}, None)), \
+                        patch.object(native, 'usage_snapshot', side_effect=AssertionError('No transcript read')):
+                    fields = list_agents.cli_run(self.root, json=True, columns='active_now,status_changed_at')[0]
+                    row = lifecycle.listing(self.root, usage=False)[0]
+                self.assertEqual(fields, {'active_now': active, 'status_changed_at': expected})
+                plugin = Agent(row, None)
+                self.assertEqual({key: plugin.record[key] for key in fields}, fields)
 
     def test_listing_can_skip_usage_without_changing_identity_or_display(self):
         """A projected listing must not parse transcripts, and its allowed fields must cover healthy, damaged and preparing rows."""

@@ -96,6 +96,8 @@ A method that takes a function also works as a decorator: `@mv.events.on("agent.
 
 `value(row)` gets a copy of the agent's listing row of its own, nested records included: changing it changes nothing in the dashboard. An inspector line, a palette action's `context.row` and a data panel's `agent.record` are copies the same way. These keys are promised for 1.x (1.13): `id`, `name`, `harness`, `universe` (the agent's universe's path), `live`, `status`, `phase`, `summary`, `task`, `focus` (its focus record, or `None`), `tokens`, `reason` (why it isn't running, when set), and `usage`: `state` (`ok`, `unavailable` or `error`) and `value`, whose `context` has `tokens`, `percent`, `window`, `responded_at` and `last_known`, as core measured them, and whose `model`, `effort` and `observed_at` (1.19) are as `agent.usage()` gives them. Every other key is core's and may change.
 
+Listing rows also provide `active_now` and `status_changed_at` (1.21). `active_now` is true for a live agent reporting `working`. `status_changed_at` is the last known harness-reported status change as a UTC ISO timestamp, or `None` if the current launch has no readable timestamp. Reports, usage samples, and internal runtime updates leave the time alone.
+
 `value` runs on every refresh, off the dashboard's event loop and within 2 s, for every row. Keep it cheap: read the row, or a cache of your own, never `mv.universe(...).agent(...)` per row (about 25 ms each).
 
 Two keywords (1.13) let a column work with core's own:
