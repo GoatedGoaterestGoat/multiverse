@@ -104,6 +104,31 @@ def supported(session):
         return False
 
 
+def recorded_prompt(record, offer=None):
+    """Project exact legacy presentation without changing the native answer envelope."""
+    prompt = record['prompt']
+    choices = prompt.get('choices')
+    old_choices = (isinstance(choices, list) and bool(choices)
+                   and all(isinstance(item, dict) and 'meaning' not in item and 'short' not in item
+                           for item in choices))
+    old_display = 'display' not in prompt
+    if not old_choices and not old_display:
+        return prompt
+    if offer is None and isinstance(record.get('params'), dict):
+        offer = codec.describe(record['method'], record['params'], item=record.get('item'))
+    if offer is None:
+        return prompt
+
+    current = offer.public(prompt['id'])
+    legacy = dict(current)
+    if old_choices:
+        legacy['choices'] = codec.legacy_choices(current['choices'])
+    if old_display:
+        del legacy['display']
+    # JSON equality keeps a damaged numeric value distinct from a native bool.
+    return current if json.dumps(prompt, sort_keys=True) == json.dumps(legacy, sort_keys=True) else prompt
+
+
 def catalog(session):
     if not available(session):
         return NativeResult('unavailable', 'Waiting prompts need a verified Codex bridge on matching checked CLI and daemon releases; resume with it')
@@ -124,7 +149,7 @@ def catalog(session):
                     or record.get('connection_id') != index.get('connection_id')
                     or not isinstance(record.get('prompt'), dict) or record['prompt'].get('id') != id):
                 raise ValueError('The relay prompt belongs to a different connection')
-            prompts.append(record['prompt'])
+            prompts.append(recorded_prompt(record))
         after = files.read('index.json')
         if after != index:
             raise ValueError('The relay prompt inventory changed while being read')
@@ -153,7 +178,7 @@ def submit(session, answer, executor):
             return NativeResult('unavailable', 'The agent is not waiting on this prompt; nothing was sent')
         offer = codec.describe(record['method'], record['params'], item=record.get('item'))
         if (offer is None or json.dumps(offer.public(answer.id), sort_keys=True)
-                != json.dumps(record['prompt'], sort_keys=True)):
+                != json.dumps(recorded_prompt(record, offer), sort_keys=True)):
             raise ValueError('The native prompt choices changed')
         response = offer.response(asdict(answer))
         executor.check_session()

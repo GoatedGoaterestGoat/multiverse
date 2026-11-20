@@ -13,7 +13,8 @@ from uuid import uuid4
 
 from .. import harnesses, universe
 from ..harnesses.types import (AttachmentSpec, Message, NativeEndpoint, NativeResult, NativeServiceHandle,
-                              PromptAnswer, PromptChoice, PromptClosed, PromptInput, PromptList, PromptOpened,
+                              PROMPT_CHOICE_LABELS, PROMPT_CHOICE_SAVES, PromptAnswer, PromptChoice,
+                              PromptClosed, PromptDisplay, PromptInput, PromptList, PromptOpened,
                               PromptQuestion, PromptResult, SessionHandle, WaitingPrompt)
 from ..plugins import access, agent_files
 from ..store import lock, now, retry_missing
@@ -84,6 +85,37 @@ def _text(value, *, empty=True):
     return isinstance(value, str) and (empty or bool(value)) and '\0' not in value and len(value.encode()) <= LIMIT
 
 
+def _choice_meaning(choice):
+    meaning = choice.meaning
+    if meaning is None and choice.short is None:
+        return choice  # An older provider still supplies its long label and its original rule-saving policy.
+    if meaning == 'other':
+        label = choice.short
+        if not isinstance(label, str) or not label.strip() or len(label) > 24 or not label.isprintable():
+            raise ValueError('Invalid short prompt choice label')
+        return choice
+    if (not isinstance(meaning, str) or meaning not in PROMPT_CHOICE_LABELS
+            or choice.saves_rule != (meaning in PROMPT_CHOICE_SAVES)):
+        raise ValueError('Invalid prompt choice meaning')
+    return replace(choice, short=PROMPT_CHOICE_LABELS[meaning])
+
+
+def _prompt_display(value):
+    if value is None:
+        return None
+    display = value if isinstance(value, PromptDisplay) else PromptDisplay(**value)
+    if not isinstance(display.lines, (tuple, list)) or len(display.lines) > 8:
+        raise ValueError('Invalid waiting prompt display lines')
+    fields = [(display.title, 80), *((line, 200) for line in display.lines)]
+    if display.subject is not None:
+        fields.append((display.subject, 500))
+    if any(not isinstance(text, str) or len(text) > limit or (text and not text.isprintable()) for text, limit in fields):
+        raise ValueError('Invalid waiting prompt display text')
+    if not display.title.strip():
+        raise ValueError('Missing waiting prompt display title')
+    return replace(display, lines=tuple(display.lines))
+
+
 def _prompt(value):
     if isinstance(value, WaitingPrompt):
         value = asdict(value)
@@ -101,7 +133,7 @@ def _prompt(value):
                 or type(choice.saves_rule) is not bool or type(choice.takes_message) is not bool):
             raise ValueError('Invalid prompt choice')
         ids.add(choice.id)
-        choices.append(choice)
+        choices.append(_choice_meaning(choice))
     ids = set()
     for value in item.questions:
         question = value if isinstance(value, PromptQuestion) else PromptQuestion(**value)
@@ -122,7 +154,8 @@ def _prompt(value):
     encoded = json.dumps(item.detail, ensure_ascii=False, allow_nan=False).encode()
     detail = (dict(item.detail) if len(encoded) <= LIMIT else
               {'truncated': True, 'text': encoded[:(LIMIT - 128) // 2].decode('utf-8', errors='ignore')})
-    return replace(item, choices=tuple(choices), questions=tuple(questions), detail=detail)
+    return replace(item, choices=tuple(choices), questions=tuple(questions), detail=detail,
+                   display=_prompt_display(item.display))
 
 
 def _catalog(adapter, session, executor):

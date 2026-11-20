@@ -1608,6 +1608,9 @@ def _from_core(kind, value):
         values["detail"] = copy.deepcopy(dict(values.get("detail") or {}))
         values["choices"] = tuple(_from_core(PromptChoice, item) for item in values.get("choices") or ())
         values["questions"] = tuple(_from_core(PromptQuestion, item) for item in values.get("questions") or ())
+        values["display"] = _from_core(PromptDisplay, values["display"]) if values.get("display") else None
+    elif kind is PromptDisplay:
+        values["lines"] = tuple(str(line) for line in values.get("lines") or ())
     elif kind is PromptQuestion:
         values["options"] = tuple((str(label), str(description)) for label, description in values.get("options") or ())
     elif kind is PromptResult:
@@ -1666,13 +1669,27 @@ class CommandResult:
 
 @dataclass(frozen=True, kw_only=True)
 class PromptChoice:
-    """One decision a permission prompt offers (1.17), in the harness's order: allow, allow_session, allow_always,
-    deny, stop, accept, decline, cancel (treat one you don't know like the label says). `label` is mv2's wording,
-    not the terminal's."""
+    """One decision a prompt offers (1.17), in the harness's order. `label` is mv2's wording, not the terminal's.
+    `meaning` (1.21) is what it does, the same for every harness: allow, allow_session, allow_always, deny,
+    deny_always, stop, dismiss, approve_plan, keep_planning, or other; `short` is its short label ("Allow for
+    session"). Both are None from a harness that doesn't map its choices yet: then go by `label`. Two choices may
+    share a meaning; `id` is what an answer names."""
     id: str
     label: str
     saves_rule: bool = False      # it also saves a rule to the person's settings: only the person can choose it
     takes_message: bool = False   # it can carry a message (a refusal's reason, say)
+    meaning: str | None = None
+    short: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptDisplay:
+    """A prompt as any harness's can be shown (1.21): `title`, one short line saying what is asked ("Run a
+    command"); `subject`, its main argument or None (the command line, the file, the server and tool); `lines`, up
+    to 8 more lines. Plain text, bounded; never a secret or an answer."""
+    title: str
+    subject: str | None = None
+    lines: tuple = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1701,7 +1718,7 @@ class WaitingPrompt:
     id: str
     kind: str
     summary: str                  # one line: the command, the file, the first question, the server
-    detail: dict = field(default_factory=dict)  # kind-specific, at most 64 KiB; a fresh copy
+    detail: dict = field(default_factory=dict)  # the harness's own (1.21: no stable keys), at most 64 KiB; a copy
     asked_at: str | None = None
     tool: str | None = None
     choices: tuple = ()           # PromptChoice
@@ -1710,6 +1727,7 @@ class WaitingPrompt:
     reason: str | None = None     # why not answerable, and where to answer it
     subagent: str | None = None
     requires_waiting: bool = True
+    display: PromptDisplay | None = None  # (1.21) the same shape for every harness; `detail` is the harness's own
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -390,12 +390,26 @@ class SlashProvider(Protocol):
     def slash_result(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
 
 
+PromptChoiceMeaning = Literal[
+    'allow', 'allow_session', 'allow_always', 'deny', 'deny_always', 'stop', 'dismiss',
+    'approve_plan', 'keep_planning', 'other',
+]
+PROMPT_CHOICE_LABELS: Mapping[PromptChoiceMeaning, str] = {
+    'allow': 'Allow once', 'allow_session': 'Allow for session', 'allow_always': 'Allow always',
+    'deny': 'Deny', 'deny_always': 'Deny always', 'stop': 'Stop', 'dismiss': 'Dismiss',
+    'approve_plan': 'Approve plan', 'keep_planning': 'Keep planning',
+}
+PROMPT_CHOICE_SAVES = frozenset(('allow_always', 'deny_always'))
+
+
 @dataclass(frozen=True, kw_only=True)
 class PromptChoice:
     id: str
     label: str
     saves_rule: bool = False
     takes_message: bool = False
+    meaning: PromptChoiceMeaning | None = None
+    short: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -412,6 +426,15 @@ class PromptQuestion:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PromptDisplay:
+    """Bounded plain text for displaying a waiting prompt across harnesses."""
+
+    title: str
+    subject: str | None = None
+    lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
 class WaitingPrompt:
     id: str
     kind: str
@@ -425,6 +448,7 @@ class WaitingPrompt:
     reason: str | None = None
     subagent: str | None = None
     requires_waiting: bool = True  # Only retained questions may be answerable outside waiting.
+    display: PromptDisplay | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

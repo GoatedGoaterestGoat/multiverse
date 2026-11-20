@@ -262,22 +262,39 @@ def outcome(found, agent):
     raise ValueError(said)
 
 
+def choice_words(choice):
+    """`Allow for session: Allow, and also allow Bash(npm test), for this session`: the choice's short label (core's,
+    from its meaning, or its own for `other`), then its long label where that says more. A choice without a short
+    label (an older adapter) is its long label."""
+    from ..display import clean
+    long = clean(choice.get('label') or '')
+    short = clean(choice.get('short') or '') or long
+    return short if long.strip().casefold() in ('', short.strip().casefold()) else f'{short}: {long}'
+
+
 def listing(found, agent):
     from ..display import clean
     if found['state'] != 'ok':
         raise ValueError(clean(found.get('reason') or f"Prompts {found['state']}"))
     lines = []
     for item in found['prompts']:
-        what = clean(item['tool'] + ': ' if item.get('tool') else '') + clean(item['summary'])
+        # What it asks, the same for every harness (core's display): its title on the prompt's line, then its subject
+        # and further lines under it. A prompt without one (an older adapter) shows its tool and summary.
+        display = item.get('display') if isinstance(item.get('display'), dict) else {}
+        what = (clean(display['title']) if display.get('title')
+                else clean(item['tool'] + ': ' if item.get('tool') else '') + clean(item['summary']))
         lines.append(f"{item['id']}  {item['kind']}  {what}" + (f"  (asked by subagent {clean(item['subagent'])})"
                                                                  if item.get('subagent') else '')
                      + ("  (doesn't need the agent waiting)" if item.get('requires_waiting', True) is False else ''))
+        if display.get('title'):
+            lines.extend('    ' + clean(line) for line in ([display['subject']] if display.get('subject') else [])
+                         + list(display.get('lines') or ()))
         if not item.get('answerable', True):
             lines.append('    ' + clean(item.get('reason') or 'answer it in the terminal'))
             continue
         if item.get('choices'):
             lines.append('    choices: ' + ', '.join(
-                f"{choice['id']} ({clean(choice['label'])})" + (" [saves a rule; person only]" if choice.get('saves_rule')
+                f"{choice['id']} ({choice_words(choice)})" + (" [saves a rule; person only]" if choice.get('saves_rule')
                                                                else '')
                 + (' [takes --message]' if choice.get('takes_message') else '') for choice in item['choices']))
         for number, question in enumerate(item.get('questions') or (), 1):

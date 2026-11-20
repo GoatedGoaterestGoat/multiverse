@@ -46,6 +46,50 @@ A prompt mv2 can't answer is listed with the reason, ending "answer it in the te
 A read's coverage is `complete`, or `unknown` with the reason when the harness reports the agent waiting but mv2
 knows no prompt for it, such as a prompt the harness keeps from plugins.
 
+### Choice meanings
+
+Each choice keeps its `id`, unique in its prompt and what an answer names, and its long `label`. Beside them,
+`meaning` says what the choice does, from one set every harness shares wherever the effect is the same, and `short` is
+that meaning's fixed short label (asked for by a plugin author, 2026-11-20). So a plugin, the dashboard and
+`mv2 answer` can show "Allow for session" without parsing a long label, and a plugin can pick a choice by what it
+does. Several choices may share a meaning, and their long labels tell them apart.
+
+| `meaning` | `short` | Means |
+| --- | --- | --- |
+| `allow` | Allow once | Allow this request (or this turn's grant), nothing remembered |
+| `allow_session` | Allow for session | Allow, and the same for the rest of this session; nothing saved |
+| `allow_always` | Allow always | Allow and save a rule to the person's settings (`saves_rule` true) |
+| `deny` | Deny | Refuse this request; the agent carries on |
+| `deny_always` | Deny always | Refuse and save a rule (`saves_rule` true) |
+| `stop` | Stop | Refuse and stop the agent's turn |
+| `dismiss` | Dismiss | Close the request without an answer (a cancelled form) |
+| `approve_plan` | Approve plan | Approve a plan; the agent leaves planning |
+| `keep_planning` | Keep planning | Refuse the plan; the agent keeps planning, with the message |
+| `other` | the adapter's own, at most 24 characters | A choice none of the above describes |
+
+Core fills each named meaning's short label, so they never drift between harnesses, and refuses a listing where a
+named meaning disagrees with `saves_rule` (true for `allow_always` and `deny_always`, false for the others). An
+`other` choice brings its own plain short label of at most 24 characters and may save a rule or not. A harness part
+that doesn't map its choices yet leaves both null; core never guesses them, and callers show the long label. The set
+grows only in core; an adapter never invents a meaning.
+
+### Display
+
+Each prompt also carries `display`, the same shape for every harness, filled by the adapter and bounded by core, so a
+plugin needn't unpack a harness's own `detail`:
+
+| Field | Holds |
+| --- | --- |
+| `title` | One short line saying what is asked: "Run a command", "Edit a file", "Use an MCP tool", "Answer 2 questions", "Approve the plan", "Fill in a form" (at most 80 characters) |
+| `subject` | The main argument, or null: the command line, the file path, the URL or host, the MCP server and tool (at most 500 characters) |
+| `lines` | Up to 8 more lines for display, each at most 200 characters: a command's stated purpose, the files a change touches, a form's message; never a question's options (they are in `questions`) |
+
+It is plain printable text within those bounds, never a secret or an answer; core refuses a listing that breaks them.
+A harness part that doesn't fill it yet leaves it null, and callers show `summary`. `tool` and `summary` stay as they
+were. `detail` is the harness's own, with no keys shared across harnesses: the [adapter design](harness-adapters.md)
+lists each harness's keys, and a plugin that wants the same view everywhere reads `display`, `tool`, `choices` and
+`questions` instead.
+
 ## The answer
 
 Core and the adapter check before anything is sent: the caller may answer, the agent is `waiting` unless the prompt

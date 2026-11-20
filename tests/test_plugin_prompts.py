@@ -199,6 +199,25 @@ class PromptApiTest(PluginTestCase):
         for private in (BASH.summary, "rm -rf", events.REPLAY):
             self.assertNotIn(private, text)  # no prompt text, and never core's replay key
 
+    def test_a_prompts_choices_and_display_read_the_same_for_every_harness(self):
+        """A choice's meaning gets core's short label and a prompt's display passes through intact (1.21); else plugins parse each harness's labels and details again."""
+        shown = api.WaitingPrompt(
+            id="perm-2", kind="permission", tool="Bash", summary="npm test",
+            display=api.PromptDisplay(title="Run a command", subject="npm test", lines=("Runs the test suite",)),
+            choices=(api.PromptChoice(id="allow", label="Allow once", meaning="allow"),
+                     api.PromptChoice(id="session", label="Allow, and also allow Bash(npm test), for this session",
+                                      meaning="allow_session"),
+                     api.PromptChoice(id="strict", label="Allow with strict review", meaning="other",
+                                      short="Allow, strict review"),
+                     api.PromptChoice(id="old", label="Deny")))  # a harness that doesn't map it yet
+        self.fake_prompts([shown])
+        [listed] = self.worker.waiting_prompts().prompts
+        self.assertEqual([(choice.meaning, choice.short) for choice in listed.choices],
+                         [("allow", "Allow once"), ("allow_session", "Allow for session"),
+                          ("other", "Allow, strict review"), (None, None)])
+        self.assertEqual(listed.display, api.PromptDisplay(title="Run a command", subject="npm test",
+                                                           lines=("Runs the test suite",)))
+
     def test_a_question_that_does_not_stop_the_agent_is_answered_once_as_its_input(self):
         """Async questions are answered while the agent runs, sent once, text kept nowhere; a lost gate is unseen."""
         write(self.directory / "runtime.json", {**read(self.directory / "runtime.json"), "status": "running"})

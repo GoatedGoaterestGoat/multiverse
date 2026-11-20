@@ -19,6 +19,17 @@ def prompt_line(item):
     return f"{item['kind']} · " + (clean(item['tool']) + ': ' if item.get('tool') else '') + clean(item['summary'])
 
 
+def display_text(item):
+    """What the prompt asks, the same for every harness (core's `display`): its subject and its lines. None for a
+    prompt from an adapter that doesn't fill it, which then shows its harness-specific `detail`."""
+    display = item.get('display')
+    if not isinstance(display, dict) or not display.get('title'):
+        return None
+    lines = ([clean(display['subject'])] if display.get('subject') else []) + [clean(line) for line in
+                                                                            display.get('lines') or ()]
+    return '\n'.join(lines)
+
+
 def outcome_shown(said, limit):
     """An answer's outcome as a place with room for `limit` characters shows it: whole when it fits, else led by
     where the rest is, then cut to fit, so the pointer shows however narrow the place or few its lines. The whole
@@ -61,8 +72,11 @@ class AnswerScreen(ModalScreen[dict | None]):
     BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("ctrl+enter", "submit", "Answer")]
     DEFAULT_CSS = """
     AnswerScreen { align: center middle; background: $mv-crust 75%; }
-    AnswerScreen #answer-body { height: auto; max-height: 30; }
+    AnswerScreen #dialog-title { width: 100%; height: auto; }
+    AnswerScreen #answer-body { height: auto; max-height: 55vh; }  /* scrolls inside the dialog in a short terminal */
     AnswerScreen .prompt-detail { height: auto; color: $mv-subtext0; margin-bottom: 1; }
+    AnswerScreen #prompt-choice-long-box { height: auto; max-height: 3; scrollbar-size: 1 1; }
+    AnswerScreen #prompt-choice-long { height: auto; color: $mv-subtext0; }
     AnswerScreen OptionList, AnswerScreen SelectionList { height: auto; max-height: 8; border: none; background: $mv-base; }
     AnswerScreen .question { height: auto; margin-top: 1; }
     AnswerScreen #answer-error { height: auto; color: $mv-red; }
@@ -74,12 +88,16 @@ class AnswerScreen(ModalScreen[dict | None]):
         self.choices = list(item.get('choices') or ())
         self.questions = list(item.get('questions') or ())
         self.picked = None  # the choice the person picked: the list's highlight alone never counts
+        self.previewed = None  # the choice whose full label shows: another one opens its label at the start
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(f"Answer {clean(self.agent)} · " + prompt_line(self.item), id="dialog-title", markup=False)
+            display = self.item.get('display') if isinstance(self.item.get('display'), dict) else {}
+            asked = clean(display['title']) if display.get('title') else prompt_line(self.item)
+            yield Label(f"Answer {clean(self.agent)} · {asked}", id="dialog-title", markup=False)
             with VerticalScroll(id="answer-body"):
-                detail = detail_text(self.item)
+                detail = display_text(self.item)
+                detail = detail_text(self.item) if detail is None else detail
                 if detail:
                     yield Static(detail, classes="prompt-detail", markup=False)
                 if self.item.get('subagent'):
@@ -88,6 +106,8 @@ class AnswerScreen(ModalScreen[dict | None]):
                 if self.choices:
                     yield OptionList(*(Option(self.choice_label(choice), id=choice['id']) for choice in self.choices),
                                      id="prompt-choices")
+                    with VerticalScroll(id="prompt-choice-long-box"):  # its own scroll: a long one never hides the list
+                        yield Static("", id="prompt-choice-long", markup=False)  # the highlighted choice in full
                     yield Static(self.pick_hint(), id="prompt-picked", markup=False)
                     yield Input(placeholder="message to go with this choice", id="prompt-message")
                 for number, question in enumerate(self.questions):
@@ -108,8 +128,13 @@ class AnswerScreen(ModalScreen[dict | None]):
         yield Footer()
 
     @staticmethod
-    def choice_label(choice):
-        label = Text(clean(choice['label']))
+    def short(choice):
+        """The choice's short label (core's, from its meaning), or its long one where it has none."""
+        return clean(choice.get('short') or '') or clean(choice['label'])
+
+    @classmethod
+    def choice_label(cls, choice):
+        label = Text(cls.short(choice))
         label.append(f"  {clean(choice['id'])}", style=theme.OVERLAY1)
         if choice.get('saves_rule'):
             label.append("  saves a rule to your settings", style=theme.PEACH)
@@ -142,13 +167,37 @@ class AnswerScreen(ModalScreen[dict | None]):
         """The choice the person picked, or None."""
         return next((choice for choice in self.choices if choice['id'] == self.picked), None)
 
+    def highlighted(self):
+        if not self.choices:
+            return None
+        index = self.query_one("#prompt-choices", OptionList).highlighted
+        return self.choices[index] if index is not None else None
+
     def show_message_box(self):
-        """The message box, for the picked choice when it takes one (or, before a pick, the highlighted one)."""
-        choice = self.chosen()
-        if choice is None and self.choices:
-            index = self.query_one("#prompt-choices", OptionList).highlighted
-            choice = self.choices[index] if index is not None else None
+        """The message box, for the picked choice when it takes one (or, before a pick, the highlighted one); and the
+        highlighted choice's full label, whatever is picked, so two choices with one short label can be told apart
+        before Enter."""
+        choice = self.chosen() or self.highlighted()
         self.query_one("#prompt-message", Input).display = bool(choice and choice.get('takes_message'))
+        shown = self.highlighted()
+        long = clean(shown['label']) if shown else ''
+        more = shown is not None and long.strip().casefold() != self.short(shown).strip().casefold()
+        self.query_one("#prompt-choice-long", Static).update(long if more else '')  # what the short label leaves out
+        box = self.query_one("#prompt-choice-long-box")
+        box.display = more
+        if shown is not None and shown['id'] != self.previewed:  # another choice: its full label from the start, as
+            box.scroll_home(animate=False)  # the words that tell two scopes apart often lead; kept for the same one
+        self.previewed = shown['id'] if shown is not None else None
+        if shown is not None:
+            self.call_after_refresh(self.show_highlight)
+
+    def show_highlight(self):
+        """The full label under the list, in view with the highlighted choice: the body scrolls in a short terminal,
+        and a choice out of view could otherwise be picked and sent unseen. The full label is at most 3 rows (a longer
+        one scrolls in its own box), so with the list (at most 8) it fits the body of a 60x20 dialog (11 rows)."""
+        box = self.query_one("#prompt-choice-long-box")
+        self.query_one("#answer-body").scroll_to_widget(
+            box if box.display else self.query_one("#prompt-choices", OptionList), animate=False)
 
     def on_option_list_option_highlighted(self, event):
         if event.option_list.id == "prompt-choices":
@@ -166,7 +215,7 @@ class AnswerScreen(ModalScreen[dict | None]):
         self.picked = event.option.id
         choice = self.chosen()
         self.query_one("#prompt-picked", Static).update(
-            f"Picked: {clean(choice['label'])}" + ("; the answers above won't be sent. Enter on it again takes it back."
+            f"Picked: {self.short(choice)}" + ("; the answers above won't be sent. Enter on it again takes it back."
                                                    if self.questions else ''))
         self.show_message_box()
         if choice.get('takes_message'):

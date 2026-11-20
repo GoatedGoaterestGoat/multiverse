@@ -1369,6 +1369,27 @@ Every provider sends `Message.framed` as the message content. Receipt identifier
 remain separate: Codex uses `clientUserMessageId`, Pi persists custom-message
 details, and the Claude mod removes its transport tag before presenting text.
 
+### Codex waiting prompt detail
+
+Use the portable `display` fields for a prompt's title, subject and lines.
+Codex keeps its own request fields in `detail`. Their names and shapes are
+specific to Codex.
+
+| Prompt | Codex detail |
+| --- | --- |
+| Command approval | `command` and `reason` supply the command and purpose in `display`. `networkApprovalContext` can supply a host. `cwd`, `parsedCmd`, `kind` and `availableDecisions` describe the native request. |
+| File change approval | `changes` has `path`, `kind` and `diff` for each change. `display` shows paths and the request's `reason`. |
+| Permission grant | `permissions` holds the native grant profile. `display` shows its network and filesystem scopes, path and glob access, and reason. |
+| Callback question | `questions` holds the native question fields. `isBlocking` describes the terminal countdown. Read the portable `questions` field for the choices. |
+| Retained question | `question` holds the native title. The portable `questions` field supplies its options. |
+| MCP approval or form | `serverName`, `message`, `mode`, `requestedSchema`, `environmentId` and `_meta` come from the native request. `display` shows the requesting server or tool and its message, or the host for a URL request. |
+
+The callback detail can include routing fields such as `threadId`, `turnId`,
+`itemId` and `approvalId`. A terminal-only placeholder carries
+`terminal_only` and may carry `truncated` when a size bound was reached.
+The bounded display fields and choice meanings use a separate presentation
+budget from the native prompt and answer.
+
 ### Claude: a terminal-hosted bridge
 
 Claude fits the service, session and attachment model above with one piece
@@ -1686,6 +1707,28 @@ is stored exactly like the person's No or Esc, so mv2 offers no "deny and stop",
 and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
 the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
 form are listed, never held.
+
+Each published choice carries its meaning from core's set: allow once is `allow`,
+deny (the agent carries on) `deny`, and a plan's approve and keep planning are
+`approve_plan` and `keep_planning`. A suggestion choice allows the call and applies
+one of Claude's suggestions: an allow rule or a directory is `allow_session`, or
+`allow_always` when it is saved to settings. A mode switch (`setMode`, such as
+accept edits) or another change of the rules does more than allow the same again,
+so it is `other` with its own short label ("Allow, accept edits"), saved or not:
+only the named meanings are tied to `saves_rule`. The adapter lists a meaning only
+when it is in the set, a named one agrees with `saves_rule`, and `other` comes with
+a short label of 1 to 24 printable characters (core's `isprintable` rule, so a bidi
+or zero-width control falls back to the long label); an older mod's choice has none. The adapter builds `display` from the published prompt: the
+tool's title ("Run a command", "Edit a file", "Use an MCP tool" with the server and
+tool), its main argument (the command's first line, the file path, a fetched page's
+host and port, never the URL's credentials, path, query or fragment, or the search
+query) and its other lines (a command's description, its further lines); a
+question's count and, for one, its header; a plan's first lines; a form's server
+and message. Text is cut to core's bounds. `detail` is Claude's own: `input` (the
+call's whole input, bounded; `display` repeats its main parts), `reason` (the
+reason Claude's permission check gave) and `permission_mode` (Claude's mode at the
+time; internal) for a permission, question or plan; `server`, `message`, `mode`
+and `schema` (the form's requested schema) for an MCP form.
 
 For the prompt events ([waiting-prompts.md](waiting-prompts.md)), the mod queues
 each prompt's open once its file is written, and its end as it is decided, and
