@@ -34,7 +34,12 @@ BLOCKED_ON = "blocked_on"
 # Another: listed with "model", an agent's Model cell adds its effort, `Opus 5.5 (xhigh)`. Without "model" it shows
 # nowhere.
 EFFORT = "effort"
-MARKS = frozenset({UNREAD, BLOCKED_ON, EFFORT})
+# Another: listed with "status", an agent that isn't working says how long it has been inactive, `idle (3m)`: since its
+# status last changed. Without "status" it shows nowhere.
+INACTIVE = "inactive"
+MARKS = frozenset({UNREAD, BLOCKED_ON, EFFORT, INACTIVE})
+# The widest a Status cell grows to say how long an agent has been inactive.
+STATUS_WIDE = 16
 # The widest a Phase cell grows to say what an agent is blocked on; a longer name is shortened inside it.
 PHASE_WIDE = 24
 # The widest a Model cell grows for a long name and its effort; a longer name is shortened, its effort kept whole.
@@ -122,6 +127,19 @@ class LiveColumn(Column):
 
 
 class StatusColumn(Column):
+    """The harness's status, with how long the agent has been inactive where the view lists `inactive`: `idle (3m)`.
+
+    Given the cell's `width`, a cell too narrow for the time says only the status."""
+    def render(self, row, width=None):
+        if row["kind"] != "agent" or not row.get("status_label"):
+            return super().render(row)
+        status = clean(row.get("status") or "—")
+        value = clean(row["status_label"])
+        if width is not None and cell_len(value) > width:
+            value = status
+        style = f"bold reverse {theme.PEACH}" if status == "waiting" else STATE_COLORS.get(status, theme.SUBTEXT0)
+        return Text(value, style=style)
+
     def agent(self, row):
         text = super().agent(row)
         if text.plain == "waiting":
