@@ -6,7 +6,7 @@ answer native requests; the launch relay can carry adapter-validated answers
 over the owning terminal's existing connection.
 """
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 import json
 from uuid import uuid4
@@ -162,11 +162,13 @@ class LaunchProxy:
     POST_BIND_TIMEOUT = 3
     RELAY_CLOSE_TIMEOUT = 1
     MAX_DELIVERY_OBSERVATIONS = 128
+    MAX_PROMPT_BATCHES = 128
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
                  record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None,
-                 navigation=None, relay_context=None, record_delivery_observation=None, record_delivery_error=None):
+                 navigation=None, relay_context=None, record_delivery_observation=None, record_delivery_error=None,
+                 record_prompt_transitions=None, publish_prompt_events=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -179,6 +181,13 @@ class LaunchProxy:
         self.relay_context = dict(relay_context or {})
         self.record_delivery_observation = record_delivery_observation
         self.record_delivery_error = record_delivery_error
+        self.record_prompt_transitions = record_prompt_transitions
+        self.publish_prompt_events = publish_prompt_events
+        self.prompt_batches = deque()
+        self.prompt_ready = None
+        self.prompt_stage_lock = threading.Lock()
+        self.prompt_generation = 0
+        self.prompt_drain = None
         self.delivery_observations = OrderedDict()
         self.delivery_overflow_reported = False
         self.delivery_error_pending = None
@@ -214,6 +223,7 @@ class LaunchProxy:
             return
         self.lost = reason
         try:
+            self.stage_prompt_transitions()
             self.record_lost(reason)
         except (OSError, ValueError):
             pass
@@ -231,6 +241,10 @@ class LaunchProxy:
         from websockets.asyncio.server import unix_serve
         worker = (asyncio.create_task(self._publish_deliveries())
                   if self.record_delivery_observation is not None else None)
+        prompts = None
+        if self.record_prompt_transitions is not None:
+            self.prompt_ready = asyncio.Event()
+            prompts = asyncio.create_task(self._publish_prompts())
         try:
             async with unix_serve(self._connection, self.spec['socket_path'], compression=None,
                                   close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE, max_queue=self.MAX_QUEUE):
@@ -238,11 +252,58 @@ class LaunchProxy:
                 while not self.stopped.is_set():
                     await asyncio.sleep(.1)
         finally:
-            if worker is not None:
+            if self.prompt_ready is not None:
+                self.prompt_ready.set()
+            workers = [task for task in (worker, prompts) if task is not None]
+            if workers:
                 try:
-                    await asyncio.wait_for(worker, self.RELAY_CLOSE_TIMEOUT)
+                    await asyncio.wait_for(asyncio.gather(*workers), self.RELAY_CLOSE_TIMEOUT)
                 except asyncio.TimeoutError:
                     pass  # Unpublished positives keep the existing bounded lookup fallback.
+
+    async def _publish_prompts(self):
+        while not self.stopped.is_set() or self.prompt_batches or self.prompt_drain is not None:
+            if self.prompt_drain is not None and len(self.prompt_batches) < self.MAX_PROMPT_BATCHES:
+                self._retry_prompt_drain()
+            if not self.prompt_batches:
+                if self.stopped.is_set():
+                    break
+                await self.prompt_ready.wait()
+                self.prompt_ready.clear()
+                continue
+            await asyncio.to_thread(self.stage_prompt_transitions)
+            if self.publish_prompt_events is not None:
+                await asyncio.to_thread(self.publish_prompt_events)
+
+    def stage_prompt_transitions(self):
+        """Off-loop fence for metadata already admitted before a status update or switch."""
+        with self.prompt_stage_lock:
+            for _ in range(len(self.prompt_batches)):
+                native_id, generation, transitions = self.prompt_batches.popleft()
+                try:
+                    self.record_prompt_transitions(native_id, generation, transitions)
+                except Exception:
+                    pass  # Optional prompt metadata never takes over transport health.
+
+    def _admit_prompt_transitions(self, drain, generation):
+        if generation != self.prompt_generation:
+            return
+        try:
+            while len(self.prompt_batches) < self.MAX_PROMPT_BATCHES:
+                batch = drain()
+                if batch is None:
+                    return
+                native_id, transitions = batch
+                self.prompt_batches.append((native_id, generation, transitions))
+                self.prompt_ready.set()
+            self.prompt_drain = drain, generation
+        except Exception:
+            pass  # The ordinary prompt listing is still available.
+
+    def _retry_prompt_drain(self):
+        pending, self.prompt_drain = self.prompt_drain, None
+        if pending is not None:
+            self._admit_prompt_transitions(*pending)
 
     def _observe_delivery(self, protocol, value):
         if self.record_delivery_observation is None:
@@ -309,6 +370,13 @@ class LaunchProxy:
         protocol = self.protocol
         relay_enabled, relay_closed = False, False
 
+        def notify_prompt_transitions():
+            if self.owner is not client or self.record_prompt_transitions is None:
+                return
+            drain = getattr(protocol, 'relay_prompt_transitions', None)
+            if drain is not None:
+                self._admit_prompt_transitions(lambda: drain() if self.owner is client else None, self.prompt_generation)
+
         async def close_optional():
             nonlocal relay_closed
             if not relay_enabled or relay_closed:
@@ -331,7 +399,10 @@ class LaunchProxy:
             prepare_relay = getattr(protocol, 'relay_context', None)
             if prepare_relay is not None:
                 try:
-                    prepare_relay(dict(self.relay_context))
+                    context = dict(self.relay_context)
+                    if self.record_prompt_transitions is not None:
+                        context['notify_prompt_transitions'] = notify_prompt_transitions
+                    prepare_relay(context)
                     relay_enabled = True
                 except Exception:
                     self._record_error('Native prompt context is unavailable; answer in the terminal')
@@ -390,9 +461,17 @@ class LaunchProxy:
                         if (not isinstance(event, dict) or event.get('action') not in ('begin', 'commit', 'abort')
                                 or self.navigation is None):
                             raise ValueError('This launch does not support conversation switching; resume with a current bridge')
+                        if event['action'] == 'commit':
+                            while self.prompt_drain is not None:
+                                await asyncio.to_thread(self.stage_prompt_transitions)
+                                self._retry_prompt_drain()
                         # Sends hold launch.lock while awaiting their own RPC.
                         # Never block this event loop acquiring that same lock.
                         answer = await asyncio.to_thread(self.navigation, event['action'], event)
+                        if event['action'] == 'commit' and isinstance(answer, dict):
+                            generation = answer.get('generation')
+                            if type(generation) is int and generation >= 0:
+                                self.prompt_generation = generation
                         protocol.navigation_done(event, answer)
                         return event if event['action'] in ('commit', 'abort') else None
                     except (OSError, ValueError, RuntimeError) as error:
@@ -482,6 +561,7 @@ class LaunchProxy:
                             except (OSError, ValueError, TypeError, KeyError):
                                 pass  # Optional telemetry must not disrupt the TUI.
                         self._observe_delivery(protocol, value)
+                    notify_prompt_transitions()
                     if value is not original:
                         encoded = json.dumps(value, ensure_ascii=False)
                         if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
@@ -559,4 +639,4 @@ class LaunchProxy:
                 if failure or ended:
                     reason = (f'{ended[0]} connection closed (code {ended[1]}): '
                               f'{failure or ended[2] or "no reason supplied"}' if ended else failure)
-                    self._lost(reason)
+                    await asyncio.to_thread(self._lost, reason)

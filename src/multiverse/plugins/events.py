@@ -82,9 +82,9 @@ def _counter(base):
     """The next sequence number, from the counter file `seq`; None when it is not there or cannot be read."""
     try:
         parts = retry_missing((Path(base) / "seq").read_text).split()
-    except OSError:
+        return int(parts[0]) if parts and parts[0].isdigit() else None
+    except (OSError, ValueError):
         return None
-    return int(parts[0]) if parts and parts[0].isdigit() else None
 
 
 def segments(root):
@@ -167,6 +167,148 @@ def _bounded_lock(path, seconds=None):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+REPLAY = "_replay"  # core's replay key on a prompt event: kept in the journal, never shown to a plugin
+RECEIPTS = "replay.json"  # {replay key: seq} of prompt events written and not yet acknowledged by core
+RECEIPT_LIMIT = 4096  # the oldest receipts go past this many: core acknowledges long before
+RECEIPTS_WRITTEN = ".replay.written"  # exists once receipts were written: a missing file then is a replacement gap
+
+
+def prompt_event(agent_dir, kind, launch, data, *, key, properties=None):
+    """Record one of an agent's prompt events (prompt.opened, prompt.closed, agent.prompt) for core's prompt
+    ledger, saying what became of it. Never raises.
+
+    'written': it is in the journal, by this call or an earlier one with the same `key` (an append whose
+    acknowledgement core lost writes nothing twice). 'unsubscribed': no plugin on in that universe subscribes to
+    `kind`, so there is nothing to write. 'retry': the journal was busy, or couldn't be written (logged): keep it
+    and record it again later, in order. `key` is core's own replay key, unique per pending event; it is kept in
+    the journal line and stripped from every read, so a plugin never sees it, and a private receipt keeps it until
+    core acknowledges it (acknowledge), while the bounded receipt is retained (RECEIPT_LIMIT). A receipt that
+    couldn't be saved is covered by the journal's tail. A crash between the append and its receipt can still write
+    it twice, which delivery at least once allows."""
+    root = None
+    try:
+        root = root_of(agent_dir)
+        if root is None or not subscribers(root, kind):
+            return "unsubscribed"
+        if not isinstance(key, str) or not key:
+            raise ValueError("a prompt event needs core's replay key")
+        agent = ({"id": properties.get("id"), "name": properties.get("name")} if isinstance(properties, dict)
+                 else agent_of(agent_dir))
+        event = {"schema": 1, "seq": 0, "at": now(), "type": kind, "agent": agent, "launch": launch,
+                 "data": dict(data or {}), REPLAY: key}
+        base = directory(root)
+        with _bounded_lock(base / ".lock") as held:
+            if not held:
+                _log(root, f"{kind}: kept for later: the journal was busy")
+                return "retry"
+            receipts = _receipts(root)
+            # A miss in the receipts is checked against the journal's tail too: an append whose receipt couldn't
+            # be saved, or receipts that couldn't be read.
+            if key in receipts:
+                return "written"
+            sequence = _replayed(root, key)
+            if sequence is None:
+                sequence = _append(root, event)["seq"]
+            elif (_counter(base) or 1) <= sequence:
+                # An interrupted append may have written the event without its
+                # counter. Incremental readers must be able to see the row.
+                _write_counter(base, sequence + 1)
+            if receipts is not _UNREADABLE:
+                receipts[key] = sequence
+                if len(receipts) > RECEIPT_LIMIT:
+                    receipts = dict(sorted(receipts.items(), key=lambda item: item[1])[-RECEIPT_LIMIT:])
+                _write_receipts(root, receipts)
+            return "written"
+    except Exception as error:
+        if root is not None:
+            _log(root, f"{kind}: kept for later: {type(error).__name__}: {error}")
+        return "retry"
+
+
+class _Unreadable(dict):
+    """Receipts that couldn't be read: the journal's tail is looked at instead."""
+
+
+_UNREADABLE = _Unreadable()
+
+
+def _receipts(root):
+    """The receipts, {} when never written, or _UNREADABLE. Once written (RECEIPTS_WRITTEN exists), a missing
+    file is retried through a replacement, so an atomic rewrite never reads as an empty map."""
+    path = directory(root) / RECEIPTS
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        if not (directory(root) / RECEIPTS_WRITTEN).exists():
+            return {}
+        try:
+            text = retry_missing(path.read_text, path=path)
+        except (OSError, UnicodeError):
+            return _UNREADABLE
+    except (OSError, UnicodeError):  # not UTF-8 is as unreadable as damaged: the tail decides
+        return _UNREADABLE
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return _UNREADABLE
+    return {key: seq for key, seq in data.items() if isinstance(key, str) and isinstance(seq, int)} \
+        if isinstance(data, dict) else _UNREADABLE
+
+
+def _write_receipts(root, receipts):
+    (directory(root) / RECEIPTS_WRITTEN).touch()  # first: from now on a missing receipts file is a gap
+    temporary = directory(root) / f".{RECEIPTS}.tmp"
+    temporary.write_text(json.dumps(receipts, separators=(",", ":")) + "\n")
+    temporary.replace(directory(root) / RECEIPTS)
+
+
+def acknowledge(agent_dir, keys):
+    """Core acknowledged these prompt events' replay keys: their receipts go. True when done; never raises (an
+    acknowledgement that couldn't be made leaves receipts that only cost a little space until RECEIPT_LIMIT)."""
+    try:
+        root = root_of(agent_dir)
+        if root is None or not (directory(root) / RECEIPTS).exists():
+            return True
+        with _bounded_lock(directory(root) / ".lock") as held:
+            if not held:
+                return False
+            receipts = _receipts(root)
+            if receipts is _UNREADABLE:
+                return False
+            kept = {key: seq for key, seq in receipts.items() if key not in set(keys)}
+            if kept != receipts:
+                _write_receipts(root, kept)
+            return True
+    except Exception:
+        return False
+
+
+def _replayed(root, key):
+    """Return the sequence for an exact replay key in the bounded tail of the latest two segments."""
+    needle = json.dumps(key, ensure_ascii=False).encode()
+    for _, path in segments(root)[-2:]:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            start = max(0, handle.tell() - TAIL_BYTES)
+            handle.seek(max(0, start - 1))
+            clipped = start > 0 and handle.read(1) not in (b"\n", b"\r")
+            lines = handle.read().splitlines()
+        # The preceding byte distinguishes a clipped row from a complete row
+        # that starts at the tail boundary. The reader also accepts complete
+        # JSON at the end of a segment without a final delimiter.
+        for line in lines[1 if clipped else 0:]:
+            if needle not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(event, dict) and event.get(REPLAY) == key and type(event.get("seq")) is int
+                    and event["seq"] > 0):
+                return event["seq"]
+    return None
+
+
 def _append(root, event):
     base = directory(root)
     known = journal_id(root) or uuid.uuid4().hex
@@ -179,7 +321,6 @@ def _append(root, event):
             temporary = base / f".{name}.tmp"
             temporary.write_text(known + "\n")
             temporary.replace(base / name)
-    counter = base / "seq"
     found = segments(root)
     sequence = _counter(base) or 1
     if found:
@@ -197,12 +338,16 @@ def _append(root, event):
             if handle.read(1) != b"\n":
                 handle.write(b"\n")  # seal a torn last line; readers skip it
         handle.write(line)
-    temporary = base / ".seq.tmp"
-    temporary.write_text(f"{sequence + 1}\n")
-    temporary.replace(counter)
+    _write_counter(base, sequence + 1)
     if rolled and found:
         prune(root, locked=True)  # the segment just closed counts now
     return event
+
+
+def _write_counter(base, next_sequence):
+    temporary = base / ".seq.tmp"
+    temporary.write_text(f"{next_sequence}\n")
+    temporary.replace(base / "seq")
 
 
 def _line(event):
@@ -319,6 +464,7 @@ def _read(root, after, limit):
             except ValueError:
                 continue  # a line being written
             if isinstance(event, dict) and isinstance(event.get("seq"), int) and event["seq"] > after:
+                event.pop(REPLAY, None)  # core's replay key: never a plugin's
                 events.append(event)
                 if len(events) >= limit:
                     return events, gap

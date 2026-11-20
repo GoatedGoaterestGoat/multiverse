@@ -266,6 +266,11 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `launches/UUID/` | One directory per spawn or resume. |
 
+`runtime.json` temporarily keeps a reported `working` or `idle` as
+`deferred_stop_status` when a stopping launch still has a waiting status.
+A newer `waiting` or `unknown` report clears the deferral. A refused
+cancellation applies the deferred report to the continuing launch.
+
 For a bridged conversation switch, `runtime.json` also holds a `navigation`
 record with its request correlation and admission token. `checking` and
 `admitted` block new submission until a definite result; an unknown result

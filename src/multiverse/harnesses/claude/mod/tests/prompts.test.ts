@@ -3,13 +3,17 @@
 // wait process, which ends when its answer file appears or its prompt file goes, or throws when the test presses Esc.
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import { closedOutcome } from '../hooks/prompts'
 
 const FOLDER = '/agent/claude-prompts'
 const ID = /^\/agent\/claude-prompts\/([0-9a-f-]{36})\.json$/
 
 // `lose`: how many of core's answer files core removes first (it proved the launch ended) before the mod's take.
+// `failReports`: how many status reports carrying prompt events core fails first.
 type Options = { below?: Record<string, unknown>; files?: Record<string, string>; lose?: number; now?: number;
-  mtimes?: Record<string, number> }
+  mtimes?: Record<string, number>; failReports?: number }
+// A status report as core takes it: its status, and the prompts' opens and ends it carries, with their conversation.
+type Report = { status: string; events: Record<string, unknown>[]; session: string | null }
 
 function world(on: On, options: Options = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', MV2_LAUNCH_ID: 'launch-1' })
@@ -23,6 +27,8 @@ function world(on: On, options: Options = {}) {
   const check = { decision: 'ask' }
   const lost = { left: options.lose ?? 0, taken: 0 }
   const ok = (exitCode: number) => ({ value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+  const reports: Report[] = []
+  let failReports = options.failReports ?? 0
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
@@ -44,6 +50,12 @@ function world(on: On, options: Options = {}) {
   on('fs.list', async ($, e) => ({ value: [...files.keys()].filter((p) => p.startsWith(`${e.path}/`))
     .map((p) => ({ name: p.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: mtimes.get(p) ?? options.now ?? 0, isLink: false })) }) as never)
   on('process.run', async ($, e) => {
+    if (e.argv[0] === '/python' && e.argv.includes('--status')) {
+      const flag = (name: string) => { const at = e.argv.indexOf(name); return at < 0 ? null : e.argv[at + 1] ?? null }
+      if (failReports > 0 && e.argv.includes('--prompt-events-json')) { failReports -= 1; return ok(1) }
+      reports.push({ status: flag('--status') ?? '', events: JSON.parse(flag('--prompt-events-json') ?? '[]'), session: flag('--prompt-session-id') })
+      return ok(0)
+    }
     if (e.argv[0] === 'rm') { for (const path of e.argv.slice(2)) files.delete(path); touch(); return ok(0) }
     if (e.argv[0] === 'mv') {
       const [from, to] = [e.argv[1] ?? '', e.argv[2] ?? '']
@@ -69,7 +81,7 @@ function world(on: On, options: Options = {}) {
   })
   const published = () => [...files.keys()].map((p) => ID.exec(p)?.[1]).filter((id): id is string => id !== undefined)
   return {
-    clock, files, published, check, lost,
+    clock, files, published, check, lost, reports,
     record: (id: string) => JSON.parse(files.get(`${FOLDER}/${id}.json`) ?? 'null'),
     ended: (id: string) => JSON.parse(files.get(`${FOLDER}/${id}.end.json`) ?? 'null'),
     // As core writes it: once, into its own prompts folder, naming the launch and conversation.
@@ -99,6 +111,14 @@ async function ask($: Raise, tool: string, input: unknown, suggestions?: unknown
   await $.tool.check({ tool, input, tool_use_id: 'toolu_1', approver: 'person' } as never)
   return $.classic.PermissionRequest({ tool_name: tool, tool_input: input, permission_suggestions: suggestions, session_id: 's1',
     transcript_path: '/home/.claude/projects/p/s1.jsonl', permission_mode: 'default', ...extra } as never) as Promise<{ decision?: unknown }>
+}
+
+const OURS = '11111111-2222-4333-8444-555555555555'
+const OLDER = '22222222-2222-4333-8444-555555555555'
+// One prompt this launch's earlier load published, one an earlier launch's.
+const SWEPT = {
+  [`${FOLDER}/${OURS}.json`]: JSON.stringify({ schema: 1, id: OURS, launch: 'launch-1', session: 's1', kind: 'question' }),
+  [`${FOLDER}/${OLDER}.json`]: JSON.stringify({ schema: 1, id: OLDER, launch: 'launch-0', session: 's0', kind: 'permission' }),
 }
 
 describe('prompts for mv2', () => {
@@ -336,4 +356,103 @@ describe('prompts for mv2', () => {
     await w.until(() => w.ended(old) !== null && !w.files.has(`${FOLDER}/${old}.json`))
     expect(w.ended(old)).toMatchObject({ how: 'closed', cause: 'stopped' })
   })
+
+  test("each prompt's open and end reach core with the status reports, the end before its wait ends", async ($, on) => {
+    // A plugin reads 'the agent left waiting' as 'every prompt of that wait has closed', and follows prompts by these
+    // events alone: an end sent after the status change, or one never sent, leaves it showing a prompt that is gone.
+    const w = world(on)
+    const prompt = async (raise: () => Promise<unknown>) => {
+      const before = new Set(w.published())
+      void raise()
+      await w.until(() => w.published().some((id) => !before.has(id)))
+      return w.published().find((p) => !before.has(p)) ?? ''
+    }
+    const ids: Record<string, string> = {}
+    // mv2 answers it, then its call runs.
+    ids.answered = await prompt(() => ask($, 'Bash', BASH, SESSION))
+    w.answer(ids.answered ?? '', { choice: 'allow' })
+    await w.until(() => w.ended(ids.answered ?? '') !== null)
+    w.check.decision = 'allow'
+    await $.tool.call({ tool: 'Bash', input: BASH, tool_use_id: 'toolu_1' } as never)
+    // Its call runs without mv2's answer: the person allowed it in the terminal.
+    w.check.decision = 'ask'
+    ids.resolved = await prompt(() => ask($, 'Bash', BASH, SESSION))
+    w.check.decision = 'allow'
+    await $.tool.call({ tool: 'Bash', input: BASH, tool_use_id: 'toolu_1' } as never)
+    // The turn ends under it.
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    w.check.decision = 'ask'
+    ids.turn = await prompt(() => ask($, 'Bash', BASH, SESSION))
+    await $.turn.complete({ turnId: 't1', answer: '', isAborted: false } as never)
+    // An MCP form, answered in the terminal.
+    ids.form = await prompt(() => $.classic.Elicitation({ mcp_server_name: 'docs', message: 'Pick', elicitation_id: 'el-1', session_id: 's1' } as never))
+    await $.classic.ElicitationResult({ mcp_server_name: 'docs', elicitation_id: 'el-1', action: 'accept' } as never)
+    // A subagent's ask, listed only, until its call ends.
+    w.check.decision = 'ask'
+    ids.subagent = await prompt(() => ask($, 'Bash', BASH, SESSION, { agent_id: 'sub-1' }))
+    w.check.decision = 'allow'
+    await $.tool.call({ tool: 'Bash', input: BASH, tool_use_id: 'toolu_1' } as never)
+    await w.clock.settle()
+    const expected: Record<string, [string, string, string | null]> = {
+      answered: ['permission', 'submitted', null], resolved: ['permission', 'gone', 'closed'], turn: ['permission', 'gone', 'turn_ended'],
+      form: ['form', 'person', 'person'], subagent: ['permission', 'gone', 'closed'],
+    }
+    for (const [name, [kind, state, cause]] of Object.entries(expected)) {
+      const id = ids[name] ?? ''
+      const at = (type: string) => w.reports.findIndex((r) => r.events.some((e) => e.type === type && e.id === id))
+      const [opened, closed] = [at('opened'), at('closed')]
+      expect([name, opened >= 0, closed >= opened]).toEqual([name, true, true])
+      expect(w.reports[opened]?.events.find((e) => e.id === id)).toEqual({ type: 'opened', id, kind, requires_waiting: true })
+      expect(w.reports[closed]?.events.find((e) => e.type === 'closed' && e.id === id)).toEqual({ type: 'closed', id, kind, state, cause })
+      expect(w.reports[closed]?.session).toBe('s1')
+      // From its open to its end, every report said the agent was still waiting: the end went first.
+      if (name !== 'subagent') expect([name, w.reports.slice(opened, closed).every((r) => r.status === 'waiting')]).toEqual([name, true])
+      // Each once.
+      expect(w.reports.flatMap((r) => r.events).filter((e) => e.id === id).length).toBe(2)
+    }
+  })
+
+  test("a reload's sweep reports the ends of this launch's prompts only", async ($, on) => {
+    // The sweep is the only place a reload's lost prompts end; an earlier launch's are closed by core at that
+    // launch's end, so reporting them again would open a prompt in the wrong launch.
+    const w = world(on, { files: SWEPT })
+    await $.session.start({ cwd: '/w' } as never)
+    await w.until(() => w.reports.some((r) => r.events.length > 0))
+    await w.clock.settle()
+    expect(w.reports.flatMap((r) => r.events.map((e) => [r.session, e]))).toEqual(
+      [['s1', { type: 'closed', id: OURS, kind: 'question', state: 'gone', cause: 'stopped' }]])
+  })
+
+  test('a report core keeps failing drops the prompt events it carried, never the status', async ($, on) => {
+    // Kept for good, a batch core can't take would keep every later status from being reported; core closes what it
+    // still holds open from its own reads and the launch's end.
+    const w = world(on, { files: SWEPT, failReports: 3 })
+    await $.session.start({ cwd: '/w' } as never)
+    await w.until(() => w.ended(OURS) !== null)
+    for (let n = 0; n < 3; n++) {
+      await $.turn.start({ text: 'go', turnId: `t${n}` })
+      await $.turn.complete({ turnId: `t${n}`, answer: '', isAborted: false } as never)
+      await w.clock.settle()
+    }
+    await $.turn.start({ text: 'go', turnId: 't9' })
+    await w.until(() => w.reports.some((r) => r.status === 'working'))
+    expect(w.reports.flatMap((r) => r.events)).toEqual([])
+  })
+
+  test("a prompt's end carries the state and cause prompt_result gives from its end record alone", () => {
+    // The same table as tests/test_claude_prompts.py's for the adapter's prompt_settled: the two must not drift, or a
+    // plugin would see one outcome in the event and another from prompt_result.
+    const rows: [Record<string, unknown>, { state: string; cause: string | null }][] = [
+      [{ how: 'sent' }, { state: 'submitted', cause: null }],
+      [{ how: 'refused' }, { state: 'refused', cause: 'invalid_answer' }],
+      [{ how: 'closed', cause: 'person' }, { state: 'person', cause: 'person' }],
+      [{ how: 'closed', cause: 'interrupted' }, { state: 'gone', cause: 'interrupted' }],
+      [{ how: 'closed', cause: 'turn_ended' }, { state: 'gone', cause: 'turn_ended' }],
+      [{ how: 'closed', cause: 'stopped' }, { state: 'gone', cause: 'stopped' }],
+      [{ how: 'closed', cause: 'resolved' }, { state: 'gone', cause: 'closed' }],
+      [{ how: 'closed', cause: 'denied' }, { state: 'gone', cause: 'closed' }],
+    ]
+    for (const [record, outcome] of rows) expect([record, closedOutcome(record)]).toEqual([record, outcome])
+  })
+
 })

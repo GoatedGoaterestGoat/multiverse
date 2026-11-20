@@ -1687,6 +1687,23 @@ and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
 the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
 form are listed, never held.
 
+For the prompt events ([waiting-prompts.md](waiting-prompts.md)), the mod queues
+each prompt's open once its file is written, and its end as it is decided, and
+sends them with its status reports (`runtime_update --prompt-events-json`, one
+conversation's per call, at most 32): core records them before the report's status,
+so an end goes in or before the report that ends its wait. Claude reports `waiting`
+before the person's own hooks run and the mod can publish, so a prompt's open can
+follow its `waiting`. The end carries the state and cause `prompt_result` gives from
+the end record alone (`closedOutcome`); a reload's sweep reports the ends of this
+launch's prompts, and core closes an earlier launch's at that launch's end. A batch
+core fails three times is dropped, so it can never keep the status unreported; core
+closes what it still holds open from its own reads and the launch's end. A wait that
+publishes nothing (a command's dialog, a prompt the person's own hook answered) has
+no events. Each end record names its launch and conversation, so before an agent
+leaves `waiting` core can ask `prompt_outcome` in its metadata-only mode, which reads
+only that record and says `closed` only when the record is this launch's and
+conversation's, never from Claude's transcript.
+
 The mod also writes `claude-queue.json`: the mv2 messages Claude holds now
 (`waitingRows`: taken, neither stored nor refused), each by its delivery attempt's
 ID, with its mode and when it was taken. It is rewritten whenever one is taken,

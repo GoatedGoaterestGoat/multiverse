@@ -8,7 +8,7 @@ from uuid import uuid4
 from multiverse import harnesses, store
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.types import NativeResult, PromptInput, PromptQuestion, WaitingPrompt
-from multiverse.runtime import native, navigation, prompts, recovery
+from multiverse.runtime import native, navigation, prompt_events, prompts, recovery
 from multiverse.universe import agents
 from test_multiverse import BaseTest
 
@@ -96,6 +96,7 @@ class PromptInputTest(BaseTest):
         """The real registry and core must agree on input identity before an echo races the send receipt."""
         from multiverse.harnesses.codex import async_questions, prompt_codec, prompts as registry
 
+        self.enterContext(patch.object(prompt_events, '_journal_event', return_value='retry'))
         version = '.'.join(map(str, prompt_codec.VERSION))
         agents.update_runtime(self.directory, self.launch, native_versions={'cli': version, 'daemon': version})
         connection = SimpleNamespace(
@@ -112,10 +113,19 @@ class PromptInputTest(BaseTest):
 
         self.adapter.waiting_prompts.side_effect = lambda *args: CodexAdapter.waiting_prompts(self.adapter, *args)
         self.prepare.side_effect = lambda *args: CodexAdapter.answer_prompt(self.adapter, *args)
-        for index, state in enumerate(('idle', 'paused', 'lost-receipt')):
+        submit = native.submit_input
+
+        def interrupt(*args, **kwargs):
+            try:
+                submit(*args, **kwargs)
+            finally:
+                raise KeyboardInterrupt
+
+        for index, state in enumerate(('idle', 'paused', 'lost-receipt', 'interrupted')):
             with self.subTest(queue=state):
                 generation = index + 1
-                self.status = 'active' if state == 'lost-receipt' else 'idle'
+                uncertain = state in ('lost-receipt', 'interrupted')
+                self.status = 'active' if uncertain else 'idle'
                 self.queue = [{'id': 'older', 'clientUserMessageId': 'older-native-input'}] if state == 'paused' else []
                 agents.update_runtime(self.directory, self.launch, session_generation=generation,
                     queue_state={'native_session_id': self.thread, 'state': state if state == 'paused' else 'idle'})
@@ -145,14 +155,25 @@ class PromptInputTest(BaseTest):
                         'clientId': input_id, 'content': [{'type': 'text', 'text': wire}]}}})
                     flush()
                     self.assertNotEqual(relay.records[self.prompt.id].get('result', {}).get('state'), 'person')
-                    if state == 'lost-receipt':
+                    if uncertain:
                         raise OSError('PRIVATE accepted input lost its receipt')
 
                 self.input_echo = echo
-                outcome = prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
-                self.assertEqual(outcome.state, 'unknown' if state == 'lost-receipt' else 'submitted', outcome)
+                if state == 'interrupted':
+                    with patch.object(native, 'submit_input', side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+                        prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
+                    record = store.read(self.directory / 'prompts' / (self.prompt.id + '.json'))
+                    self.assertIs(record.get('input_reserved'), True)
+                    outcome = self.result()
+                else:
+                    outcome = prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
+                self.assertEqual(outcome.state, 'unknown' if uncertain else 'submitted', outcome)
+                journal = store.read(self.directory / 'prompts' / 'journal' / 'events.json')
+                closes = [row['data'] for row in journal['pending']
+                          if row['kind'] == 'prompt.closed' and row['data']['id'] == self.prompt.id]
+                self.assertEqual([item['state'] for item in closes], [outcome.state])
                 self.assertNotEqual(relay.records[self.prompt.id].get('result', {}).get('state'), 'person')
-                if state != 'lost-receipt':
+                if not uncertain:
                     self.assertEqual(self.started[-1:], ['older-native-input' if state == 'paused' else input_id])
                 pending = prompts.pending_inputs(self.directory, self.launch, self.thread, generation)
                 self.assertEqual(pending, self.prompt.id)
@@ -179,6 +200,33 @@ class PromptInputTest(BaseTest):
                 self.assertFalse((self.directory / 'prompts' / (self.prompt.id + '.answer.json')).exists())
         self.callback.assert_not_called()
 
+    def test_a_claim_closes_the_prompt_even_when_delivery_refuses(self):
+        """A refused delivery after a valid claim closes the card; refusing before a claim leaves it open."""
+        self.enterContext(patch.object(prompt_events, '_journal_event', return_value='retry'))
+        for claimed in (False, True):
+            with self.subTest(claimed=claimed):
+                self.fresh()
+                self.assertTrue(prompts.waiting(self.root, self.agent).prompts)
+                self.prepare.side_effect = lambda session, answer, executor: NativeResult('ok', value=(
+                    PromptInput('prompt-' + answer.id, 'input') if claimed else {'state': 'refused'}))
+                with patch.object(native, 'submit_input', return_value=NativeResult(
+                        'error', value={'definite_failure': True})) as sent:
+                    self.assertEqual(self.answer().state, 'refused')
+                self.assertEqual(sent.call_count, int(claimed))
+                ledger = store.read(self.directory / 'prompts' / 'journal' / 'events.json')
+                self.assertEqual(self.prompt.id in ledger['open'], not claimed)
+                closed = [row['data']['state'] for row in ledger['pending']
+                          if row['kind'] == 'prompt.closed' and row['data']['id'] == self.prompt.id]
+                self.assertEqual(closed, ['refused'] if claimed else [])
+        self.fresh()
+        self.assertTrue(prompts.waiting(self.root, self.agent).prompts)
+        self.prepare.side_effect = KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.answer()
+        with patch.object(self.adapter, 'get_delivery', return_value=NativeResult('pending')):
+            self.assertEqual(self.result().state, 'submitted')
+        self.assertIn(self.prompt.id, store.read(self.directory / 'prompts' / 'journal' / 'events.json')['open'])
+
     def test_policy_recipe_and_reservation_do_not_widen_callback_authority(self):
         """A nonwaiting question must not bypass caller, callback policy, payload bounds or permanent admission."""
         callback = replace(self.prompt, id=str(uuid4()), requires_waiting=True)
@@ -197,7 +245,7 @@ class PromptInputTest(BaseTest):
         self.catalog = [replace(self.prompt, kind='permission')]
         self.assertEqual(prompts.waiting(self.root, self.agent).state, 'unavailable')
         self.assertFalse(self.calls)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
 
         for facts in (None, [], {'session_generation': None}, {'session_generation': True},
                       {'session_generation': -1}, {'session_generation': '1'}):

@@ -91,7 +91,47 @@ listed, only makes an answer eligible; the prompt's identity is what keeps a lat
 A sent answer is never sent again: the wait and `--result` only read. After the agent stops, an answer the
 in-session part never took is `gone`, definitely not applied; one it took without writing an outcome is `unknown`. Each answer is recorded in the agent's folder
 with who answered (`person` or `plugin NAME`), the prompt's kind and tool, the choice or the labels chosen, and the
-outcome. Events carry only the kind, tool, caller and outcome: no command, path or answer text.
+outcome. Its event, `agent.prompt`, carries only the prompt's ID, kind, tool, caller, state and cause: no
+command, path or answer text.
+
+## Events
+
+A plugin follows prompts through the event journal instead of reading every agent's prompts on each status change
+(asked for by a plugin author, 2026-11-20). Any harness that implements this protocol gets these events the same
+way; one that doesn't records none, and its `answer` capability says why.
+
+| Event | `data` |
+| --- | --- |
+| `prompt.opened` | `id`, `kind`, `requires_waiting` |
+| `prompt.closed` | `id`, `kind`, `state`, `cause` |
+
+`id` is the one the listing shows and `--result` takes. A close's `state` and `cause` are what the result gives
+from what was known when the prompt closed, read without a transcript; for an answer mv2 sent that may still be
+settling (`submitted`, `sent_first`), and each later change is recorded as `agent.prompt`. No event holds prompt
+text, choices or answers.
+
+**Order.** Each prompt opens once, then closes once; delivery is at least once, so a handler dedupes by `id`. A
+prompt's close is recorded before the agent's status leaves `waiting`, whenever mv2 can see it ended by then: so a
+plugin that sees an agent stop waiting has normally already seen the wait's prompts close. The exception is a
+prompt that ended where mv2 can't see it (another client of the harness answered it) and whose end is reported
+later. A prompt's open is recorded no later than the first status update after it can be listed, which may be
+after the status became `waiting`: a harness can report `waiting` before mv2 can list the prompt (its own hooks
+run first), and a wait mv2 can't list (a command's own dialog) has no events at all. A question that doesn't need
+the agent waiting has no order against its status.
+
+**How core keeps it.** The in-session part reports each prompt's open and end to core as they happen, never as
+snapshots, since a quick open and close between two snapshots would lose an edge; a status update can carry them,
+and core records them before that update's status. Core keeps a small ledger per agent and launch, so each prompt
+is opened and closed once whoever reports it; a close for a prompt it never saw open records the open first.
+Before it records a status change away from `waiting`, core writes every edge already reported, then asks the
+adapter, without reading history, whether each prompt still open has ended, and closes those it has. A read of the
+prompts records the open of any listed prompt the ledger lacks. When a launch ends, its open prompts close as
+`gone`/`stopped` before `agent.exited` or `agent.killed`, or, after a crash, before the next `agent.launched`; a
+conversation switch closes them as `gone`/`switched` before `agent.session`. Recording never holds up the change it
+reports: an edge the journal can't take at once stays in the ledger and is written in order at the next one.
+
+**For a plugin.** Subscribe to `prompt.*`, and to `agent.prompt` to follow an answer's outcome. On start, and after
+a gap the journal no longer holds, read the prompts once; the events carry them from there.
 
 ## The adapter's part
 

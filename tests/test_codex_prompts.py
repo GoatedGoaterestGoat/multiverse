@@ -16,7 +16,7 @@ from multiverse.harnesses.codex import prompt_codec as codec
 from multiverse.harnesses.codex import prompt_files, prompts
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
-from multiverse.harnesses.types import NativeEndpoint, PromptAnswer, SessionHandle
+from multiverse.harnesses.types import NativeEndpoint, PromptAnswer, PromptOutcomeQuery, SessionHandle
 from multiverse.runtime import rpc, native as runtime_native, prompts as core_prompts
 from websockets.asyncio.client import unix_connect
 from websockets.asyncio.server import unix_serve
@@ -276,6 +276,31 @@ class PromptRelayTest(unittest.TestCase):
 
     def result(self, id):
         return prompts.outcome(self.session, SimpleNamespace(id=id)).value
+
+    def test_metadata_only_outcome_requires_the_exact_durable_callback_close(self):
+        """A submitted response can settle late and an unclosed receipt cannot explain a waiting exit."""
+        id = self.request()
+        observation = PromptOutcomeQuery(id=id)
+        self.assertEqual(prompts.outcome(self.session, observation).value, {})
+
+        self.write_answer(id)
+        candidate = self.relay.files.take(id)
+        self.assertIsNotNone(self.relay.claim(candidate))
+        self.flush()
+        self.assertEqual(self.result(id)['state'], 'submitted')
+        self.assertEqual(prompts.outcome(self.session, observation).value, {})
+
+        self.resolve()
+        self.assertEqual(prompts.outcome(self.session, observation).value,
+                         {'closed': True, 'state': 'submitted', 'cause': None})
+        self.relay.sent(candidate, True)
+        self.flush()
+        self.assertEqual(prompts.outcome(self.session, observation).value,
+                         {'closed': True, 'state': 'sent_first', 'cause': None})
+        self.assertNotIn('closed', self.result(id))
+        for closed_scope in (replace(self.session, launch_id=str(uuid4())),
+                             replace(self.session, native_id=str(uuid4()))):
+            self.assertEqual(prompts.outcome(closed_scope, observation).value, {})
 
     def test_both_response_orders_are_single_send_and_the_result_never_claims_acceptance(self):
         """The owning connection orders replies but native resolution cannot prove whose decision or grant scope won."""

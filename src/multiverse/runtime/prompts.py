@@ -11,12 +11,12 @@ from uuid import uuid4
 
 from .. import harnesses, universe
 from ..harnesses.types import (AttachmentSpec, Message, NativeEndpoint, NativeResult, NativeServiceHandle,
-                              PromptAnswer, PromptChoice, PromptInput, PromptList, PromptQuestion, PromptResult,
-                              SessionHandle, WaitingPrompt)
+                              PromptAnswer, PromptChoice, PromptClosed, PromptInput, PromptList, PromptOpened,
+                              PromptQuestion, PromptResult, SessionHandle, WaitingPrompt)
 from ..plugins import access, agent_files
 from ..store import lock, now, retry_missing
 from ..universe import agents, records
-from . import delivery_evidence, effects, native
+from . import delivery_evidence, effects, native, prompt_events
 
 LIMIT = 64 * 1024
 INPUT_LIMIT = 128 * 1024
@@ -162,11 +162,18 @@ def waiting(root, agent, *, caller=None):
         with lock(directory / '.launch.lock', create_parent=False, blocking=False):
             connected = _connect(root, directory)
             if connected is None:
+                launch = agents.runtime(directory).get('launch_id')
+                prompt_events.finish(directory, launch, previous=True)
+                prompt_events.finish(directory, launch)
+                prompt_events.publish(directory)
                 return PromptList(state='unavailable', reason='The agent is not running')
             adapter, session, executor = connected
             found = _catalog(adapter, session, executor)
             found = replace(found, prompts=tuple(p for p in found.prompts
                                                 if session.status == 'waiting' or not p.requires_waiting))
+            prompt_events.record(directory, session.launch_id, session.native_id, tuple(
+                PromptOpened(id=p.id, kind=p.kind, requires_waiting=p.requires_waiting)
+                for p in found.prompts))
             found = replace(found, prompts=tuple(
                 replace(p, answerable=False, reason='An answer was already recorded; read --result. Do not answer again.')
                 if not p.requires_waiting and _record_present(directory / 'prompts' / (p.id + '.json')) else p
@@ -422,8 +429,16 @@ def _save(directory, record, outcome):
     if outcome.state in FINAL or outcome.cause in ('stopped', 'switched'):
         _discard_answer(directory, record['id'])
     if changed:
-        agents._event(directory, 'agent.prompt', record['session']['launch_id'],
-                      {'kind': record['kind'], 'tool': record['tool'], 'caller': record['caller'], 'outcome': outcome.state})
+        launch = record['session']['launch_id']
+        if (record.get('requires_waiting') is False
+                and (record.get('input_reserved') is True or outcome.state in ('person', 'gone'))):
+            prompt_events.stage(directory, launch, record['session']['native_id'], (
+                PromptClosed(id=record['id'], kind=record['kind'], state=outcome.state, cause=outcome.cause,
+                             requires_waiting=False),))
+        data = {'id': record['id'], 'kind': record['kind'], 'tool': record['tool'], 'caller': record['caller'],
+                'state': outcome.state, 'outcome': outcome.state, 'cause': outcome.cause}
+        if not prompt_events.publish_ordered(directory, 'agent.prompt', launch, data):
+            agents._event(directory, 'agent.prompt', launch, data)
     return outcome
 
 
@@ -521,6 +536,9 @@ def _submit_input(directory, adapter, session, executor, record, recipe):
         valid = False
     if not valid:
         return _refused(record['id'], 'The harness returned an invalid answer input; nothing was sent.', 'invalid_input')
+    # The adapter has committed this question to one input; delivery may still fail or remain uncertain.
+    record['input_reserved'] = True
+    agent_files.write_json(directory / 'prompts' / (record['id'] + '.json'), record)
     try:
         executor.check_session()
     except access.Denied:
@@ -556,6 +574,8 @@ def _settle_input(root, directory, record):
         executor.check_session()
         reply = effects.call(adapter, 'get_delivery', session, record['input_id'], executor)
         outcome = _input_outcome(record['id'], reply)
+        if outcome.state == 'answered':
+            record['input_reserved'] = True  # An exact transcript receipt also proves a legacy input went through.
     except access.Denied:
         raise
     except Exception:

@@ -3,6 +3,7 @@ from ..harnesses.types import normalize_session_id
 from ..store import exists_replaced, retry_missing, existing_lock, lock, now, read, write
 from . import focus, sessions, records
 import fcntl
+import logging
 import re
 import stat
 
@@ -245,49 +246,82 @@ def update_runtime(agent_dir, launch_id, **changes):
     return mutate_runtime(agent_dir, launch_id, lambda data: changes, create_parent=True)
 
 
-def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, blocking=True):
+def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, blocking=True, prompt_batch=None,
+                   before_status_event=None):
     """Reduce current facts under the runtime lock; None leaves the record alone.
 
     Reducers are core bookkeeping only: no native calls or plugin callbacks.
     Keep launch guards, refusal precedence and status events shared with writes.
     """
-    ended = None
+    from ..runtime import prompt_events
+
+    ended = status_event = None
     with lock(agent_dir / ".runtime.lock", create_parent=create_parent, blocking=blocking):
         data = runtime(agent_dir)
         if data.get("launch_id") != launch_id:
             raise ValueError("Outdated launch; refusing to update current runtime")
+        if prompt_batch is not None:
+            native_id, transitions = prompt_batch
+            try:
+                if records.properties(agent_dir / 'properties.json').get('native_session_id') == native_id:
+                    prompt_events.stage(agent_dir, launch_id, native_id, transitions)
+                else:
+                    logging.getLogger(__name__).warning('Ignored prompt transitions for another conversation')
+            except (OSError, ValueError):
+                logging.getLogger(__name__).warning('Could not verify the conversation for prompt transitions')
         changes = changes_for(data)
-        if changes is None:
-            return None
-        before = data.get("status")
-        primary = data.get('native_refusal')
-        data.update(changes, observed_at=now())
-        if primary or data.get('native_refusal'):
-            data['native_refusal'] = primary or data['native_refusal']
-            data['reason'] = data['error'] = data['native_refusal']['message']
-            data['startup_delivery'] = 'failed'
-            data['delivery_error'] = data['reason']
-            data['status'] = 'unknown'
-        # A turn ends when the harness goes idle from working, or from waiting on the person inside a turn: a
-        # command's dialog the person opens while the agent is idle (Claude's /model picker) waits outside any turn.
-        # `in_turn` (exactly true) is set while working, and when a wait starts from working (a record from before the
-        # flag still proves its turn that way); it is cleared when the agent goes idle.
-        turn_end = data.get('status') == 'idle' and (before == 'working' or (before == 'waiting' and data.get('in_turn') is True))
-        if data.get('status') == 'working' or (data.get('status') == 'waiting' and before == 'working'):
-            data['in_turn'] = True
-        elif data.get('status') == 'idle':
-            data.pop('in_turn', None)
-        write(agent_dir / "runtime.json", data)
-        # Under the lock, so a focus --turn, which reads the status under it too, is ordered with this turn end.
-        if turn_end:
-            ended = focus.turn_ended(agent_dir)
+        if changes is not None:
+            before = data.get("status")
+            primary = data.get('native_refusal')
+            data.update(changes, observed_at=now())
+            if primary or data.get('native_refusal'):
+                data['native_refusal'] = primary or data['native_refusal']
+                data['reason'] = data['error'] = data['native_refusal']['message']
+                data['startup_delivery'] = 'failed'
+                data['delivery_error'] = data['reason']
+                data['status'] = 'unknown'
+            if before == 'waiting' and data.get('state') == 'ending':
+                # A stopping harness can report activity before cancellation
+                # succeeds. Keep its wait until a terminal state confirms exit.
+                if 'status' in changes:
+                    if data.get('status') in ('working', 'idle'):
+                        data['deferred_stop_status'] = data['status']
+                    else:
+                        data.pop('deferred_stop_status', None)
+                data['status'] = 'waiting'
+            elif data.get('state') != 'ending':
+                data.pop('deferred_stop_status', None)
+            # A turn ends when the harness goes idle from working, or from waiting on the person inside a turn: a
+            # command's dialog the person opens while the agent is idle (Claude's /model picker) waits outside any turn.
+            # `in_turn` (exactly true) is set while working, and when a wait starts from working (a record from before the
+            # flag still proves its turn that way); it is cleared when the agent goes idle.
+            turn_end = data.get('status') == 'idle' and (before == 'working' or (before == 'waiting' and data.get('in_turn') is True))
+            if data.get('status') == 'working' or (data.get('status') == 'waiting' and before == 'working'):
+                data['in_turn'] = True
+            elif data.get('status') == 'idle':
+                data.pop('in_turn', None)
+            write(agent_dir / "runtime.json", data)
+            if data.get('status') != before:
+                status_event = {"from": before, "to": data.get('status')}
+            # Under the lock, so a focus --turn, which reads the status under it too, is ordered with this turn end.
+            if turn_end:
+                ended = focus.turn_ended(agent_dir)
     if ended:
         # The turn ended a focus: tell the agent about messages it held, after the lock.
         focus.after_turn(agent_dir, ended)
-    if data.get('status') != before:
-        # After the lock: recording an event never holds up the runtime record.
-        _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})
-    return data
+    if changes is not None and 'status' in changes:
+        prompt_events.finish(agent_dir, launch_id, previous=True)
+    if status_event is not None:
+        # Native observation and journal writes stay outside the runtime lock.
+        if before_status_event is not None:
+            before_status_event()
+        if before == 'waiting':
+            prompt_events.leaving_wait(agent_dir, launch_id, data)
+        if not prompt_events.publish_ordered(agent_dir, 'agent.status', launch_id, status_event):
+            _event(agent_dir, "agent.status", launch_id, status_event)
+    if prompt_batch is not None or changes is not None and 'status' in changes:
+        prompt_events.publish(agent_dir)
+    return data if changes is not None else None
 
 
 def _event(agent_dir, kind, launch=None, data=None, properties=None):
@@ -340,7 +374,11 @@ def session_properties(root, agent_dir, *, launch_locked=False):
 
 
 def _session_event(directory, row):
-    _event(directory, 'agent.session', row['launch'], {key: row[key] for key in ('from', 'to', 'reason')})
+    from ..runtime import prompt_events
+    prompt_events.finish(directory, row['launch'], native_id=row['from'], cause='switched')
+    data = {key: row[key] for key in ('from', 'to', 'reason')}
+    if not prompt_events.publish_ordered(directory, 'agent.session', row['launch'], data):
+        _event(directory, 'agent.session', row['launch'], data)
 
 
 def _rebind_session(root, agent_dir, previous, session_id, reason, launch_id, *, home=None):

@@ -129,6 +129,32 @@ class PromptApiTest(PluginTestCase):
             return call()
 
 
+    def test_a_plugin_follows_prompts_by_their_events_in_order(self):
+        """Prompts open and close in the journal for a subscribed plugin, by id, in order and without text (1.21); else a plugin polls every agent or misses a prompt that came and went."""
+        from multiverse.plugins import events
+        self.write_plugin("follower", {"module": "plugin", "extends": ["events"],
+                                       "events": ["prompt.*", "agent.prompt"]}, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("follower")
+        fake = self.fake_prompts([], {})
+        fake.show(BASH, self.directory)
+        fake.show(LATER, self.directory)
+        fake.end("later-1", self.directory, state="person")  # the person answered it in the terminal
+        answered = self.worker.answer_prompt("perm-1", choice="allow")
+        self.assertEqual(answered.state, "answered")
+        found, _ = events.read(self.root, 0)
+        seen = [(event["type"], event["data"]["id"], event["data"].get("state")) for event in found]
+        self.assertEqual([row for row in seen if row[0].startswith("prompt.")],
+                         [("prompt.opened", "perm-1", None), ("prompt.opened", "later-1", None),
+                          ("prompt.closed", "later-1", "person"), ("prompt.closed", "perm-1", "submitted")])
+        self.assertEqual(found[1]["data"], {"id": "later-1", "kind": "question", "requires_waiting": False})
+        # mv2's own answer closes the prompt as it stood then; how it settled comes as agent.prompt.
+        outcome = [event["data"] for event in found if event["type"] == "agent.prompt"]
+        self.assertEqual((outcome[-1]["id"], outcome[-1]["state"], outcome[-1]["outcome"]),
+                         ("perm-1", "answered", "answered"))
+        text = json.dumps(found)
+        for private in (BASH.summary, "rm -rf", events.REPLAY):
+            self.assertNotIn(private, text)  # no prompt text, and never core's replay key
+
     def test_a_question_that_does_not_stop_the_agent_is_answered_once_as_its_input(self):
         """Async questions are answered while the agent runs, sent once, text kept nowhere; a lost gate is unseen."""
         write(self.directory / "runtime.json", {**read(self.directory / "runtime.json"), "status": "running"})

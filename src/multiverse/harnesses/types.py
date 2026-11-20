@@ -445,11 +445,19 @@ class PromptAnswer:
     notes: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class PromptOutcomeQuery(PromptAnswer):
+    """Read exact closure metadata without opening native history."""
+    metadata_only: Literal[True] = True
+
+
 @dataclass(frozen=True)
 class PromptInput:
-    """Transient native input recipe; core reserves and submits it through ordinary delivery.
+    """Transient native input recipe for a retained question committed to one input.
 
-    id must be 'prompt-' + PromptAnswer.id. Text is never an audit or receipt field.
+    The adapter reserves the question before returning this recipe. Core submits it through
+    ordinary delivery; its outcome can remain uncertain. The id is 'prompt-' + PromptAnswer.id.
+    Text is never an audit or receipt field.
     """
     id: str
     text: str
@@ -463,6 +471,27 @@ class PromptResult:
     saved_rule: bool = False
     person_answer: Mapping[str, Any] | None = None
     cause: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptOpened:
+    """A named native prompt can now be listed for this conversation."""
+    id: str
+    kind: str
+    requires_waiting: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptClosed:
+    """A prompt ended with the outcome known when it closed."""
+    id: str
+    kind: str
+    state: str
+    cause: str | None = None
+    requires_waiting: bool = True  # Describes the opening edge if core has not seen it.
+
+
+PromptTransition = PromptOpened | PromptClosed
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -493,6 +522,8 @@ class PromptProvider(Protocol):
     """Native prompts and retained questions, one mv2 submission, and read-only outcomes.
 
     Core reads input receipts through get_delivery; callback prompt_outcome remains read-only.
+    Report PromptOpened and PromptClosed for the exact native conversation. A status
+    callback can carry the edges, in order, before reporting the status change.
     """
     def waiting_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def answer_prompt(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...

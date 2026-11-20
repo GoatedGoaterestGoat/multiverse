@@ -349,6 +349,9 @@ class LaunchConnection:
         if self.prompts is not None:
             await self.prompts.run(send)
 
+    def relay_prompt_transitions(self):
+        return self.prompts.take_transitions() if self.prompts is not None else None
+
     async def relay_before_send(self, value):
         if self.prompts is not None:
             await self.prompts.before_send(value)

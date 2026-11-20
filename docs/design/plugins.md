@@ -425,6 +425,9 @@ caller can forget one:
 | `message.read` | `mailbox.inbox`, after a successful read moved the cursor (never peek, history or a failed print) | count of inbox-only messages read |
 | `universe.created` | `templates.create`, in its own journal and its parent's | name, path, template |
 | `refresh.applied` | `templates.refresh_apply`, after the manifest is written | files written |
+| `prompt.opened` | core's prompt ledger, when a harness's waiting prompt can first be listed: reported by the adapter, or found by a read of the listing (1.21; see [waiting prompts](waiting-prompts.md)) | id, kind, requires_waiting |
+| `prompt.closed` | core's prompt ledger, when that prompt ends: reported by the adapter, before a status change away from `waiting`, or at its launch's or conversation's end | id, kind, state, cause (as `prompt_result()` gives them then) |
+| `agent.prompt` | `runtime/prompts.py`, when an answer mv2 sent changes outcome | id, kind, tool, caller, state, cause; `outcome` (the same as state, until 2.0); never the prompt's text or the answer |
 | `PLUGIN.*` | `mv.events.emit` from a plugin | anything JSON (namespaced to its name) |
 
 Moving or removing a whole subverse records nothing in its own journal, which

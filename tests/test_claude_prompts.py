@@ -14,7 +14,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
 from multiverse.harnesses.claude import BRIDGE, checked_version
-from multiverse.harnesses.types import NativeEndpoint, NativeResult, PromptAnswer, SessionHandle
+from multiverse.harnesses.types import NativeEndpoint, NativeResult, PromptAnswer, PromptOutcomeQuery, SessionHandle
 from multiverse.store import read, write
 from test_multiverse import BaseTest
 
@@ -250,6 +250,56 @@ class ClaudePromptsTest(BaseTest):
                 self.assertEqual(self.adapter.prompt_outcome(self.session(), PromptAnswer(id=open_one)).value['state'], 'submitted')
                 (answers / f'{open_one}{suffix}').unlink()
         self.assertEqual(self.adapter.prompt_outcome(self.session(), PromptAnswer(id=str(uuid4()))).value['state'], 'unknown')
+
+    def test_a_prompts_end_event_gives_the_outcome_its_end_record_alone_gives(self):
+        """The mod's prompt.closed event carries a state and cause it maps from its end record (hooks/prompts.ts
+        closedOutcome, the same table in mod/tests/prompts.test.ts), with nothing Claude stored yet: they must be what
+        prompt_result gives then, or a plugin sees one outcome in the event and another from prompt_result."""
+        for record, expected in (
+                ({'how': 'sent', 'choice': 'allow'}, ('submitted', None)),
+                ({'how': 'refused', 'reason': 'x'}, ('refused', 'invalid_answer')),
+                ({'how': 'closed', 'cause': 'person'}, ('person', 'person')),
+                ({'how': 'closed', 'cause': 'interrupted'}, ('gone', 'interrupted')),
+                ({'how': 'closed', 'cause': 'turn_ended'}, ('gone', 'turn_ended')),
+                ({'how': 'closed', 'cause': 'stopped'}, ('gone', 'stopped')),
+                ({'how': 'closed', 'cause': 'resolved'}, ('gone', 'closed')),
+                ({'how': 'closed', 'cause': 'denied'}, ('gone', 'closed'))):
+            with self.subTest(record):
+                id = self.publish()
+                (self.agent_dir / 'claude-prompts' / f'{id}.json').unlink()
+                self.end(id, launch='launch-1', session=self.native, **record)
+                reply = self.adapter.prompt_outcome(self.session(), PromptAnswer(id=id)).value
+                self.assertEqual((reply['state'], reply.get('cause')), expected)
+                # Core's metadata-only read, before the agent leaves waiting, gives the same from the record.
+                reply = self.adapter.prompt_outcome(self.session(), PromptOutcomeQuery(id=id)).value
+                self.assertEqual((reply.get('closed'), reply['state'], reply.get('cause')), (True, *expected))
+
+    def test_a_metadata_only_outcome_proves_a_close_only_from_this_launchs_and_conversations_end_record(self):
+        """Core closes a prompt before the agent leaves waiting on this read alone: a close claimed from another launch's or
+        conversation's record, a damaged one, or a prompt still open would end a prompt a plugin still sees waiting, and
+        reading Claude's transcript here could hold up the status change."""
+        def outcome(**record):
+            id = self.publish()
+            if record:
+                (self.agent_dir / 'claude-prompts' / f'{id}.json').unlink()
+                self.end(id, **record)
+            return self.adapter.prompt_outcome(self.session(), PromptOutcomeQuery(id=id)).value
+        ours = {'how': 'closed', 'cause': 'person', 'launch': 'launch-1', 'session': self.native}
+        self.assertEqual(outcome(**ours).get('closed'), True)
+        for label, record in (
+                ('still open', {}),
+                ('another launch', {**ours, 'launch': 'launch-0'}),
+                ('another conversation', {**ours, 'session': str(uuid4())}),
+                ('an older mod: no conversation named', {k: v for k, v in ours.items() if k != 'session'}),
+                ('a schema marker of true', {**ours, 'schema': True}),
+                ('an unknown ending', {**ours, 'how': 'later'})):
+            with self.subTest(label):
+                self.assertNotIn('closed', outcome(**record))
+        # Claude's own rows are never read: what they say would change the full outcome, not this one.
+        self.rows({'type': 'attachment', 'attachment': {'type': 'hook_permission_decision', 'decision': 'allow', 'toolUseID': CALL}})
+        with patch('multiverse.harnesses.claude.prompt_call_evidence', side_effect=AssertionError('read the transcript')):
+            reply = outcome(how='sent', choice='allow', launch='launch-1', session=self.native)
+        self.assertEqual((reply.get('closed'), reply['state']), (True, 'submitted'))
 
     def test_an_outcome_reads_only_this_conversations_transcript(self):
         """The end record names the transcript; another conversation's file, or a file of the same name in another

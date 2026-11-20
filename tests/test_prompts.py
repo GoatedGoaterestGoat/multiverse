@@ -151,7 +151,8 @@ class PromptTest(BaseTest):
         self.assertNotIn('PRIVATE', str(result))
         self.assertNotIn('PRIVATE', record.read_text())
         for call in self.events.call_args_list:
-            self.assertEqual(set(call.args[3]), {'kind', 'tool', 'caller', 'outcome'})
+            self.assertEqual(set(call.args[3]), {'id', 'kind', 'tool', 'caller', 'state', 'cause', 'outcome'})
+            self.assertEqual(call.args[3]['state'], call.args[3]['outcome'])
             self.assertNotIn('PRIVATE', json.dumps(call.args[3]))
         self.assertFalse(wire.exists())
         for given in ({'answers': {'pick': 'A'}}, {'choice': 'cancel'},
@@ -357,7 +358,8 @@ class PromptTest(BaseTest):
         self.assertNotIn('PRIVATE', record.read_text())
         self.assertFalse(wire.exists())
         for call in self.events.call_args_list:
-            self.assertEqual(set(call.args[3]), {'kind', 'tool', 'caller', 'outcome'})
+            self.assertEqual(set(call.args[3]), {'id', 'kind', 'tool', 'caller', 'state', 'cause', 'outcome'})
+            self.assertEqual(call.args[3]['state'], call.args[3]['outcome'])
         old = self.prompt_id
         schema = {'choices': [], 'questions': [asdict(q) for q in self.prompt.questions]}
         self.fresh()
@@ -501,7 +503,7 @@ class PromptTest(BaseTest):
         self.assertEqual((outcome.state, outcome.cause), ('gone', 'replaced'))
         self.assertIn(self.prompt_id, outcome.reason)
         self.assertFalse(self.sent)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
         self.receipts[old.id] = NativeResult('ok', value={'state': 'person', 'person_answer': {'choice': 'deny'}})
         outcome = prompts.answer(self.root, self.agent, old.id, choice='allow', wait=False)
         self.assertEqual((outcome.state, outcome.person_answer), ('person', {'choice': 'deny'}))
@@ -515,7 +517,7 @@ class PromptTest(BaseTest):
         self.assertEqual(outcome.person_answer, {'answers': {'pick': ['B']}, 'typed': {'text': ['PERSON TYPED TEXT']}})
         self.assertNotIn('PRIVATE', str(outcome))
         self.assertFalse(self.sent)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
         self.receipts[old.id].value['person_answer']['answers']['text'] = ['x' * prompts.LIMIT]
         outcome = prompts.answer(self.root, self.agent, old.id, answers={'pick': 'A'}, wait=False)
         self.assertTrue(outcome.person_answer['truncated'])

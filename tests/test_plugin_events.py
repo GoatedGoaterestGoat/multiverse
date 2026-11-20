@@ -77,6 +77,122 @@ class JournalTest(PluginTestCase):
         self.assertEqual([event["seq"] for event in found], [1, 2, 3, 4])
         self.assertEqual(found[-1]["data"], {"after": "crash"})
 
+    def test_a_prompt_event_says_what_became_of_it_and_is_never_written_twice(self):
+        """prompt_event tells core written, unsubscribed or retry, writes a replayed key once and never shows the key; else core drops or repeats prompt edges, or plugins see its bookkeeping."""
+        agent = self.agent("worker")
+        opened = {"id": "p1", "kind": "permission", "requires_waiting": True}
+        self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k1"), "unsubscribed")
+        self.assertEqual(events.segments(self.root), [])  # nobody subscribes: nothing written
+        self.subscribe(("prompt.*",))
+        for _ in range(2):  # the second is a replay after an append whose acknowledgement was lost
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k1"), "written")
+        self.assertEqual(events.prompt_event(agent, "prompt.closed", "L1",
+                                             {"id": "p1", "kind": "permission", "state": "gone", "cause": "resolved"},
+                                             key="k2"), "written")
+        found, _ = events.read(self.root, 0)
+        self.assertEqual([(event["type"], event["data"]["id"]) for event in found],
+                         [("prompt.opened", "p1"), ("prompt.closed", "p1")])
+        self.assertTrue(all(events.REPLAY not in event for event in found))  # core's key, never a plugin's
+        self.assertEqual(found[0]["agent"]["name"], "worker")
+        for case, call in (("the journal busy", lambda: mock.patch.object(events, "LOCK_SECONDS", 0)),
+                           ("no replay key", None)):
+            with self.subTest(case):
+                if call is None:
+                    self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key=""), "retry")
+                    continue
+                with events._bounded_lock(events.directory(self.root) / ".lock") as held, call():
+                    self.assertTrue(held)
+                    self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k3"), "retry")
+        self.assertEqual(len(events.read(self.root, 0)[0]), 2)
+        with self.subTest("a replay after more than the journal's tail was written since"):
+            self.subscribe(("prompt.*", "agent.*"), name="busy")
+            for index in range(200):  # other writers push k1 far out of the tail
+                events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"pad": "x" * 512, "n": index})
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k1"), "written")
+            self.assertEqual(sum(event["type"] == "prompt.opened" for event in events.read(self.root, 0, 10_000)[0]),
+                             1)  # its receipt says so: not written twice
+            self.assertTrue(events.acknowledge(agent, ["k1", "k2"]))
+            self.assertEqual(json.loads((events.directory(self.root) / events.RECEIPTS).read_text()), {})
+        with self.subTest("a receipt that couldn't be saved"):
+            with mock.patch.object(events, "_write_receipts", side_effect=OSError(28, "No space left on device")):
+                self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k4"), "retry")
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k4"), "written")
+        with self.subTest("the receipts caught mid-rewrite"):
+            events.prompt_event(agent, "prompt.opened", "L1", opened, key="k5")
+            for index in range(200):  # k5 far out of the tail: only its receipt knows it
+                events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"pad": "x" * 512, "n": index})
+            receipts, real, missed = events.directory(self.root) / events.RECEIPTS, Path.read_text, []
+
+            def replaced_once(path, *args, **kwargs):
+                if path == receipts and not missed:
+                    missed.append(path)
+                    raise FileNotFoundError(2, "No such file or directory", str(path))
+                return real(path, *args, **kwargs)
+            with mock.patch.object(Path, "read_text", replaced_once):
+                self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k5"), "written")
+            self.assertTrue(missed)
+        with self.subTest("a torn line holding the key proves nothing"):
+            _, segment = events.segments(self.root)[-1]
+            torn = events._line({"schema": 1, "seq": 10 ** 6, "type": "prompt.opened", "agent": None, "launch": "L1",
+                                 "data": opened, events.REPLAY: "k7"})
+
+            def short_append(root, event):
+                with segment.open("ab") as stream:
+                    stream.write(torn[:-2])
+                raise OSError("short write")
+
+            with mock.patch.object(events, "_append", side_effect=short_append):
+                self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k7"), "retry")
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k7"), "written")
+            self.assertTrue(any(event["data"]["id"] == "p1" and event["seq"] < 10 ** 6
+                                for event in events.read(self.root, 0, 10_000)[0][-1:]))  # written for real
+        with self.subTest("receipts that aren't UTF-8"):
+            (events.directory(self.root) / events.RECEIPTS).write_bytes(b"\xff\xfe{")
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k6"), "written")  # not
+            # retried for ever: unreadable receipts fall back to the tail
+        self.assertEqual(sum(event["type"] == "prompt.opened" and event["data"]["id"] == "p1"
+                             for event in events.read(self.root, 0, 10_000)[0]), 5)  # k1, k4, k5, k6, k7: each once
+
+    def test_replay_proof_includes_a_complete_row_at_the_tail_boundary(self):
+        """A saved event can be appended twice when the receipt is lost and its row starts at the tail boundary."""
+        agent = self.agent("worker")
+        self.subscribe(("prompt.*",))
+        opened = {"kind": "question", "requires_waiting": False}
+        for identity in ("earlier", "boundary"):
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", {**opened, "id": identity},
+                                                 key=identity), "written")
+        _, segment = events.segments(self.root)[-1]
+        _, tail = segment.read_bytes().split(b"\n", 1)
+        with mock.patch.object(events, "TAIL_BYTES", len(tail)), mock.patch.object(events, "_receipts", return_value={}):
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", {**opened, "id": "boundary"},
+                                                 key="boundary"), "written")
+        self.assertEqual([row["data"]["id"] for row in events.read(self.root, 0)[0]], ["earlier", "boundary"])
+
+    def test_a_complete_row_without_its_final_newline_reaches_incremental_readers_once(self):
+        """A short write can leave JSON visible in history but hidden from a subscriber's current cursor."""
+        agent = self.agent("worker")
+        self.subscribe(("prompt.*",))
+        opened = {"kind": "question", "requires_waiting": False}
+        self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", {**opened, "id": "earlier"},
+                                             key="earlier"), "written")
+        _, segment = events.segments(self.root)[-1]
+
+        def lose_newline(root, event):
+            with segment.open("ab") as stream:
+                stream.write(events._line({**event, "seq": 2})[:-1])
+            raise OSError("short write")
+
+        with mock.patch.object(events, "_append", side_effect=lose_newline):
+            self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", {**opened, "id": "q"},
+                                                 key="complete"), "retry")
+        before, _ = events.read(self.root, 0)
+        self.assertEqual([row["data"]["id"] for row in before], ["earlier", "q"])
+        self.assertEqual(events.read(self.root, 1)[0], [])
+        self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", {**opened, "id": "q"},
+                                             key="complete"), "written")
+        opened_after, _ = events.read(self.root, 1)
+        self.assertEqual([(row["seq"], row["data"]["id"]) for row in opened_after], [(2, "q")])
+
     def test_a_segment_pruned_while_it_is_read_becomes_a_gap(self):
         """Segments rolled by size or day and pruned by age, by plugins.json's size limit or between listing and
         reading read back as a gap with the right bounds, and a handler gets events.gap; fragile because rolling,

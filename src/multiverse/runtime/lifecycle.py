@@ -1199,6 +1199,11 @@ def launch_result(root, agent_dir):
 def _event(agent_dir, kind, launch=None, data=None, properties=None):
     """Record an event for plugins that subscribe to it; best effort, never raises."""
     try:
+        if kind in ('agent.launched', 'agent.exited', 'agent.killed'):
+            from . import prompt_events
+            prompt_events.finish(agent_dir, launch, previous=kind == 'agent.launched')
+            if prompt_events.publish_ordered(agent_dir, kind, launch, data):
+                return
         from ..plugins import events
         events.for_agent(agent_dir, kind, launch, data, properties)
     except Exception:
@@ -1415,7 +1420,15 @@ def kill(root, reference, *, attachment_only=False):
         # Older launches may have inherited remain-on-exit=off.
         if backend is not None:
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
-        update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
+        def begin_stop(current):
+            changes = {'state': 'ending', 'ending_at': now()}
+            # Keep the observed wait until the exit is proven. Cancellation
+            # can fail, and a live prompt must still be available in that case.
+            if current.get('status') != 'waiting':
+                changes['status'] = 'unknown'
+            return changes
+
+        agents.mutate_runtime(agent_dir, launch_id, begin_stop)
         try:
             if attachment_only:
                 attachment = facts.get('attachment')
@@ -1432,9 +1445,17 @@ def kill(root, reference, *, attachment_only=False):
                     'Terminal attachment closed before delivery; saved for explicit retry')
         except Exception as error:
             if live not in ('stopped', 'dormant'):
-                update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
-                               ending_at=facts.get('ending_at'),
-                               error=f'Native cancellation failed; remaining terminal retained: {error}')
+                def cancel_stop(current):
+                    if current.get('state') != 'ending':
+                        return None  # The runner may already have recorded its exit.
+                    changes = {'state': facts.get('state', 'running'), 'ending_at': facts.get('ending_at'),
+                               'error': f'Native cancellation failed; remaining terminal retained: {error}'}
+                    deferred = current.get('deferred_stop_status')
+                    if deferred in ('working', 'idle'):
+                        changes['status'] = deferred
+                    return changes
+
+                agents.mutate_runtime(agent_dir, launch_id, cancel_stop)
                 raise
             # A dead child has no terminal connection to preserve. Removing its
             # owned wrapper must not depend on an unreachable shared service.

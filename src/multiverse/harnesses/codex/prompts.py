@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
-from ..types import NativeResult, PromptInput
+from ..types import NativeResult, PromptClosed, PromptInput, PromptOpened, PromptTransition
 from . import prompt_codec as codec
 from . import async_questions
 from .prompt_files import Candidate, Files, identifier
@@ -170,6 +170,7 @@ def submit(session, answer, executor):
 
 
 def outcome(session, answer):
+    metadata_only = getattr(answer, 'metadata_only', False) is True
     try:
         files = files_for(session)
         id = identifier(answer.id)
@@ -178,10 +179,14 @@ def outcome(session, answer):
             raise ValueError('The prompt result belongs to a different conversation')
         if result.get('state') not in ('sent_first', 'person', 'gone', 'refused', 'submitted', 'unknown'):
             raise ValueError('The prompt result is not a known Codex outcome')
+        if metadata_only:
+            closed = {'closed': True, 'state': result['state'], 'cause': result.get('cause')}
+            return NativeResult('ok', value=closed if result.get('closed') is True else {})
         return NativeResult('ok', value={key: result.get(key) for key in
             ('state', 'reason', 'cause', 'person_answer', 'saved_rule', 'choices', 'questions')})
     except (OSError, ValueError, TypeError, KeyError):
-        return NativeResult('ok', value={'state': 'unknown', 'cause': 'unconfirmed', 'reason': UNKNOWN})
+        return NativeResult('ok', value={} if metadata_only else
+                            {'state': 'unknown', 'cause': 'unconfirmed', 'reason': UNKNOWN})
 
 
 class Relay:
@@ -193,6 +198,12 @@ class Relay:
         self.by_question = {}
         self.async_overflow = False
         self.jobs = Jobs()
+        self.flush_lock = asyncio.Lock()
+        self.pending_transitions = []
+        self.ready_transitions = []
+        notify = context.get('notify_prompt_transitions')
+        self.notify_transitions = notify if callable(notify) else None
+        self.transition_scope = 0
         self.partial = False
         self.disabled = False
         self.closed = False
@@ -252,11 +263,78 @@ class Relay:
                  'cause': cause, 'person_answer': person,
                  'choices': deepcopy(record['offer'].choices), 'questions': deepcopy(record['offer'].questions),
                  'saved_rule': state == 'sent_first' and record.get('saved_rule', False)}
+        if not record.get('async') and not record['open']:
+            value['closed'] = True
         record['result'] = value
         action = 'settle' if record.get('async') and state != 'submitted' else 'write'
         self.jobs.append((action, record['id'] + '.result.json', value))
 
-    def applied(self, results):
+    def open_transition(self, record):
+        if self.notify_transitions is not None:
+            record['transition_scope'] = self.transition_scope
+            self.pending_transitions.append(PromptOpened(id=record['id'], kind=record['offer'].kind,
+                                                 requires_waiting=not record.get('async')))
+
+    def close_transition(self, record, transitions):
+        result = record.get('result')
+        if record['open'] or result is None:
+            return
+        if not record.get('async') and result.get('closed') is not True:
+            # A native resolution can end a callback while its send is pending.
+            result = {**result, 'closed': True}
+            record['result'] = result
+            self.jobs.append(('write', record['id'] + '.result.json', result))
+        if record.get('transition_scope') != self.transition_scope or record.get('close_reported'):
+            return
+        record['close_reported'] = True
+        transitions.append(PromptClosed(id=record['id'], kind=record['offer'].kind, state=result['state'],
+                                        cause=result['cause'], requires_waiting=not record.get('async')))
+
+    def take_transitions(self) -> tuple[str, tuple[PromptTransition, ...]] | None:
+        if (self.native_id is None or self.native_id != self.connection.root.native_id
+                or self.connection.owns_primary() is not True):
+            self.ready_transitions.clear()
+            return None
+        if not self.ready_transitions:
+            return None
+        limit = 2 * MAX_REQUESTS
+        edges = tuple(self.ready_transitions[:limit])
+        del self.ready_transitions[:limit]
+        return self.native_id, edges
+
+    def notify_ready(self):
+        if self.notify_transitions is None:
+            return
+        while self.ready_transitions:
+            before = len(self.ready_transitions)
+            self.notify_transitions()
+            if len(self.ready_transitions) == before:
+                return  # The core publisher is busy. Try again on the next poll.
+
+    async def flush(self, *, final=False):
+        # Serialize private snapshots, including the one a terminal reply needs
+        # before it can end the native wait. Journal I/O belongs to core.
+        async with self.flush_lock:
+            if self.closed and not final:
+                return
+            jobs, self.jobs = self.jobs, Jobs()
+            transitions, count = self.pending_transitions, len(self.pending_transitions)
+            try:
+                results = await asyncio.to_thread(self.files.apply, jobs, final=final) if jobs else ()
+            except (OSError, ValueError):
+                jobs.extend(self.jobs)
+                self.jobs = jobs
+                raise
+            if transitions is not self.pending_transitions or self.closed and not final:
+                self.applied(results)
+                return
+            edges = transitions[:count]
+            del transitions[:count]
+            self.applied(results, edges)
+            self.ready_transitions.extend(edges)
+            self.notify_ready()
+
+    def applied(self, results, transitions=None):
         """Only the relay loop imports outcomes from its off-loop file worker."""
         for id, value, disposition in results or ():
             record = self.records.get(id)
@@ -265,6 +343,9 @@ class Relay:
                 record['open'] = False
                 if disposition in ('input', 'unknown', 'uncertain'):
                     record['attempted'] = True
+                # Core records the outcome of an ordinary reserved input.
+                if transitions is not None and disposition != 'input':
+                    self.close_transition(record, transitions)
 
     def close_record(self, record, cause, reason):
         if record['open']:
@@ -286,6 +367,7 @@ class Relay:
                 self.result(record, 'unknown', reason + ' ' + UNKNOWN, cause=cause)
         elif record.get('result', {}).get('state') != 'person':
             self.result(record, 'gone', reason + ' No mv2 answer was sent.', cause=cause)
+        self.close_transition(record, self.pending_transitions)
 
     def disable(self):
         """Release the optional feature without disabling the native terminal."""
@@ -306,6 +388,8 @@ class Relay:
                 record['contradiction'] = True
                 self.result(record, 'unknown', 'The prompt relay can no longer observe this submission. ' + UNKNOWN,
                             cause='connection_lost')
+            if not record['open']:
+                self.close_transition(record, self.pending_transitions)
         self.index()
 
     def synchronize(self):
@@ -315,6 +399,11 @@ class Relay:
             for record in self.records.values():
                 if record['native_id'] == self.native_id and (record['open'] or record.get('local')):
                     self.close_record(record, 'switched', 'The agent changed conversations.')
+            # Core closes the old conversation at its switch boundary.
+            # A detached file worker can never publish edges in the new scope.
+            self.pending_transitions = []
+            self.ready_transitions = []
+            self.transition_scope += 1
             self.items.clear()
             self.native_id = current
             self.mode_requests.clear()
@@ -428,6 +517,7 @@ class Relay:
                     self.jobs.extend([('remove', record['id'] + '.open.json', None),
                                       ('discard', record['id'] + '.answer.json', None)])
                 self.finish(record)
+                self.close_transition(record, self.pending_transitions)
                 self.index()
         elif method in ('turn/completed', 'turn/started'):
             turn = params.get('turn')
@@ -490,6 +580,7 @@ class Relay:
             self.records[id] = record
             self.by_question[key] = id
             self.publication(record)
+            self.open_transition(record)
         self.index()
 
     def async_reply(self, item, target, *, terminal=False):
@@ -517,7 +608,16 @@ class Relay:
         return closed
 
     async def before_send(self, value):
-        """Publish the shared winner before terminal input can reach the daemon."""
+        """Publish a terminal close before forwarding the input or callback reply."""
+        if 'method' not in value:
+            record = self.records.get(self.by_request.get(request_id(value.get('id'))))
+            if (self.notify_transitions is not None and self.eligible() and record is not None
+                    and not record['open'] and record.get('result', {}).get('state') == 'person'):
+                try:
+                    await self.flush()
+                except (OSError, ValueError):
+                    pass  # Optional publication never refuses a callback reply.
+            return
         params = value.get('params')
         if (value.get('method') not in ('turn/start', 'turn/steer') or request_id(value.get('id')) is None
                 or not isinstance(params, dict) or params.get('threadId') != self.connection.root.native_id
@@ -535,10 +635,11 @@ class Relay:
                                                          for record in closed])
                 valid = len(claims) == len(jobs) and all(claim.disposition in winners for claim in claims)
             else:
+                transitions = self.pending_transitions
                 results = await asyncio.to_thread(self.files.apply, jobs)
                 valid = len(results) == len(jobs) and all(disposition in winners for _, _, disposition in results)
                 if valid:
-                    self.applied(results)
+                    self.applied(results, transitions if transitions is self.pending_transitions else None)
             if not valid:
                 raise ValueError('The terminal answer winner could not be published; input was not forwarded')
             if (params['threadId'] != self.connection.root.native_id
@@ -633,6 +734,7 @@ class Relay:
         self.records[id] = record
         self.by_request[key] = id
         self.publication(record)
+        self.open_transition(record)
         self.index()
 
     def terminal(self, value):
@@ -663,6 +765,7 @@ class Relay:
                           ('discard', record['id'] + '.answer.json', None)])
         self.result(record, 'person', reason,
                     cause='person', person=record['offer'].person_answer(value.get('result')))
+        self.close_transition(record, self.pending_transitions)
         self.index()
         return True
 
@@ -823,9 +926,7 @@ class Relay:
                             await send(candidate)
                         finally:
                             candidate.answer.clear()
-            jobs, self.jobs = self.jobs, Jobs()
-            if jobs:
-                self.applied(await asyncio.to_thread(self.files.apply, jobs))
+            await self.flush()
             await asyncio.sleep(POLL)
 
     async def close(self):
@@ -840,9 +941,7 @@ class Relay:
             if record.get('result'):
                 action = 'settle' if record.get('async') else 'write'
                 self.jobs.append((action, record['id'] + '.result.json', record['result']))
-        jobs, self.jobs = self.jobs, Jobs()
-        if jobs:
-            try:
-                self.applied(await asyncio.to_thread(self.files.apply, jobs, final=True))
-            except (OSError, ValueError):
-                pass  # Absent/stale files cannot be used as proof of a live prompt.
+        try:
+            await self.flush(final=True)
+        except (OSError, ValueError):
+            pass  # Absent/stale files cannot be used as proof of a live prompt.

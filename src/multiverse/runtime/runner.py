@@ -177,8 +177,9 @@ class RelayPublisher:
 
 class StatusWatcher:
     """Core-owned observer, bounded by one terminal launch and exact binding."""
-    def __init__(self, agent_dir, launch_id, root):
+    def __init__(self, agent_dir, launch_id, root, *, before_status_event=None):
         self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
+        self.before_status_event = before_status_event
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='native-status', daemon=True)
 
@@ -225,7 +226,7 @@ class StatusWatcher:
                 lost = (facts.get('native_relay') or {}).get('state') == 'lost'
                 changes['status'] = 'unknown' if lost else status
                 return changes if any(facts.get(key) != value for key, value in changes.items()) else None
-            mutate_runtime(self.agent_dir, self.launch_id, changes_for)
+            mutate_runtime(self.agent_dir, self.launch_id, changes_for, before_status_event=self.before_status_event)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -693,11 +694,19 @@ def main():
             from multiverse.runtime.queue_continuation import record_primary_event
             from multiverse.runtime.navigation import handler as navigation_handler
             from multiverse.runtime.delivery_observations import DeliveryPublisher
+            from multiverse.runtime import prompt_events
             delivery_publisher = None
             agent_id = env.get('MV2_AGENT_ID')
             if getattr(adapter, 'family', None) == 'codex' and isinstance(agent_id, str) and agent_id:
                 delivery_publisher = DeliveryPublisher(agent_dir, launch.name, properties['harness'],
                                                        agent_id=agent_id)
+            apply_navigation = navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)
+
+            def navigate(action, event):
+                if action == 'commit' and proxy is not None:
+                    proxy.stage_prompt_transitions()
+                return apply_navigation(action, event)
+
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
@@ -705,10 +714,13 @@ def main():
                 record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
                 record_connection=attachments.connection_logger(launch, started=runner_started),
                 record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
-                navigation=navigation_handler(Path(env['MV2_UNIVERSE']), agent_dir, launch.name),
+                navigation=navigate,
                 relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name},
                 record_delivery_observation=delivery_publisher,
-                record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None)
+                record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None,
+                record_prompt_transitions=lambda native_id, generation, edges: prompt_events.stage(
+                    agent_dir, launch.name, native_id, edges, generation=generation),
+                publish_prompt_events=lambda: prompt_events.publish(agent_dir))
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()
@@ -824,7 +836,8 @@ def main():
             roles['startup delivery'] = attachments.Role(launch, 'startup delivery', started=runner_started)
             startup.start()
         if attachment.get('observe_status'):
-            watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
+                                    before_status_event=proxy.stage_prompt_transitions if proxy else None)
             roles['status observer'] = attachments.Role(launch, 'status observer', started=runner_started)
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
@@ -864,6 +877,8 @@ def main():
         if not startup_checked:
             finish_failed_wake(launch, request, env, process,
                                diagnostic.get('reason') or 'Runner ended before launch readiness')
+        if proxy is not None:
+            proxy.stage_prompt_transitions()
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code in (0, -signal.SIGTERM, 143) or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
@@ -881,6 +896,8 @@ def main():
     except Exception as error:
         print(f"Multiverse launch failed: {error}", file=sys.stderr)
         diagnostic = launch_diagnostic(agent_dir, launch.name, f'Multiverse launch failed: {error}')
+        if proxy is not None:
+            proxy.stage_prompt_transitions()
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error), **diagnostic)
         if not exited:  # failed before the process ended, or before it could start: still its one exit
             from multiverse.runtime.lifecycle import _event

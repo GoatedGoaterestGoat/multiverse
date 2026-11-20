@@ -7,6 +7,7 @@ session (Claude's /clear), and core rebinds the agent to it.
 """
 import argparse
 import json
+import logging
 import os
 import re
 
@@ -47,6 +48,8 @@ def configure(parser):
     parser.add_argument("--status", "--activity", dest="status", choices=("idle", "working", "waiting", "unknown"),
                         help="idle, working, waiting or unknown")
     parser.add_argument("--usage-json", help="JSON context/cost/rate-limit usage from the harness")
+    parser.add_argument("--prompt-events-json", help="ordered prompt transition metadata from the harness")
+    parser.add_argument("--prompt-session-id", metavar="ID", help="native session that reported the prompt transitions")
 
     parser.add_argument("--bridge", type=bridge_argument, metavar="ID",
                         help="the integration's own bridge id, for example claude-mod-v1, or none")
@@ -82,12 +85,29 @@ def usage(text):
 
 
 def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
-        native_session_id=None, previous_session_id=None, session_reason=None):
+        native_session_id=None, previous_session_id=None, session_reason=None,
+        prompt_events_json=None, prompt_session_id=None):
     session = (native_session_id, previous_session_id, session_reason)
     if any(session) and not all(session):
         raise ValueError("--native-session-id, --previous-session-id and --session-reason go together")
-    if status is None and usage_json is None and native_session_id is None:
+    if (prompt_events_json is None) != (prompt_session_id is None):
+        if status is None:
+            raise ValueError("--prompt-events-json and --prompt-session-id go together")
+        logging.getLogger(__name__).warning('Ignored incomplete prompt-event metadata')
+        prompt_events_json = prompt_session_id = None
+    if native_session_id is not None and prompt_events_json is not None:
+        raise ValueError("Report prompt transitions separately from a native session switch")
+    if status is None and usage_json is None and native_session_id is None and prompt_events_json is None:
         raise ValueError("Specify --status, --usage-json or --native-session-id")
+    prompt_batch = None
+    if prompt_events_json is not None:
+        from ..runtime.prompt_events import parse
+        try:
+            prompt_batch = prompt_session_id, parse(prompt_events_json)
+        except ValueError:
+            if status is None:
+                raise
+            logging.getLogger(__name__).warning('Ignored invalid prompt-event metadata')
     root, directory, launch_id = callback(root, agent)
     if native_session_id is not None:
         return rebind(root, directory, launch_id, previous_session_id, native_session_id, session_reason)
@@ -98,6 +118,8 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
         changes["usage"] = usage(usage_json)
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
+    if prompt_batch is not None:
+        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch)
     return agents.update_runtime(directory, launch_id, **changes)
 
 

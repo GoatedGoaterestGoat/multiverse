@@ -6,7 +6,7 @@ import type { Config, Facts, PluginItem } from './statusline'
 import { pythonEnv } from './python'
 import { retryMissing } from './records'
 import { registerUsage } from './usage'
-import { closeAll, closeKeys, form, hold as holdPrompt, sweep } from './prompts'
+import { closeAll, closeKeys, form, hold as holdPrompt, sweep, transitions } from './prompts'
 import { publishQueue, reloaded } from './queue'
 import type { QueueView } from './queue'
 import { dialogIn, watch } from './dialog'
@@ -242,17 +242,35 @@ function status(): string {
 
 // Report the current status once it changes, one report at a time, so a
 // burst of changes ends with the latest state. The first report also tells
-// Multiverse this launch's mod is loaded.
+// Multiverse this launch's mod is loaded. A report also carries the prompts'
+// opens and ends seen since the last one (prompts.ts), which core records
+// before the report's status: an end goes with or before the change that ends
+// its wait. One call carries one conversation's, at most TRANSITIONS of them;
+// a batch that fails TRANSITION_TRIES times is dropped, so it can never keep
+// the status from being reported (core closes what it still holds open from
+// its own reads and the launch's end).
+const TRANSITIONS = 32
+const TRANSITION_TRIES = 3
+let transitionFailures = 0
+
 async function report($: EngineInterface) {
   if (reporting) return
   reporting = true
   try {
-    // Not an mv2 command: agents report their phase, never their status.
-    const python = await $.env.get("MV2_PYTHON")
+    // Not an mv2 command: agents report their phase, never their status. A report started as a session ends (after a
+    // hold, a form or a sweep) finds no engine: there is nothing left to report.
+    let python
+    try { python = await $.env.get("MV2_PYTHON") } catch { return }
     if (!python) return
-    while (!registered || reported !== status()) {
+    while (!registered || reported !== status() || transitions.length > 0) {
       const value = status()
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
+      const session = transitions[0]?.session
+      let batch = 0
+      while (batch < transitions.length && batch < TRANSITIONS && transitions[batch]?.session === session) batch += 1
+      if (session !== undefined) {
+        argv.push("--prompt-events-json", JSON.stringify(transitions.slice(0, batch).map((t) => t.event)), "--prompt-session-id", session)
+      }
       // v2 reads a tag's send time, v3 also runs Claude's commands for mv2 and v4 publishes the prompts the agent
       // waits on; mv2 relies on each only for a mod that registered it.
       if (!registered) argv.push("--bridge", "claude-mod-v4")
@@ -263,18 +281,30 @@ async function report($: EngineInterface) {
         // A timeout or a refusal (Claude runs a mod's calls only once its trust prompt is answered) is logged like
         // a failed exit; the next status change tries again.
         $.ui.log(`multiverse: status report failed: ${error instanceof Error ? error.message : String(error)}`)
+        failed(batch)
         return
       }
       if (result.exitCode !== 0) {
         $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)
+        failed(batch)
         return
       }
+      transitions.splice(0, batch)
+      transitionFailures = 0
       reported = value
       registered = true
     }
   } finally {
     reporting = false
   }
+}
+
+function failed(batch: number) {
+  if (batch === 0) return
+  transitionFailures += 1
+  if (transitionFailures < TRANSITION_TRIES) return
+  transitions.splice(0, batch)
+  transitionFailures = 0
 }
 
 // Tell mv2 this process moved to another session (a /clear), once Claude's own process file names it. Core also
@@ -691,7 +721,7 @@ export const register: Register = (on) => {
     queueComplete = !(await reloaded($))
     queueChanged($)
     void report($)
-    void sweep($)
+    void sweep($).then(() => report($))
     void $.session.id().then((id) => { sessionId = id }, () => {})
     $.command.register({ name: NAME, description: DESCRIPTION, argumentHint: HINT, immediate: true })
       .catch((error: unknown) => $.ui.log(`multiverse: could not register /${NAME}: ${String(error)}`))
@@ -811,7 +841,10 @@ export const register: Register = (on) => {
     void report($)
     const below = await next(e)
     if (below?.decision !== undefined) return below
-    return holdPrompt($, e, below, { toolUseId: id, key, reason: found?.[1].reason }, next.signal)
+    // Its open goes once it is published, and whatever ended it goes with the report after it.
+    const decided = await holdPrompt($, e, below, { toolUseId: id, key, reason: found?.[1].reason }, next.signal, () => void report($))
+    void report($)
+    return decided
   })
 
   // A command's own dialog waits on the person for as long as it is open; the command's run lasts until it closes.
@@ -849,14 +882,15 @@ export const register: Register = (on) => {
     void report($)
     // Listed for the person, never held: holding it would keep Claude from drawing the form. One another hook
     // answers is closed again by its ElicitationResult.
-    void form($, key, e)
+    void form($, key, e).then(() => report($))
     return next(e)
   })
 
   on("classic.ElicitationResult", async ($, e, next) => {
     const key = `elicitation:${e.elicitation_id ?? e.mcp_server_name}`
     closeKeys($, [key], "person")
-    if (waiting.delete(key)) void report($)
+    waiting.delete(key)
+    void report($)
     return next(e)
   })
 

@@ -992,6 +992,22 @@ CONTRADICTED = {'state': 'unknown', 'cause': 'contradicted', 'reason': (
     "Claude's stored rows for this call don't match the answer mv2 sent, so mv2 can't tell whose answer took.")}
 
 
+def closed_outcome(end):
+    """The state and cause a prompt's end record alone gives, with nothing Claude stored: what the mod's prompt.closed
+    event carries (hooks/prompts.ts closedOutcome) and what a metadata-only outcome returns. An answer mv2 sent is
+    'submitted' here; core puts its own record's state on it."""
+    how, cause = end.get('how'), end.get('cause')
+    if how == 'sent':
+        return {'state': 'submitted', 'cause': None}
+    if how == 'refused':
+        return {'state': 'refused', 'cause': 'invalid_answer'}
+    if cause == 'person':
+        return {'state': 'person', 'cause': 'person'}
+    if cause in ('interrupted', 'turn_ended', 'stopped'):
+        return {'state': 'gone', 'cause': cause}
+    return {'state': 'gone', 'cause': 'closed'}
+
+
 def prompt_settled(end, evidence, session=None):
     """The outcome core records, from how the mod ended the prompt and what Claude stored (prompt_call_evidence)."""
     if evidence and evidence['conflict']:
@@ -1976,6 +1992,16 @@ class ClaudeAdapter(ConfiguredAdapter):
         folder = Path(session.session_file).parent / PROMPTS_FOLDER
         # An end record keeps the prompt's choices and questions, as the published one does: read it as large.
         end = _json_record(folder / f'{answer.id}.end.json', PROMPT_BYTES)
+        if getattr(answer, 'metadata_only', False):
+            # Core's check before an agent leaves waiting: closed only on this launch's and conversation's own end
+            # record for that prompt, never from Claude's transcript; anything less proves nothing.
+            if (isinstance(end, dict) and type(end.get('schema')) is int and end['schema'] == 1 and end.get('id') == answer.id
+                    and end.get('how') in ('sent', 'refused', 'closed') and isinstance(end.get('launch'), str)
+                    and end['launch'] == session.launch_id and isinstance(end.get('session'), str)
+                    and end['session'] == session.native_id):
+                return NativeResult('ok', value={'closed': True, **closed_outcome(end)})
+            return NativeResult('ok', value={'state': 'unknown', 'reason': (
+                "No end record of this launch and conversation shows that prompt closed")})
         if end is None:
             still = _json_record(folder / f'{answer.id}.json', PROMPT_BYTES)
             # Submitted only with core's answer for it, waiting or already taken by the mod: an open prompt mv2 sent
