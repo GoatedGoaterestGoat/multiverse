@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "claude_code": "2.1.329",
+  "claude_code": "2.1.330",
   "models": [
     {
       "id": "claude-3-5-haiku",
