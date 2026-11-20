@@ -309,8 +309,9 @@ def listing(root, wait=loader.REFRESH_WAIT):
     and has settings is loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings
     check refuses reads `unusable` here as it does in doctor. A plugin that is off is never imported here; its
     own settings screen or fields (settings `own_view`) come from settings_view(), on request."""
-    from . import host
+    from . import host, installer
     current = entries(root)
+    placed = installer.pinned(root)
     checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
               and found.on and found.state in ("on", "unusable") and found.loaded is None]
     for found in checks:
@@ -354,7 +355,10 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 # A trusted universe copy that takes the place of another source's plugin says so: a cloned
                 # repository's plugin never replaces a built-in one silently.
                 "overrides": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed
-                              if found.source == "universe" and source != "universe"]}
+                              if found.source == "universe" and source != "universe"],
+                # What mv2 plugins install placed: where from and at which commit; None for a plugin placed by hand.
+                "install": _install_view(placed.get(str(Path(found.directory).resolve())) if found.directory
+                                         else None)}
         if manifest is not None and manifest.settings is not None:
             current = loader.settings(root, found)
             try:
@@ -979,6 +983,79 @@ def clear_secret(root, name, key):
     return cleared
 
 
+def _install_view(record):
+    if record is None:
+        return None
+    return {key: record.get(key) for key in ("install", "source", "kind", "ref", "path", "commit", "follows",
+                                              "branch", "version", "placement", "installed_at", "updated_at")}
+
+
+def _person_only(root, what, command):
+    if from_agent(root):
+        raise PluginError(f"Only the person {what} plugins: ask them to run {command}")
+
+
+def install_preview(source, root=None, here=False):
+    """Fetch the plugin `source` names (`URL[@REF][#PATH]` or a folder) into a staging folder and say what it is;
+    nothing is installed. Personal unless `here` (into universe `root`'s plugins/). The person only.
+
+    {key, name, version, description, source, ref, path, commit, follows, fingerprint, placement, target,
+     powers: {access, permissions, extends, harnesses, packages}, runs: {python, claude, compiled}}: pass `key`
+    to install_confirm() to install exactly these files, or to install_cancel()."""
+    from . import installer
+    _person_only(root, "installs", f"mv2 plugins install {source}")
+    try:
+        return installer.preview(source, root, here)
+    except installer.InstallError as error:
+        raise PluginError(f"Nothing was installed: {error}") from None
+
+
+def install_confirm(key, root=None):
+    """Install, or update to, exactly what preview `key` showed (the person's yes): {name, version, commit,
+    target, placement, updated, packages}."""
+    from . import installer
+    _person_only(root, "installs", "mv2 plugins install")
+    try:
+        result = installer.confirm(key, root)
+    except installer.InstallError as error:
+        raise PluginError(str(error)) from None
+    loader._entries.clear()
+    return result
+
+
+def install_cancel(key, root=None):
+    """Drop preview `key`'s fetched files; True when there was one."""
+    from . import installer
+    return installer.cancel(key, root)
+
+
+def update_preview(name, ref=None, root=None, here=False, placement=None):
+    """Fetch what installed plugin `name` would update to (`ref`, else its newest tag or its branch's tip) and say
+    what changes; install_preview()'s fields plus `update`: {from, changes, same, edited, powers_changed} and
+    `ask`: whether the person must say yes (its powers change). `placement` ('personal' or 'universe', from a
+    listing row's install) updates exactly that one, refusing when it has none. The person only."""
+    from . import installer
+    _person_only(root, "updates", f"mv2 plugins update {name}")
+    try:
+        return installer.update_preview(name, ref, root, here, placement)
+    except installer.InstallError as error:
+        raise PluginError(f"{name} was not updated: {error}") from None
+
+
+def remove_installed(name, root=None, here=False, placement=None, expected=None):
+    """Remove what mv2 plugins install placed for `name` (the person only): {name, removed, placement, left}, where
+    `left` lists what stays elsewhere ({what, clear}): its settings, grants, secrets, packages. `placement` removes
+    exactly that one; `expected` (the listing row's install) refuses when the install changed since it was shown."""
+    from . import installer
+    _person_only(root, "removes", f"mv2 plugins remove {name}")
+    try:
+        result = installer.remove(name, root, here, placement, expected)
+    except installer.InstallError as error:
+        raise PluginError(f"{name} was not removed: {error}") from None
+    loader._entries.clear()
+    return result
+
+
 def from_agent(root=None):
     """Whether this process runs for an agent (agent_identity.runs_in_agent): mv2's launch markers, or, given the
     universe `root`, a tmux pane one of its tree's agents records. A guard against mistakes."""
@@ -1103,6 +1180,15 @@ def set_enabled(root, name, on, grant=None):
     """
     root = Path(root)
     installed = []
+    if not on and all(found.name != name or found.state == "missing" for found in entries(root)):
+        # A plugin this universe no longer has (removed, or never here): turning it off forgets it here, its
+        # grant too, so what a removal left can be cleared.
+        try:
+            forgotten = config.forget(root, name, keep_grant=from_agent(root))
+        except config.GrantHeld:
+            raise PluginError(f"Only the person forgets a plugin's grant: ask them to run mv2 plugins disable "
+                              f"{name}") from None
+        return {"name": name, "on": False, "installed": [], "granted": None, "forgotten": forgotten}
     was_on = entry(root, name).on
     if on:
         found = entry(root, name)

@@ -11,7 +11,7 @@ from ..plugins import access as levels, loader, manifest as manifests, settings 
 from ..store import is_file_replaced
 
 ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
-           "install", "migrate", "new", "packages", "secrets", "secret")
+           "install", "update", "remove", "migrate", "new", "packages", "secrets", "secret")
 HOST_ACTIONS = ("status", "start", "stop")
 NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "packages", "secrets", "secret")
 
@@ -19,9 +19,10 @@ NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
                         help="list (default), info, enable, disable, grant, settings, trust, untrust, check, host, "
-                             "events, install, migrate, new, packages, secrets or secret")
+                             "events, install, update, remove, migrate, new, packages, secrets or secret")
     parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
-                                               "for new: the new plugin's name)")
+                                               "for new: the new plugin's name; for install: a git URL[@REF][#PATH] "
+                                               "or a plugin's folder; for update: NAME[@REF])")
     parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act; secret: the KEY")
     # Words past these are refused by run() without repeating them: `secret NAME KEY VALUE` must never echo VALUE.
     parser.add_argument("extra", nargs="*", help=argparse.SUPPRESS, metavar=argparse.SUPPRESS)
@@ -44,6 +45,10 @@ def configure(parser):
                         help="enable, packages: install the plugin's Python packages without asking (the person only)")
     parser.add_argument("--clear", action="store_true", dest="clear",
                         help="secret: remove this universe's value (a parent's, if set, is used again)")
+    parser.add_argument("--here", action="store_true",
+                        help="install, update, remove: in this universe's plugins/, not your personal plugins")
+    parser.add_argument("--yes", action="store_true",
+                        help="install, update: go ahead without asking (the person only), after showing what it is")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -73,7 +78,7 @@ def _changes(assignments, removals):
 
 def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
         recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, approved=None,
-        clear=False, secret_value=None, extra=(), json=False):
+        clear=False, secret_value=None, extra=(), here=False, yes=False, json=False):
     """`approved`: the folder name of the package list the person said yes to on a terminal (cli_run).
     `secret_value` comes only from cli_run's hidden prompt or stdin, never from an argument."""
     if plugin_action not in ACTIONS:
@@ -107,10 +112,8 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         if not name:
             raise ValueError("mv2 plugins new takes the new plugin's name")
         return scaffold(name, Path(directory or ".").expanduser())
-    if plugin_action == "install":
-        if not name:
-            raise ValueError("mv2 plugins install takes a plugin's name")
-        return plugins.install(name)
+    if plugin_action in ("install", "update", "remove"):
+        return _installer(root, plugin_action, name, here, yes)
     root = universe.resolve(root)
     if plugin_action in NAMED and not name:
         raise ValueError(f"mv2 plugins {plugin_action} takes a plugin's name")
@@ -204,8 +207,11 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
                              f"mv2 plugins secret {name} KEY; mv2 plugins secrets {name} lists them")
         if clear:
             cleared = plugins.clear_secret(root, name, level)
-            return {"universe": str(root), "name": name, "key": level, "cleared": cleared,
-                    "secrets": plugins.secrets_view(root, name)}
+            try:
+                left = plugins.secrets_view(root, name)
+            except plugins.PluginError:
+                left = []  # a plugin no longer here: its secret is cleared all the same
+            return {"universe": str(root), "name": name, "key": level, "cleared": cleared, "secrets": left}
         if secret_value is None and plugins.from_agent(root):
             plugins.set_secret(root, name, level, "")  # refuses, saying only the person sets one
         if secret_value is None:
@@ -245,6 +251,8 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
             if wanted is not None and wanted.access.minimum != wanted.access.request and not plugins.from_agent(root):
                 grant, defaulted = wanted.access.minimum, True
         result = plugins.set_enabled(root, name, plugin_action == "enable", grant=grant)
+        if "forgotten" in result:  # a plugin this universe no longer has
+            return {"universe": str(root), **result}
         found = plugins.entry(root, name)
         from ..plugins import host
         top = root
@@ -270,7 +278,17 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     copy = plugins.universe_copy(root, name)
     if copy is None:
         found = plugins.entry(root, name)
-        raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
+        from ..plugins import installer
+        record = installer.pinned(root).get(str(Path(found.directory).resolve())) if found.directory else None
+        if record is None or record["placement"] != "personal":
+            raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
+        if plugin_action == "untrust":
+            # An installed plugin is pinned at its content: untrusting it would leave it unpinned, not stopped.
+            raise ValueError(f"{name} was installed by mv2 plugins install: turn it off here with mv2 plugins "
+                             f"disable {name}, or remove it with mv2 plugins remove {name}")
+        if plugins.from_agent(root):
+            raise ValueError(f"Only the person trusts a plugin: ask them to run mv2 plugins trust {name}")
+        copy = Path(found.directory).resolve()
     if plugin_action == "trust":
         value = trust.trust(copy)
         after = plugins.entry(root, name)
@@ -407,7 +425,7 @@ def check(directory, load=False):
 
 def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
             recursive=False, directory=None, load=False, level=None, grant=None, install_packages=False, clear=False,
-            extra=(), json=False):
+            extra=(), here=False, yes=False, json=False):
     secret_value = _read_secret(root, name, level) if (plugin_action == "secret" and not clear and name and level
                                                         and not extra) else None
     approved = None
@@ -418,16 +436,161 @@ def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), remov
         install_packages, approved = bool(asked), asked or None  # the yes is for the list shown, and only it
     if plugin_action == "enable" and grant is None and not json and name:
         grant = _ask_grant(root, name)
+    if plugin_action in ("install", "update") and not yes and not json and not extra:
+        asked = _ask_install(root, plugin_action, name, here)
+        if asked is not None:
+            return text(plugin_action, asked)
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
                  apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant,
                  install_packages=install_packages, approved=approved, clear=clear, secret_value=secret_value,
-                 extra=extra)
+                 extra=extra, here=here, yes=yes)
     if json:
         return result
+    if plugin_action in ("install", "update") and result.get("needs_yes"):
+        print(text(plugin_action, result))
+        raise SystemExit(1)  # shown, not installed: there was no terminal to ask on
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
         print(text(plugin_action, result))
         raise SystemExit(1)  # a failed check, or a migration that did not apply
     return text(plugin_action, result)
+
+
+def _installer(root, action, name, here, yes, shown=None, printed=False):
+    """install, update or remove (the person only). Install and update ask first: run() goes ahead only with
+    `yes` (an update whose powers don't change needs none); cli_run asks on a terminal and passes `shown`."""
+    if not name:
+        raise ValueError(f"mv2 plugins {action} takes " + ("a git URL or a plugin's folder" if action == "install"
+                                                          else "a plugin's name"))
+    if action == "install" and name in plugins.submodules() and not Path(name).expanduser().is_dir():
+        return plugins.install(name)  # this checkout's own plugin submodule
+    selected = universe.resolve(root) if here else _selected(root)
+    if action == "remove":
+        return {"action": "remove", **plugins.remove_installed(name, selected, here)}
+    if shown is None:
+        if action == "install":
+            shown = plugins.install_preview(name, selected, here)
+        else:
+            plugin, _, ref = name.partition("@")
+            shown = plugins.update_preview(plugin, ref or None, selected, here)
+    if action == "update" and shown["update"]["same"]:
+        plugins.install_cancel(shown["key"], selected)
+        return {"action": action, "preview": shown, "result": None}
+    if (action == "install" or shown.get("ask")) and not yes:
+        plugins.install_cancel(shown["key"], selected)
+        return {"action": action, "preview": shown, "result": None, "needs_yes": True}
+    return {"action": action, "preview": shown, "result": plugins.install_confirm(shown["key"], selected),
+            "printed": printed}
+
+
+def _ask_install(root, action, name, here):
+    """On a terminal, for a person: show what install or update would bring and ask when it must. The result
+    (cli_run prints it), or None when there's nothing to ask here (no terminal, an agent): run() decides."""
+    if not name or plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    if action == "install" and name in plugins.submodules() and not Path(name).expanduser().is_dir():
+        return None
+    selected = universe.resolve(root) if here else _selected(root)
+    if action == "install":
+        shown = plugins.install_preview(name, selected, here)
+    else:
+        plugin, _, ref = name.partition("@")
+        shown = plugins.update_preview(plugin, ref or None, selected, here)
+    if action == "update" and shown["update"]["same"]:
+        return _installer(root, action, name, here, False, shown)
+    print(preview_text(action, shown))
+    if action == "update" and not shown.get("ask"):
+        return _installer(root, action, name, here, True, shown, printed=True)
+    try:
+        answer = input(("Install it? " if action == "install" else "Update it? ") + "[y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""  # no answer is a no
+        print()
+    if answer not in ("y", "yes"):
+        plugins.install_cancel(shown["key"], selected)
+        print("Nothing installed." if action == "install" else "Nothing changed.")
+        raise SystemExit(1)
+    return _installer(root, action, name, here, True, shown, printed=True)
+
+
+def _short(commit):
+    return commit[:12] if commit else "no commit"
+
+
+def _shown(value):
+    """Text from a plugin's source, with control characters written out, so it can't redraw the question."""
+    from ..plugins import installer
+    return installer.visible(value)
+
+
+def _from(shown):
+    follows = {"tag": f'tag {shown["ref"]}', "branch": f'branch {shown["branch"]}', "commit": "a pinned commit",
+               "default": f'the default branch{" " + shown["branch"] if shown.get("branch") else ""}'}
+    return (f'{_shown(shown["source"])} at {_short(shown["commit"])} ({_shown(follows.get(shown["follows"], ""))})'
+            if shown["kind"] == "git" else f'the folder {_shown(shown["source"])}')
+
+
+def _powers_lines(powers):
+    access = powers["access"]
+    lines = [f'  access       asks for {_shown(access["request"])}, works with at least {_shown(access["minimum"])}']
+    for key, label in (("permissions", "permissions"), ("extends", "extends")):
+        if powers[key]:
+            lines.append(f'  {label:<12} {_shown(", ".join(powers[key]))}')
+    for family, entries in (powers["harnesses"] or {}).items():
+        for entry in entries:  # what it adds to that harness's launches, in full
+            bounds = " ".join(f'{side} {".".join(map(str, entry[key]))}' for side, key in
+                              (("from", "min_version"), ("up to", "max_version")) if entry.get(key))
+            what = (entry.get("path") or ", ".join(f"{key}={value}" for key, value in sorted(entry["fields"].items()))
+                    or "an entry")
+            lines.append(f'  launches     {family}: {_shown(what)}' + (f" ({_shown(bounds)})" if bounds else "")
+                         + ("" if entry.get("needs_bridge", True) else ", without the bridge"))
+    if powers["packages"]:
+        lines.append(f'  packages     {_shown(", ".join(powers["packages"]))} (installed later, when you say yes to '
+                     f'them)')
+    return lines
+
+
+def preview_text(action, shown):
+    """What install or update would bring, for the person to judge before saying yes."""
+    title = _shown(f'{shown["name"]} {shown["version"] or ""}'.rstrip())
+    if action == "install":
+        lines = [title + (f': {_shown(shown["description"])}' if shown["description"] else ""),
+                 f'  from         {_from(shown)}',
+                 f'  into         {shown["target"]} '
+                 + ("(personal: any universe can turn it on)" if shown["placement"] == "personal"
+                    else "(this universe only)"),
+                 *_powers_lines(shown["powers"])]
+    else:
+        update, before = shown["update"], shown["update"]["from"]
+        lines = [f'Update {shown["name"]} from {_shown(before["version"] or "?")} ({_short(before["commit"])}) to '
+                 f'{_shown(shown["version"] or "?")} ({_short(shown["commit"])}), from {_from(shown)}']
+        if update["edited"]:
+            lines.append("  Its installed files were changed since it was installed: this puts back what the source "
+                         "has, and asks, since what runs now may differ from what was installed.")
+        if update["changes"]:
+            lines.append(f'  {len(update["changes"])} new {"commit" if len(update["changes"]) == 1 else "commits"}:')
+            lines.extend(f"    {_shown(line)}" for line in update["changes"][:10])
+            if len(update["changes"]) > 10:
+                lines.append(f'    and {len(update["changes"]) - 10} more')
+        elif update["changes"] is not None and shown["commit"] != before["commit"]:
+            lines.append("  Not a descendant of the installed commit (another branch, or history rewritten).")
+        if update["powers_changed"]:
+            lines.append(f'  What it can do changes ({", ".join(update["powers_changed"])}); now:')
+            lines.extend(_powers_lines(shown["powers"]))
+    runs = shown["runs"]
+    python = runs["python"]
+    lines.append(f'  runs         {len(python)} Python {"file" if len(python) == 1 else "files"}'
+                 + (f': {_shown(", ".join(python[:8]))}' + (f" and {len(python) - 8} more" if len(python) > 8 else "")
+                    if python else "")
+                 + ("; Claude hooks in claude/" if runs["claude"] else ""))
+    if runs["compiled"]:
+        lines.append(f'  !            compiled files nobody can read: {_shown(", ".join(runs["compiled"]))}')
+    if action == "install":
+        if shown.get("on_here"):
+            lines.append(f'! This universe\'s plugins.json still turns {shown["name"]} on, from before: it runs here '
+                         f'as soon as it\'s installed.')
+        lines.append("It runs in each universe where it's turned on, with your own permissions. Install it only if "
+                     "you trust its source.")
+    return "\n".join(lines)
 
 
 def _selected(root):
@@ -587,6 +750,11 @@ def text(action, result):
                  f'{_state(result)} here; {result["source"]} plugin at {result["directory"]}']
         for override in result.get("overrides", []):
             lines.append(f'It overrides the {override["source"]} {result["name"]} at {override["directory"]}.')
+        if result.get("install"):
+            placed = result["install"]
+            lines.append(f'Installed by mv2 plugins install from {placed["source"]}'
+                         + (f' at {_short(placed["commit"])}' if placed.get("commit") else "")
+                         + f'; updated {placed["updated_at"]}.')
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
         if result.get("access"):
@@ -613,6 +781,10 @@ def text(action, result):
         lines.extend(f"Recent error: {error}" for error in result["errors"])
         return "\n".join(lines)
     if action in ("enable", "disable"):
+        if "forgotten" in result:
+            return (f'Forgot {result["name"]} in {result["universe"]}: plugins.json no longer turns it on or grants it '
+                    f'anything.' if result["forgotten"] else f'{result["name"]} is not here, and plugins.json names '
+                    f'it nowhere.')
         if not result["on"]:
             return f'Turned {result["name"]} off in {result["universe"]}.'
         access = result.get("access") or {}
@@ -705,9 +877,36 @@ def text(action, result):
         return text
     if action == "untrust":
         return f'{result["name"]} is no longer trusted.' if result["forgotten"] else f'{result["name"]} was not trusted.'
-    if action == "install":
+    if action == "install" and "action" not in result:  # a checkout submodule
         return (f'Installed {result["name"]} at {result["path"]}. Turn it on with mv2 plugins enable {result["name"]}.'
                 if result["installed"] else f'Fetched {result["path"]}, but it holds no plugin.json.')
+    if action == "remove":
+        lines = [f'Removed {result["name"]} from {result["removed"]}.']
+        if result["left"]:
+            lines.append("Left as they are:")
+            lines.extend(f'  {item["what"]}: {item["clear"]}' for item in result["left"])
+        return "\n".join(lines)
+    if action in ("install", "update"):
+        shown, done = result["preview"], result["result"]
+        if done is None and action == "update" and shown["update"]["same"]:
+            return f'{shown["name"]} is up to date ({_short(shown["commit"])}).'
+        if done is None:
+            return "\n".join([preview_text(action, shown),
+                              f"Nothing {'installed' if action == 'install' else 'changed'}: no terminal to ask on. "
+                              f"Run it again with --yes to go ahead."])
+        name = done["name"]
+        # What it is was shown before the question on a terminal; with --yes, or with no question, it is shown now.
+        lines = [] if result.get("printed") else [preview_text(action, shown)]
+        lines.append(_shown(f'Installed {name} {done["version"] or ""}'.rstrip()) + f' in {done["target"]}.'
+                     if action == "install" else
+                     f'Updated {name} to {_shown(done["version"] or "?")} ({_short(done["commit"])}).')
+        if action == "install":
+            lines.append(f"Turn it on in a universe with: mv2 plugins enable {name}")
+        if done["packages"]:
+            lines.append(f'It needs {len(done["packages"])} Python '
+                         f'{"package" if len(done["packages"]) == 1 else "packages"}: mv2 plugins enable {name} asks '
+                         f'to install them, or run mv2 plugins packages {name}.')
+        return "\n".join(lines)
     if action == "new":
         return "\n".join([f'Created {result["name"]} at {result["directory"]}.',
                           f'Use it here while you work on it: export MV2_PLUGIN_PATH={result["directory"]}',

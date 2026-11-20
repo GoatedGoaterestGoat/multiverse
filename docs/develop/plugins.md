@@ -493,6 +493,7 @@ Nothing starts an agent, tmux, a harness or the plugin host. A test sees only it
 
 | Where | How |
 | --- | --- |
+| A git repository | People install it with `mv2 plugins install URL[@REF][#PATH]`: a repository of its own, or a folder inside one. Tag releases, so `mv2 plugins update` can move to the newest tag. An update that changes the plugin's access, permissions, extension points, harness launches or packages asks the person again |
 | Personal | `~/.multiverse/plugins/NAME/` |
 | A universe | `<universe>/plugins/NAME/`, such as a repository's `.multiverse/plugins/` or a template's `plugins/`. Each person runs `mv2 plugins trust NAME`, and runs it again after every change |
 | Python package | An entry point in the `multiverse.plugins` group, such as `my-plugin = "mv2_my_plugin"` under `[project.entry-points."multiverse.plugins"]` in `pyproject.toml`. It names a top-level package whose directory holds `plugin.json`. mv2 finds it without importing it |

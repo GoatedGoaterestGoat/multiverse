@@ -586,13 +586,13 @@ mv2 update [--check] [--json] [--plugin-fetch-timeout SECONDS]
 List, turn on or off, configure, trust and check plugins.
 
 ```sh
-mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--install-packages] [--clear] [--json] [ACTION] [name] [LEVEL]
+mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--prune] [--load DIR] [--apply] [--recursive] [--dir DIRECTORY] [--install-packages] [--clear] [--here] [--yes] [--json] [ACTION] [name] [LEVEL]
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, migrate, new, packages, secrets or secret | `list` |
-| `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name) |  |
+| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, update, remove, migrate, new, packages, secrets or secret | `list` |
+| `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name; for install: a git URL[@REF][#PATH] or a plugin's folder; for update: NAME[@REF]) |  |
 | `LEVEL` |  | grant: observe, spend or act; secret: the KEY |  |
 | `--grant` | `observe`, `spend`, `act` | enable: the access level to grant it here (otherwise a terminal asks; without one, its minimum) |  |
 | `--set` | `KEY=VALUE` | settings: change one setting (VALUE is JSON, or else text); repeatable |  |
@@ -604,4 +604,6 @@ mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--pru
 | `--dir` | `DIRECTORY` | new: where to create it (default: the current directory) |  |
 | `--install-packages` |  | enable, packages: install the plugin's Python packages without asking (the person only) |  |
 | `--clear` |  | secret: remove this universe's value (a parent's, if set, is used again) |  |
+| `--here` |  | install, update, remove: in this universe's plugins/, not your personal plugins |  |
+| `--yes` |  | install, update: go ahead without asking (the person only), after showing what it is |  |
 | `--json` |  | Print the full result as JSON |  |

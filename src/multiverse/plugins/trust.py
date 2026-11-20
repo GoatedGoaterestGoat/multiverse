@@ -358,6 +358,16 @@ def trust(directory):
     return value
 
 
+def pin(directory, value):
+    """Trust whatever at `directory` has fingerprint `value`, without reading it: the installer pins what the
+    person approved before the files arrive there, so they're never there unpinned."""
+    directory = Path(directory).resolve()
+    with lock(user_directory() / ".trusted-plugins.lock"):
+        records = _records()
+        records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
+        write(user_directory() / FILE, {"schema": 1, "plugins": records})
+
+
 def forget(directory):
     """Stop trusting the plugin at `directory`; True when it was trusted."""
     directory = Path(directory).resolve()

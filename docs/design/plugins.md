@@ -1667,6 +1667,76 @@ specifically. `compaction` called them out, and each one has a test:
 - The install lock and per-turn tree locks are shared by the worker and the
   install.
 
+## Installing plugins from a source
+
+`mv2 plugins install` places a plugin from a git repository or a folder, and
+`update` and `remove` act only on what it placed. The user decided
+(2026-11-20):
+
+- **Sources:** a git URL (https, ssh, git or file) or a local folder, written
+  `URL[@REF][#PATH]`. `@REF` is a tag, branch or commit; `#PATH` is a folder
+  inside the repository. The ref follows the first `@` in the URL's path, so a
+  user in the URL (`git@host:`, `https://user@host/`) and a branch with a
+  slash both work.
+- **Placement:** personal (`~/.multiverse/plugins/NAME`) by default; `--here`
+  puts it in the universe's `plugins/`. A record (`plugin-installs.json`)
+  keeps the source, ref, commit, folder, fingerprint and the plugin's powers.
+- **Trust:** a preview shows name, version, source, commit, access,
+  permissions, extension points, harness launches, Python packages and the
+  files that run on load, and nothing is placed before the person's yes. The
+  fingerprint is pinned in `trusted-plugins.json` before the files arrive, so
+  they're never in place unpinned. A personal plugin the installer placed is
+  then verified and run like a trusted universe plugin: from a copy of exactly
+  those bytes, and as `changed` once its files change. It counts as installed
+  by any of three marks: its record, its pin, or `.mv2-installed.json` inside
+  it (part of its fingerprint, naming the install). So a lost or damaged
+  record, or a lost pin, never leaves it running unpinned. The loader
+  decides this for each folder it finds, by the folder itself, so the same
+  folder found through `MV2_PLUGIN_PATH` is verified too. `mv2 plugins trust
+  NAME` approves an edit; `untrust` is refused for it, since it would leave
+  the plugin unpinned rather than stopped. A plugin placed by hand is
+  unchanged: personal plugins stay trusted as they are.
+- **Update:** with no ref, a tag install moves to the newest tag (version
+  order), a branch or default-branch install to the branch's tip, and a
+  commit install refuses. It asks only when the plugin's powers change: its
+  access, permissions, extension points, harness launches or Python packages.
+  A code-only update installs without asking, showing the commits.
+- **Remove:** only the installer's folder, record and pin. Settings, grants,
+  secrets and package folders stay, listed with what clears each.
+- **The person only:** agents can't install, update or remove a plugin.
+- **The dashboard:** the Plugins screen installs, updates and removes too
+  (claude-tui), through `install_preview`, `install_confirm`,
+  `install_cancel`, `update_preview` and `remove_installed`. It passes the
+  row's `placement`, and to remove the row's install record too, so an
+  update or removal acts only on the install the screen showed: never a
+  same-name install elsewhere, or one that changed since.
+
+How a fetch is kept safe:
+
+- git runs with only the https, ssh, git and file protocols allowed (never
+  `ext::`, which runs a command), no terminal prompt, no hooks, no
+  submodules, and the URL after `--`. A source starting with `-` is refused.
+- Nothing is checked out. The plugin's folder is read from git's tree
+  objects: each folder on the way to `#PATH` must be a folder, not a link.
+  Its files are written byte for byte from their blobs, so no attribute or
+  filter in the repository or the person's git config runs. A link, a
+  submodule or any other kind of entry inside it refuses the install.
+- Confirming hashes the staged files again and installs only when they're
+  still what the preview showed and the record is exactly as it was then
+  (an update shown before another one is refused). Each step that fails
+  removes the staging folder.
+- Placing is a rename on one filesystem: an update moves the old folder aside
+  first. If placing or saving the record fails, the old folder, its pin and
+  the record go back as they were; if even that fails, the old folder stays
+  in staging and the error names it.
+- Update and remove act only on the folder whose marker names the recorded
+  install: a folder moved there or put there by hand is left alone. Plugin
+  and staging folders that are links are refused, and the sweep removes only
+  the installer's own scratch entries left for a day.
+- Text from a source (name, version, description, commit subjects, file
+  names, git's messages) is shown with control and formatting characters
+  written out, so it can't redraw or hide the question.
+
 ## Plugins in their own repositories
 
 Compaction and the remote control each get their own repository, versioned on

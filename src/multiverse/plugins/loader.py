@@ -368,8 +368,9 @@ def _stat(path):
         return None
 
 
-def _signature(root):
-    """Everything entries() depends on, by file times and sizes: cheap enough for every refresh."""
+def _signature(root, pins=None, sources=None):
+    """Everything entries() depends on, by file times and sizes: cheap enough for every refresh. `pins`, the
+    installer's classification entries() read for this call (_pinned)."""
     parts = [os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(), _generation, _stat(trust.user_directory() / trust.FILE)]
     if root is not None:
         parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
@@ -382,13 +383,22 @@ def _signature(root):
         # whether the plugin can be used. The index is rewritten on each, whatever store holds the value.
         from . import secrets as secret_store
         parts.append(_stat(secret_store.directory() / secret_store.INDEX))
+    # What the installer placed (personal, and this universe's): pinned at its content, as trusted plugins are.
+    from . import installer
+    parts.append(_stat(trust.user_directory() / installer.RECORD))
+    if root is not None:
+        parts.append(_stat(Path(root) / "state" / installer.RECORD))
+    # Each folder classed as installed adds its trust signature below, so the classification is part of the
+    # signature. An uncertain read only ever widens it (every personal folder verified): a listing kept from one
+    # differs from any certain one, and is read again.
+    pins, _ = pins if pins is not None else _pinned(root)
     with _lock:
         failed = {directory: known for directory, known in _loaded.items() if isinstance(known, Failed)}
-    for source, directory in _source_directories(root):
+    for source, directory in (_source_directories(root) if sources is None else sources):
         parts.append((source, str(directory), _stat(directory / manifests.FILE)))
         if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
             parts.append(_still_failed(failed[directory.resolve()], _files(directory.resolve())))
-        if source == "universe":  # trust covers every file but .git, compiled bytecode included
+        if source == "universe" or _managed(directory, pins):  # trust covers every file but .git
             try:
                 parts.append(trust.signature(directory))
             except OSError:
@@ -466,9 +476,14 @@ def entries(root):
 
     Kept while nothing it depends on changes (see _signature)."""
     root = Path(root) if root is not None else None
-    signature = _signature(root)
+    # One look at the plugin folders and the installer's maps, for this call: its signature and its entries use
+    # the same answer, so a folder arriving meanwhile can't skip the checks.
+    sources = _source_directories(root)
+    pins = _pinned(root, sources)
+    certain = pins[1]
+    signature = _signature(root, pins, sources)
     with _lock:
-        cached = _entries.get(root)
+        cached = _entries.get(root) if certain else None  # an uncertain read neither uses nor leaves a listing
     if cached and cached[0] == signature:
         return list(cached[1])
     discovering = _discovering.__dict__.setdefault("roots", set())
@@ -476,27 +491,48 @@ def entries(root):
         # Asked again while this thread finds this universe's plugins: a loaded plugin's settings check calling the
         # API, whose access check asks which plugins are on. Answered without running settings checks again, which
         # would ask again, without end; on/off, the source and the grant come out the same.
-        return list(_entries_uncached(root, checks=False))
+        return list(_entries_uncached(root, checks=False, pins=pins, sources=sources))
     discovering.add(root)
     try:
-        found = _entries_uncached(root)
+        found = _entries_uncached(root, pins=pins, sources=sources)
     finally:
         discovering.discard(root)
-    with _lock:
-        _entries[root] = (signature, found)
+    if certain:
+        with _lock:
+            _entries[root] = (signature, found)
     return list(found)
 
 
-def _entries_uncached(root, checks=True):
+def _pinned(root, sources=None):
+    """(directories, certain): the personal plugin directories the installer placed (by its record, its pin or
+    its marker), verified at their pinned content as universe plugins are at what was trusted. Read only when a
+    listing finds a folder in the personal plugins; entries() reads it once and shares it with its signature and
+    its construction."""
+    from . import installer
+    sources = _source_directories(root) if sources is None else sources
+    return installer.managed_personal([directory for _, directory in sources])
+
+
+def _managed(directory, pins):
+    """Whether a plugin directory the loader just found, by whichever source (personal, or MV2_PLUGIN_PATH naming
+    the same folder), is one the installer placed: in what was read of its records and pins, or a folder in the
+    personal plugins carrying the marker that arrives with it. Decided by the folder itself, never its label."""
+    from . import installer
+    return (str(installer.entry_path(directory)) in pins or str(Path(directory).resolve()) in pins
+            or (installer.in_personal(directory) and installer.marked(directory)))
+
+
+def _entries_uncached(root, checks=True, pins=None, sources=None):
     settings = config.load(root, observed=True) if root is not None else config.Config()
     chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
-    for source, directory in _source_directories(root):
+    pins = (pins if pins is not None else _pinned(root))[0]
+    for source, directory in (_source_directories(root) if sources is None else sources):
         try:
             found = manifests.load(directory)
         except manifests.ManifestError as error:
             invalid.setdefault(directory.name, (source, directory, str(error)))
             continue
-        if source == "universe" and found.name not in chosen:
+        if (source == "universe" or _managed(directory, pins)) and found.name not in chosen:
             state, value = trust.verify(directory)
             if state != "trusted":
                 # An untrusted copy in a universe never hides the plugin another source provides (a repository's
@@ -523,7 +559,7 @@ def _entries_uncached(root, checks=True):
         on = settings.is_on(name, default)
         try:
             result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name),
-                                  checks=checks)
+                                  checks=checks, pinned=source != "universe" and _managed(directory, pins))
         except Exception as error:  # whatever happens with one plugin, every other one is still listed
             text = str(error).strip().splitlines()
             result[name] = Entry(name, "failed", on, source, directory, found, problem=(
@@ -540,10 +576,18 @@ def _entries_uncached(root, checks=True):
     return [result[name] for name in sorted(result)]
 
 
-def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True):
+def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True, pinned=False):
     entry = Entry(name, "on" if on else "off", on, source, directory, found, shadowed=shadowed)
-    if source == "universe":
+    if source == "universe" or pinned:
         trusted = "trusted" if fingerprint else trust.state(directory)
+        if trusted != "trusted" and pinned:
+            entry.state = "changed" if trusted == "changed" else "untrusted"
+            entry.problem = (f"{name}'s files changed since mv2 plugins install put them in {directory}; review "
+                             f"them, then run mv2 plugins trust {name}, or put back what was installed with mv2 "
+                             f"plugins update {name}" if trusted == "changed" else
+                             f"{name} was installed by mv2 plugins install but is no longer trusted; review it, then "
+                             f"run mv2 plugins trust {name}")
+            return entry
         if trusted != "trusted":
             entry.state = trusted
             entry.problem = (f"{name} is in this universe's plugins/ and is not trusted; review it, then run "
