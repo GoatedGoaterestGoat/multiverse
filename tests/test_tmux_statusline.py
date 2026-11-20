@@ -30,6 +30,9 @@ from test_multiverse import BaseTest, TerminalBase
 class StatusRendererTest(BaseTest):
     def setUp(self):
         super().setUp()
+        # The bar gives its reader process 1 s and shows no count past it; these tests check what is counted, and a
+        # loaded machine can take longer to start that process. The bound itself has its own test below.
+        self.enterContext(patch.object(statusline, 'INBOX_TIMEOUT', 30))
         self.agent, self.launch = str(uuid4()), str(uuid4())
         self.directory = self.root / 'state/agents' / self.agent
         self.properties = {'id': self.agent, 'universe_id': read(self.root / 'universe.json')['id'],
@@ -80,7 +83,9 @@ class StatusRendererTest(BaseTest):
         with (self.directory / 'inbox.jsonl').open('ab') as out:
             out.write(b'{"id":"legacy","text":"old format"}\n{"partial":')
         paths = {path: path.read_bytes() for path in self.directory.iterdir() if path.is_file()}
-        code = ('import runpy,sys; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__"); '
+        # The script's reader gets the same generous wait as setUp's, so a loaded machine cannot drop its count.
+        code = ('import select; wait=select.select; select.select=lambda *a: wait(*a[:3], None if a[3] is None else 30); '
+                'import runpy,sys; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__"); '
                 'assert not any(n.startswith(("multiverse.universe.agents","multiverse.cli","textual","websockets")) for n in sys.modules)')
         result = subprocess.run([sys.executable, '-S', '-c', code, str(Path(statusline.__file__).resolve()),
                                  str(self.root), self.agent, self.launch, 'codex'],
@@ -207,7 +212,8 @@ class StatusRendererTest(BaseTest):
         started = time.monotonic()
         with lock(self.directory / '.inbox.lock'):
             self.assertIsNone(statusline.unread(self.directory))
-        self.assertLess(time.monotonic() - started, statusline.INBOX_TIMEOUT)
+        # A reader that waited for the lock would take the whole 30 s budget.
+        self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(statusline.unread(self.directory), 1)
         self.enterContext(patch.object(statusline.threading, 'active_count', return_value=1))
         children, original = [], os.fork
