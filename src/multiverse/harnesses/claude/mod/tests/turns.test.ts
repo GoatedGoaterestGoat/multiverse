@@ -2,7 +2,7 @@
 // The test's hooks stand in for Claude's core and the host: the status reports, with the turn events each carries,
 // and the transcript file, as the row ids the mod finds at its end (the test decides when a row lands there).
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 
 const STEER = '3f2a0c1e-1111-4222-8333-944455556661'
 const RUN = '7a1b2c3d-1111-4222-8333-944455556671'  // an 'mv2 slash' run: its slash record's id
@@ -10,8 +10,13 @@ type Report = { status: string; turns: Record<string, unknown>[]; at: number; se
 
 // `slow`: each read of the transcript file takes all the time it is allowed. `heldInfo`: Claude never answers
 // $.session.info().
+// Each test's plugin is a fresh copy, but the one before it can still be finishing a report as the next test starts,
+// and that call reaches the next test's hooks. Each world names its own Python, so it counts only its own copy's.
+let worlds = 0
+
 function world(on: On, env: Record<string, string> = {}, slow = false, heldInfo = false) {
-  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', MV2_LAUNCH_ID: 'launch-1', ...env })
+  const python = `/python-${++worlds}`
+  mock.env(on, { MV2_PYTHON: python, MV2_AGENT_DIR: '/agent', MV2_LAUNCH_ID: 'launch-1', ...env })
   const clock = mock.clock(on, { now: 0 })
   // Claude's own part of session.start and turn.complete; `heldHooks`, when set, holds it (the mod's hook resumes later).
   const heldHooks: { start?: Promise<void>; complete?: Promise<void> } = {}
@@ -58,7 +63,7 @@ function world(on: On, env: Record<string, string> = {}, slow = false, heldInfo 
   const release = () => { for (const read of held.splice(0)) if (read.until <= clock.now()) read.wake(); else held.push(read) }
   const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   on('process.run', async ($, e) => {
-    const at = e.argv.indexOf('--status')
+    const at = e.argv[0] === python ? e.argv.indexOf('--status') : -1
     if (at >= 0) {
       const flag = e.argv.indexOf('--turn-events-json')
       const session = e.argv.indexOf('--turn-session-id')
@@ -451,7 +456,7 @@ describe('turn events', () => {
     await prompt($, P1)
     await $.turn.start({ text: 'go', turnId: 't1' })
     const held = w.hold(J1)
-    void row($, J1, 'delivery', { kind: 'composer' }, { type: 'attachment', name: 'queued_command', isMeta: true })
+    const stuck = row($, J1, 'delivery', { kind: 'composer' }, { type: 'attachment', name: 'queued_command', isMeta: true })
     await held.reached
     await done($, D1)
     w.disk.push(P1, J1, D1)
@@ -467,6 +472,8 @@ describe('turn events', () => {
     expect(w.reports.flatMap((r) => r.turns.map((t) => [r.session, t.type, t.turn])))
       .toEqual([['s1', 'started', P1], ['s2', 'started', P2], ['s1', 'ended', P1]])
     await w.clock.advance(6000)  // the /clear's own wait for Claude's process file runs out before the test ends
+    held.release()  // left held, the kit would abort it as the test ends, a rejection no one hears
+    await stuck
   })
 
   test("rows rank by the order Claude stored them: a later row still half written beyond a clipped tail holds the end", async ($, on) => {

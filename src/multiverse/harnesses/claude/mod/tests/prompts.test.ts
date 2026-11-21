@@ -2,7 +2,7 @@
 // hooks stand in for Claude's core and the host beneath the mod: a file system the mod's files land in, and the
 // wait process, which ends when its answer file appears or its prompt file goes, or throws when the test presses Esc.
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, onTestEnd, test } from './kit'
 import { closedOutcome, suggestionMeaning } from '../hooks/prompts'
 
 const FOLDER = '/agent/claude-prompts'
@@ -15,8 +15,20 @@ type Options = { below?: Record<string, unknown>; files?: Record<string, string>
 // A status report as core takes it: its status, and the prompts' opens and ends it carries, with their conversation.
 type Report = { status: string; events: Record<string, unknown>[]; session: string | null }
 
+// A test's own asks are awaited before it ends: each returns once its prompt does.
+async function closed(w: ReturnType<typeof world>, asks: Promise<unknown>[]) {
+  w.escape()
+  await Promise.all(asks)
+  await w.clock.settle()
+}
+
+// Each test's plugin is a fresh copy, but the one before it can still be finishing a report as the next test starts,
+// and that call reaches the next test's hooks. Each world names its own Python, so it counts only its own copy's.
+let worlds = 0
+
 function world(on: On, options: Options = {}) {
-  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', MV2_LAUNCH_ID: 'launch-1' })
+  const python = `/python-${++worlds}`
+  mock.env(on, { MV2_PYTHON: python, MV2_AGENT_DIR: '/agent', MV2_LAUNCH_ID: 'launch-1' })
   const clock = mock.clock(on, { now: options.now ?? 0 })
   const mtimes = new Map<string, number>(Object.entries(options.mtimes ?? {}))
   const files = new Map<string, string>(Object.entries(options.files ?? {}))
@@ -28,6 +40,8 @@ function world(on: On, options: Options = {}) {
   const lost = { left: options.lose ?? 0, taken: 0 }
   const ok = (exitCode: number) => ({ value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   const reports: Report[] = []
+  let waits = 0  // the plugin's prompt waits in flight
+  const waited = new Set<string>()  // the prompt files they were for
   let failReports = options.failReports ?? 0
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
@@ -50,7 +64,7 @@ function world(on: On, options: Options = {}) {
   on('fs.list', async ($, e) => ({ value: [...files.keys()].filter((p) => p.startsWith(`${e.path}/`))
     .map((p) => ({ name: p.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: mtimes.get(p) ?? options.now ?? 0, isLink: false })) }) as never)
   on('process.run', async ($, e) => {
-    if (e.argv[0] === '/python' && e.argv.includes('--status')) {
+    if (e.argv[0] === python && e.argv.includes('--status')) {
       const flag = (name: string) => { const at = e.argv.indexOf(name); return at < 0 ? null : e.argv[at + 1] ?? null }
       if (failReports > 0 && e.argv.includes('--prompt-events-json')) { failReports -= 1; return ok(1) }
       reports.push({ status: flag('--status') ?? '', events: JSON.parse(flag('--prompt-events-json') ?? '[]'), session: flag('--prompt-session-id') })
@@ -70,16 +84,33 @@ function world(on: On, options: Options = {}) {
     }
     if (e.argv[0] === '/bin/sh' && e.argv.length === 6) {
       const [answer, prompt] = [e.argv[4] ?? '', e.argv[5] ?? '']
-      for (;;) {
-        if (escaped) throw new Error('$.process.run(/bin/sh) aborted')
-        if (files.has(answer)) return ok(0)
-        if (!files.has(prompt)) return ok(2)
-        await new Promise<void>((wake) => waiters.push(wake))
+      waits += 1
+      waited.add(prompt)
+      try {
+        for (;;) {
+          if (escaped) throw new Error('$.process.run(/bin/sh) aborted')
+          if (files.has(answer)) return ok(0)
+          if (!files.has(prompt)) return ok(2)
+          await new Promise<void>((wake) => waiters.push(wake))
+        }
+      } finally {
+        waits -= 1
       }
     }
     return ok(0)
   })
   const published = () => [...files.keys()].map((p) => ID.exec(p)?.[1]).filter((id): id is string => id !== undefined)
+  // Each wait the plugin still holds a prompt in is Esc'd, as the person would, and the test ends once no wait is left
+  // and each prompt it held has its end written. A prompt only listed has no wait to end.
+  const unsettled = () => waits > 0 || [...waited].some((prompt) => !files.has(prompt.replace(/\.json$/, '.end.json')))
+  onTestEnd(on, async () => {
+    if (!unsettled()) return
+    escaped = true
+    touch()
+    for (let i = 0; i < 200 && unsettled(); i++) await new Promise<void>((wake) => { waiters.push(wake); void clock.settle().then(wake) })
+    if (unsettled()) throw new Error(`a prompt this test held never ended: ${waits} wait(s) left`)
+    await clock.settle()
+  })
   return {
     clock, files, published, check, lost, reports,
     record: (id: string) => JSON.parse(files.get(`${FOLDER}/${id}.json`) ?? 'null'),
@@ -166,7 +197,7 @@ describe('prompts for mv2', () => {
     // What mv2 shows and validates against: a rule saved to the person's settings must be marked so a plugin can't
     // choose it, and a question's options must be the tool's own.
     const w = world(on)
-    void ask($, 'Bash', BASH, [...SESSION, ...SAVED])
+    const asks = [ask($, 'Bash', BASH, [...SESSION, ...SAVED])]
     await w.until(() => w.published().length === 1)
     const record = w.record(w.published()[0] ?? '')
     expect(record).toMatchObject({ schema: 1, launch: 'launch-1', session: 's1', claude: '2.1.319', tool_use_id: 'toolu_1', kind: 'permission',
@@ -174,12 +205,13 @@ describe('prompts for mv2', () => {
     expect(record.detail).toMatchObject({ input: BASH, reason: 'touch in /tmp/x needs approval' })
     expect(record.choices.map((c: { id: string; saves_rule: boolean }) => [c.id, c.saves_rule])).toEqual(
       [['allow', false], ['allow_session', false], ['allow_session_2', false], ['allow_always', true], ['deny', false]])
-    void ask($, 'AskUserQuestion', QUESTIONS)
+    asks.push(ask($, 'AskUserQuestion', QUESTIONS))
     await w.until(() => w.published().length === 2)
     const question = w.published().map(w.record).find((r) => r.kind === 'question')
     expect(question.questions.map((q: { id: string; multiple: boolean; options: unknown }) => [q.id, q.multiple, q.options])).toEqual(
       [['Which colour?', false, [['Blue', ''], ['Red', '']]], ['Which fruits?', true, [['Apple', ''], ['Plum', '']]]])
     expect(question.choices).toEqual([])
+    await closed(w, asks)
   })
 
   test("an answer that doesn't fit is refused, and the prompt is left to the person", async ($, on) => {
@@ -361,9 +393,10 @@ describe('prompts for mv2', () => {
     // A plugin reads 'the agent left waiting' as 'every prompt of that wait has closed', and follows prompts by these
     // events alone: an end sent after the status change, or one never sent, leaves it showing a prompt that is gone.
     const w = world(on)
+    const raised: Promise<unknown>[] = []
     const prompt = async (raise: () => Promise<unknown>) => {
       const before = new Set(w.published())
-      void raise()
+      raised.push(raise())
       await w.until(() => w.published().some((id) => !before.has(id)))
       return w.published().find((p) => !before.has(p)) ?? ''
     }
@@ -392,6 +425,7 @@ describe('prompts for mv2', () => {
     ids.subagent = await prompt(() => ask($, 'Bash', BASH, SESSION, { agent_id: 'sub-1' }))
     w.check.decision = 'allow'
     await $.tool.call({ tool: 'Bash', input: BASH, tool_use_id: 'toolu_1' } as never)
+    await Promise.all(raised)  // each hook returns once its prompt ends
     await w.clock.settle()
     const expected: Record<string, [string, string, string | null]> = {
       answered: ['permission', 'submitted', null], resolved: ['permission', 'gone', 'closed'], turn: ['permission', 'gone', 'turn_ended'],
@@ -473,15 +507,16 @@ describe('prompts for mv2', () => {
     for (const [suggestion, saved, expected] of rows) expect([suggestion, suggestionMeaning(suggestion, saved)]).toEqual([suggestion, expected])
     for (const row of rows) expect((row[2].short ?? '').length).toBeLessThanOrEqual(24)
     const w = world(on)
-    void ask($, 'Bash', BASH, SESSION)
+    const asks = [ask($, 'Bash', BASH, SESSION)]
     await w.until(() => w.published().length === 1)
     expect(w.record(w.published()[0] ?? '').choices.map((c: { id: string; meaning?: string; short?: string }) => [c.id, c.meaning, c.short]))
       .toEqual([['allow', 'allow', undefined], ['allow_session', 'allow_session', undefined],
         ['allow_session_2', 'other', 'Allow, accept edits'], ['deny', 'deny', undefined]])
-    void ask($, 'ExitPlanMode', PLAN)
+    asks.push(ask($, 'ExitPlanMode', PLAN))
     await w.until(() => w.published().length === 2)
     const plan = w.published().map(w.record).find((r) => r.kind === 'plan')
     expect(plan.choices.map((c: { meaning: string }) => c.meaning)).toEqual(['approve_plan', 'keep_planning'])
+    await closed(w, asks)
   })
 
 })
