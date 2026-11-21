@@ -3,7 +3,7 @@ import re
 from ..universe import agents, focus
 from ..runtime import effects, lifecycle
 from .. import harnesses, universe
-from ..display import clean, error_text, label, mode, state, notice_lines
+from ..display import clean, error_text, label, mode, state, notice_lines, startup_prompt_line
 
 TAIL_LINES = 30
 
@@ -96,6 +96,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
             result['notices'] = notices
         if row.get('delivery_problem'):
             result['delivery_problem'] = row['delivery_problem']
+        if live and isinstance(row.get('runtime', {}).get('startup_prompt'), dict):
+            result['startup_prompt'] = {key: row['runtime']['startup_prompt'].get(key) for key in ('title', 'detail')}
         if row.get('runtime', {}).get('auto_recovery'):
             result['recovery'] = row['runtime']['auto_recovery']
         return result
@@ -109,6 +111,9 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     out.extend('Note: ' + notice for notice in notices)
     if row.get('delivery_problem'):
         out.append(row['delivery_problem'])
+    asked = startup_prompt_line(row, row.get('runtime', {}).get('startup_prompt')) if live else None
+    if asked:
+        out.append(asked)
     if row.get('recovery_note'):
         out.append('Note: Reconnected automatically.')
     if row.get('focus'):

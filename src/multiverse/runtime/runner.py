@@ -321,7 +321,7 @@ class StartupDelivery:
             adapter = harnesses.load(self.root, _read_record(self.agent_dir / 'properties.json')['harness'])
             while not self.stopped.is_set():
                 result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5,
-                                              include_delivery=False, settle_on_timeout=False)
+                                              include_delivery=False, settle_on_timeout=False, stop_at_prompt=False)
                 if result['ready']:
                     if self.prompt_protocol is not None:
                         if self.prompt_protocol.prompt_error:
@@ -332,7 +332,7 @@ class StartupDelivery:
                             continue
                     error = None
                     break
-                if not result.get('timed_out'):
+                if not result.get('timed_out') and not result.get('startup_prompt'):  # a prompt: keep waiting
                     error = result['error'] + '; startup messages remain saved for deliver AGENT --retry'
                     break
         except Exception as failure:
@@ -353,9 +353,11 @@ class RefusalMonitor:
     """Observe only this owned pane's current visible native startup screen."""
     def __init__(self, agent_dir, launch_id, root, adapter, executable):
         self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
-        self.describe, self.executable = adapter.launch_refusal, executable
+        self.describe, self.executable = getattr(adapter, 'launch_refusal', None), executable
         self.supports = getattr(adapter, 'supports_launch_refusal', None)
         self.started = getattr(adapter, 'launch_started', None)
+        # A prompt the person answers before the session starts: recorded while it shows, never a failure.
+        self.prompt = getattr(adapter, 'launch_prompt', None)
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='native-launch-refusal', daemon=True)
 
@@ -392,7 +394,10 @@ class RefusalMonitor:
         if self.supports is not None and not self.supports(version):
             self._settled('unsupported')
             return  # No known native layout: do no pane observation or launch locking.
-        while not self.stopped.is_set() and time.monotonic() < deadline:
+        shown = None  # the startup prompt recorded now
+        bridged = False
+        # A prompt on screen keeps the watch past the window: it may be answered much later, and then the session starts.
+        while not self.stopped.is_set() and (time.monotonic() < deadline or shown is not None):
             try:
                 # Never wait behind a long send/stop. The snapshot is exact and
                 # contains no scrollback, command transcript or inferred status.
@@ -406,13 +411,16 @@ class RefusalMonitor:
                             and facts.get('state') == 'running'
                             and (facts.get('native_relay') or {}).get('state') == 'ready'):
                         return  # Structured binding succeeded; later navigation is not a launch refusal.
+                    if callable(self.prompt) and facts.get('native_bridge'):
+                        bridged = True  # its plugin reported: the session started, whatever the pane still shows
+                        break
                     properties = _read_record(self.agent_dir / 'properties.json')
                     backend, pane = owned(properties, facts)
                     text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
                     cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}\t#{pane_width}').split('\t')
                     # Recheck tags after both observations as well as before.
                     owned(properties, facts)
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline and shown is None:
                     break  # A slow pane query cannot extend startup classification.
                 x = y = width = None
                 if len(cursor) in (3, 4):
@@ -430,16 +438,34 @@ class RefusalMonitor:
                 snapshot = {'cli_version': version, 'text': text,
                             'cursor_visible': {'0': False, '1': True}.get(cursor[0]) if len(cursor) in (3, 4) else None,
                             'cursor_x': x, 'cursor_y': y, 'width': width, 'native_id': properties.get('native_session_id')}
-                evidence = self.describe(snapshot)
+                evidence = self.describe(snapshot) if callable(self.describe) else None
                 if evidence is not None:
                     refusal.record(self.agent_dir, self.launch_id, evidence, observation_deadline=deadline)
                     return
                 if callable(self.started) and self.started(snapshot) is True:
-                    self._settled('started', deadline=deadline)
+                    late = shown is not None and time.monotonic() >= deadline
+                    if callable(self.prompt):
+                        refusal.note_started(self.agent_dir, self.launch_id)
+                    # A prompt held the watch open past the window: the start that ends it still settles startup.
+                    self._settled('started', deadline=None if late else deadline)
                     return  # Settles startup observation only; no binding or permission authority.
+                if callable(self.prompt):
+                    try:
+                        asked = refusal.startup_prompt(self.prompt(snapshot))
+                    except ValueError:
+                        asked = None  # an answer that isn't one names nothing
+                    if asked != shown:
+                        if not refusal.note_prompt(self.agent_dir, self.launch_id, asked):
+                            return  # the launch ended or was refused
+                        shown = asked
             except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 pass  # Unavailable or unknown evidence cannot identify a refusal.
-            self.stopped.wait(min(.25, max(0, deadline - time.monotonic())))
+            self.stopped.wait(1 if time.monotonic() >= deadline else min(.25, max(0, deadline - time.monotonic())))
+        if bridged:
+            late = shown is not None and time.monotonic() >= deadline
+            refusal.note_started(self.agent_dir, self.launch_id)
+            self._settled('started', deadline=None if late else deadline)
+            return
         if not self.stopped.is_set():
             self._settled('unverified')
 

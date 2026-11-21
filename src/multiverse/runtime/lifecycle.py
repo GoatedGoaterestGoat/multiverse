@@ -399,7 +399,9 @@ def _effort_problem(reason, properties, requested):
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
-          _queue_wake=False, _restart_queue=False, start_fresh=False, effort=None):
+          _queue_wake=False, _restart_queue=False, start_fresh=False, effort=None, screen=False):
+    """`screen`: without `wait`, wait briefly (SCREEN_WAIT_SECONDS) to say what the launch's screen shows, for an
+    adapter that reads it; `mv2 spawn` and `mv2 resume` ask for it."""
     effects.require('resume' if resume else 'spawn', resume or name or harness)
     requested_model = model
     if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
@@ -874,7 +876,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,
-                                           'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None})
+                                           'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None
+                                                              or native.adapter_hook(adapter, 'launch_prompt') is not None})
             if resume_message_id is not None and _queue_wake:
                 update_message(agent_dir, resume_message_id, submission_state='pending',
                                delivery_method='native', deferred_launch_id=launch_id,
@@ -915,8 +918,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error
-    result = (wait_ready(root, agent_dir, launch_id, adapter, wait_timeout) if wait
-              else launch_result(root, agent_dir))
+    if wait:
+        result = wait_ready(root, agent_dir, launch_id, adapter, wait_timeout)
+    elif screen and native.adapter_hook(adapter, 'launch_prompt') is not None:
+        result = screen_wait(root, agent_dir, launch_id)
+    else:
+        result = launch_result(root, agent_dir)
     notices = display.notice_lines(result.get('notices'), result.get('runtime', {}).get('launch_notices'))
     return {**result, 'notices': notices} if notices else result
 
@@ -1246,13 +1253,16 @@ def _launched(root, agent_dir, launch_id, command, mode, properties):
 
 
 def launch_ready(adapter, properties, facts, agent_dir, request, live, *, include_delivery=True):
-    """Whether a launch is ready: no launch error and no lost relay, running with its process in a live pane,
+    """Whether a launch is ready: no launch error, no lost relay and no startup prompt on its screen, running with
+    its process in a live pane,
     past its startup check, attached as its adapter requires (the bridge registered, the binding validated)
     and, with `include_delivery`, its startup messages delivered. wait_ready and the agent.ready event use
     this one predicate; wait_ready checks the first two itself first, to say why."""
     if ((facts.get('native_startup_observation') or {}).get('state') == 'pending'
             or facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost'):
         return False
+    if facts.get('startup_prompt') and not facts.get('native_bridge'):
+        return False  # its screen waits for the person: the session hasn't started, whatever else is ready
     running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                and facts.get('startup_checked', True))
     if not running:
@@ -1301,7 +1311,105 @@ def _record_ready(agent_dir, launch_id, properties):
         pass
 
 
-def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True):
+SCREEN_WAIT_SECONDS = 10
+
+
+def _ended(facts, live):
+    """Why this launch record can no longer start, or None: a launch error, a native refusal, a lost relay, a state
+    other than starting or running, or a pane that is gone. A startup prompt counts only where this is None."""
+    if facts.get('reason') or (facts.get('native_refusal') or {}).get('message'):
+        return facts.get('reason') or facts['native_refusal']['message']
+    if (facts.get('native_relay') or {}).get('state') == 'lost':
+        return facts['native_relay'].get('reason') or 'The native relay was lost'
+    if facts.get('state') not in ('starting', 'running') or live in ('ending', 'stopped', 'dormant'):
+        return facts.get('error') or f"Launch ended before it started ({facts.get('state') if live == 'alive' else live})"
+    return None
+
+
+def screen_wait(root, agent_dir, launch_id, timeout=SCREEN_WAIT_SECONDS):
+    """A launch's result once its screen shows the harness started or a prompt the person must answer first, or its
+    plugin has reported, within `timeout` seconds. Readiness stays `--wait`'s: this only says what the screen shows.
+
+    Each pass checks the pane read-only (never tmux recovery) within the time left, at most CHECK_SECONDS a check: a
+    pane gone or dead ends it as a launch that didn't start, and a prompt counts only from a record read after a check
+    found the pane alive. Polling stops CHECK_SECONDS early, to leave the last check some time."""
+    end = time.monotonic() + timeout
+    polling = end - min(CHECK_SECONDS, timeout)
+    while True:
+        result = _current(root, agent_dir, launch_id)
+        error = _ended(result['runtime'], 'alive')
+        if error:
+            return {**result, 'ok': False, 'ready': False, 'error': error}
+        left = end - time.monotonic()
+        live = _observe_within(result, result['runtime'], min(left, CHECK_SECONDS)) if left > 0 else 'unknown'
+        result = _current(root, agent_dir, launch_id)  # one record: a report can land while the pane is checked
+        facts = result['runtime']
+        error = _ended(facts, live)
+        if error:
+            return {**result, 'ok': False, 'ready': False, 'error': error}
+        if facts.get('startup_prompt') and not facts.get('native_bridge') and live == 'alive':
+            return {**result, 'startup_prompt': facts['startup_prompt']}
+        if facts.get('startup_screen') == 'started' or facts.get('native_bridge') or time.monotonic() >= polling:
+            return result
+        time.sleep(min(.1, max(0, polling - time.monotonic())))
+
+
+CHECK_SECONDS = .5
+
+
+def _current(root, agent_dir, launch_id):
+    """The launch's whole result, runtime and session from one read; ValueError when another launch replaced it."""
+    result = launch_result(root, agent_dir)
+    if result['runtime'].get('launch_id') != launch_id:
+        raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+    return result
+
+
+def _observe_within(result, facts, seconds):
+    """The pane's liveness from a read-only check (no tmux recovery), or 'unknown' when it doesn't answer within
+    `seconds`. A check left running when the wait moves on is one tmux query that changes nothing."""
+    socket = (facts.get('tmux') or {}).get('socket')
+    if not socket:
+        return observe(result, facts)['live']  # no pane recorded: decided from the record alone
+    snapshot = _read_only_snapshot(socket, facts, seconds)
+    return 'unknown' if snapshot is None else observe(result, facts, {socket: snapshot})['live']
+
+
+_snapshots = {}  # socket -> (thread, answer, scope) of the newest read-only check
+_snapshots_lock = __import__('threading').Lock()
+
+
+def _read_only_snapshot(socket, facts, seconds):
+    """One read-only check of a tmux server at a time, within `seconds`: a later pass waits on one still running
+    rather than start another, so an unanswering server holds at most one query, however many passes the wait makes.
+    Its answer counts only for the launch and pane it was asked for: one running for another (an earlier launch on the
+    same server, asked before this pane existed) is waited on and never used, and this launch then asks for itself."""
+    import threading
+    scope = (facts.get('launch_id'), (facts.get('tmux') or {}).get('pane'))
+    end = time.monotonic() + max(0, seconds)
+    while True:
+        with _snapshots_lock:
+            running = _snapshots.get(socket)
+            if running is None or not running[0].is_alive():
+                answer = {}
+
+                def check():
+                    try:
+                        answer['snapshot'] = Tmux(socket).snapshot(facts=facts, read_only=True)
+                    except Exception:
+                        pass  # an unanswered check proves nothing
+                running = (threading.Thread(target=check, name='screen-wait-liveness', daemon=True), answer, scope)
+                _snapshots[socket] = running
+                running[0].start()
+        running[0].join(max(0, end - time.monotonic()))
+        if running[2] == scope:
+            return running[1].get('snapshot')
+        if running[0].is_alive() or time.monotonic() >= end:
+            return None  # another launch's check still holds the server: unknown here
+
+
+def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True,
+               stop_at_prompt=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = retry_missing(lambda: read(agent_dir / 'launches' / launch_id / 'request.json'))
     deadline = time.monotonic() + timeout
@@ -1322,11 +1430,22 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             from . import refusal
             if screen_deadline is None:
                 screen_deadline = refusal.startup_deadline(facts)
-            if not screen_expired and time.monotonic() >= screen_deadline:
+            if not screen_expired and time.monotonic() >= screen_deadline and not facts.get('startup_prompt'):
+                # A prompt on screen keeps the observer watching; the start that ends it settles startup.
                 screen_expired = True
                 refusal.settle_startup(agent_dir, launch_id, 'unverified')
                 continue  # Re-read refusal/generation/state after atomic settlement.
         live = observe(result, facts)['live']
+        if (stop_at_prompt and facts.get('startup_prompt') and live == 'alive'
+                and facts.get('state') in ('starting', 'running')):
+            # It started and waits for the person: not ready (even a launch with nothing more to wait for), not failed.
+            # The prompt as it is now: a report can retire it while liveness is checked.
+            fresh = launch_result(root, agent_dir)  # one record, runtime and session
+            current = fresh['runtime']
+            if (current.get('launch_id') == launch_id and current.get('startup_prompt') and not current.get('native_bridge')
+                    and _ended(current, live) is None):
+                return {**fresh, 'ok': True, 'ready': False, 'startup_prompt': current['startup_prompt']}
+            continue  # re-read from the top: its failure checks see what ended it
         # A caller deadline changes only this answer. The runner keeps its own
         # observation/retry window, and a re-read catches a refusal or retry claim.
         unverified = (caller_unverified and (facts.get('native_startup_observation') or {}).get('state') == 'pending'

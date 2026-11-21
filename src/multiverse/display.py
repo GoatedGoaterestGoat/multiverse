@@ -208,7 +208,20 @@ def outcome(record, verb, failure):
     if record.get("ok") is False:
         raise ValueError(f"{name} {failure}: {record.get('error') or 'the launch did not finish'}")
     summary = f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
-    return with_notices(summary, record)
+    asked = startup_prompt_line(record, record.get("startup_prompt"))
+    return with_notices(summary + (f" {asked}" if asked else ""), record)
+
+
+def startup_prompt_line(record, prompt):
+    """`It's waiting at Claude's prompt "Accessing workspace" (/w): answer it in its pane with mv2 attach NAME.`, for a
+    launch whose screen asks the person something before its session starts; None when it doesn't."""
+    if not isinstance(prompt, dict) or not isinstance(prompt.get("title"), str):
+        return None
+    harness = record.get("harness") or "agent"
+    detail = prompt.get("detail")
+    where = f" ({clean(detail)})" if isinstance(detail, str) and detail else ""
+    return (f"It's waiting at {HARNESS_NAMES.get(harness, harness)}'s prompt \"{clean(prompt['title'])}\"{where}: "
+            f"answer it in its pane with mv2 attach {record['name']}.")
 
 
 def with_notices(summary, record):

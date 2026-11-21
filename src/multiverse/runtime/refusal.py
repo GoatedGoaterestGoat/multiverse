@@ -25,6 +25,8 @@ def startup_deadline(facts):
 def settle_startup(directory, launch_id, state, *, deadline=None, require_process_ready=False):
     def changes(facts):
         observed = (facts.get('native_startup_observation') or {}).get('state')
+        if state == 'unverified' and facts.get('startup_prompt'):
+            return None  # a prompt on screen keeps the observer watching; the start that ends it settles startup
         if (facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
                 or facts.get('native_refusal') or observed not in (None, 'pending')
                 or (require_process_ready and (facts.get('state') != 'running'
@@ -78,3 +80,60 @@ def record(directory, launch_id, evidence, *, observation_deadline=None):
             last = {**attempts[-1], 'state': 'unknown', 'ok': False, 'reason': evidence['message']}
             update_message(directory, message['id'], submission_state='unknown', attempts=[*attempts[:-1], last])
     return saved
+
+
+# A prompt the person must answer before the harness starts its session (Claude's folder trust, say). It never fails
+# the launch: the agent waits, as for any prompt, until the screen moves on.
+PROMPT_TITLE_CHARS = 120
+PROMPT_DETAIL_CHARS = 500
+
+
+def startup_prompt(found):
+    """An adapter's `launch_prompt` answer as metadata (`title`, `detail`), or None; ValueError when it isn't one."""
+    if found is None:
+        return None
+    if not isinstance(found, dict) or set(found) - {'title', 'detail'}:
+        raise ValueError('A startup prompt is {"title": text, "detail": text or None}')
+    title, detail = found.get('title'), found.get('detail')
+    if (not isinstance(title, str) or not title.strip() or len(title) > PROMPT_TITLE_CHARS or not title.isprintable()
+            or detail is not None and (not isinstance(detail, str) or len(detail) > PROMPT_DETAIL_CHARS
+                                       or not detail.isprintable())):
+        raise ValueError('A startup prompt is {"title": text, "detail": text or None}')
+    return {'title': title.strip(), 'detail': detail.strip() if detail else None}
+
+
+def note_prompt(directory, launch_id, prompt):
+    """Record what the launch's screen asks now (None: nothing), with status waiting while the harness has not
+    reported one yet; a harness's own report is never overwritten. False when the launch no longer runs."""
+    def changes(facts):
+        if facts.get('state') not in ('starting', 'running') or facts.get('ending_at') or facts.get('native_refusal'):
+            return None
+        shown = facts.get('startup_prompt')
+        # The status is the screen's to set only while the harness has reported none of its own in this launch.
+        ours = facts.get('last_reported_status') is None and not facts.get('native_bridge')
+        # Once the harness's plugin has reported, its session has started: no screen prompt stands.
+        asked = None if facts.get('native_bridge') else prompt
+        if asked is None:
+            if shown is None:
+                return None
+            update = {'startup_prompt': None}
+            if ours and facts.get('status') == 'waiting':
+                update['status'] = 'unknown'
+            return update
+        if shown is not None and {k: shown.get(k) for k in ('title', 'detail')} == asked:
+            return None
+        update = {'startup_prompt': {**asked, 'at': now()}, 'startup_screen': 'prompt'}
+        if ours and facts.get('status') in (None, 'unknown'):
+            update['status'] = 'waiting'
+        return update
+    return agents.mutate_runtime(directory, launch_id, changes) is not None
+
+
+def note_started(directory, launch_id):
+    """The launch's screen shows the harness's own input: its startup prompt, if any, is over."""
+    note_prompt(directory, launch_id, None)
+    def changes(facts):
+        if facts.get('state') not in ('starting', 'running') or facts.get('startup_screen') == 'started':
+            return None
+        return {'startup_screen': 'started'}
+    agents.mutate_runtime(directory, launch_id, changes)

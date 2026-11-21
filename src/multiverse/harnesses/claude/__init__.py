@@ -45,6 +45,7 @@ from ...store import read, retry_missing
 from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply, SlashCommand
 from . import models as model_table
 from . import pane
+from . import screen
 from . import run as one_shot
 from . import transcripts as rows_source
 from . import turn_projection
@@ -1602,6 +1603,16 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
+
+    def launch_prompt(self, evidence):
+        """The prompt Claude's launch screen asks before its session starts (folder trust, an `--add-dir` folder), as
+        {'title', 'detail'}, or None. Its plugin can't report these: Claude runs a plugin's calls only once a session
+        has started."""
+        return screen.startup_prompt(evidence.get('text') if isinstance(evidence, dict) else None)
+
+    def launch_started(self, evidence):
+        """Whether the launch screen shows Claude's input box, the session started."""
+        return screen.ready(evidence.get('text') if isinstance(evidence, dict) else None)
 
     def attachment_ready(self, session):
         """A launch with no inbox is ready once its process runs; a bridged one when the mod has registered.
