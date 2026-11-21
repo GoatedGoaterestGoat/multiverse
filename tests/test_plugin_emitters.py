@@ -1,4 +1,5 @@
 """Core's event emitters: each one records its change once, honestly, without holding the change up."""
+from contextlib import ExitStack
 import fcntl
 import json
 from pathlib import Path
@@ -11,7 +12,8 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.plugins import events
 from multiverse.plugins.testing import PluginTestCase
-from multiverse.store import read, write
+from multiverse.runtime import prompt_events
+from multiverse.store import lock, read, write
 from multiverse.universe import agents, mailbox
 
 
@@ -142,6 +144,39 @@ class EmitterTest(EmitterBase):
             self.ready_case(starter, {"state": "running", "pid": 1, "startup_delivery": "ready"})
             [event] = self.ready_case(starter, {"state": "running", "pid": 1, "startup_delivery": "ready"})  # once
             self.assertEqual((event["launch"], event["agent"]["name"]), ("L1", "starter"))
+
+    def test_runtime_report_does_not_wait_for_ordered_journal_locks(self):
+        """A contended append or receipt cleanup must not consume a journal wait on the status report path."""
+        journal_lock = events.directory(self.root) / ".lock"
+        runtime = self.agent_dir / "runtime.json"
+        with lock(journal_lock), mock.patch.object(events, "_bounded_lock", wraps=events._bounded_lock) as attempts:
+            agents.update_runtime(self.agent_dir, "L1", status="working", status_observed=True)
+            facts = read(runtime)
+            self.assertEqual(facts["status"], "working")
+            self.assertEqual(self.recorded(kind="agent.status"), [])
+            self.assertEqual(attempts.call_args_list, [mock.call(journal_lock, seconds=0)])
+
+        prompt_events.publish(self.agent_dir)
+        [working] = self.recorded(kind="agent.status")
+        self.assertEqual((working["data"]["to"], working["at"]), ("working", facts["status_changed_at"]))
+
+        append = prompt_events._journal_event
+        with ExitStack() as held:
+            def publish_then_contend(directory, row):
+                result = append(directory, row)
+                self.assertEqual(result, "written")
+                held.enter_context(lock(journal_lock))
+                return result
+
+            with mock.patch.object(prompt_events, "_journal_event", side_effect=publish_then_contend), \
+                    mock.patch.object(events, "_bounded_lock", wraps=events._bounded_lock) as attempts:
+                agents.update_runtime(self.agent_dir, "L1", status="idle")
+                self.assertEqual(read(runtime)["status"], "idle")
+                self.assertEqual(attempts.call_args_list, [mock.call(journal_lock, seconds=0)] * 2)
+
+        prompt_events.publish(self.agent_dir)
+        statuses = self.recorded(kind="agent.status")
+        self.assertEqual([event["data"]["to"] for event in statuses], ["working", "idle"])
 
     def test_core_operations_finish_while_the_journal_is_locked_elsewhere(self):
         """Recording an event never blocks, fails or holds runtime updates, message append, report or startup

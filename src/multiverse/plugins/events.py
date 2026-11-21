@@ -766,9 +766,10 @@ def prompt_event(agent_dir, kind, launch, data, *, key, properties=None, at=None
 
     'written': it is in the journal, by this call or an earlier one with the same `key` (an append whose
     acknowledgement core lost writes nothing twice). 'unsubscribed': no plugin on in that universe subscribes to
-    `kind`, so there is nothing to write. 'retry': the journal was busy, or couldn't be written (logged): keep it
-    and record it again later, in order. `key` is core's own replay key, unique per pending event; it is kept in
-    the journal line and stripped from every read, so a plugin never sees it, and a private receipt keeps it until
+    `kind`, so there is nothing to write. 'retry': the journal was busy or couldn't be written (logged). A busy
+    lock returns immediately so core can leave the event in its ordered record for the host to retry. `key` is
+    core's replay key, unique per pending event. It is kept in the journal line and stripped from every read,
+    so a plugin never sees it. A private receipt keeps it until
     core acknowledges it (acknowledge), while the bounded receipt is retained (RECEIPT_LIMIT). A receipt that
     couldn't be saved is covered by the journal's tail. A crash between the append and its receipt can still write
     it twice, which delivery at least once allows."""
@@ -785,7 +786,7 @@ def prompt_event(agent_dir, kind, launch, data, *, key, properties=None, at=None
                  "type": kind, "agent": agent, "launch": launch,
                  "data": dict(data or {}), REPLAY: key}
         base = directory(root)
-        with _bounded_lock(base / ".lock") as held:
+        with _bounded_lock(base / ".lock", seconds=0) as held:
             if not held:
                 _log(root, f"{kind}: kept for later: the journal was busy")
                 return "retry"
@@ -864,13 +865,13 @@ def _write_receipts(root, receipts):
 
 
 def acknowledge(agent_dir, keys):
-    """Core acknowledged these prompt events' replay keys: their receipts go. True when done; never raises (an
-    acknowledgement that couldn't be made leaves receipts that only cost a little space until RECEIPT_LIMIT)."""
+    """Try to remove replay receipts for acknowledged events. A busy journal leaves them for bounded retention.
+    Return true when done. Never raises."""
     try:
         root = root_of(agent_dir)
         if root is None or not (directory(root) / RECEIPTS).exists():
             return True
-        with _bounded_lock(directory(root) / ".lock") as held:
+        with _bounded_lock(directory(root) / ".lock", seconds=0) as held:
             if not held:
                 return False
             receipts = _receipts(root)
