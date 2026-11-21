@@ -267,6 +267,40 @@ class LaunchDisplayFollowupTest(BaseTest):
             self.assertEqual([row['live'] for row in rows], ['alive', 'alive'])
             self.assertEqual(snapshots.call_count, 2)
 
+    def test_listing_handles_both_sidecars_overtaking_their_runtime_snapshot(self):
+        """Registration and request publication can each invalidate an earlier snapshot in the same listing."""
+        directory, starting, pane = self.record(1, terminal=False)
+        path = directory / 'runtime.json'
+        launch = directory / 'launches' / starting['launch_id']
+        preparing = {**starting, 'preparing': True}
+        starting = {**starting, 'host': 'fixture'}
+        terminal = {**starting, 'tmux': {'socket': self.socket, 'pane': '%1', 'session': '$1'}}
+        write(path, preparing)
+
+        original_preparation = agents.preparation_snapshot
+        original_damage = missing_runtime.damage
+
+        def prepare(agent_dir, facts):
+            if facts == preparing:
+                write(path, starting)
+                write(launch / 'registration.json', {})
+            return original_preparation(agent_dir, facts)
+
+        def damage(agent_dir, facts):
+            if facts.get('host') == 'fixture' and 'tmux' not in facts:
+                write(path, terminal)
+                write(launch / 'request.json', {})
+            return original_damage(agent_dir, facts)
+
+        with lock(directory / '.launch.lock'), \
+                patch.object(agents, 'preparation_snapshot', side_effect=prepare), \
+                patch.object(missing_runtime, 'damage', side_effect=damage), \
+                patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)):
+            row = lifecycle.listing(self.root, usage=False)[0]
+        self.assertNotIn('damaged', row)
+        self.assertEqual(row['live'], 'alive', row)
+        self.assertEqual(read(path), terminal)
+
 
 class ConcurrentLaunchDisplayTest(TerminalBase):
     def test_concurrent_fake_spawns_never_flash_absent_or_unknown(self):

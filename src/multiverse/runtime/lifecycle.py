@@ -153,17 +153,19 @@ def _listing_observation(properties, facts, snapshots, refreshed):
 def _listing_runtime(directory, facts, *, prepare=False):
     """A newer launch sidecar cannot condemn an older runtime snapshot.
 
-    Re-read once on damage, only for the same launch, then validate again.
-    Control paths keep their original authority checks; this never repairs disk.
+    Registration can overtake the minimal record, then the launch request
+    can overtake the full record that still lacks a terminal. Allow one
+    recheck per boundary, keeping the same launch and validating each read.
     """
-    for retry in (True, False):
+    max_rechecks = 2 if prepare and agents.preparing(facts) else 1
+    for attempt in range(max_rechecks + 1):
         try:
             checked = agents.preparation_snapshot(directory, facts) if prepare else facts
             if error := missing_runtime.damage(directory, checked):
                 raise error
             return checked
         except records.RecordError:
-            if not retry:
+            if attempt == max_rechecks:
                 raise
             current = records.runtime(directory / 'runtime.json')
             if (not facts.get('launch_id') or current.get('launch_id') != facts['launch_id']
