@@ -88,6 +88,137 @@ class HostStartTest(PluginTestCase):
                 self.assertEqual(worker.returncode, 0, "the worker was killed before it finished")
                 self.assertFalse(host.running(self.root))
 
+    def test_host_retries_ordered_events_after_a_busy_journal_without_another_report(self):
+        """A status queued behind a prompt can otherwise remain absent until the agent reports again."""
+        from multiverse.harnesses.types import PromptOpened
+        from multiverse.plugins import events
+        from multiverse.runtime import prompt_events
+        from multiverse.universe import agents
+
+        directory = self.agent("worker")
+        launch, native = "fixture-launch", "fixture-session"
+        properties = json.loads((directory / "properties.json").read_text())
+        write(directory / "properties.json", {**properties, "native_session_id": native})
+        write(directory / "runtime.json", {"launch_id": launch, "state": "running", "status": "working"})
+        observed = "2026-11-20T13:00:00+00:00"
+        stopping, retried_while_busy = threading.Event(), threading.Event()
+        thread = threading.Thread(target=host.supervise, args=(self.root,),
+                                  kwargs={"exit_when_idle": False, "stopping": stopping}, daemon=True)
+
+        def published():
+            rows, _ = events.read(self.root)
+            return [row for row in rows if row["type"] in ("prompt.opened", "agent.status")]
+
+        journal_event, caller = prompt_events._journal_event, threading.current_thread()
+
+        def observe_recovery(agent, row):
+            disposition = journal_event(agent, row)
+            if threading.current_thread() is not caller and disposition == "retry":
+                retried_while_busy.set()
+            return disposition
+
+        with mock.patch.object(prompt_events, "_journal_event", side_effect=observe_recovery), \
+                mock.patch.object(events, "subscribers", return_value=["fixture"]), \
+                mock.patch.object(events, "LOCK_SECONDS", 0), mock.patch.object(host, "WORKER_POLL_SECONDS", 0.02), \
+                mock.patch.object(host, "needed", return_value={}):
+            try:
+                with events._bounded_lock(events.directory(self.root) / ".lock") as held:
+                    self.assertTrue(held)
+                    prompt_events.record(directory, launch, native, (
+                        PromptOpened(id="fixture-prompt", kind="question", requires_waiting=False),
+                    ))
+                    with mock.patch.object(agents, "now", return_value=observed):
+                        agents.update_runtime(directory, launch, status="idle", status_observed=True)
+                    self.assertEqual(agents.runtime(directory)["status"], "idle")
+                    thread.start()
+                    self.assertTrue(retried_while_busy.wait(5))
+                    self.assertEqual(published(), [])
+                self.assertTrue(_until(lambda: len(published()) == 2, 3), "outbox did not drain after journal unlocked")
+            finally:
+                stopping.set()
+                if thread.ident is not None:
+                    thread.join(5)
+        self.assertFalse(thread.is_alive())
+        opened, idle = published()
+        self.assertEqual((opened["type"], idle["type"]), ("prompt.opened", "agent.status"))
+        self.assertEqual(idle["data"], {"from": "working", "to": "idle"})
+        self.assertEqual(idle["at"], observed)
+        self.assertLess(opened["seq"], idle["seq"])
+
+    def test_recovery_skips_locked_staging_on_capture_and_acknowledgement(self):
+        """One agent holding staging cannot block another agent or keep recovery alive at shutdown."""
+        from multiverse.harnesses.types import PromptOpened
+        from multiverse.plugins import events
+        from multiverse.runtime import prompt_events
+        from multiverse.store import lock
+
+        with mock.patch.object(events, "subscribers", return_value=["fixture"]), \
+                mock.patch.object(host, "WORKER_POLL_SECONDS", 0.02):
+            for phase in ("capture", "ack"):
+                with self.subTest(phase=phase):
+                    occupied, healthy = sorted(self.agent(f"{phase}-{index}") for index in range(2))
+                    for directory in (occupied, healthy):
+                        properties = json.loads((directory / "properties.json").read_text())
+                        write(directory / "properties.json", {**properties, "native_session_id": "fixture-session"})
+                        write(directory / "runtime.json", {"launch_id": "launch", "state": "running"})
+                        prompt_events.stage(directory, "launch", "fixture-session", (
+                            PromptOpened(id=phase, kind="question", requires_waiting=False),
+                        ))
+                    journal = prompt_events._journal_event
+                    wrote, allow_ack, stopping = threading.Event(), threading.Event(), threading.Event()
+
+                    def pause_after_append(directory, row):
+                        disposition = journal(directory, row)
+                        if phase == "ack" and directory == occupied and disposition == "written" and not wrote.is_set():
+                            wrote.set()
+                            allow_ack.wait(5)
+                        return disposition
+
+                    def published(directory):
+                        return [row for row in events.read(self.root)[0] if row["type"] == "prompt.opened"
+                                and row["agent"]["id"] == directory.name]
+
+                    thread = threading.Thread(target=host._recover_agent_events, args=(self.root, stopping), daemon=True)
+                    with mock.patch.object(prompt_events, "_journal_event", side_effect=pause_after_append):
+                        try:
+                            if phase == "ack":
+                                thread.start()
+                                self.assertTrue(wrote.wait(5))
+                            with lock(occupied / "prompts" / "journal" / ".lock"):
+                                if phase == "capture":
+                                    thread.start()
+                                allow_ack.set()
+                                self.assertTrue(_until(lambda: bool(published(healthy)), 3))
+                                stopping.set()
+                                thread.join(2)
+                                self.assertFalse(thread.is_alive())
+                        finally:
+                            allow_ack.set()
+                            stopping.set()
+                            if thread.ident is not None:
+                                thread.join(5)
+                    prompt_events.publish(occupied)
+                    self.assertEqual(len(published(occupied)), 1)
+
+    def test_recovery_cannot_cache_an_outbox_empty_after_an_exhausted_read(self):
+        """A transient missing read cannot make recovery skip unchanged pending work."""
+        from multiverse.harnesses.types import PromptOpened
+        from multiverse.runtime import prompt_events
+
+        directory = self.agent("worker")
+        properties = json.loads((directory / "properties.json").read_text())
+        write(directory / "properties.json", {**properties, "native_session_id": "fixture-session"})
+        write(directory / "runtime.json", {"launch_id": "launch", "state": "running"})
+        prompt_events.stage(directory, "launch", "fixture-session", (
+            PromptOpened(id="fixture-prompt", kind="question", requires_waiting=False),
+        ))
+        stamp = prompt_events.outbox_stamp(directory)
+        self.assertIsNotNone(stamp)
+        with mock.patch.object(prompt_events, "open_replaced", side_effect=FileNotFoundError):
+            self.assertFalse(prompt_events.outbox_empty(directory, stamp))
+        self.assertEqual(prompt_events.outbox_stamp(directory), stamp)
+        self.assertFalse(prompt_events.outbox_empty(directory, stamp))
+
     def test_a_second_start_that_finds_the_session_is_already_starting(self):
         """Concurrent host starts never make two supervisors or overwrite a running one's status, whether the other
         start's session or its supervisor comes first; fragile because it races tmux session creation, and it

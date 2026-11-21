@@ -123,14 +123,14 @@ class JournalTest(PluginTestCase):
             events.prompt_event(agent, "prompt.opened", "L1", opened, key="k5")
             for index in range(200):  # k5 far out of the tail: only its receipt knows it
                 events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"pad": "x" * 512, "n": index})
-            receipts, real, missed = events.directory(self.root) / events.RECEIPTS, Path.read_text, []
+            receipts, real, missed = events.directory(self.root) / events.RECEIPTS, events._read_journal_text, []
 
             def replaced_once(path, *args, **kwargs):
                 if path == receipts and not missed:
                     missed.append(path)
                     raise FileNotFoundError(2, "No such file or directory", str(path))
                 return real(path, *args, **kwargs)
-            with mock.patch.object(Path, "read_text", replaced_once):
+            with mock.patch.object(events, "_read_journal_text", replaced_once):
                 self.assertEqual(events.prompt_event(agent, "prompt.opened", "L1", opened, key="k5"), "written")
             self.assertTrue(missed)
         with self.subTest("a torn line holding the key proves nothing"):
@@ -154,6 +154,80 @@ class JournalTest(PluginTestCase):
             # retried for ever: unreadable receipts fall back to the tail
         self.assertEqual(sum(event["type"] == "prompt.opened" and event["data"]["id"] == "p1"
                              for event in events.read(self.root, 0, 10_000)[0]), 5)  # k1, k4, k5, k6, k7: each once
+
+    def test_journal_recovery_does_not_block_on_special_files(self):
+        """A damaged lock or replay file cannot keep an ordered publisher alive indefinitely."""
+        agent = self.agent("worker")
+        self.subscribe(("prompt.*",))
+        data = {"kind": "question", "id": "earlier", "requires_waiting": False}
+        self.assertEqual(events.prompt_event(agent, "prompt.opened", "launch", data, key="earlier"), "written")
+        base = events.directory(self.root)
+        segment = events.segments(self.root)[-1][1]
+
+        for path, key, disposition in (
+                (base / ".lock", "later", "retry"),
+                (base / events.RECEIPTS, "earlier", "written"),
+                (segment, "later", "retry")):
+            with self.subTest(path=path.name):
+                original = self.work / ("saved-" + path.name)
+                path.rename(original)
+                os.mkfifo(path)
+                completed, outcomes = threading.Event(), []
+
+                def record():
+                    try:
+                        outcomes.append(events.prompt_event(agent, "prompt.opened", "launch", data, key=key))
+                    finally:
+                        completed.set()
+
+                thread = threading.Thread(target=record, daemon=True)
+                thread.start()
+                try:
+                    self.assertTrue(completed.wait(3), f"recovery opened {path.name} with a blocking descriptor")
+                    self.assertEqual(outcomes, [disposition])
+                finally:
+                    if not completed.is_set():
+                        descriptor = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+                        os.close(descriptor)
+                    thread.join(5)
+                    original.replace(path)
+        self.assertEqual([row["data"]["id"] for row in events.read(self.root)[0]], ["earlier"])
+
+    def test_a_queued_event_ignores_old_journal_temporaries(self):
+        """A FIFO at a former temporary name must never trap publication while it holds the journal."""
+        agent = self.agent("worker")
+        self.subscribe(("prompt.*",))
+        base = events.directory(self.root)
+        base.mkdir(parents=True, exist_ok=True)
+        abandoned = [base / f".{name}.tmp" for name in (events.ID, events.ID_COPY, "seq", events.RECEIPTS)]
+        for path in abandoned:
+            os.mkfifo(path)
+
+        completed, outcomes = threading.Event(), []
+
+        def record():
+            try:
+                data = {"kind": "question", "id": "pending", "requires_waiting": False}
+                outcomes.append(events.prompt_event(agent, "prompt.opened", "launch", data, key="pending"))
+            finally:
+                completed.set()
+
+        thread = threading.Thread(target=record, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(completed.wait(3))
+            self.assertEqual(outcomes, ["written"])
+        finally:
+            descriptors = [] if completed.is_set() else [
+                os.open(path, os.O_RDWR | os.O_NONBLOCK) for path in abandoned if path.exists()
+            ]
+            try:
+                thread.join(5)
+            finally:
+                for descriptor in descriptors:
+                    os.close(descriptor)
+        self.assertEqual(events.journal_id(self.root), (base / events.ID_COPY).read_text().strip())
+        self.assertEqual(events.read(self.root)[0][0]["data"]["id"], "pending")
 
     def test_replay_proof_includes_a_complete_row_at_the_tail_boundary(self):
         """A saved event can be appended twice when the receipt is lost and its row starts at the tail boundary."""
@@ -457,7 +531,10 @@ class JournalTest(PluginTestCase):
             with mock.patch.object(events, "_Claimed", reader), mock.patch.object(os, "open", opening), \
                     mock.patch.object(os, "close", closing):
                 events.merge(self.root)
-            self.assertEqual(held, set())
+            for descriptor in held:  # fdopen's context manager closes in C, outside the patched os.close
+                with self.assertRaises(OSError) as closed:
+                    os.fstat(descriptor)
+                self.assertEqual(closed.exception.errno, errno.EBADF)
             events.merge(self.root)
             self.assertEqual(seen()[-2:], [15, 16])
         with self.subTest("a recorder reads no more than its budget"):

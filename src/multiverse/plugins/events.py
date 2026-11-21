@@ -35,10 +35,11 @@ import os
 from pathlib import Path
 import re
 import stat
+import tempfile
 import time
 import uuid
 
-from ..store import lock, now, retry_missing, is_file_replaced
+from ..store import lock, now, open_regular, retry_missing, is_file_replaced
 from . import config, loader
 from .manifest import CORE_EVENTS
 
@@ -65,13 +66,19 @@ ID_COPY = "journal-id.copy"  # a second copy, so a journal-id that was lost or c
 # started before an update runs the old code until it stops).
 
 
+def _read_journal_text(path):
+    with open_regular(path) as stream:
+        return stream.read().decode("utf-8")
+
+
 def journal_id(root):
     """The id of `root`'s journal, made when it is first written; None while there is none (or before mv2 made
     them: such a journal gets one at its next event)."""
     for name in (ID, ID_COPY):
         try:
-            value = retry_missing((directory(root) / name).read_text).strip()
-        except OSError:
+            path = directory(root) / name
+            value = retry_missing(lambda: _read_journal_text(path), path=path).strip()
+        except (OSError, UnicodeError):
             continue
         if _ID_FORMAT.fullmatch(value):
             return value
@@ -84,7 +91,8 @@ _ID_FORMAT = re.compile(r"[0-9a-f]{32}")
 def _counter(base):
     """The next sequence number, from the counter file `seq`; None when it is not there or cannot be read."""
     try:
-        parts = retry_missing((Path(base) / "seq").read_text).split()
+        path = Path(base) / "seq"
+        parts = retry_missing(lambda: _read_journal_text(path), path=path).split()
         return int(parts[0]) if parts and parts[0].isdigit() else None
     except (OSError, ValueError):
         return None
@@ -718,7 +726,7 @@ def _bounded_lock(path, seconds=None):
     """Yield True holding `path`'s lock, or False when it stays busy for `seconds` (LOCK_SECONDS)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + (LOCK_SECONDS if seconds is None else seconds)
-    with path.open("a") as handle:
+    with open_regular(path, "a") as handle:
         while True:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -740,7 +748,7 @@ RECEIPT_LIMIT = 4096  # the oldest receipts go past this many: core acknowledges
 RECEIPTS_WRITTEN = ".replay.written"  # exists once receipts were written: a missing file then is a replacement gap
 
 
-def prompt_event(agent_dir, kind, launch, data, *, key, properties=None):
+def prompt_event(agent_dir, kind, launch, data, *, key, properties=None, at=None):
     """Record one of an agent's prompt events (prompt.opened, prompt.closed, agent.prompt) for core's prompt
     ledger, saying what became of it. Never raises.
 
@@ -761,7 +769,8 @@ def prompt_event(agent_dir, kind, launch, data, *, key, properties=None):
             raise ValueError("a prompt event needs core's replay key")
         agent = ({"id": properties.get("id"), "name": properties.get("name")} if isinstance(properties, dict)
                  else agent_of(agent_dir))
-        event = {"schema": 1, "seq": 0, "at": now(), "type": kind, "agent": agent, "launch": launch,
+        event = {"schema": 1, "seq": 0, "at": at if isinstance(at, str) else now(),
+                 "type": kind, "agent": agent, "launch": launch,
                  "data": dict(data or {}), REPLAY: key}
         base = directory(root)
         with _bounded_lock(base / ".lock") as held:
@@ -806,12 +815,12 @@ def _receipts(root):
     file is retried through a replacement, so an atomic rewrite never reads as an empty map."""
     path = directory(root) / RECEIPTS
     try:
-        text = path.read_text()
+        text = _read_journal_text(path)
     except FileNotFoundError:
         if not (directory(root) / RECEIPTS_WRITTEN).exists():
             return {}
         try:
-            text = retry_missing(path.read_text, path=path)
+            text = retry_missing(lambda: _read_journal_text(path), path=path)
         except (OSError, UnicodeError):
             return _UNREADABLE
     except (OSError, UnicodeError):  # not UTF-8 is as unreadable as damaged: the tail decides
@@ -824,11 +833,22 @@ def _receipts(root):
         if isinstance(data, dict) else _UNREADABLE
 
 
+def _replace_journal_text(path, text):
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def _write_receipts(root, receipts):
-    (directory(root) / RECEIPTS_WRITTEN).touch()  # first: from now on a missing receipts file is a gap
-    temporary = directory(root) / f".{RECEIPTS}.tmp"
-    temporary.write_text(json.dumps(receipts, separators=(",", ":")) + "\n")
-    temporary.replace(directory(root) / RECEIPTS)
+    base = directory(root)
+    marker = base / RECEIPTS_WRITTEN
+    if not marker.is_file():
+        _replace_journal_text(marker, "")  # from now on a missing receipts file is a gap
+    _replace_journal_text(base / RECEIPTS, json.dumps(receipts, separators=(",", ":")) + "\n")
 
 
 def acknowledge(agent_dir, keys):
@@ -856,7 +876,7 @@ def _replayed(root, key):
     """Return the sequence for an exact replay key in the bounded tail of the latest two segments."""
     needle = json.dumps(key, ensure_ascii=False).encode()
     for _, path in segments(root)[-2:]:
-        with path.open("rb") as handle:
+        with open_regular(path) as handle:
             handle.seek(0, 2)
             start = max(0, handle.tell() - TAIL_BYTES)
             handle.seek(max(0, start - 1))
@@ -883,13 +903,12 @@ def _append(root, event):
     known = journal_id(root) or uuid.uuid4().hex
     for name in (ID, ID_COPY):  # a new journal, or one of its two id files lost: written again from the other
         try:
-            stored = retry_missing((base / name).read_text).strip()
-        except OSError:
+            path = base / name
+            stored = retry_missing(lambda: _read_journal_text(path), path=path).strip()
+        except (OSError, UnicodeError):
             stored = ""
         if stored != known:
-            temporary = base / f".{name}.tmp"
-            temporary.write_text(known + "\n")
-            temporary.replace(base / name)
+            _replace_journal_text(base / name, known + "\n")
     found = segments(root)
     sequence = _counter(base) or 1
     if found:
@@ -901,7 +920,7 @@ def _append(root, event):
     rolled = current is None or _full(current)
     if rolled:
         current = base / f"{sequence:0{NAME_WIDTH}d}.jsonl"
-    with current.open("ab+") as handle:
+    with open_regular(current, "ab+") as handle:
         if handle.tell():
             handle.seek(-1, 2)
             if handle.read(1) != b"\n":
@@ -914,9 +933,7 @@ def _append(root, event):
 
 
 def _write_counter(base, next_sequence):
-    temporary = base / ".seq.tmp"
-    temporary.write_text(f"{next_sequence}\n")
-    temporary.replace(base / "seq")
+    _replace_journal_text(base / "seq", f"{next_sequence}\n")
 
 
 def _line(event):
@@ -942,7 +959,7 @@ def _full(path):
 def _last_sequence(path):
     """The last complete event's sequence number in a segment (its tail only), else one before its first."""
     try:
-        with path.open("rb") as handle:
+        with open_regular(path) as handle:
             size = handle.seek(0, 2)
             handle.seek(max(0, size - TAIL_BYTES))
             lines = handle.read().splitlines()
@@ -1025,7 +1042,7 @@ def _read(root, after, limit):
         following = found[index + 1][0] if index + 1 < len(found) else None
         if following is not None and following <= after + 1:
             continue
-        with path.open("rb") as handle:  # FileNotFoundError: pruned meanwhile, read() starts over
+        with open_regular(path) as handle:  # FileNotFoundError: pruned meanwhile, read() starts over
             data = handle.read()
         for line in data.splitlines():
             try:
@@ -1063,15 +1080,17 @@ def summary(root):
 
 def _log(root, text):
     try:
-        loader.append_log(Path(root) / "state" / "plugins" / "events.log", f"{now()} {text}")
+        loader.append_log(Path(root) / "state" / "plugins" / "events.log", f"{now()} {text}", blocking=False)
     except (OSError, TypeError):
         pass
 
 
 def agent_of(agent_dir):
     """{"id", "name"} of an agent directory, or None."""
+    from ..universe import records
+
     try:
-        properties = json.loads(retry_missing((Path(agent_dir) / "properties.json").read_text))
+        properties = records._object(Path(agent_dir) / "properties.json")
         return {"id": properties.get("id"), "name": properties.get("name")}
     except (OSError, ValueError, AttributeError):
         return None

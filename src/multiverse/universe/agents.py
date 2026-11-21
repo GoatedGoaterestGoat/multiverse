@@ -324,7 +324,8 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False, bl
             before_status_event(status_event['to'])
         if before == 'waiting':
             prompt_events.leaving_wait(agent_dir, launch_id, data)
-        if not prompt_events.publish_ordered(agent_dir, 'agent.status', launch_id, status_event):
+        if not prompt_events.publish_ordered(agent_dir, 'agent.status', launch_id, status_event,
+                                             at=data['observed_at']):
             _event(agent_dir, "agent.status", launch_id, status_event)
     if prompt_batch is not None or changes is not None and 'status' in changes:
         prompt_events.publish(agent_dir)
