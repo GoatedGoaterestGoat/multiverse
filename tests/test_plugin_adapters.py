@@ -159,9 +159,9 @@ class PluginLaunchTest(PluginTestCase):
 
     def test_plain_claude_launches_load_no_plugin_directory_and_probe_no_version(self):
         """Bridged Claude launches get plugin dirs and settings merged beside mv2's own, and the plugin's problem and
-        mode recorded as the plugin's, never in the harness's own mode, while plain launches get none and never probe
-        the version; fragile because plain is the fallback for Claudes that cannot take these flags and is rarely
-        exercised."""
+        mode recorded as the plugin's, never in the harness's own mode, while plain launches get none of theirs (only
+        mv2's own grant of the agent's folder) and never probe the version; fragile because plain is the fallback for
+        Claudes that cannot take these flags and is rarely exercised."""
         self.enable("guard")
         with self.subTest("bridged"):
             command, _ = self.launch()
@@ -186,7 +186,10 @@ class PluginLaunchTest(PluginTestCase):
             command, probe = self.launch(bridge=False)
             probe.assert_not_called()
             self.assertNotIn("--plugin-dir", command.argv)
-            self.assertNotIn("--settings", command.argv)
+            settings = json.loads(command.argv[command.argv.index("--settings") + 1])
+            # mv2's own grant of the agent's folder (it replaced --add-dir), and nothing of a plugin's or the bridge's.
+            self.assertEqual(settings, {"permissions": {"additionalDirectories": [str(self.agent_dir)]}})
+            self.assertEqual(sum(item == "--settings" or item.startswith("--settings=") for item in command.argv), 1)
             self.assertEqual(command.plugins["plugins"]["guard"]["state"], "skipped")
             self.assertEqual(command.plugins["plugins"]["typeahead"]["state"], "skipped")
             self.assertNotIn("MV2_GUARD", command.environment)  # all of guard is left out, its contribution too

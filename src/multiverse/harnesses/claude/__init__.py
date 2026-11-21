@@ -1250,6 +1250,28 @@ def unavailable(bridge):
                         {'launch_only': True, 'final': bridge.final} if bridge.launch_only else None)
 
 
+def _agent_folder(context, configured):
+    """How the agent's own folder becomes a working directory: (settings for mv2's --settings, extra arguments).
+
+    `--add-dir` would do it, but since Claude Code 2.1.330 it stops the launch at an "Adding a new directory" dialog
+    when the folder is under no folder the person trusts, because Claude then also loads the folder's own skills,
+    commands and agents. The folder is mv2's state, and an agent only needs to read and write files there, which
+    `permissions.additionalDirectories` grants without loading anything from it and without a dialog. Claude keeps
+    only the last --settings, though, so when the harness's own arguments (`configured`: its `args` and this mode's
+    `spawn_args` or `resume_args`, never a value the recipe fills in, such as the bootstrap) may carry one, mv2's
+    would be replaced: the folder then goes in `--add-dir`, as before, and their settings stay theirs.
+    """
+    folder = context.values.get('agent_dir')
+    if not folder:
+        return {}, ()
+    # Any argument shaped like the flag counts, even after a '--': Claude takes '--' as the value of a flag such as
+    # --append-system-prompt, so telling a real one apart would take its whole option table. Counting one too many
+    # only keeps --add-dir, as before this setting; counting one too few would lose the folder.
+    if any(isinstance(item, str) and (item == '--settings' or item.startswith('--settings=')) for item in configured):
+        return {}, ('--add-dir', folder)
+    return {'permissions': {'additionalDirectories': [folder]}}, ()
+
+
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     delivery_attempt_ids = True  # each delivery attempt has its own message ID, so a receipt names one attempt
@@ -1433,6 +1455,19 @@ class ClaudeAdapter(ConfiguredAdapter):
                 return replace(command, argv=tuple(argv))
         return None
 
+    def _configured_args(self, context):
+        """The harness's own arguments for this launch, `args` then `spawn_args` or `resume_args`, as the launch
+        renders them: a placeholder such as {task} can become --settings=FILE."""
+        settings = getattr(self, 'settings', None) or {}
+        values = {**context.values, 'model': context.model or ''}
+        rendered = []
+        for item in (*settings.get('args', []), *settings.get(f'{context.mode}_args', [])):
+            try:
+                rendered.append(item.format_map(values) if isinstance(item, str) else item)
+            except (KeyError, IndexError, ValueError):
+                rendered.append(item)  # the launch itself refuses it; this only decides how the folder goes
+        return tuple(rendered)
+
     def _with_bridge(self, command, context):
         # auto uses the bridge unless this Claude cannot run it (and says why), required raises instead of
         # falling back, plain never loads the mod.
@@ -1448,7 +1483,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
-        settings = {'crossSessionInbound': 'accept'}
+        folder, added = _agent_folder(context, self._configured_args(context))
+        settings = {'crossSessionInbound': 'accept', **folder}
         environment = {**command.environment, FUNCTION_HOOKS: '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
@@ -1459,7 +1495,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', json.dumps(plan.claude_settings), *directories, *command.argv[1:]),
+                  '--settings', json.dumps(plan.claude_settings), *directories, *added, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
             environment=plan.environment, native_mode=native_mode, plugins=plan.record())
 
@@ -1472,7 +1508,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         if FUNCTION_HOOKS not in plan.environment:
             # A tmux server first started from a Claude session passes its hooks switch on; only the bridge sets it.
             unset = tuple(dict.fromkeys((*unset, FUNCTION_HOOKS)))
-        return replace(command, environment=plan.environment, unset_env=unset, plugins=plan.record())
+        # mv2's own settings, or --add-dir beside the harness's own: plugins' Claude settings reach only the bridge.
+        own, added = _agent_folder(context, self._configured_args(context))
+        argv = (command.argv[0], *(('--settings', json.dumps(own)) if own else ()), *added, *command.argv[1:])
+        return replace(command, argv=argv, environment=plan.environment, unset_env=unset, plugins=plan.record())
 
     def session_home(self, environment):
         """Claude's storage for a launch: CLAUDE_CONFIG_DIR, else HOME/.claude, of that launch's environment."""

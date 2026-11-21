@@ -11,8 +11,6 @@
     "{session_id}",
     "--append-system-prompt",
     "{bootstrap}",
-    "--add-dir",
-    "{agent_dir}",
     "--",
     "{task}"
   ],
@@ -25,9 +23,7 @@
     "--append-system-prompt",
     "{bootstrap}",
     "--system-prompt-snapshot",
-    "off",
-    "--add-dir",
-    "{agent_dir}"
+    "off"
   ],
   "model_args": [
     "--model",
