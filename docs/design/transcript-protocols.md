@@ -312,6 +312,18 @@ Its methods are observe in `EFFECTS`. Core owns cursors, bounds, the
 generation token, turn grouping and the access checks, and never parses a
 harness's rows.
 
+**What a cold read costs.** A view starts from the harness's own index of the
+transcript, which a fresh process must build before it can answer. Built from
+nothing, that is a full read of the transcript, and it grows with its size:
+tens of seconds for a transcript of a few hundred megabytes, against core's
+read limit. So an adapter may persist its index across processes, in the
+agent's folder: proved against the transcript by a digest of the bytes it
+covers, extended by parsing only the lines appended since, rebuilt from
+scratch when the proof fails, bounded in size, and holding nothing of a row's
+text beyond what the index needs. A fresh process then starts from the saved
+index instead of a full parse, so a cold read stays well inside the limit. The
+same index can also answer the turn events' cursors.
+
 The Claude adapter reads every transcript through
 `harnesses/claude/transcripts.py`: finding a session's copies (the folder
 rule, regular files only, an unreadable folder that could hold the session as

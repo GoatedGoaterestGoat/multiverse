@@ -1,6 +1,9 @@
 """Reading a Claude session's transcript: labels, history, positions and copies (harnesses/claude/transcripts.py)."""
+import hashlib
 import json
 import os
+import shutil
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +51,419 @@ class ClaudeTranscriptReadingTest(BaseTest):
         index = t.newest_copy(self.native, self.environment, (str(self.work),))
         return index, t.analyse(index, tip)
 
+    def test_a_new_process_takes_over_the_saved_row_index_only_when_it_proves_and_it_keeps_no_row_text(self):
+        """A new process (the dashboard, the plugin host) otherwise parses a large transcript from its start: tens of
+        seconds under load. Taking over a saved index must give exactly a cold read's view, parse only what Claude
+        wrote since, fall back on any change or damage, and keep no row text, or a read trusts stale or forged-by-
+        accident rows, or the agent's folder holds the conversation."""
+        rows, parent = [], None
+
+        def add(row):
+            nonlocal parent
+            row = {'uuid': f'00000000-0000-4000-8000-{len(rows):012d}', 'parentUuid': parent, 'sessionId': self.native,
+                   'timestamp': f'2026-11-20T10:00:{len(rows):02d}Z', **row}
+            rows.append(row)
+            parent = row['uuid']
+        for n in range(4):
+            add({'type': 'user', 'origin': {'kind': 'composer'}, 'promptId': f'p{n}',
+                 'message': {'role': 'user', 'content': f'SECRET-PROMPT-{n} please look at the build'}})
+            add({'type': 'assistant', 'message': {'role': 'assistant', 'id': f'm{n}', 'model': 'claude-haiku',
+                 'content': [{'type': 'text', 'text': f'SECRET-ANSWER-{n}'}],
+                 'usage': {'input_tokens': 3, 'unrecognized': 'SECRET-USAGE'}}})  # usage can carry other keys
+        add({'type': 'system', 'subtype': 'local_command',
+             'content': '<command-name>/context</command-name>\n<command-args>SECRET-ARGS</command-args>'})
+        add({'type': 'system', 'subtype': 'local_command', 'content': '<local-command-stdout>SECRET-OUTPUT</local-command-stdout>'})
+        self.write(rows)
+        adapter, store = self.adapter(), Path(self.session().session_file).parent / t.ROW_STORE
+
+        def cold():
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            view = adapter.transcript_view(self.session())
+            shutil.rmtree(store, ignore_errors=True)
+            return view
+
+        def parsed_reading():  # a new process's view, and how many rows it parsed
+            t._transcripts.clear()
+            real, parsed = t.entry, []
+            with patch.object(t, 'entry', lambda *a, **k: parsed.append(1) or real(*a, **k)):
+                view = adapter.transcript_view(self.session())
+            return view, len(parsed)
+
+        def saved():
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            adapter.transcript_view(self.session())
+            files = list(store.iterdir())
+            self.assertEqual([file.suffix for file in files], ['.idx'])  # one file, no temporary left behind
+            return files[0]
+
+        whole = cold()
+        file = saved()
+        data = file.read_bytes()
+        for secret in (b'SECRET-PROMPT', b'SECRET-ANSWER', b'SECRET-ARGS', b'SECRET-OUTPUT', b'SECRET-USAGE', b'please look'):
+            self.assertNotIn(secret, data)  # no row text: marks, ids and positions only
+        view, count = parsed_reading()
+        with self.subTest('an unchanged take-over parses no row and gives the cold view'):
+            self.assertEqual(count, 0)
+            self.assertEqual((view.rows, view.history), (whole.rows, whole.history))
+            self.assertTrue(any(fact.preview.startswith('SECRET-PROMPT') for fact in view.rows))  # read from the transcript
+            self.assertIn(('/context', 'SECRET-ARGS'), [(fact.command, fact.args) for fact in view.rows])
+
+        with self.subTest('an append parses only its rows'):
+            saved()
+            add({'type': 'user', 'origin': {'kind': 'composer'}, 'promptId': 'p9', 'message': {'role': 'user', 'content': 'next'}})
+            self.write(rows)
+            view, count = parsed_reading()
+            self.assertEqual(count, 1)
+            self.assertEqual((view.rows, view.history), (cold().rows, cold().history))
+
+        def changed(change):  # each kind of change or damage: the next process reads every row, and sees the cold view
+            file = saved()
+            change(file)
+            view, count = parsed_reading()
+            self.assertEqual(count, len(rows))
+            self.assertEqual((view.rows, view.history), (cold().rows, cold().history))
+
+        def section(file):  # a byte changed inside the first section, its checksum unchanged
+            data = bytearray(file.read_bytes())
+            data[data.index(b'\n') + 2] ^= 1
+            file.write_bytes(bytes(data))
+
+        def header(**values):
+            def change(file):
+                data = file.read_bytes()
+                end = data.index(b'\n')
+                file.write_bytes(json.dumps({**json.loads(data[:end]), **values}).encode() + data[end:])
+            return change
+
+        def rewritten(file):  # the same length, an earlier row's bytes changed
+            text = self.path.read_bytes()
+            self.path.write_bytes(text.replace(b'SECRET-ANSWER-1', b'SECRET-ANSWER-X', 1))
+
+        def replaced(file):  # the same bytes in a new file at the same path: another inode
+            text, before = self.path.read_bytes(), self.path.stat().st_ino
+            fresh = self.path.with_name(self.path.name + '.new')
+            fresh.write_bytes(text)  # made while the original exists, so it can't take the original's inode
+            os.replace(fresh, self.path)
+            self.assertNotEqual(self.path.stat().st_ino, before)
+
+        def shorter(file):
+            self.write(rows[:3])
+            rows[3:] = []
+
+        def foreign(file):  # a file saved for another transcript, named as this one's
+            data = file.read_bytes()
+            end = data.index(b'\n')
+            file.write_bytes(json.dumps({**json.loads(data[:end]), 'path': str(self.path) + 'x'}).encode() + data[end:])
+
+        for name, change in (('a damaged section', section), ('another reader version', header(derivation=t.ROW_DERIVATION + 1)),
+                             ('another schema', header(schema=t.ROW_SCHEMA + 1)), ('a file for another transcript', foreign),
+                             ('garbage', lambda file: file.write_bytes(b'not an index')),
+                             ('a same-length rewrite', rewritten), ('another inode', replaced)):
+            with self.subTest(f'{name} means a cold read'):
+                changed(change)
+        with self.subTest('a file past the size bound means a cold read'):
+            file = saved()
+            with patch.object(t, 'ROW_STORE_BYTES', 64):
+                view, count = parsed_reading()
+            self.assertEqual(count, len(rows))
+        with self.subTest('a shorter file means a cold read'):
+            changed(shorter)
+
+        with self.subTest('it is written at most every ROW_SAVE_INTERVAL, and never by a read with little time left'):
+            file = saved()
+            written = file.stat().st_mtime_ns
+            add({'type': 'user', 'origin': {'kind': 'composer'}, 'promptId': 'pa', 'message': {'role': 'user', 'content': 'more'}})
+            self.write(rows)
+            adapter.transcript_view(self.session())  # the same process, within the interval: not written again
+            self.assertEqual(file.stat().st_mtime_ns, written)
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+
+            class Short:  # a turn event's read: 0.5 s
+                deadline = time.monotonic() + .5
+
+                def check(self):
+                    pass
+            adapter.transcript_view(self.session(), reader=Short())
+            self.assertFalse(store.exists())
+
+        with self.subTest('a read that finished too late to write leaves it to the next process, which writes it once'):
+            # A big transcript's full read can end close to its deadline; the host's worker then builds the index.
+            expected = cold()
+            t._transcripts.clear()
+            self.assertTrue(adapter.transcript_index(self.session()))
+            row_file = next(store.iterdir())
+            written = row_file.stat().st_mtime_ns
+            view, count = parsed_reading()  # a new process takes it over
+            self.assertEqual(count, 0)
+            self.assertEqual((view.rows, view.history), (expected.rows, expected.history))
+            self.assertTrue(adapter.transcript_index(self.session()))  # current already: not written again
+            self.assertEqual(row_file.stat().st_mtime_ns, written)
+
+        class Clocked:  # a read's deadline on the adapter's clock, which a stand-in moves
+            def __init__(self, deadline, now):
+                self.deadline, self.now = deadline, now
+
+            def check(self):
+                if self.now[0] >= self.deadline:
+                    raise TimeoutError('deadline')
+
+        with self.subTest("an optional save stops at the read's deadline, writing nothing, and the view stands"):
+            expected = cold()
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            now, serialize = [0.0], t.Transcript.row_sections
+
+            def slow(index, analysis):  # serializing takes the rest of the read's time
+                result = serialize(index, analysis)
+                now[0] = 5.0
+                return result
+            with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(t.Transcript, 'row_sections', slow):
+                view = adapter.transcript_view(self.session(), reader=Clocked(3.0, now))
+            self.assertFalse(store.exists() and any(store.iterdir()))
+            self.assertEqual(view.rows, expected.rows)
+
+        with self.subTest('a short read with a stale saved index still reads the transcript as it is now'):
+            saved()  # an index of the transcript as it was
+            add({'type': 'user', 'origin': {'kind': 'composer'}, 'promptId': 'pz', 'message': {'role': 'user', 'content': 'fresh'}})
+            self.write(rows)
+            t._transcripts.clear()
+            now, loaded = [0.0], []
+            real = t._load_rows
+            with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(t, '_load_rows', lambda *a: loaded.append(1) or real(*a)):
+                view = adapter.transcript_view(self.session(), reader=Clocked(0.5, now))
+            self.assertEqual(loaded, [])  # a 0.5 s read neither loads nor saves the optional index
+            self.assertEqual(view.rows[-1].preview, 'fresh')
+
+        with self.subTest('after a same-length rewrite, transcript_index writes the index of the new bytes'):
+            file = saved()
+            before = file.read_bytes()
+            text = self.path.read_bytes()
+            self.assertIn(b'fresh', text)
+            self.path.write_bytes(text.replace(b'fresh', b'FRESH', 1))  # the same length, an earlier row's bytes
+            os.utime(self.path, ns=(self.path.stat().st_atime_ns, self.path.stat().st_mtime_ns + 1_000_000))
+            self.assertTrue(adapter.transcript_index(self.session()))  # the same process: its earlier save covers other bytes
+            self.assertNotEqual(file.read_bytes(), before)
+
+        with self.subTest('a linked index folder receives no index'):
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            elsewhere = self.work / 'elsewhere'
+            elsewhere.mkdir()
+            store.symlink_to(elsewhere, target_is_directory=True)
+            self.assertEqual(adapter.transcript_view(self.session()).rows, cold().rows)
+            self.assertEqual(list(elsewhere.iterdir()), [])
+            store.unlink()
+
+        with self.subTest('a deadline during the write leaves no index and no temporary file'):
+            class Cut(Exception):
+                pass
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            writing, real = [], t.secrets.token_hex
+
+            def started(*args, **kwargs):  # the deadline passes as the temporary file is named, right before it exists
+                writing.append(1)
+                return real(*args, **kwargs)
+
+            class Lapsing:
+                deadline = 0
+
+                def check(self):
+                    if writing:
+                        raise Cut()
+            with patch.object(t.secrets, 'token_hex', started), self.assertRaises(Cut):
+                adapter.transcript_index(self.session(), reader=Lapsing())
+            self.assertEqual(list(store.iterdir()) if store.exists() else [], [])
+
+        with self.subTest('a FIFO named like the index never blocks the read, which reads the transcript instead'):
+            expected = cold()
+            t._transcripts.clear()
+            store.mkdir()
+            fifo = t.row_file(store, self.path)
+            os.mkfifo(fifo)
+            done = []
+            worker = threading.Thread(target=lambda: done.append(adapter.transcript_view(self.session())), daemon=True)
+            worker.start()
+            worker.join(5)
+            blocked = worker.is_alive()
+            if blocked:  # free it before failing
+                os.close(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
+                worker.join(5)
+            self.assertFalse(blocked, 'a FIFO at the index path blocked the read')
+            self.assertEqual(len(done), 1)
+            self.assertEqual(done[0].rows, expected.rows)
+
+        with self.subTest("an optional save past its deadline starts no later section's projection"):
+            expected = cold()
+            t._transcripts.clear()
+            now, projected, real = [0.0], [], t._saved_field
+
+            def project(name, value):  # the first projection takes the rest of the read's time
+                projected.append(name)
+                now[0] = 5.0
+                return real(name, value)
+            with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(t, '_saved_field', project):
+                view = adapter.transcript_view(self.session(), reader=Clocked(3.0, now))
+            self.assertEqual(set(projected), {t._ROW_FIELDS[0]})
+            self.assertFalse(store.exists() and any(store.iterdir()))
+            self.assertEqual(view.rows, expected.rows)
+
+        with self.subTest('a take-over cut while it accounts the rows publishes nothing and keeps them for its retry'):
+            file = saved()
+            fresh = t.Transcript(self.path, rows=True)
+            self.assertTrue(fresh.adopt_rows(file.read_bytes()))
+            pending, accounted, real = fresh.saved_rows, [], t._account
+
+            class Cut(Exception):
+                pass
+
+            def account(*args):
+                accounted.append(1)
+                return real(*args)
+
+            def check():
+                if accounted:
+                    raise Cut()
+            with patch.object(t, '_account', account), t.open_regular(self.path) as handle, self.assertRaises(Cut):
+                fresh._take_rows(handle, os.fstat(handle.fileno()), check)
+            self.assertEqual(len(accounted), 1)
+            self.assertIs(fresh.saved_rows, pending)
+            self.assertEqual((fresh.offset, fresh.entries, fresh.responses), (0, [], {}))
+            with t.open_regular(self.path) as handle:
+                self.assertTrue(fresh._take_rows(handle, os.fstat(handle.fileno()), None))
+            self.assertEqual(fresh.offset, self.path.stat().st_size)
+
+        with self.subTest('a read that overtakes a save leaves it marking only what it wrote'):
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            real = t.os.replace
+            later = {'type': 'system', 'subtype': 'turn_duration', 'durationMs': 1, 'uuid': str(uuid4()),
+                     'sessionId': self.native, 'timestamp': '2026-11-20T10:59:00Z'}
+
+            def publish(source, target, **kwargs):  # as the save moves its file in, Claude appends and a read takes it
+                if str(target).endswith('.idx') and later is not None:
+                    self.path.write_bytes(self.path.read_bytes() + (json.dumps(later) + '\n').encode())
+                    t._transcripts[self.path].read(prove=True)
+                return real(source, target, **kwargs)
+            with patch.object(t.os, 'replace', publish):
+                adapter.transcript_view(self.session())
+            later = None
+            self.assertTrue(adapter.transcript_index(self.session()))
+            header = json.loads(next(store.iterdir()).read_bytes().split(b'\n', 1)[0])
+            self.assertEqual(header['offset'], self.path.stat().st_size)
+
+        def rewrite(old, new):  # the same length, so only the bytes say it changed
+            data = self.path.read_bytes()
+            self.assertIn(old, data)
+            self.path.write_bytes(data.replace(old, new, 1))
+            status = self.path.stat()
+            os.utime(self.path, ns=(status.st_atime_ns, status.st_mtime_ns + 1_000_000))
+
+        with self.subTest('a save a rewrite overtook never replaces what the newer save published'):
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            real, overtaken = t.secrets.token_hex, []
+
+            def naming(*args, **kwargs):  # as the first save names its file, the transcript changes and is saved again
+                if not overtaken:
+                    overtaken.append(1)
+                    rewrite(b'SECRET-PROMPT-0', b'SECRET-PROMPT-X')
+                    self.assertTrue(adapter.transcript_index(self.session()))
+                return real(*args, **kwargs)
+            with patch.object(t.secrets, 'token_hex', naming):
+                adapter.transcript_view(self.session())
+            self.assertEqual(overtaken, [1])
+            data, file = self.path.read_bytes(), next(store.iterdir())
+            header = json.loads(file.read_bytes().split(b'\n', 1)[0])
+            self.assertEqual((header['offset'], header['prefix']), (len(data), hashlib.sha256(data).hexdigest()))
+            written = file.read_bytes()
+            self.assertTrue(adapter.transcript_index(self.session()))
+            self.assertEqual(file.read_bytes(), written)
+
+        with self.subTest('an analysis of rows a rewrite replaced is never saved with the new rows'):
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            index = t.newest_copy(self.native, self.environment, (str(self.work),))
+            analysis = t.analyse(index)
+            rewrite(b'SECRET-ANSWER-0', b'SECRET-ANSWER-Y')
+            index.read(prove=True)
+            self.assertEqual(len(index.entries), analysis.count)  # the same count, other rows
+            self.assertFalse(t.save_rows(index, analysis, store))
+            self.assertFalse(store.exists() and any(store.iterdir()))
+
+        with self.subTest("a save waiting on the index lock stops at the read's deadline, and the view stands"):
+            expected = cold()
+            t._transcripts.clear()
+            now, real = [0.0], t.secrets.token_hex
+            holding, released = threading.Event(), threading.Event()
+
+            def holder():  # another read holds the lock; while it does, the read's deadline passes
+                with t._transcripts_lock:
+                    holding.set()
+                    time.sleep(0.3)
+                    now[0] = 5.0
+                    time.sleep(3)
+                released.set()
+
+            def naming(*args, **kwargs):
+                if not holding.is_set():
+                    threading.Thread(target=holder, daemon=True).start()
+                    holding.wait(5)
+                return real(*args, **kwargs)
+            with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(t.secrets, 'token_hex', naming):
+                view = adapter.transcript_view(self.session(), reader=Clocked(3.0, now))
+            self.assertFalse(released.is_set(), 'the view waited on the lock past its deadline')
+            released.wait(5)
+            self.assertFalse(store.exists() and any(store.iterdir()))
+            self.assertEqual(view.rows, expected.rows)
+
+        with self.subTest('a save whose lock acquire crosses the deadline stops there, and publishes nothing'):
+            expected = cold()
+            t._transcripts.clear()
+            now, real, started = [0.0], t.secrets.token_hex, threading.Event()
+
+            def holder():  # another read holds the lock and lets go right as the deadline passes
+                with t._transcripts_lock:
+                    started.set()
+                    time.sleep(0.3)
+                    now[0] = 5.0
+
+            def naming(*args, **kwargs):
+                if not started.is_set():
+                    threading.Thread(target=holder, daemon=True).start()
+                    started.wait(5)
+                return real(*args, **kwargs)
+            with patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: now[0])), \
+                    patch.object(t.secrets, 'token_hex', naming):
+                view = adapter.transcript_view(self.session(), reader=Clocked(3.0, now))
+            self.assertFalse(store.exists() and any(store.iterdir()))
+            self.assertEqual(view.rows, expected.rows)
+
+        with self.subTest("an evicted index's save never replaces its successor's file"):
+            t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)
+            real, evicted = t.secrets.token_hex, []
+
+            def naming(*args, **kwargs):  # mid-save, the index is evicted, the transcript changes, a successor saves
+                if not evicted:
+                    evicted.append(t._transcripts.pop(self.path))
+                    rewrite(b'SECRET-PROMPT-X', b'SECRET-PROMPT-Z')
+                    self.assertTrue(adapter.transcript_index(self.session()))
+                return real(*args, **kwargs)
+            with patch.object(t.secrets, 'token_hex', naming):
+                adapter.transcript_view(self.session())
+            self.assertEqual(len(evicted), 1)
+            data, file = self.path.read_bytes(), next(store.iterdir())
+            header = json.loads(file.read_bytes().split(b'\n', 1)[0])
+            self.assertEqual((header['offset'], header['prefix']), (len(data), hashlib.sha256(data).hexdigest()))
+
     def test_a_read_past_its_deadline_starts_no_further_step_keeps_nothing_and_its_retry_reads_it_all(self):
         """A turn event's read has 0.5 s and a cold index of a large transcript takes tens of seconds: one deadline must
         stop every step that can block or grow, wherever the time runs out, and leave nothing partial behind, or a
@@ -73,8 +489,8 @@ class ClaudeTranscriptReadingTest(BaseTest):
         clock, log = [0.0], []
         state = {'slow': None, 'when': None}  # the step made slow, and on which call
 
-        class Reader:  # core's reader: one deadline, which the fake clock passes when the slow step runs
-            deadline = 1.0
+        class Reader:  # core's reader: one deadline, with room to load the saved index (ROW_SAVE_MARGIN)
+            deadline = 3.0
 
             def check(self):
                 if clock[0] >= self.deadline:
@@ -86,11 +502,12 @@ class ClaudeTranscriptReadingTest(BaseTest):
                 calls = sum(1 for each, _ in log if each == name)  # this call's number
                 late = name == state['slow'] and clock[0] < Reader.deadline
                 if late and state['when'] == 'start' and calls == 1:
-                    clock[0] = 2.0
-                result = call(*args, **kwargs)
-                if late and state['when'] == calls:
-                    clock[0] = 2.0  # at the end of that call: it finished, and nothing after it may start
-                return result
+                    clock[0] = Reader.deadline + 1
+                try:
+                    return call(*args, **kwargs)
+                finally:
+                    if late and state['when'] == calls:
+                        clock[0] = Reader.deadline + 1  # at the end of that call (even one that raised): nothing after it may start
             return run
 
         real_scandir, real_open = os.scandir, t.open_regular
@@ -125,13 +542,22 @@ class ClaudeTranscriptReadingTest(BaseTest):
                  'the history walk': (t, 'walk'), 'the history membership': (t, '_on_history'),
                  'the context': (t, 'in_context'), 'the history refs': (t, '_history_refs'),
                  "the view's start of context": (t, 'context_from'), 'a view fact': (claude, '_fact')}
-        analysis_steps = set(list(steps)[:steps.__len__() - 2])
+        view_steps = {"the view's start of context", 'a view fact'}
+
+        store = Path(self.session().session_file).parent / t.ROW_STORE
+        kept_index = {}  # the saved row index a take-over pass starts each read from
 
         def read(reader, bodies=None):
             t._transcripts.clear()
+            shutil.rmtree(store, ignore_errors=True)  # a cold read, or one from exactly the saved index below
+            if kept_index:
+                store.mkdir()
+                for name, data in kept_index.items():
+                    (store / name).write_bytes(data)
             clock[0], log[:] = 0.0, []
             patches = [patch.object(claude, 'time', SimpleNamespace(monotonic=lambda: clock[0])),
-                       patch.object(t.os, 'scandir', listing), patch.object(t, 'open_regular', opening)]
+                       patch.object(t.os, 'scandir', listing), patch.object(t, 'open_regular', opening),
+                       patch.object(t, 'ROW_SAVE_INTERVAL', 0)]
             patches += [patch.object(module, name, timed(step, getattr(module, name)))
                         for step, (module, name) in ((s, w) for s, w in steps.items() if w)]
             with contextlib.ExitStack() as stack:
@@ -152,24 +578,37 @@ class ClaudeTranscriptReadingTest(BaseTest):
                     out.append((before, calls[before]))
             return out
 
+        def boundary_table(reading):
+            for slow, when in boundaries():
+                with self.subTest(read=reading, slow=slow, when=when):
+                    state.update(slow=slow, when=when)
+                    with self.assertRaises(Cut):
+                        read(Reader())
+                    state.update(slow=None)
+                    self.assertIn(slow, [name for name, _ in log])
+                    self.assertEqual([name for name, at in log if at >= Reader.deadline], [])  # nothing started after
+                    kept = t._transcripts.get(self.path)
+                    if kept is not None:  # no view, no part of a read, and an analysis only if it finished in time
+                        self.assertEqual(kept.views, {})
+                        self.assertIn(kept.offset, (0, self.path.stat().st_size))
+                        if slow not in view_steps:
+                            self.assertIsNone(getattr(kept, 'analysis', None))
+                    self.assertFalse(store.exists() and not kept_index)  # a bounded read never saves the row index
+                    view = read(None)
+                    self.assertEqual((view.rows, view.history), (fresh.rows, fresh.history))
+
         read(None)  # a dry run: the order the steps run in
         self.assertEqual({name for name, _ in log}, set(steps))  # every step runs in a whole read
-        for slow, when in boundaries():
-            with self.subTest(slow=slow, when=when):
-                state.update(slow=slow, when=when)
-                with self.assertRaises(Cut):
-                    read(Reader())
-                state.update(slow=None)
-                self.assertIn(slow, [name for name, _ in log])
-                self.assertEqual([name for name, at in log if at >= Reader.deadline], [])  # nothing started after
-                kept = t._transcripts.get(self.path)
-                if kept is not None:  # no view, no part of a read, and an analysis only if it finished in time
-                    self.assertEqual(kept.views, {})
-                    self.assertIn(kept.offset, (0, self.path.stat().st_size))
-                    if slow in analysis_steps:
-                        self.assertIsNone(getattr(kept, 'analysis', None))
-                view = read(None)
-                self.assertEqual((view.rows, view.history), (fresh.rows, fresh.history))
+        boundary_table('cold')
+        read(None)  # an unbounded read saves the row index: the take-over pass starts each read from that copy
+        kept_index.update({file.name: file.read_bytes() for file in store.iterdir()})
+        self.assertTrue(kept_index)
+        steps.update({'loading the saved row index': (t, '_load_rows'), 'taking the saved rows': (t.Transcript, 'adopt_rows')})
+        read(None)
+        self.assertNotIn('parsing a row', {name for name, _ in log})  # an unchanged take-over parses no row
+        self.assertTrue({'loading the saved row index', 'taking the saved rows'} <= {name for name, _ in log})
+        boundary_table('take-over')
+        kept_index.clear()
 
         everything = list(range(len(fresh.rows)))
         read(None, everything)
@@ -201,7 +640,7 @@ class ClaudeTranscriptReadingTest(BaseTest):
                 worker = threading.Thread(target=waiting)
                 worker.start()
                 time.sleep(.1)  # it reaches the lock and waits
-                clock[0] = 2.0  # the deadline passes while it waits
+                clock[0] = Reader.deadline + 1  # the deadline passes while it waits
                 worker.join(5)
                 self.assertFalse(worker.is_alive())  # it gave up without the lock being released
             self.assertEqual(outcome, ['cut'])

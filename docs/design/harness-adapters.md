@@ -1871,6 +1871,44 @@ process that reads usage writes it, whole and moved over the old one, at most
 every few seconds, for the session's current transcripts only; past 32 MiB it is
 neither written nor read.
 
+A transcript read's full row index is kept the same way, in `claude-rows/` in
+the agent's folder, one file per transcript copy, so a new process (the
+dashboard, the plugin host) doesn't parse a large transcript from its start. The
+index is mv2's own state, checked against corruption and transcript change, not
+against deliberate rewriting by the same user. Its header names the schema, the
+reader's derivation version (changed whenever the reader would derive a row's
+fields or labels differently), the transcript's path, and the inode, length,
+SHA-256 and line chain of the bytes it covers; then one section per row field,
+each with its own length and SHA-256, and the labels and history order from the
+newest row. It holds no row text: each row keeps only its labelling mark, which
+of Claude's markers its text starts with, and of a reply's usage only the
+counters mv2 reads; a view reads a prompt's preview or a command's name and
+arguments from the transcript at that row's offset. The folder is opened
+without following a link, and the index is read and written relative to it, so
+a linked folder is neither read nor written, and a FIFO in its place never
+blocks a read. A save writes one snapshot of the rows and the proof of the
+bytes they cover, taken together, and marks only that snapshot saved, so a read
+that goes on meanwhile is written by the next save. Its labels and history must
+be of exactly those rows, and an older save never replaces what a newer one for
+the same transcript published: only the index the process still holds for it
+publishes, after one more deadline check. A read whose deadline leaves less
+than 2 s neither loads nor saves it: reading the transcript itself comes first.
+A new
+process takes it over only after checking every section and hashing the
+transcript's bytes up to the point it covers, then parses only what Claude wrote
+since; another schema, version or path, a damaged section, another inode, a
+shorter file, another digest or a file past 128 MiB means a read from the start.
+It is written whole and moved over the old one, at most every 5 s per
+transcript, by a process that has just made a full view, and only when that
+read's deadline leaves 2 s, so a turn event's 0.5 s read never writes it; the
+save stops at that deadline, writing nothing, and the view stands. A
+big transcript's full read can end too close to its deadline to write one, so
+the adapter's `transcript_index` brings the saved index up to the transcript for
+a process with no report-path limit (the plugin host's worker), under that
+process's own deadline: it writes only when the saved copy is behind, once per
+change, and a deadline during the write leaves neither an index nor a temporary
+file.
+
 An accepted `send` means written to the Claude session inbox; the receipt
 confirms delivery. The mod was tested against Claude Code 2.1.330; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
