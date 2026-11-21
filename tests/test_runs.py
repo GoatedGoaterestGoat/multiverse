@@ -602,6 +602,32 @@ class RunsTest(BaseTest):
                 self.assertNotIn('ssss', caught.exception.reason)
                 self.no_content()
 
+    def test_a_slow_group_listing_still_proves_an_ended_run_stopped(self):
+        """plugins under a load of about 30, and its live agent's merges: "The private run could not be proven
+        stopped" after runs that had ended, since each group listing was capped at half a second and a loaded
+        machine's listing took longer every time. A group that never empties is still unproven."""
+        for case in ('a listing that needs 0.6 s', 'a group that never empties'):
+            with self.subTest(case):
+                child = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+                track(pid=child.pid)
+                timeouts = []
+
+                def members(pgid, timeout):
+                    timeouts.append(timeout)
+                    if case == 'a group that never empties':
+                        return [pgid + 1]
+                    if timeout < .6:
+                        raise subprocess.TimeoutExpired(['ps'], timeout)
+                    return []
+                try:
+                    until(lambda: run_supervisor._exited(child))
+                    with patch.object(run_supervisor, '_members', side_effect=members):
+                        stopped = run_supervisor._stop(child)
+                    self.assertIs(stopped, case == 'a listing that needs 0.6 s', timeouts[:5])
+                finally:
+                    if child.returncode is None:
+                        child.wait(timeout=5)
+
     def test_cleanup_proof_and_doctor_preserve_uncertain_targets(self):
         """A leftover cleanup needs dead producer identities and unchanged files; otherwise it can delete a
         replacement's data, while doctor must never mutate the evidence it reports."""
