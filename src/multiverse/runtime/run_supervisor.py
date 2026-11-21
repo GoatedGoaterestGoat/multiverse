@@ -140,7 +140,9 @@ def _stop(child):
             pass  # macOS can reject signalling a zombie-only group; still prove it empty below.
         end = min(deadline, time.monotonic() + grace)
         while time.monotonic() < end:
-            if _empty_group(child.pid, max(.05, min(.5, end - time.monotonic()))):
+            # Each listing may use the rest of this signal's grace: on a loaded machine one full listing can take
+            # over half a second, and a shorter cap would fail every one, leaving an ended run unproven.
+            if _empty_group(child.pid, max(.05, end - time.monotonic())):
                 child.wait(timeout=max(.05, deadline - time.monotonic()))
                 return True
             time.sleep(.03)
