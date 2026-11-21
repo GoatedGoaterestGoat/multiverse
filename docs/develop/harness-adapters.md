@@ -540,9 +540,11 @@ A disposable supervisor owns the child's new process group. One deadline covers
 preparation, execution and interpretation; cancellation, timeout and the calling
 worker's death stop that group with TERM then KILL and bounded cleanup. The leader
 is not reaped until group cleanup, so a reused PID grants no control. The native
-child waits behind a gate until its process identity is saved. An unavailable
-identity lookup is retried for at most 5 seconds
-within the run's remaining deadline, still checking cancellation and scope. This
+child waits behind a gate until its process identity is saved. The calling
+process, the supervisor and the child each have their start recorded, and an
+unavailable lookup of any of them (one `ps` can take seconds on a loaded machine)
+is retried for at most 5 seconds within the run's remaining deadline, still
+checking cancellation and scope; a start still unknown then refuses the run. This
 retries only observation; the native command has not started. Agent and
 universe folder identities are captured before the API reads the agent's storage
 and checked after that read and the preliminary options probe. The same immutable
