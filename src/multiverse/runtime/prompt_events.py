@@ -1,6 +1,7 @@
 """Record metadata-only edges for waiting prompts and retained questions."""
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 import re
@@ -8,7 +9,7 @@ import time
 from uuid import uuid4
 
 from ..harnesses.types import NativeResult, PromptClosed, PromptOpened, PromptOutcomeQuery, SessionHandle, TurnStarted
-from ..store import lock, open_replaced, read
+from ..store import lock, now, open_replaced, read
 from . import turn_events
 
 
@@ -65,8 +66,9 @@ def _new_ledger(launch=None, native_id=None):
             'open': {}, 'closed': [], 'pending': []}
 
 
-def _enqueue(ledger, kind, launch, data):
-    ledger['pending'].append({'key': uuid4().hex, 'kind': kind, 'launch': launch, 'data': data})
+def _enqueue(ledger, kind, launch, data, *, at=None):
+    ledger['pending'].append({'key': uuid4().hex, 'kind': kind, 'launch': launch,
+                              'data': data, 'at': at if at is not None else now()})
 
 
 def _answer_outcome(agent_dir, ledger, transition):
@@ -124,12 +126,14 @@ def _select(agent_dir, ledger, launch, native_id, generation):
     return True
 
 
-def _load(path):
+def _load(path, *, expected_stamp=None):
     try:
         with open_replaced(path) as stream:
             ledger = json.load(stream)
+            if expected_stamp is not None and _file_stamp(os.fstat(stream.fileno())) != expected_stamp:
+                return None
     except FileNotFoundError:
-        return _new_ledger()
+        return None if expected_stamp is not None else _new_ledger()
     if (not isinstance(ledger, dict) or type(ledger.get('schema')) is not int or ledger['schema'] != 1
             or not isinstance(ledger.get('open'), dict) or not isinstance(ledger.get('closed'), list)
             or not isinstance(ledger.get('pending'), list) or 'generation' not in ledger
@@ -285,11 +289,11 @@ def finish(agent_dir, launch_id, *, native_id=None, cause='stopped', previous=Fa
 def _journal_event(agent_dir, row):
     from ..plugins import events
 
-    return events.prompt_event(agent_dir, row['kind'], row['launch'], row['data'], key=row['key'])
+    return events.prompt_event(agent_dir, row['kind'], row['launch'], row['data'], key=row['key'], at=row.get('at'))
 
 
-def publish(agent_dir):
-    """Publish one ordered prefix at a time without holding the staging lock across journal I/O."""
+def publish(agent_dir, *, recovery_stop=None):
+    """Publish without holding the staging lock across I/O. Host recovery tries one prefix without waiting on staging."""
     from ..plugins import events
 
     folder = Path(agent_dir) / 'prompts' / 'journal'
@@ -299,25 +303,31 @@ def publish(agent_dir):
     limit = max(1, min(events.TAIL_BYTES, events.SEGMENT_BYTES) // events.EVENT_BYTES - 1)
     try:
         with lock(folder / '.publish.lock', create_parent=False, blocking=False):
-            while _publish_prefix(agent_dir, limit):
-                pass
+            if recovery_stop is None:
+                while _publish_prefix(agent_dir, limit):
+                    pass
+            elif not recovery_stop.is_set():
+                _publish_prefix(agent_dir, limit, recovery_stop=recovery_stop)
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
         pass
 
 
-def _publish_prefix(agent_dir, limit):
+def _publish_prefix(agent_dir, limit, *, recovery_stop=None):
     from ..plugins import events
 
     rows = []
 
     def capture(ledger):
-        rows.extend(ledger['pending'])
+        pending = ledger['pending']
+        rows.extend(pending if recovery_stop is None else pending[:limit])
         return False
 
-    _edit(agent_dir, capture, create=False)
+    _edit(agent_dir, capture, create=False, blocking=recovery_stop is None)
     keys = []
     written = 0
     for row in rows:
+        if recovery_stop is not None and recovery_stop.is_set():
+            break
         disposition = _journal_event(agent_dir, row)
         if disposition not in ('written', 'unsubscribed'):
             break
@@ -338,13 +348,33 @@ def _publish_prefix(agent_dir, limit):
         acknowledged = True
         return True
 
-    _edit(agent_dir, acknowledge, create=False)
+    _edit(agent_dir, acknowledge, create=False, blocking=recovery_stop is None)
     if acknowledged:
         events.acknowledge(agent_dir, keys)
     return acknowledged and (written == limit or len(keys) == len(rows))
 
 
-def publish_ordered(agent_dir, kind, launch_id, data):
+def _file_stamp(status):
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns
+
+
+def outbox_stamp(agent_dir):
+    """A stat-only check for changes to an outbox the host already drained."""
+    path = Path(agent_dir) / 'prompts' / 'journal' / 'events.json'
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        return None
+    return _file_stamp(status)
+
+
+def outbox_empty(agent_dir, stamp):
+    """True only if the outbox with the given stamp can be read and has no pending work."""
+    ledger = _load(Path(agent_dir) / 'prompts' / 'journal' / 'events.json', expected_stamp=stamp)
+    return ledger is not None and not ledger['pending']
+
+
+def publish_ordered(agent_dir, kind, launch_id, data, *, at=None):
     """When earlier prompt edges are pending, queue the following lifecycle event behind them."""
     from ..plugins import events
 
@@ -356,7 +386,7 @@ def publish_ordered(agent_dir, kind, launch_id, data):
         nonlocal staged
         if not ledger['pending']:
             return False
-        _enqueue(ledger, kind, launch_id, data)
+        _enqueue(ledger, kind, launch_id, data, at=at)
         staged = True
         return True
 

@@ -159,11 +159,20 @@ def needed(root):
     return result
 
 
-def _log(root, text):
+def _log(root, text, wait=0.0):
     try:
-        loader.append_log(host_directory(root) / "host.log", f"{now()} {text}")
+        loader.append_log(host_directory(root) / "host.log", f"{now()} {text}", blocking=False, wait=wait)
     except OSError:
         pass
+
+
+STOPPING_LOG_WAIT = 0.2  # seconds a worker's last line waits for host.log: its siblings stop, and log, at once
+
+
+def _stopping(root, name):
+    """A worker's last line when its supervisor is gone. Every worker notices at the same poll and logs at once, so
+    this one waits briefly for the others' writes rather than being skipped as other host lines are."""
+    _log(root, f"{name}: supervisor gone; stopping", wait=STOPPING_LOG_WAIT)
 
 
 def _held(root):
@@ -198,6 +207,39 @@ def running(root):
     return _age(recorded.get("updated_at", ""), unknown=float("inf")) <= HEARTBEAT_SECONDS
 
 
+def _recover_agent_events(root, stopping):
+    """Retry ordered events independently of callbacks, heartbeats and plugin handlers."""
+    from ..runtime import prompt_events
+    from ..universe import agents
+
+    idle = {}
+    while not stopping.is_set():
+        previous_idle, idle = idle, {}
+        try:
+            for scope in universes.tree(root):
+                for record in agents.record_paths(scope):
+                    if stopping.is_set():
+                        return
+                    directory = record.parent
+                    if directory.is_symlink():
+                        continue
+                    try:
+                        stamp = prompt_events.outbox_stamp(directory)
+                        if stamp is None:
+                            continue
+                        if stamp == previous_idle.get(directory):
+                            idle[directory] = stamp
+                            continue
+                        prompt_events.publish(directory, recovery_stop=stopping)
+                        if not stopping.is_set() and prompt_events.outbox_empty(directory, stamp):
+                            idle[directory] = stamp
+                    except Exception as error:
+                        _log(root, f"could not recover events for {directory.name} ({type(error).__name__})")
+        except Exception as error:
+            _log(root, f"ordered event recovery scan failed ({type(error).__name__})")
+        stopping.wait(WORKER_POLL_SECONDS)
+
+
 def supervise(root, *, exit_when_idle=True, stopping=None):
     """Run the supervisor until stopped (SIGTERM, or `stopping` when given) or no plugin needs it."""
     root = Path(root).resolve()
@@ -217,6 +259,10 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     beating = threading.Event()
     beat = threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True)
     beat.start()
+    recovery_stopping = threading.Event()
+    recovery = threading.Thread(target=_recover_agent_events, args=(root, recovery_stopping),
+                                name="host ordered events", daemon=True)
+    recovery.start()
     try:
         while not stopping.is_set():
             if _restart_requested(root, started):
@@ -225,6 +271,8 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 _log(root, "restarting with the new code: draining the workers")
                 _write_status(root, started, workers, restarts, stopped, code=running_code, restarting=True,
                               pid_started=as_started)
+                recovery_stopping.set()
+                recovery.join()
                 if _drain_workers(list(workers.values()), stopping):
                     workers.clear()
                     restart = True
@@ -268,6 +316,8 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     finally:
         # All at once, each finishing its call in flight; the heartbeat goes on meanwhile, so the host still counts
         # as running and nothing starts a second one beside it.
+        recovery_stopping.set()
+        recovery.join()
         _stop_workers(list(workers.values()))
         beating.set()
         beat.join(5)  # no status write left half way when the new code takes over the process
@@ -734,7 +784,7 @@ def work(root, name, supervisor=None):
         supervisor = os.getppid()
     root = Path(root).resolve()
     if os.getppid() != supervisor:
-        _log(root, f"{name}: supervisor gone; stopping")
+        _stopping(root, name)
         return 0
     loader.process = "host"
     # Before loading: a drain (SIGUSR1) that comes while the plugin loads must not end the process (its default).
@@ -761,7 +811,7 @@ def work(root, name, supervisor=None):
     try:
         while not stopping.is_set() and not failed.is_set():
             if os.getppid() != supervisor:
-                _log(root, f"{name}: supervisor gone; stopping")
+                _stopping(root, name)
                 orphaned = True
                 break
             if time.monotonic() - refreshed > 5:
@@ -793,7 +843,7 @@ def work(root, name, supervisor=None):
         _finish_calls(loaded, draining, supervisor)
         services.stop(wait=None if draining.is_set() else SERVICES_STOP_SECONDS, supervisor=supervisor)
         if not orphaned and os.getppid() != supervisor:  # gone while it drained or stopped, after the loop
-            _log(root, f"{name}: supervisor gone; stopping")
+            _stopping(root, name)
             orphaned = True
         if orphaned and os.getpgrp() == os.getpid():
             # Nobody is left to end this worker's process group (the supervisor does that): end it here, with what
