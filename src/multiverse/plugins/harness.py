@@ -122,9 +122,9 @@ def launch_plan(info, base_settings=None, base_environment=None):
     a plugin that would change them is left out, so the adapter's own values
     and entries never change; a plugin's hook entries come after the
     adapter's own in each list. `claude_settings` and `environment` in the plan are the
-    merged result, base included. Claude settings reach only a bridged
-    launch (a plain one passes no --settings); a plugin that sets them in a
-    plain launch is recorded as skipped.
+    merged result, base included. Plugins' Claude settings reach only a bridged
+    launch (a plain one passes only the adapter's own --settings); a plugin that
+    sets them in a plain launch is recorded as skipped.
 
     Each manifest entry fits the launch (harness version, bridge) on its own,
     and one that does not is recorded as `unfit`. A plugin none of whose

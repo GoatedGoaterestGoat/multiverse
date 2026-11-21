@@ -1426,7 +1426,7 @@ session. Seen on 2.1.302, it keeps `--resume`, `--settings`, every
 `--plugin-dir`, the model, the effort, `--append-system-prompt` and the
 environment, and turns `--dangerously-skip-permissions` into the session's
 permission mode and allowed tools; it drops `--messaging-socket-path`, `--name`
-and `--add-dir`. Claude then listens on its own default socket
+and `--add-dir` (mv2 passes the agent's folder in `--settings`, which it keeps). Claude then listens on its own default socket
 (`/tmp/cc-socks/<pid>.sock`, listed in `~/.claude/sessions/<pid>.json`) and
 publishes the key for that path, while the mod and its status and usage reports
 keep working. mv2's own socket then has no key, so the adapter follows Claude to
@@ -1444,7 +1444,7 @@ When it cannot follow (the file is another process's, or the launch was recorded
 before mv2 kept the start time), `mv2 list`, `inspect` and `send` say "Claude
 relaunched itself (/restart) without mv2's inbox; restart the agent". Restarting
 the agent through mv2 (stop, then resume) brings all of mv2's flags back,
-including `--name` and `--add-dir`.
+including `--name`.
 
 `/clear` keeps the process but moves it to a new session ID, and Claude's inbox
 drops a message addressed to another session. mv2 follows the move. With the
@@ -1501,7 +1501,25 @@ passes `--messaging-socket-path` (the core-assigned private socket),
 `--plugin-dir` for the source-owned `multiverse` mod, `--settings` with
 `crossSessionInbound: accept` (Claude otherwise holds peer messages for approval
 when the session skips permission prompts) and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
-(mods are early access). `send` reads the key Claude publishes for that socket and
+(mods are early access).
+
+The built-in Claude adapter gives every launch, bridge or plain, the agent's own
+folder as an extra working directory for permissions (the workspace stays the
+current directory) through `--settings`, as `permissions.additionalDirectories`.
+It is not `--add-dir`: since Claude Code 2.1.330 that flag stops the launch at an
+"Adding a new directory" dialog when the folder is under no folder the person
+trusts, because Claude then also loads the folder's own skills, commands and
+agents. The setting grants only access to the files, needs no dialog and trusts
+nothing on the person's behalf. Claude keeps only the last `--settings`, so when
+the harness's `args`, `spawn_args` or `resume_args`, as the launch renders them,
+hold anything shaped like their own (even after a `--`, which Claude can take as another flag's value), the
+adapter leaves theirs alone and gives the folder with `--add-dir` instead, as before
+(with that dialog on 2.1.330 when the folder isn't under a trusted one), and the
+bridge's `crossSessionInbound` is lost to theirs as it always was. A harness with
+its own launch recipe (schema 1) passes exactly the flags its recipe names. The
+rule is deliberately broad: an argument that only looks like `--settings`, such
+as a prompt after `--`, also gets `--add-dir`, which keeps both grants as before,
+whereas missing a real one would lose the agent's folder. `send` reads the key Claude publishes for that socket and
 writes one message at `next` priority, addressed to the exact session UUID. Its
 framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`:
 the mode, which the mod honors, and the message ID for its receipt. The mod acts
