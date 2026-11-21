@@ -138,6 +138,18 @@ Compressed reads stream with a 64 MiB decoder-window cap, a 64 MiB row cap, 512 
 
 Truncated or corrupt compression refuses as unknown/error. A compressed file must remain unchanged for its whole read. A rewrite or a newly appearing plain sibling refuses instead of mixing snapshots, so the caller can retry. If Zstandard support is missing, the refusal explains how to restore it.
 
+The reader may keep a metadata index for the selected rollout in the agent's
+state folder. It keeps at most 200,000 rows and 64 MiB on disk, including the
+bounded preview needed for a possible prompt. Row bodies stay in the rollout.
+On a new process or a changed file, the reader hashes every reused complete
+line before using its metadata. It parses new rows and rebuilds from the first
+line whose bytes disagree. A missing, invalid or oversized index leaves a
+regular cold scan. Like other mv2 agent state, the index trusts the local
+account and checks for corruption and native transcript changes. The reader
+checks the launch and conversation at scan boundaries and the deadline between
+rows. Short turn-event reads use the in-memory index when available. Reads
+neither change nor unpack native files.
+
 - Every complete JSONL line is one row. An unfinished last line waits for its newline. Damaged rows remain as `meta` with no body. Refs are native item IDs from response items or inter-agent communication only; session metadata, turn context and events have no item ref. A missing item ID leaves `ref=None`. `call_id` separately correlates a call and its output. Positions chain the hashes of all preceding line bytes. A ref-less prompt gets core's cursor-based turn ID.
 - A user-role `response_item/message` whose content metadata has native `provenance.type=user` is `prompt`, or `mid_turn` after the first input in the same native turn. Native harness/skill/AGENTS.md provenance stays `injected`, as do inherited parent messages. For older rows without provenance, an ordered exact plain-text matching `event_msg/user_message` or `item_completed` with a `UserMessage` item authenticates the input. These event echoes are `meta`. Unpaired or ambiguous legacy inputs stay `injected`; fewer echoes than indistinguishable inputs cannot authenticate one occurrence. Legacy media inputs need native provenance because their UI echoes are not exact model-input copies. Old and new echo streams are counted separately to avoid double counting an input. Unmatched user messages and developer/system messages are `injected`. Message framing never proves provenance, so ordinary input has `source=None`.
 - Native `inter_agent_communication` is `prompt` with source `peer` when `trigger_turn` is true, and `mid_turn` otherwise. Assistant messages, reasoning and tool calls are `response`. Tool outputs are `tool_result`, with their native `call_id`. Other events are `meta`; `turn_aborted` is `injected`.
