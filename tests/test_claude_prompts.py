@@ -151,7 +151,15 @@ class ClaudePromptsTest(BaseTest):
         answered first. Reporting 'answered' on the mod's word alone would be wrong whenever the person was quicker, and
         a decision row proves only which call: rows that disagree with the answer mv2 sent, or with each other, stay
         unknown."""
-        result = lambda **extra: {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': CALL, 'content': 'ok'}]}, **extra}
+        result = lambda content='ok', **extra: {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': CALL, 'content': content}]}, **extra}
+        # Claude 2.1.330's words for a refusal in the call's result, and the note a flag of its may add.
+        rejected = ("The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+                    "the new_string was NOT written to the file). ")
+        note = ("\n\nNote: The user's next message may contain a correction or preference. Pay close attention \u2014 if they "
+                "explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions.")
+        plain_no = rejected + 'STOP what you are doing and wait for the user to tell you how to proceed.' + note
+        typed = rejected + 'To tell you how to proceed, the user said:\nuse a different file name\nand say why'
+        stopped = {'choice': 'stop', 'label': 'No (the turn stopped)', 'meaning': 'stop'}
         decision = lambda verdict, **extra: {'type': 'attachment', 'attachment': {'type': 'hook_permission_decision', 'decision': verdict,
                                                                                   'toolUseID': CALL}, **extra}
         decided = decision('allow')
@@ -178,11 +186,23 @@ class ClaudePromptsTest(BaseTest):
             ('the person allowed it for the session', {'how': 'closed', 'cause': 'resolved'},
              [result(permissionDecision={'decision': 'accept', 'source': 'user_temporary', 'grantScope': 'session'})],
              {'state': 'person', 'person_answer': {'choice': 'allow_session'}}),
-            ('the person refused it', {'how': 'closed', 'cause': 'resolved'},
-             [result(permissionDecision={'decision': 'reject', 'source': 'user_reject'}, toolDenialKind='user-rejected')],
-             {'state': 'person', 'person_answer': {'choice': 'deny'}}),
+            # A plain No stops the turn, which mv2's deny doesn't: the answer is Claude's own stop, not mv2's deny.
+            ('the person refused it with a plain No', {'how': 'closed', 'cause': 'resolved'},
+             [result(plain_no, toolDenialKind='user-rejected')], {'state': 'person', 'person_answer': stopped}),
             # Esc on Claude's dialog, as 2.1.319 stores it: no permission decision, only the rejection.
-            ('Esc on the dialog', {'how': 'closed', 'cause': 'resolved'}, [result(toolDenialKind='user-rejected')],
+            ('Esc on the dialog', {'how': 'closed', 'cause': 'resolved'}, [result(plain_no, toolDenialKind='user-rejected')],
+             {'state': 'person', 'person_answer': stopped}),
+            # A No with text typed after Tab: the agent carries on with that text, so it is mv2's deny and its message,
+            # with or without the note.
+            ('the person refused it and typed how to proceed', {'how': 'closed', 'cause': 'resolved'},
+             [result(typed + note, permissionDecision={'decision': 'reject', 'source': 'user_reject'}, toolDenialKind='user-rejected')],
+             {'state': 'person', 'person_answer': {'choice': 'deny', 'message': 'use a different file name\nand say why'}}),
+            ('typed how to proceed, no note', {'how': 'closed', 'cause': 'resolved'},
+             [result([{'type': 'text', 'text': typed}], permissionDecision={'decision': 'reject', 'source': 'user_reject'},
+                     toolDenialKind='user-rejected')],
+             {'state': 'person', 'person_answer': {'choice': 'deny', 'message': 'use a different file name\nand say why'}}),
+            ("a refusal in words mv2 doesn't know", {'how': 'closed', 'cause': 'resolved'},
+             [result(permissionDecision={'decision': 'reject', 'source': 'user_reject'}, toolDenialKind='user-rejected')],
              {'state': 'person', 'person_answer': {'choice': 'deny'}}),
             # Claude joins a multi-select's labels with ", "; typed text with a comma in it must stay one answer.
             ("the person's answers to questions", {'how': 'closed', 'cause': 'resolved', 'kind': 'question', 'questions': QUESTIONS},
