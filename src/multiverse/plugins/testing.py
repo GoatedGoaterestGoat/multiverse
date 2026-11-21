@@ -620,6 +620,7 @@ class FakePrompts:
         from ..harnesses import types
         self.open = {item.id: asdict(item) for item in prompts}  # the API's dataclass, as the dict core reads
         self.outcomes, self.answers, self._settled, self._ended = list(outcomes), [], {}, set()
+        self._test, self._answered_by = test, {}  # a prompt's id -> the session that answered it
         self._inputs = {}  # an input's id ("prompt-" + the prompt's) -> the outcome its delivery takes
         fake = self
 
@@ -628,6 +629,7 @@ class FakePrompts:
                 return types.NativeResult("ok", value={"prompts": list(fake.open.values()), "coverage": "complete"})
 
             def answer_prompt(self, session, answer, executor):
+                fake._answered_by[answer.id] = session
                 secret = {item["id"] for item in (fake.open.get(answer.id) or {}).get("questions", ())
                           if item.get("secret")}
                 fake.answers.append({"id": answer.id, "choice": answer.choice, "message": answer.message,
@@ -694,11 +696,44 @@ class FakePrompts:
 
     def settle(self, id, outcome=None):
         """The harness settled a pending answer: prompt_result(id) reads `outcome` (a dict, as for the script) from
-        now, and the prompt is no longer shown."""
+        now, and the prompt is no longer shown: reported to core as ended (1.21), as a harness that lists prompts
+        reports each end. Core records the close with mv2's answer as it stood, and later outcomes as agent.prompt."""
         self._settled[id] = {"state": "answered", **(outcome or {})}
         if "prompt-" + id in self._inputs:  # an input's delivery: its receipt reads this from now
             self._inputs["prompt-" + id] = dict(self._settled[id])
-        self.open.pop(id, None)
+        shown = self.open.pop(id, None)
+        session = self._answered_by.get(id)
+        if shown is not None and session is not None:
+            from ..harnesses import types
+            self._report_for(self._test.root / "state" / "agents" / session.agent_id, types.PromptClosed(
+                id=id, kind=shown["kind"], state=self._settled[id]["state"], cause=self._settled[id].get("cause"),
+                requires_waiting=shown["requires_waiting"]))
+
+    def show(self, prompt, agent):
+        """The harness shows a new prompt to `agent` (its directory, from agent(), or an api.Agent) (1.21): listed
+        from now, and reported to core as opened, as a harness that lists prompts reports each one. The agent needs
+        a conversation (agent(..., native_id=...)): core takes a prompt only for the one it records."""
+        from dataclasses import asdict
+        from ..harnesses import types
+        self.open[prompt.id] = asdict(prompt)
+        self._report_for(agent, types.PromptOpened(id=prompt.id, kind=prompt.kind,
+                                                   requires_waiting=prompt.requires_waiting))
+
+    def end(self, id, agent, state="gone", cause="resolved"):
+        """The harness ends a prompt it showed `agent` (1.21): no longer listed, and reported to core as closed with
+        `state` and `cause`, as when the person answered it in the terminal (state "person") or it ended without an
+        answer (state "gone", cause "resolved", "interrupted", "turn_ended", ...)."""
+        from ..harnesses import types
+        shown = self.open.pop(id, None) or {}
+        self._report_for(agent, types.PromptClosed(id=id, kind=shown.get("kind", "permission"), state=state,
+                                                   cause=cause, requires_waiting=shown.get("requires_waiting", True)))
+
+    def _report_for(self, agent, transition):
+        from ..store import read
+        from ..runtime import prompt_events
+        directory = Path(getattr(agent, "directory", agent))
+        runtime, properties = read(directory / "runtime.json"), read(directory / "properties.json")
+        prompt_events.record(directory, runtime.get("launch_id"), properties.get("native_session_id"), (transition,))
 
 
 class FakeRuns:

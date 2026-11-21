@@ -26,6 +26,47 @@ from multiverse.universe import agents, mailbox, sessions
 
 
 class RecordObservationsTest(BaseTest):
+    def test_recorded_uninterested_plugins_need_no_switch_file(self):
+        """An existing registry without any matching manifest must not wait for optional settings."""
+        from multiverse.plugins import config, events, loader, registry
+
+        recorded = {'registry': {'events': ['agent.exit']}}
+        visible = [SimpleNamespace(events=('agent.ready',))]
+        with patch.object(registry, 'known', return_value=recorded), \
+                patch.object(loader, 'manifest_records', return_value=visible), \
+                patch.object(config, 'load', return_value=config.Config()) as switches:
+            self.assertEqual(events.subscribers(self.root, 'turn.ended'), [])
+        switches.assert_not_called()
+        with patch.object(registry, 'known', return_value=recorded), \
+                patch.object(loader, 'manifest_records', side_effect=RuntimeError('unknown home in a plugin path')), \
+                patch.object(config, 'load', return_value=config.Config(enabled={'registry': True})) as switches:
+            self.assertEqual(events.subscribers(self.root, 'turn.ended'), [])
+        switches.assert_called_once_with(self.root, observed=True)
+
+    def test_related_events_share_one_read_for_possible_subscribers(self):
+        """Several event kinds must share the switch read without skipping its replacement retry."""
+        from multiverse.plugins import config, events, loader, registry
+
+        recorded = {'status': {'events': ['agent.status']}, 'turns': {'events': ['turn.*']}}
+        path = config.path(self.root)
+        read_text = Path.read_text
+        attempts = []
+
+        def replaced(candidate, *args, **kwargs):
+            if candidate == path:
+                attempts.append(candidate)
+                if len(attempts) == 1:
+                    raise FileNotFoundError(errno.ENOENT, 'replacement gap', candidate)
+            return read_text(candidate, *args, **kwargs)
+
+        store.write(path, {'enabled': {'status': True, 'turns': True}})
+        with patch.object(registry, 'known', return_value=recorded), \
+                patch.object(loader, 'manifest_records', side_effect=AssertionError('recorded subscriber rediscovered')), \
+                patch.object(Path, 'read_text', replaced), self.clock() as (_, sleeps):
+            self.assertEqual(events.subscribers(self.root, ('agent.status', 'turn.ended')), ['status', 'turns'])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(sleeps), 1)
+
     def test_fleet_counts_fit_a_small_descriptor_budget(self):
         """Retaining one lock per inbox can exhaust descriptors and hide healthy messages in a large fleet."""
         rows = []

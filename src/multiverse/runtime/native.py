@@ -302,6 +302,23 @@ class NativeExecutor:
         return write_answer(self, session, answer)
 
 
+def _plugin_as_user(sender):
+    """Whether a saved sender may carry a plugin's as_user mark: a valid plugin's own, with no agent, mv2 or
+    agent-session mark of any kind."""
+    from ..plugins import manifest
+    plugin = sender.get('plugin')
+    return (isinstance(plugin, str) and bool(manifest.NAME.fullmatch(plugin))
+            and sender.get('name') == f'plugin {plugin}'
+            and not any(sender.get(key) for key in ('agent_id', 'core', 'agent_process', 'labelled')))
+
+
+def _person(sender):
+    """Whether a saved sender is the person's own mv2 send: named the user, as send saves it, with no agent,
+    plugin, mv2 or agent-session mark. A missing or nameless sender isn't proof of the person."""
+    return (isinstance(sender, dict) and sender.get('name') == 'user'
+            and not any(sender.get(key) for key in ('agent_id', 'plugin', 'core', 'agent_process', 'labelled')))
+
+
 def framed_text(root, message, *, at=None, listing=False):
     """The recipient's text: who sent the message, then the message as written.
 
@@ -310,7 +327,14 @@ def framed_text(root, message, *, at=None, listing=False):
     sender = message.get('from') or {}
     if not listing and message.get('focus_note') and sender.get('core') is True:
         return message['text']
-    name = sender.get('name') or 'user'
+    # The person's own words reach the agent bare, as if typed, with no header or age (the user, 2026-11-20): a
+    # person's mv2 send, and a plugin's as_user send relaying what the person wrote, whose record still names the
+    # plugin. The inbox listing keeps its header, naming the user for both.
+    person = _person(sender)
+    as_user = message.get('as_user') is True and _plugin_as_user(sender)
+    if (person or as_user) and not listing:
+        return message['text']
+    name = 'user' if as_user else sender.get('name') or 'user'
     scope = sender.get('universe')
     if sender.get('agent_id') and scope:
         try:

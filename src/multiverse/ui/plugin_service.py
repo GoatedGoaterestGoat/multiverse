@@ -176,6 +176,33 @@ class PluginService:
     def clear_secret(self, root, name, key):
         return plugins.clear_secret(Path(root), name, key)
 
+    def install_preview(self, root, source):
+        """Fetch a plugin (`URL[@REF][#PATH]` or a folder) for the person to judge; nothing is placed (slow: git)."""
+        return plugins.install_preview(source, Path(root))
+
+    def update_preview(self, root, name, placement):
+        """Fetch what plugin `name`, installed at exactly `placement` ('personal' or 'universe'), would update to, and
+        whether the person must be asked (slow: git)."""
+        return plugins.update_preview(name, root=Path(root), placement=placement)
+
+    def install_confirm(self, root, key):
+        """Install exactly what preview `key` showed: the person's yes."""
+        return plugins.install_confirm(key, Path(root))
+
+    def install_cancel(self, root, key):
+        """Drop preview `key`'s fetched files."""
+        return plugins.install_cancel(key, Path(root))
+
+    def remove_installed(self, root, name, placement, expected):
+        """Remove what mv2 plugins install placed for `name` at exactly `placement`, refusing if its install record
+        is no longer `expected` (the row shown); what stays elsewhere, with how to clear each."""
+        return plugins.remove_installed(name, Path(root), placement=placement, expected=expected)
+
+    def preview_text(self, action, shown):
+        """The words `mv2 plugins install` and `update` show before asking."""
+        from ..tools.plugins import preview_text
+        return preview_text(action, shown)
+
     def packages_prompt(self, name, state):
         """The same words `mv2 plugins packages NAME` asks with."""
         from ..tools.plugins import packages_prompt

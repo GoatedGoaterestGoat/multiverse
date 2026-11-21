@@ -29,6 +29,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .transcripts import view
         return view(session, tip=tip, reader=reader)
 
+    def project_turn_event(self, session, view, transition, *, reader=None):
+        from .transcripts import project_turn_event
+        return project_turn_event(session, view, transition, reader=reader)
+
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         from .transcripts import bodies
         return bodies(session, view, indexes, max_bytes=max_bytes, reader=reader)
@@ -295,6 +299,7 @@ class CodexAdapter(ConfiguredAdapter):
         # Harness/plugin variables can contain credentials. Pass them to native
         # shell tools in the session RPC, never as process-list-visible flags.
         from .plugins import merge_config
+        from .turn_events import task_digest
         session_config = merge_config(
             {'shell_environment_policy': {'set': dict(command.environment)}} if command.environment else {},
             additions.session_config)
@@ -317,6 +322,7 @@ class CodexAdapter(ConfiguredAdapter):
                                 'plugin_user_config': merge_config(additions.user_config,
                                     {'model_reasoning_effort': context.effort} if context.effort is not None else {}),
                                 'navigation_cli': cli_version,
+                                'turn_task_digest': task_digest(context.values.get('task')),
                                 'navigation_home': storage['CODEX_HOME'],
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
                                binds_session=True),

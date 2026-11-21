@@ -358,6 +358,36 @@ def trust(directory):
     return value
 
 
+def pin(directory, value):
+    """Trust whatever at `directory` has fingerprint `value`, without reading it: the installer pins what the
+    person approved before the files arrive there, so they're never there unpinned."""
+    directory = Path(directory).resolve()
+    with lock(user_directory() / ".trusted-plugins.lock"):
+        records = _records()
+        records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
+        write(user_directory() / FILE, {"schema": 1, "plugins": records})
+
+
+def pin_first(directory, value):
+    """Pin `directory` at fingerprint `value` only if nothing pins it yet, deciding and writing under the trust
+    lock; True when it pinned. A trust map that is there but can't be read pins nothing."""
+    directory = Path(directory).resolve()
+    path = user_directory() / FILE
+    with lock(user_directory() / ".trusted-plugins.lock"):
+        try:
+            data = retry_missing(lambda: read(path))
+        except FileNotFoundError:
+            data = {"plugins": {}}
+        except (OSError, ValueError):
+            return False
+        records = data.get("plugins") if isinstance(data, dict) else None
+        if not isinstance(records, dict) or str(directory) in records:
+            return False
+        records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
+        write(path, {"schema": 1, "plugins": records})
+        return True
+
+
 def forget(directory):
     """Stop trusting the plugin at `directory`; True when it was trusted."""
     directory = Path(directory).resolve()

@@ -7,7 +7,7 @@
 // writes once a row is stored is checked too; 2.1.292's kit had no core for it and
 // answers "no implementation", which `append` below accepts so the tests run on both.
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 import { agePhrase } from '../hooks/age'
 import { dialogIn, watch, EVERY_MS, FIRST_MS } from '../hooks/dialog'
 import { register } from '../hooks/index'
@@ -31,8 +31,13 @@ async function append($: { session: { append: (input: never) => Promise<unknown>
   }
 }
 
+// Each test's plugin is a fresh copy, but the one before it can still be finishing a report as the next test starts,
+// and that call reaches the next test's hooks. Each world names its own Python, so it counts only its own copy's.
+let worlds = 0
+
 function world(on: On, options: { sessionId?: string; moveExit?: number; file?: () => string | undefined; now?: number; refuse?: string; holdRefusals?: Promise<void>; holdSubmits?: Promise<void>; holdUnsure?: Promise<void>; env?: Record<string, string>; statusThrows?: number } = {}) {
-  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', ...options.env })
+  const python = `/python-${++worlds}`
+  mock.env(on, { MV2_PYTHON: python, MV2_AGENT_DIR: '/agent', ...options.env })
   const clock = mock.clock(on, { now: options.now ?? 0 })
   // Claude's core for the engine events the tests raise: each passes through.
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
@@ -66,7 +71,7 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
   let thrown = 0
   on('process.run', async ($, e) => {
     if (e.argv[1] === '-m') pythons.push([e.argv[3] ?? '', e.init?.env?.PYTHONPATH])
-    const index = e.argv.indexOf('--status')
+    const index = e.argv[0] === python ? e.argv.indexOf('--status') : -1
     // A status report the test makes throw, as a timeout or a refusal does, before anything is recorded.
     if (index >= 0 && thrown < (options.statusThrows ?? 0)) { thrown += 1; throw new Error('timed out after 10000 ms') }
     if (index >= 0) { statuses.push(e.argv[index + 1] ?? ''); reports.push([...e.argv]) }
@@ -92,7 +97,7 @@ function world(on: On, options: { sessionId?: string; moveExit?: number; file?: 
     if (options.refuse !== undefined && e.origin.kind === 'plugin') return { drop: options.refuse }
     return { text: e.text, origin: e.origin }
   })
-  return { clock, files, statuses, submitted, appended, moves, logs, reads, pythons, reports }
+  return { clock, files, statuses, submitted, appended, moves, logs, reads, pythons, reports, python }
 }
 
 // The text as the mod hands it to Claude: tagged with its ID (and send time), stripped where the row is stored.
@@ -117,7 +122,7 @@ describe('session moves', () => {
     await w.clock.settle()
     await $.classic.SessionStart({ source: 'clear', session_id: NEW } as never)
     await w.clock.settle()
-    expect(w.moves).toEqual([['/python', '-m', 'multiverse.tools.runtime_update', '--native-session-id', NEW,
+    expect(w.moves).toEqual([[w.python, '-m', 'multiverse.tools.runtime_update', '--native-session-id', NEW,
                               '--previous-session-id', OLD, '--session-reason', 'clear']])
     // A second /clear moves on from the new session.
     const NEXT = '33333333-3333-4333-8333-333333333333'
@@ -212,7 +217,7 @@ describe('status', () => {
     expect(w.reports).toEqual([])
     await $.turn.start({ text: 'go', turnId: 't1' })
     await w.clock.settle()
-    expect(w.reports.at(-1)).toEqual(['/python', '-m', 'multiverse.tools.runtime_update', '--status', 'working', '--bridge', 'claude-mod-v4'])
+    expect(w.reports.at(-1)).toEqual([w.python, '-m', 'multiverse.tools.runtime_update', '--status', 'working', '--bridge', 'claude-mod-v4'])
   })
 
   test('idle when the session starts, working in a turn, waiting on a question, idle after', async ($, on) => {

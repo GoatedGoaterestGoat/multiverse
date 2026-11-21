@@ -6,15 +6,18 @@ answer native requests; the launch relay can carry adapter-validated answers
 over the owning terminal's existing connection.
 """
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+from itertools import groupby
 import json
+import time
 from uuid import uuid4
 
 from websockets.asyncio.client import unix_connect
 from websockets.exceptions import WebSocketException
 
 from ..harnesses.types import LocalProtocolError, NativeResult
+from . import turn_events
 
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
@@ -162,11 +165,13 @@ class LaunchProxy:
     POST_BIND_TIMEOUT = 3
     RELAY_CLOSE_TIMEOUT = 1
     MAX_DELIVERY_OBSERVATIONS = 128
+    MAX_EVENT_BATCHES = turn_events.MAX_RELAY_BATCHES
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None, record_lost=lambda reason: None,
                  record_refusal=lambda evidence: None, record_connection=None, record_primary_event=lambda event: None,
-                 navigation=None, relay_context=None, record_delivery_observation=None, record_delivery_error=None):
+                 navigation=None, relay_context=None, record_delivery_observation=None, record_delivery_error=None,
+                 record_prompt_transitions=None, publish_prompt_events=None, record_turn_transitions=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
@@ -179,6 +184,20 @@ class LaunchProxy:
         self.relay_context = dict(relay_context or {})
         self.record_delivery_observation = record_delivery_observation
         self.record_delivery_error = record_delivery_error
+        self.record_prompt_transitions = record_prompt_transitions
+        self.record_turn_transitions = record_turn_transitions
+        self.publish_prompt_events = publish_prompt_events
+        self.prompt_batches = deque()
+        self.turn_batches = deque()
+        self.reserved_batches = set()
+        self.native_fences = deque()
+        self.native_fence_lock = threading.Lock()
+        self.event_ready = None
+        self.event_loop = None
+        self.prompt_stage_lock = threading.Lock()
+        self.turn_stage_lock = threading.Lock()
+        self.event_generation = 0
+        self.event_drains = {}
         self.delivery_observations = OrderedDict()
         self.delivery_overflow_reported = False
         self.delivery_error_pending = None
@@ -214,6 +233,7 @@ class LaunchProxy:
             return
         self.lost = reason
         try:
+            self.stage_adapter_events()
             self.record_lost(reason)
         except (OSError, ValueError):
             pass
@@ -231,6 +251,11 @@ class LaunchProxy:
         from websockets.asyncio.server import unix_serve
         worker = (asyncio.create_task(self._publish_deliveries())
                   if self.record_delivery_observation is not None else None)
+        events = None
+        if self.record_prompt_transitions is not None or self.record_turn_transitions is not None:
+            self.event_ready = asyncio.Event()
+            self.event_loop = asyncio.get_running_loop()
+            events = asyncio.create_task(self._publish_adapter_events())
         try:
             async with unix_serve(self._connection, self.spec['socket_path'], compression=None,
                                   close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE, max_queue=self.MAX_QUEUE):
@@ -238,11 +263,177 @@ class LaunchProxy:
                 while not self.stopped.is_set():
                     await asyncio.sleep(.1)
         finally:
-            if worker is not None:
+            if self.event_ready is not None:
+                self.event_ready.set()
+            workers = [task for task in (worker, events) if task is not None]
+            if workers:
                 try:
-                    await asyncio.wait_for(worker, self.RELAY_CLOSE_TIMEOUT)
+                    await asyncio.wait_for(asyncio.gather(*workers), self.RELAY_CLOSE_TIMEOUT)
                 except asyncio.TimeoutError:
                     pass  # Unpublished positives keep the existing bounded lookup fallback.
+
+    async def _publish_adapter_events(self):
+        while not self.stopped.is_set() or self._event_batch_count() or self.event_drains or self.native_fences:
+            if self.event_drains and self._event_batch_count() < self.MAX_EVENT_BATCHES:
+                self._retry_event_drains()
+            if not self._event_batch_count() and not self.native_fences:
+                if self.stopped.is_set():
+                    break
+                await self.event_ready.wait()
+                self.event_ready.clear()
+                continue
+            staged = await asyncio.to_thread(self.stage_adapter_events)
+            if self.publish_prompt_events is not None:
+                await asyncio.to_thread(self.publish_prompt_events)
+            if staged is False:
+                await asyncio.sleep(.02)
+
+    def stage_adapter_events(self, *, fenced=False, admitted=None):
+        """Off-loop fence for metadata already admitted before a status update or switch."""
+        if admitted is None and not self._resume_fences():
+            return False
+        with self.turn_stage_lock:
+            prompts, turns = admitted if admitted is not None else (None, None)
+            if self.stage_prompt_events(fenced=fenced, admitted=prompts) is False:
+                return False
+            # Leave work in the queue until it is accepted. The event loop
+            # still counts this prefix against its admission limit.
+            self._retire_reserved(self.turn_batches)
+            queued = self._queued_prefix(self.turn_batches, turns)
+            for (record, native_id, generation), group in groupby(queued, key=lambda batch: batch[:3]):
+                batches = list(group)
+                try:
+                    edges = tuple(edge for _, _, _, batch in batches
+                                  if 0 < len(batch) <= turn_events.MAX_BATCH and all(map(turn_events.valid, batch))
+                                  for edge in batch)
+                    if edges and not self._record_event_batch(record, native_id, generation, edges,
+                                                              fenced=fenced, turns=True):
+                        return False
+                except Exception:
+                    pass  # Optional metadata never takes over transport health.
+                for _ in batches:
+                    self.turn_batches.popleft()
+
+    @staticmethod
+    def _record_event_batch(record, native_id, generation, edges, *, fenced, turns=False):
+        if record(native_id, generation, edges) is not False:
+            return True
+        if not fenced:
+            return False
+        from ..universe import agents
+
+        return agents.retain_fenced_batch(native_id, generation, edges, turns=turns)
+
+    def stage_prompt_events(self, *, fenced=False, admitted=None):
+        with self.prompt_stage_lock:
+            self._retire_reserved(self.prompt_batches)
+            for record, native_id, generation, transitions in self._queued_prefix(self.prompt_batches, admitted):
+                try:
+                    if not self._record_event_batch(record, native_id, generation, transitions, fenced=fenced):
+                        return False
+                except Exception:
+                    pass  # Optional metadata never takes over transport health.
+                self.prompt_batches.popleft()
+
+    def _retire_reserved(self, queue):
+        while queue and id(queue[0]) in self.reserved_batches:
+            self.reserved_batches.remove(id(queue.popleft()))
+
+    def _queued_prefix(self, queue, admitted):
+        queued = tuple(queue)
+        if admitted is None:
+            return queued
+        selected = set(map(id, admitted))
+        return tuple(batch for batch in queued if id(batch) in selected)
+
+    def _reserve_remaining(self, admitted, reserve=None):
+        from ..universe import agents
+
+        with self.turn_stage_lock, self.prompt_stage_lock:
+            self._retire_reserved(self.prompt_batches)
+            self._retire_reserved(self.turn_batches)
+            prompts = self._queued_prefix(self.prompt_batches, admitted[0])
+            turns = self._queued_prefix(self.turn_batches, admitted[1])
+            if not (reserve or agents.reserve_fenced_batches)(prompts, turns):
+                return False
+            self.reserved_batches.update(map(id, (*prompts, *turns)))
+
+    def _capture_fence(self, *, include_turns):
+        from ..universe import agents
+
+        protected = {id(batch) for fence in self.native_fences for group in fence.admitted for batch in group}
+        prompts = tuple(batch for batch in tuple(self.prompt_batches) if id(batch) not in protected)
+        turns = tuple(batch for batch in tuple(self.turn_batches) if id(batch) not in protected) if include_turns else ()
+        return agents.capture_fenced_batches(self, (prompts, turns), self._reserve_remaining)
+
+    def stage_status_events(self, status):
+        """Working and waiting can precede turn input proof. A known prompt close still goes first."""
+        include_turns = status not in ('working', 'waiting')
+        earlier_ready = self._resume_fences()
+        admitted = self._capture_fence(include_turns=include_turns)
+        if not earlier_ready:
+            return self._reserve_remaining(admitted)
+        if include_turns:
+            staged = self.stage_adapter_events(fenced=True, admitted=admitted)
+        else:
+            staged = self.stage_prompt_events(fenced=True, admitted=admitted[0])
+        if staged is False:
+            return self._reserve_remaining(admitted)
+
+    def defer_native_fence(self, fence):
+        self.native_fences.append(fence)
+        if self.event_loop is not None:
+            try:
+                self.event_loop.call_soon_threadsafe(self.event_ready.set)
+            except RuntimeError:
+                pass  # The runner can retry from its final boundary.
+
+    def _resume_fences(self):
+        from ..universe import agents
+
+        if not self.native_fences:
+            return True
+        if not self.native_fence_lock.acquire(blocking=False):
+            return False
+        try:
+            while self.native_fences:
+                if not agents.resume_native_fence(self.native_fences[0]):
+                    return False
+                self.native_fences.popleft()
+            return True
+        finally:
+            self.native_fence_lock.release()
+
+    def stage_boundary_events(self):
+        if not self._resume_fences():
+            return False
+        admitted = self._capture_fence(include_turns=True)
+        if self.stage_adapter_events(admitted=admitted) is False:
+            return self._reserve_remaining(admitted)
+
+    def _event_batch_count(self):
+        return len(self.prompt_batches) + len(self.turn_batches)
+
+    def _admit_event_transitions(self, record, drain, generation):
+        if generation != self.event_generation:
+            return
+        batches = self.turn_batches if record is self.record_turn_transitions else self.prompt_batches
+        try:
+            while self._event_batch_count() < self.MAX_EVENT_BATCHES:
+                batch = drain()
+                if batch is None:
+                    return
+                native_id, transitions = batch
+                batches.append((record, native_id, generation, transitions))
+                self.event_ready.set()
+            self.event_drains[record] = drain, generation
+        except Exception:
+            pass  # The ordinary prompt and transcript reads are still available.
+
+    def _retry_event_drains(self):
+        for record in tuple(self.event_drains):
+            drain, generation = self.event_drains.pop(record)
+            self._admit_event_transitions(record, drain, generation)
 
     def _observe_delivery(self, protocol, value):
         if self.record_delivery_observation is None:
@@ -309,6 +500,14 @@ class LaunchProxy:
         protocol = self.protocol
         relay_enabled, relay_closed = False, False
 
+        def notify_transitions(hook, record):
+            if self.owner is not client or record is None:
+                return
+            drain = getattr(protocol, hook, None)
+            if drain is not None:
+                self._admit_event_transitions(record, lambda: drain() if self.owner is client else None,
+                                              self.event_generation)
+
         async def close_optional():
             nonlocal relay_closed
             if not relay_enabled or relay_closed:
@@ -331,7 +530,14 @@ class LaunchProxy:
             prepare_relay = getattr(protocol, 'relay_context', None)
             if prepare_relay is not None:
                 try:
-                    prepare_relay(dict(self.relay_context))
+                    context = dict(self.relay_context)
+                    if self.record_prompt_transitions is not None:
+                        context['notify_prompt_transitions'] = lambda: notify_transitions(
+                            'relay_prompt_transitions', self.record_prompt_transitions)
+                    if self.record_turn_transitions is not None:
+                        context['notify_turn_transitions'] = lambda: notify_transitions(
+                            'relay_turn_transitions', self.record_turn_transitions)
+                    prepare_relay(context)
                     relay_enabled = True
                 except Exception:
                     self._record_error('Native prompt context is unavailable; answer in the terminal')
@@ -390,9 +596,18 @@ class LaunchProxy:
                         if (not isinstance(event, dict) or event.get('action') not in ('begin', 'commit', 'abort')
                                 or self.navigation is None):
                             raise ValueError('This launch does not support conversation switching; resume with a current bridge')
+                        if event['action'] == 'commit':
+                            while self.event_drains:
+                                if await asyncio.to_thread(self.stage_adapter_events) is False:
+                                    await asyncio.sleep(.02)
+                                self._retry_event_drains()
                         # Sends hold launch.lock while awaiting their own RPC.
                         # Never block this event loop acquiring that same lock.
                         answer = await asyncio.to_thread(self.navigation, event['action'], event)
+                        if event['action'] == 'commit' and isinstance(answer, dict):
+                            generation = answer.get('generation')
+                            if type(generation) is int and generation >= 0:
+                                self.event_generation = generation
                         protocol.navigation_done(event, answer)
                         return event if event['action'] in ('commit', 'abort') else None
                     except (OSError, ValueError, RuntimeError) as error:
@@ -482,6 +697,8 @@ class LaunchProxy:
                             except (OSError, ValueError, TypeError, KeyError):
                                 pass  # Optional telemetry must not disrupt the TUI.
                         self._observe_delivery(protocol, value)
+                    notify_transitions('relay_prompt_transitions', self.record_prompt_transitions)
+                    notify_transitions('relay_turn_transitions', self.record_turn_transitions)
                     if value is not original:
                         encoded = json.dumps(value, ensure_ascii=False)
                         if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
@@ -559,4 +776,4 @@ class LaunchProxy:
                 if failure or ended:
                     reason = (f'{ended[0]} connection closed (code {ended[1]}): '
                               f'{failure or ended[2] or "no reason supplied"}' if ended else failure)
-                    self._lost(reason)
+                    await asyncio.to_thread(self._lost, reason)

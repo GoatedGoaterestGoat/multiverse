@@ -187,11 +187,13 @@ class Tmux:
             raise ValueError(f'tmux returned ambiguous escaped output for {name}')
         return value
 
-    def snapshot(self, *, facts=None):
+    def snapshot(self, *, facts=None, read_only=False):
+        """The server's panes, or ({}, reason). `read_only`: one query of an answering server it can prove, never the
+        creation or recovery lock; one it can't prove gives a reason, so a pane reads as unknown, not gone."""
         try:
-            answer = recovery.observe(self, facts=facts)
+            answer = (recovery.healthy if read_only else recovery.observe)(self, facts=facts)
             if answer is None:
-                return {}, None
+                return ({}, 'the tmux server could not be checked without recovery') if read_only else ({}, None)
             output, _ = answer
             return {row[0]: dict(zip(FIELDS, row)) for line in output.splitlines()
                     if len(row := line.split("\t")) == len(FIELDS)}, None

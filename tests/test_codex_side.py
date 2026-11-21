@@ -1,11 +1,13 @@
 """An unmanaged native side conversation never replaces the mv2 primary."""
+import asyncio
 from copy import deepcopy
 import unittest
 from uuid import uuid4
 
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex.status import notification as status_notification
-from multiverse.harnesses.types import LocalProtocolError, SessionHandle
+from multiverse.harnesses.codex.turn_events import task_digest
+from multiverse.harnesses.types import LocalProtocolError, SessionHandle, TurnEnded, TurnJoined, TurnStarted
 
 
 # Pinned 0.167 request inventory; production instead permits only known reads.
@@ -79,7 +81,7 @@ class CodexSideTest(unittest.TestCase):
             **({'environments': [{'environmentId': 'local', 'cwd': '/fixture/workspace',
                 'runtimeWorkspaceRoots': policy['runtimeWorkspaceRoots']}], 'ephemeral': False,
                 'parentThreadId': None, 'attachedToThreadId': None, 'forkedFromId': None, 'threadSource': 'user'}
-               if root.settings['navigation_cli'] in ([0, 169, 0], [0, 170, 0]) else {})}, **policy}})
+               if root.settings['navigation_cli'] in ([0, 169, 0], [0, 170, 0], [0, 171, 0]) else {})}, **policy}})
         owner[0] = True  # Core accepted the exact initial binding before calling after_bind.
         view.after_bind('/fixture/native.sock')
         return root, view
@@ -112,14 +114,14 @@ class CodexSideTest(unittest.TestCase):
             owner[0] = True
             view.after_bind('/fixture/native.sock')
             return root, view
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(initial_attached=version):
                 root, view = bound(version, [], attached=True)
                 self.assertTrue(root.bound)
                 self.assertIsNone(root.current_grants)
-            seed = canonical if version in ('0.169.0', '0.170.0') else []
+            seed = canonical if version in ('0.169.0', '0.170.0', '0.171.0') else []
             for name, value in cases:
-                expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                 with self.subTest(initial=(version, name)):
                     root, view = bound(version, value)
                     self.assertTrue(root.bound, 'Unmapped navigation evidence must leave ordinary binding usable')
@@ -154,7 +156,7 @@ class CodexSideTest(unittest.TestCase):
                     if name == 'attached':
                         selected['attachedToThreadId'] = self.main
                     view.incoming({'id': 20, 'result': {'thread': selected, **deepcopy(policy)}})
-                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                     self.assertEqual(root.native_id, self.main)
                     self.assertEqual(root.grant_ceiling, ceiling)
                     self.assertEqual(root.current_grants, policy if expected else None)
@@ -179,7 +181,7 @@ class CodexSideTest(unittest.TestCase):
                     if name == 'attached':
                         selected['attachedToThreadId'] = self.main
                     reply = {'id': 20, 'result': {'thread': selected, 'cwd': '/fixture/workspace', **deepcopy(policy)}}
-                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0') else name in ('empty', 'missing', 'null')
+                    expected = name == 'local exact' if version in ('0.169.0', '0.170.0', '0.171.0') else name in ('empty', 'missing', 'null')
                     if expected:
                         view.incoming(reply)
                         self.assertEqual(view.navigation('incoming', reply)['action'], 'commit')
@@ -287,6 +289,90 @@ class CodexSideTest(unittest.TestCase):
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing({'id': 20, 'method': 'thread/start', 'params': {**full,
                         'threadSource': 'user', 'ephemeral': False, 'historyMode': 'paginated', 'environments': supplied}})
+
+    def test_primary_environment_override_invalidates_navigation_before_native_notification(self):
+        """An outgoing request can reselect the environment before its settings notification arrives."""
+        cwd = '/fixture/workspace'
+        local = [{'environmentId': 'local', 'cwd': cwd, 'runtimeWorkspaceRoots': []}]
+        for method in ('thread/settings/update', 'turn/start'):
+            cases = [
+                ('omitted selectors', self.main, {}, True),
+                ('null cwd', self.main, {'cwd': None}, True),
+                ('foreign thread', self.side, {'cwd': '/another/workspace'}, True),
+                ('explicit same local', self.main, {'cwd': cwd, 'environments': local}, True),
+                ('same cwd with defaults', self.main, {'cwd': cwd}, False),
+                ('same cwd with null environments', self.main, {'cwd': cwd, 'environments': None}, False),
+                ('new cwd', self.main, {'cwd': '/another/workspace'}, False),
+                ('new cwd with explicit local', self.main, {'cwd': '/another/workspace', 'environments': local}, False),
+                ('relative cwd', self.main, {'cwd': 'relative'}, False),
+                ('empty cwd', self.main, {'cwd': ''}, False),
+                ('invalid cwd', self.main, {'cwd': []}, False),
+            ]
+            if method == 'turn/start':
+                cases.extend((
+                    ('null roots', self.main, {'runtimeWorkspaceRoots': None}, True),
+                    ('same roots with defaults', self.main, {'runtimeWorkspaceRoots': []}, False),
+                    ('same roots with explicit local', self.main,
+                     {'runtimeWorkspaceRoots': [], 'environments': local}, True),
+                    ('other roots with explicit local', self.main,
+                     {'runtimeWorkspaceRoots': ['/another/workspace'], 'environments': local}, False),
+                ))
+            for name, target, selectors, preserves in cases:
+                with self.subTest(method=method, case=name):
+                    root, view = self.navigation_bound(navigation_cli=[0, 171, 0])
+                    self.initialize(view, 'codex/0.171.0')
+                    policy, epoch = deepcopy(root.grant_ceiling), root.grants_epoch
+                    self.assertIsNotNone(root.current_grants)
+                    request = {'id': 20, 'method': method, 'params': {'threadId': target, **selectors}}
+                    self.assertEqual(view.outgoing(request), request)
+                    self.assertEqual(root.current_grants, policy if preserves else None)
+                    self.assertEqual(root.grant_ceiling, policy)
+                    self.assertEqual(root.grants_epoch, epoch if preserves else epoch + 1)
+                    self.assertEqual(root.native_id, self.main)
+                    if not preserves:
+                        view.incoming({'id': 20, 'result': {}})
+                        with self.assertRaisesRegex(LocalProtocolError, 'permissions changed'):
+                            view.outgoing({'id': 21, 'method': 'thread/start', 'params': {
+                                'cwd': cwd, 'threadSource': 'user', 'ephemeral': False,
+                                'historyMode': 'paginated'}})
+                        self.assertIsNone(getattr(root, '_selection', None))
+
+    def test_owner_turn_start_pins_the_verified_local_environment(self):
+        """Stock terminal input should keep navigation usable without trusting daemon defaults."""
+        cwd = '/fixture/workspace'
+        for name, owner, cli, daemon, changes, outcome in (
+                ('matching', True, [0, 171, 0], '0.171.0', {}, 'pinned'),
+                ('null environments', True, [0, 171, 0], '0.171.0', {'environments': None}, 'pinned'),
+                ('retained release', True, [0, 170, 0], '0.170.0', {}, 'pinned'),
+                ('permission override', True, [0, 171, 0], '0.171.0',
+                 {'approvalPolicy': 'on-request'}, 'invalidated'),
+                ('changed roots', True, [0, 171, 0], '0.171.0',
+                 {'runtimeWorkspaceRoots': ['/other']}, 'invalidated'),
+                ('nonowner', False, [0, 171, 0], '0.171.0', {}, 'invalidated'),
+                ('mixed', True, [0, 170, 0], '0.171.0', {}, 'invalidated'),
+                ('unchecked CLI', True, [0, 166, 0], '0.171.0', {}, 'invalidated')):
+            with self.subTest(name=name):
+                root, view = self.navigation_bound(navigation_cli=cli)
+                self.initialize(view, 'codex/' + daemon)
+                view.owns_primary = lambda: owner
+                grants, epoch = deepcopy(root.current_grants), root.grants_epoch
+                self.assertIsNotNone(grants)
+                request = {'id': 20, 'method': 'turn/start', 'params': {
+                    'threadId': self.main, 'cwd': cwd, 'runtimeWorkspaceRoots': [],
+                    'clientUserMessageId': 'message', 'input': [{'type': 'text', 'text': 'input'}], **changes}}
+                original = deepcopy(request)
+                forwarded = view.outgoing(request)
+                self.assertEqual(request, original)
+                if outcome == 'pinned':
+                    self.assertEqual(forwarded, {**request, 'params': {**request['params'],
+                        'environments': [{'environmentId': 'local', 'cwd': cwd, 'runtimeWorkspaceRoots': []}]}})
+                    self.assertEqual(root.current_grants, grants)
+                    self.assertEqual(root.grants_epoch, epoch)
+                else:
+                    self.assertEqual(forwarded, request)
+                    self.assertIsNone(root.current_grants)
+                self.assertEqual(root.grant_ceiling, grants)
+                self.assertEqual(root.native_id, self.main)
 
     def test_side_thread_lifecycle_leaves_the_primary_untouched(self):
         """A /btw side thread's whole lifecycle, down to closing one saturated with requests, leaves the primary
@@ -511,7 +597,7 @@ class CodexSideTest(unittest.TestCase):
                     with self.assertRaises(LocalProtocolError):
                         view.outgoing(input)
 
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(navigation_version=version):
                 root, view = self.navigation_bound(navigation_cli=list(map(int, version.split('.'))))
                 self.initialize(view, 'codex/' + version)
@@ -532,7 +618,8 @@ class CodexSideTest(unittest.TestCase):
                 (True, [0, 169, 0], '0.167.2', False), (True, [0, 167, 2], '0.169.0', False),
                 (True, [0, 168, 0], '0.168.0', False), (True, [0, 169, 1], '0.169.1', False),
                 (True, [0, 170, 0], '0.169.0', False), (True, [0, 169, 0], '0.170.0', False),
-                (True, [0, 170, 1], '0.170.1', False),
+                (True, [0, 171, 0], '0.170.0', False), (True, [0, 170, 0], '0.171.0', False),
+                (True, [0, 170, 1], '0.170.1', False), (True, [0, 171, 1], '0.171.1', False),
                 (True, [0, 166, 0], '0.166.0', True)):
             with self.subTest(owner=owner, cli=cli, daemon=daemon, side=side):
                 root, view = self.navigation_bound(navigation_cli=cli)
@@ -902,7 +989,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.163.0', '0.164.0', '0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             with self.subTest(supported=version):
                 view = self.connection('checked-' + version, lambda: True)
                 self.initialize(view, 'codex/' + version)
@@ -943,6 +1030,88 @@ class CodexSideTest(unittest.TestCase):
         self.assertIsNone(caught.exception.request_id)
         self.assertTrue(self.protocol.bound)
         self.assertEqual(self.primary_state(), before)
+
+    def test_turn_events_require_exact_current_input_and_keep_recovered_ends(self):
+        """Replay or unrelated native traffic must not turn a join into a task or end a different turn."""
+        self.protocol.settings.update(navigation_cli=(0, 166, 0), turn_task_digest=task_digest('PRIVATE TASK'))
+        self.view.relay_context({'notify_turn_transitions': lambda: None, 'task_launch': True})
+
+        def turn(method, identity, **fields):
+            return {'method': 'turn/' + method, 'params': {'threadId': self.main,
+                    'turn': {'id': identity, **fields}}}
+
+        def consumed(item, client=None, *, identity='main-turn', thread=None, phase='completed'):
+            return {'method': 'item/' + phase, 'params': {'threadId': thread or self.main, 'turnId': identity,
+                    'item': {'type': 'userMessage', 'id': item, 'clientId': client,
+                             'content': [{'type': 'text', 'text': 'PRIVATE INPUT'}]}}}
+
+        def read():
+            observed = self.view.relay_turn_transitions()
+            if observed is None:
+                return ()
+            native, edges = observed
+            self.assertEqual(native, self.main)
+            self.assertNotIn('PRIVATE', repr(edges))
+            return edges
+
+        async def send(identifier, method, client, **params):
+            frame = {'id': identifier, 'method': 'turn/' + method,
+                     'params': {'threadId': self.main, 'clientUserMessageId': client, **params}}
+            await self.view.relay_before_send(self.view.outgoing(frame))
+
+        async def check():
+            await send(2, 'start', 'startup', input=[{'type': 'text', 'text': 'PRIVATE TASK'}])
+            self.view.incoming(turn('started', 'main-turn'))
+            self.view.incoming(consumed('item1', 'startup', phase='started'))
+            self.assertEqual(read(), ())
+            self.view.incoming(consumed('side', 'startup', thread=self.side))
+            self.assertEqual(read(), ())
+            self.view.incoming(consumed('item1', 'startup'))
+            self.view.incoming(consumed('item1', 'startup'))
+            self.assertEqual(read(), (TurnStarted(turn='main-turn', kind='prompt', ref='item1', source='person',
+                                                  attempt='startup', first_task=True),))
+
+            await send(3, 'steer', 'manual', expectedTurnId='main-turn')
+            self.view.incoming(consumed('item2', 'manual'))
+            self.view.incoming(consumed('item3', 'external'))
+            self.assertEqual(read(), (
+                TurnJoined(turn='main-turn', ref='item2', source='person', attempt='manual'),
+                TurnJoined(turn='main-turn', ref='item3', source='harness', attempt='external'),
+            ))
+
+            first_end = turn('completed', 'main-turn', status='interrupted', completedAt=100, durationMs=30)
+            self.view.incoming(first_end)
+            self.view.incoming(first_end)
+            self.assertEqual(read(), (TurnEnded(turn='main-turn', kind='prompt', ref='end_100_30',
+                                                state='interrupted'),))
+            self.view.incoming(turn('started', 'main-turn'))
+            self.view.incoming(first_end)  # Recovery must not replay the previous interruption.
+            self.assertEqual(read(), ())
+            self.view.incoming(turn('completed', 'main-turn', status='failed', completedAt=110, durationMs=25))
+            self.assertEqual(read(), (TurnEnded(turn='main-turn', kind='prompt', ref='end_110_25', state='error'),))
+
+            self.view.incoming(consumed('unknown', None, identity='not-observed'))
+            self.assertEqual(read(), ())
+            self.view.incoming(turn('started', 'housekeeping'))
+            await send(4, 'steer', 'typed-mid-turn', expectedTurnId='housekeeping')
+            self.view.incoming(consumed('late-first-seen', 'typed-mid-turn', identity='housekeeping'))
+            self.assertEqual(read(), (TurnJoined(turn='housekeeping', ref='late-first-seen',
+                                                 source='person', attempt='typed-mid-turn'),))
+            self.view.incoming(turn('started', 'model-already-running'))
+            self.view.incoming({'method': 'item/started', 'params': {'threadId': self.main,
+                'turnId': 'model-already-running', 'item': {'type': 'agentMessage'}}})
+            self.view.incoming(consumed('after-model', 'foreign', identity='model-already-running'))
+            self.assertEqual(read(), (TurnJoined(turn='model-already-running', ref='after-model',
+                                                 source='harness', attempt='foreign'),))
+            self.owner = False
+            self.view.incoming(turn('completed', 'unowned', status='completed'))
+            self.owner = True
+            self.view.version = (0, 167, 0)
+            self.view.incoming(turn('completed', 'mixed', status='completed'))
+            self.view.version = (0, 166, 0)
+            self.assertEqual(read(), ())
+
+        asyncio.run(check())
 
     def test_primary_queue_events_preserve_interrupt_order_and_ignore_the_side(self):
         """Primary interrupt ordering controls durable queue pause; a side or late old turn must not silently pause a newer primary turn."""

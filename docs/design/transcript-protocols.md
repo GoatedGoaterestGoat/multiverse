@@ -102,7 +102,7 @@ which rows are real prompts.
 | `mid_turn` | Joins the running turn: a steer, or a prompt typed while the model works |
 | `tool_result` | A tool's result |
 | `command` | Starts a slash command; core makes it a turn of its own |
-| `command_output` | That command's echo, caveat or output |
+| `command_output` | That command's echo, caveat or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
 | `injected` | Context the harness added: reminders, file and environment notes, a background notice merged mid-turn, a skill's instructions |
 | `compaction` | Written by a compaction: the boundary, a summary, rows it stored |
 | `response` | The model's output |
@@ -137,6 +137,18 @@ Plain JSONL and Zstandard-compressed `.jsonl.zst` rollouts use the same logical 
 Compressed reads stream with a 64 MiB decoder-window cap, a 64 MiB row cap, 512 MiB input and decompression budgets per open, and at most 200,000 indexed rows or frame/block headers. Complete frame boundaries are checked before decoding, including concatenated frames and frames without a content size. Header checks, frame scanning and decoding honor the caller's cancellation budget.
 
 Truncated or corrupt compression refuses as unknown/error. A compressed file must remain unchanged for its whole read. A rewrite or a newly appearing plain sibling refuses instead of mixing snapshots, so the caller can retry. If Zstandard support is missing, the refusal explains how to restore it.
+
+The reader may keep a metadata index for the selected rollout in the agent's
+state folder. It keeps at most 200,000 rows and 64 MiB on disk, including the
+bounded preview needed for a possible prompt. Row bodies stay in the rollout.
+On a new process or a changed file, the reader hashes every reused complete
+line before using its metadata. It parses new rows and rebuilds from the first
+line whose bytes disagree. A missing, invalid or oversized index leaves a
+regular cold scan. Like other mv2 agent state, the index trusts the local
+account and checks for corruption and native transcript changes. The reader
+checks the launch and conversation at scan boundaries and the deadline between
+rows. Short turn-event reads use the in-memory index when available. Reads
+neither change nor unpack native files.
 
 - Every complete JSONL line is one row. An unfinished last line waits for its newline. Damaged rows remain as `meta` with no body. Refs are native item IDs from response items or inter-agent communication only; session metadata, turn context and events have no item ref. A missing item ID leaves `ref=None`. `call_id` separately correlates a call and its output. Positions chain the hashes of all preceding line bytes. A ref-less prompt gets core's cursor-based turn ID.
 - A user-role `response_item/message` whose content metadata has native `provenance.type=user` is `prompt`, or `mid_turn` after the first input in the same native turn. Native harness/skill/AGENTS.md provenance stays `injected`, as do inherited parent messages. For older rows without provenance, an ordered exact plain-text matching `event_msg/user_message` or `item_completed` with a `UserMessage` item authenticates the input. These event echoes are `meta`. Unpaired or ambiguous legacy inputs stay `injected`; fewer echoes than indistinguishable inputs cannot authenticate one occurrence. Legacy media inputs need native provenance because their UI echoes are not exact model-input copies. Old and new echo streams are counted separately to avoid double counting an input. Unmatched user messages and developer/system messages are `injected`. Message framing never proves provenance, so ordinary input has `source=None`.
@@ -233,6 +245,80 @@ plugin slices one history read by turn instead of reading turn by turn.
 - Claude writes a turn's last rows after its Stop hooks run, so a turn never
   counts as finished from the Stop hook or the agent's status alone.
 
+## Turn events
+
+A plugin follows conversations through the event journal: an event when an
+input starts or joins a turn, and one when the turn ends (asked for by a
+plugin author, 2026-11-20). Any harness that provides transcripts and reports
+these edges gets them the same way. They carry no text: a plugin reads the
+rows through this protocol, with `transcripts.read`.
+
+| Event | `data` |
+| --- | --- |
+| `turn.started` | `turn`, `kind`, `ref`, `generation`, `resolved`, `source`, `message`, `first_task` |
+| `turn.joined` | `turn`, `ref`, `generation`, `resolved`, `source`, `message` |
+| `turn.ended` | `turn`, `kind`, `ref`, `generation`, `resolved`, `state` |
+
+- `turn` and `kind` are the turn's ID and kind as the turns above group it, so
+  a skill a harness stores as a prompt is a `prompt` turn. `ref` and
+  `generation` are the row's cursor: the input's row for a start or join, the
+  turn's last stored row for an end, its own turn-end row included where the
+  harness has stored one. `resolved` is true when mv2 proved all three; false
+  when it couldn't, and then they are null. An unresolved event is published
+  anyway, in its place, never dropped; a plugin pairs a null-turn start and
+  end by order, since a conversation runs one turn at a time.
+- `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
+  a message, a plugin's send, an answer, a command run with `mv2 slash`, the
+  launch's task) or `harness` (anything else). `message` is the mv2 message ID
+  for a message, from which a plugin reads its sender, and null otherwise; mv2
+  matches the delivery from its own records and never adds the ID to the row
+  or anything the agent sees. `first_task` marks the start of the turn that
+  ran the launch's task, when the harness proves that input was the task.
+- `state` is `finished`, `interrupted`, `error` (a model or harness error
+  ended it, where the harness records one) or `unknown` (the harness can't
+  tell, or mv2 closed the turn because its end was never reported). A plugin
+  never matches a harness's interruption text.
+
+**Order.** A turn starts once, before its joins and its end, and the journal
+keeps the order the harness reported them in, prompt events and status changes
+included: a turn's end comes before the `idle` that follows it, whenever mv2
+can see the end by then. A harness may continue a turn on its own after it
+ended, with no new input; the turn then ends again with a later `ref`, and the
+latest end wins.
+
+**Missed ends.** A new turn whose predecessor's end was never reported records
+that end as `unknown` first. A launch's end, a crash noticed later, or a
+conversation switch ends an open turn as `unknown` before `agent.exited`,
+`agent.killed`, the next `agent.launched` or `agent.session`. An end or a join
+whose turn's start mv2 never saw (the in-session part reloaded mid-turn) is
+recorded alone. After a gap the journal no longer holds, a plugin reads the
+turns once.
+
+**How it's kept.** A status report never reads a transcript: the harness's
+report of each edge, with its native row and turn, is staged with the status
+change in the agent's ordered queue, and the agent's status is recorded at
+once. A status report looks up which plugins subscribe once for all the events
+it records, and skips reading plugin settings only when no plugin here could
+subscribe to any of them. The plugin host then resolves each staged edge off
+every report path: it proves the public turn ID, cursor and generation (from
+the harness's own small index where it keeps one, otherwise from a bounded
+read in a separate process), maps the delivery to the message, and publishes
+the queue in order. So a status event in the journal can trail the agent's
+status by the time resolution takes, but never comes before an edge staged
+ahead of it. Edges are staged only while a plugin subscribes to turn events.
+The queue lives in the agent's folder, so a host restart resumes it. At most
+512 entries per agent wait to be resolved; anything staged beyond them goes to
+fixed files beside the queue, in order, and its turn events are published
+unresolved, which keeps the work bounded, while its other events publish as
+usual. Those files exist only while the host falls behind or isn't running,
+and each is removed, oldest first, once everything in it is published. Nothing
+staged is ever dropped. Turn events carry only the public turn ID and cursor
+fields; what the harness reports privately for each edge stays in the queue.
+
+A staged edge wakes the host, and a recovery scan picks up missed wakes. The
+host reuses workers for indexed reads. Full reads and index builds run one at
+a time in a process that exits.
+
 ## The adapter's part
 
 An adapter that provides transcripts implements `TranscriptProvider` in
@@ -242,6 +328,18 @@ index, and whether an earlier generation's transcript can still be found.
 Its methods are observe in `EFFECTS`. Core owns cursors, bounds, the
 generation token, turn grouping and the access checks, and never parses a
 harness's rows.
+
+**What a cold read costs.** A view starts from the harness's own index of the
+transcript, which a fresh process must build before it can answer. Built from
+nothing, that is a full read of the transcript, and it grows with its size:
+tens of seconds for a transcript of a few hundred megabytes, against core's
+read limit. So an adapter may persist its index across processes, in the
+agent's folder: proved against the transcript by a digest of the bytes it
+covers, extended by parsing only the lines appended since, rebuilt from
+scratch when the proof fails, bounded in size, and holding nothing of a row's
+text beyond what the index needs. A fresh process then starts from the saved
+index instead of a full parse, so a cold read stays well inside the limit. The
+same index can also answer the turn events' cursors.
 
 The Claude adapter reads every transcript through
 `harnesses/claude/transcripts.py`: finding a session's copies (the folder
@@ -452,7 +550,6 @@ The question's model and effort come from the latest `turn_context` or `thread_s
 
 ## Later
 
-- **Conversation entries** (API 1.15): each row's content in one form for
-  every harness.
+- **Conversation entries**: each row's content in one form for every harness.
 - **Pi reading, models and one-shot runs; a schema for the reply; provider routing recorded at
   launch for per-agent runs** ([future work](future-work.md)).

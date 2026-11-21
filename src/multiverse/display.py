@@ -147,14 +147,13 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def report_age(row):
-    """How long ago a working or blocked agent last reported, so how stale its summary is: `32s`, `10m`, `2h`,
-    `3d`. None for any other phase, or a record whose report time isn't a readable timestamp with its time zone
-    (core writes UTC; a naive or date-only one is damaged, not guessed at)."""
-    if row.get("phase") not in ("working", "blocked") or not isinstance(row.get("reported_at"), str):
+def age(timestamp):
+    """How long ago `timestamp` was: `32s`, `10m`, `2h`, `3d`. None when it isn't a readable timestamp with its time
+    zone (core writes UTC; a naive or date-only one is damaged, not guessed at)."""
+    if not isinstance(timestamp, str):
         return None
     try:
-        at = datetime.fromisoformat(row["reported_at"])
+        at = datetime.fromisoformat(timestamp)
         if at.tzinfo is None:
             return None
         seconds = int(max(0, (_now() - at).total_seconds()))
@@ -164,6 +163,21 @@ def report_age(row):
         if seconds >= size:
             return f"{seconds // size}{unit}"
     return f"{seconds}s"
+
+
+def report_age(row):
+    """How long ago a working or blocked agent last reported, so how stale its summary is: `32s`, `10m`, `2h`,
+    `3d`. None for any other phase, or a report time that isn't readable (`age`)."""
+    return age(row.get("reported_at")) if row.get("phase") in ("working", "blocked") else None
+
+
+def status_label(row):
+    """An agent's status with how long it has been inactive: `idle (3m)`, `waiting (40s)`. A working agent that is
+    live is active now, so just `working`; so is any agent whose last status change isn't known (`status_changed_at`
+    missing, from before core recorded it, or damaged)."""
+    status = row.get("status")
+    inactive = None if row.get("active_now") else age(row.get("status_changed_at"))
+    return f"{status} ({inactive})" if status and inactive else status
 
 
 def phase_label(row):
@@ -194,7 +208,20 @@ def outcome(record, verb, failure):
     if record.get("ok") is False:
         raise ValueError(f"{name} {failure}: {record.get('error') or 'the launch did not finish'}")
     summary = f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
-    return with_notices(summary, record)
+    asked = startup_prompt_line(record, record.get("startup_prompt"))
+    return with_notices(summary + (f" {asked}" if asked else ""), record)
+
+
+def startup_prompt_line(record, prompt):
+    """`It's waiting at Claude's prompt "Accessing workspace" (/w): answer it in its pane with mv2 attach NAME.`, for a
+    launch whose screen asks the person something before its session starts; None when it doesn't."""
+    if not isinstance(prompt, dict) or not isinstance(prompt.get("title"), str):
+        return None
+    harness = record.get("harness") or "agent"
+    detail = prompt.get("detail")
+    where = f" ({clean(detail)})" if isinstance(detail, str) and detail else ""
+    return (f"It's waiting at {HARNESS_NAMES.get(harness, harness)}'s prompt \"{clean(prompt['title'])}\"{where}: "
+            f"answer it in its pane with mv2 attach {record['name']}.")
 
 
 def with_notices(summary, record):

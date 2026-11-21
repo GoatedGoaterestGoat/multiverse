@@ -7,10 +7,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+from urllib.parse import urlsplit
 
 
-VERSION = (0, 170, 0)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), VERSION))
+VERSION = (0, 171, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), (0, 170, 0), VERSION))
 DETAIL_BYTES = 64 << 10
 RESPONSE_BYTES = 128 << 10  # Typed wrappers and offered native values can expand a bounded answer file.
 METHODS = {
@@ -67,8 +68,14 @@ def public_answer(value):
         return result
 
 
-def choice(identifier, label, *, saves_rule=False):
-    return {'id': identifier, 'label': label, 'saves_rule': saves_rule, 'takes_message': False}
+def choice(identifier, label, meaning, *, short=None, saves_rule=False):
+    return {'id': identifier, 'label': label, 'meaning': meaning, 'saves_rule': saves_rule,
+            'takes_message': False, **({'short': short} if short is not None else {})}
+
+
+def legacy_choices(choices):
+    return tuple({key: value for key, value in item.items() if key not in ('meaning', 'short')}
+                 for item in choices)
 
 
 def question(identifier, prompt, *, header='', options=(), free_text=True, secret=False, required=True, takes_note=False):
@@ -77,6 +84,72 @@ def question(identifier, prompt, *, header='', options=(), free_text=True, secre
     return {'id': text(identifier), 'question': text(prompt, empty=True), 'header': text(header, empty=True),
             'options': tuple(options), 'multiple': False, 'free_text': free_text,
             'secret': secret, 'required': required, 'takes_note': takes_note}
+
+
+def display_line(value, limit):
+    if not isinstance(value, str):
+        return None
+    value = ''.join(character if character.isprintable() else ' ' for character in value).strip()
+    if len(value) > limit:
+        value = value[:limit - 1] + '…'
+    return value or None
+
+
+def display_block(title, subject=None, lines=()):
+    clean = [line for value in lines if (line := display_line(value, 200)) is not None]
+    return {'title': display_line(title, 80), 'subject': display_line(subject, 500), 'lines': clean[:8]}
+
+
+def display_lines(value):
+    return value.splitlines()[:8] if isinstance(value, str) else []
+
+
+def url_host(value):
+    try:
+        return urlsplit(value).hostname if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+def permission_path_label(value):
+    if not isinstance(value, dict):
+        return None
+    tag = value.get('type')
+    if tag == 'path':
+        return display_line(value.get('path'), 200)
+    if tag == 'glob_pattern':
+        pattern = display_line(value.get('pattern'), 200)
+        return f'glob {pattern}' if pattern else None
+    special = value.get('value')
+    if tag != 'special' or not isinstance(special, dict):
+        return None
+    kind = special.get('kind')
+    if not isinstance(kind, str):
+        return None
+    labels = {'root': ':root', 'minimal': ':minimal', 'tmpdir': ':tmpdir', 'slash_tmp': '/tmp',
+              'project_roots': ':workspace_roots', 'current_working_directory': ':cwd'}
+    label = display_line(special.get('path'), 200) if kind == 'unknown' else labels.get(kind)
+    subpath = display_line(special.get('subpath'), 200)
+    return f'{label}/{subpath}' if label and subpath else label
+
+
+def filesystem_display_lines(files):
+    lines = []
+    entries = files.get('entries')
+    if isinstance(entries, list):
+        labels = {'read': 'Read', 'write': 'Write', 'deny': 'Deny read'}
+        for entry in entries[:8]:
+            if not isinstance(entry, dict) or not isinstance(entry.get('access'), str):
+                continue
+            access = labels.get(entry['access'])
+            path = permission_path_label(entry.get('path'))
+            if access and path:
+                lines.append(f'{access} {path}')
+    for mode, label in (('read', 'Read'), ('write', 'Write')):
+        paths = files.get(mode)
+        if isinstance(paths, list):
+            lines.extend(f'{label} {path}' for path in paths[:8] if isinstance(path, str))
+    return list(dict.fromkeys(lines))
 
 
 @dataclass
@@ -93,16 +166,68 @@ class Offer:
     reason: str | None = None
     detail: dict = field(default_factory=dict)
 
+    def display(self):
+        params = self.params
+        if self.kind == 'question':
+            count = len(self.questions)
+            title = f'Answer {count} questions' if count > 1 else 'Answer a question'
+            subject = self.questions[0].get('header') if count == 1 else None
+            return display_block(title, subject)
+        tool = METHODS[self.method]
+        reason = display_lines(params.get('reason'))
+        if tool == 'command':
+            network = params.get('networkApprovalContext')
+            if isinstance(network, dict) and isinstance(network.get('host'), str):
+                return display_block('Access the network', network['host'], reason)
+            title = 'Send input to a command' if params.get('kind') == 'writeStdin' else 'Run a command'
+            return display_block(title, params.get('command'), reason)
+        if tool == 'file_change':
+            paths = [change.get('path') for change in self.detail.get('changes', [])[:8]]
+            if len(paths) == 1:
+                return display_block('Edit a file', paths[0], reason)
+            return display_block('Edit files', lines=[*paths, *reason])
+        if tool == 'permissions':
+            permission = params.get('permissions')
+            scopes, lines = [], []
+            if isinstance(permission, dict):
+                network, fs = permission.get('network'), permission.get('fileSystem')
+                if isinstance(network, dict) and network.get('enabled') is True:
+                    scopes.append('network')
+                if isinstance(fs, dict):
+                    if any(fs.get(key) for key in ('read', 'write', 'entries')):
+                        scopes.append('filesystem')
+                    lines = filesystem_display_lines(fs)
+            subject = ' and '.join(scopes).capitalize() + ' access' if scopes else None
+            return display_block('Grant permissions', subject, [*lines, *reason])
+        if params.get('mode') in ('url', 'openai/userVerification'):
+            return display_block('Open an MCP URL', url_host(params.get('url')))
+        server = display_line(params.get('serverName'), 500)
+        if self.kind == 'form':
+            return display_block('Fill in a form', server, display_lines(params.get('message')))
+        metadata = params.get('_meta')
+        tool_name = display_line(metadata.get('tool_name'), 500) if isinstance(metadata, dict) else None
+        subject = ' · '.join(value for value in (server, tool_name) if value)
+        return display_block('Use an MCP tool' if tool_name else 'Approve an MCP request', subject,
+                             display_lines(params.get('message')))
+
     def public(self, identifier):
         stamp = self.params.get('startedAtMs')
         try:
             at = datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat() if type(stamp) is int else None
         except (OverflowError, OSError, ValueError):
             at = None
-        return {'id': identifier, 'kind': self.kind, 'asked_at': at, 'tool': METHODS[self.method],
-                'summary': self.summary[:500], 'detail': deepcopy(self.detail),
+        return {'id': identifier, 'kind': self.kind, 'asked_at': at, 'tool': METHODS.get(self.method, self.method),
+                'summary': self.summary[:500], 'detail': deepcopy(self.detail), 'display': self.display(),
                 'choices': tuple(self.choices), 'questions': tuple(self.questions),
                 'answerable': self.answerable, 'reason': self.reason, 'subagent': None}
+
+    def check_answerable_size(self):
+        # Preserve the original prompt and response budgets. Presentation is
+        # independently bounded by the display limits and finite choice meanings.
+        value = self.public('preview')
+        del value['display']
+        value['choices'] = legacy_choices(value['choices'])
+        bounded(value)
 
     def response(self, answer):
         """Build only a typed offered result; never accept caller-provided native JSON."""
@@ -261,6 +386,7 @@ def command(offer):
         saves = False
         if isinstance(decision, str) and decision in simple:
             identifier, label = simple[decision]
+            meaning = identifier
         elif isinstance(decision, dict) and set(decision) == {'acceptWithExecpolicyAmendment'}:
             amendment = object_value(decision['acceptWithExecpolicyAmendment'])
             prefix = object_value(amendment.get('execpolicy_amendment')).get('command')
@@ -270,6 +396,7 @@ def command(offer):
             if any('\r' in part or '\n' in part for part in prefix):
                 continue  # The checked TUI hides these amendments.
             identifier, label, saves = f'allow_rule_{number}', 'Allow and save the offered command rule', True
+            meaning = 'allow_always'
         elif isinstance(decision, dict) and set(decision) == {'applyNetworkPolicyAmendment'}:
             amendment = object_value(decision['applyNetworkPolicyAmendment'])
             network = object_value(amendment.get('network_policy_amendment'))
@@ -277,11 +404,12 @@ def command(offer):
                 raise ValueError('The native network amendment has an unsupported shape')
             text(network.get('host'))
             identifier, label, saves = f'network_rule_{number}', 'Save the offered network rule', True
+            meaning = 'allow_always' if network['action'] == 'allow' else 'deny_always'
         else:
             raise ValueError('The native command offers an unsupported decision')
         if identifier in offer.results:
             raise ValueError('The native command repeats an ambiguous decision')
-        offer.choices.append(choice(identifier, label, saves_rule=saves))
+        offer.choices.append(choice(identifier, label, meaning, saves_rule=saves))
         offer.results[identifier] = {'decision': deepcopy(decision)}
     if not offer.choices:
         raise ValueError('No terminal command decision can be answered here')
@@ -466,16 +594,16 @@ def elicitation(offer):
                 ('allow_always', 'Always allow', True, 'always')]:
             if value is not None and value not in persist:
                 continue
-            offer.choices.append(choice(identifier, label, saves_rule=saved))
+            offer.choices.append(choice(identifier, label, identifier, saves_rule=saved))
             offer.results[identifier] = {'action': 'accept', 'content': None,
                                          '_meta': {'persist': value} if value else None}
         if meta.get('codex_approval_kind') != 'mcp_tool_call':
-            offer.choices.append(choice('decline', 'Decline'))
+            offer.choices.append(choice('decline', 'Decline', 'deny'))
             offer.results['decline'] = {'action': 'decline', 'content': None, '_meta': None}
     else:
         offer.kind = 'form'
         form_fields(offer, schema)
-    offer.choices.append(choice('cancel', 'Cancel'))
+    offer.choices.append(choice('cancel', 'Cancel', 'dismiss'))
     offer.results['cancel'] = {'action': 'cancel', 'content': None,
         '_meta': {'codex_approval_cancellation_reason': 'user'} if meta.get('codex_approval_kind') == 'mcp_tool_call' else None}
 
@@ -513,7 +641,7 @@ def describe(method, params, *, item=None):
                 text(value.get('diff'), empty=True)
             for native, identifier, label in [('accept', 'allow', 'Allow once'),
                     ('acceptForSession', 'allow_session', 'Allow for this session'), ('cancel', 'stop', 'Stop this turn')]:
-                offer.choices.append(choice(identifier, label))
+                offer.choices.append(choice(identifier, label, identifier))
                 offer.results[identifier] = {'decision': native}
         elif tool == 'command':
             command(offer)
@@ -522,7 +650,8 @@ def describe(method, params, *, item=None):
             for identifier, label, scope, strict in [('allow', 'Grant for this turn', 'turn', False),
                     ('allow_review', 'Grant with strict review', 'turn', True),
                     ('allow_session', 'Grant for this session', 'session', False), ('deny', 'Deny permissions', 'turn', False)]:
-                offer.choices.append(choice(identifier, label))
+                meaning = 'other' if strict else identifier
+                offer.choices.append(choice(identifier, label, meaning, short='Allow, strict review' if strict else None))
                 offer.results[identifier] = {'permissions': {} if identifier == 'deny' else deepcopy(granted), 'scope': scope}
                 if strict:
                     offer.results[identifier]['strictAutoReview'] = True
@@ -531,7 +660,7 @@ def describe(method, params, *, item=None):
         elif tool == 'mcp':
             elicitation(offer)
         offer.detail = bounded(detail)
-        bounded(offer.public('preview'))
+        offer.check_answerable_size()
     except (ValueError, TypeError, RecursionError) as error:
         # A terminal-only listing is deliberately small and contains no partial
         # choices or retained opaque authentication metadata.

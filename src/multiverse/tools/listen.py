@@ -79,11 +79,27 @@ def run(root=None, *, timeout=None, _present=None):
     launch_id = agents.runtime(directory).get('launch_id')
     if not launch_id:
         raise ValueError('No running launch to listen for')
-    with focus.listening(directory) as registration:
-        return _wait(directory, launch_id, deadline, started, registration, _present or (lambda result: None))
+    with ExitStack() as listeners:
+        registrations = [listeners.enter_context(focus.listening(directory))]
+        try:
+            registrations.append(listeners.enter_context(focus.listening(directory, launch_id=launch_id)))
+        except (OSError, ValueError):
+            pass  # A missing launch registration cannot stop the listener or its focus claim.
+        return _wait(directory, launch_id, deadline, started, registrations, _present or (lambda result: None))
 
 
-def _wait(directory, launch_id, deadline, started, registration, present):
+def running(directory, launch_id):
+    """Prove a live listener for the observed launch without waiting on a lock."""
+    try:
+        if launch_id and focus.listener(directory, launch_id=launch_id):
+            _current(directory, launch_id)
+            return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _wait(directory, launch_id, deadline, started, registrations, present):
     previous = None
     # A process check that cannot be told (ps slower than its timeout on a loaded machine) reads nothing and is
     # tried again on the next poll. No check starts once the first unanswered one began this long ago; the one in
@@ -94,7 +110,8 @@ def _wait(directory, launch_id, deadline, started, registration, present):
     next_process_check = 0
     while True:
         facts = _current(directory, launch_id)
-        registration.register()
+        for registration in registrations:
+            registration.register()
         # Only a polling hint: the focus lock below always takes a fresh retrying read before output.
         focused = focus.hint(directory) is not None
         owed = owed or focused

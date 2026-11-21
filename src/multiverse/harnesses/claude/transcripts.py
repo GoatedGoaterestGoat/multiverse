@@ -13,12 +13,16 @@ be read raises `Unreadable` rather than read as absence.
 """
 from collections import OrderedDict
 from dataclasses import dataclass
+import contextlib
+import contextvars
+import dataclasses
 import itertools
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -119,29 +123,49 @@ def holds_name(name, keys):
     return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
 
 
-def session_transcripts(native_id, environment=None, workspaces=(), links=False):
+def session_transcripts(native_id, environment=None, workspaces=(), links=False, check=None):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
 
     Raises Unreadable when a folder can't be listed or searched and could hold the session (a dangling link, or a
     folder gone before it was searched, counts as one that can't be searched): Claude files it
     under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
     folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
-    that finds nothing would otherwise read as proof the transcript is absent.
+    that finds nothing would otherwise read as proof the transcript is absent. `check`: called before the listing
+    and between its entries; it raises past a read's deadline.
     """
-    return _scan_transcripts(native_id, environment, workspaces, links)[0]
+    return _scan_transcripts(native_id, environment, workspaces, links, check)[0]
 
 
-def _scan_transcripts(native_id, environment=None, workspaces=(), links=False):
+def _scan_transcripts(native_id, environment=None, workspaces=(), links=False, check=None):
     """session_transcripts, and whether this call listed the projects folder itself (False when it is missing)."""
     projects = claude_home(environment) / 'projects'
+    found, files, keys = [], set(), project_keys(workspaces)
+    if check is not None:
+        check()  # right before the listing opens
     try:
-        entries = list(os.scandir(projects))
+        listing = os.scandir(projects)
     except FileNotFoundError:
         return [], False
     except OSError as error:
         raise Unreadable(projects) from error
-    found, files, keys = [], set(), project_keys(workspaces)
+    entries, taking = [], iter(listing)
+    try:
+        while True:  # taken one at a time: a deadline mid-listing fetches no further entry
+            if check is not None:
+                check()
+            try:
+                entries.append(next(taking))
+            except StopIteration:
+                break
+            except OSError as error:  # the listing failing partway is the folder not being listable
+                raise Unreadable(projects) from error
+    finally:
+        close = getattr(listing, 'close', None)
+        if close is not None:
+            close()
     for entry in entries:
+        if check is not None:
+            check()  # outside the handlers below: a deadline is never taken for an unreadable folder
         candidate = Path(entry.path) / f'{native_id}.jsonl'
         holds = holds_name(entry.name, keys)
         try:
@@ -262,9 +286,12 @@ class Transcript:
         self.path, self.rewrites, self.rows = path, 0, rows
         self.saved = None  # a usage index another process saved, proved at the next read before it counts
         self.saved_offset = 0  # how far the copy in the agent's store reaches, as this process last wrote or took it
+        self.saved_rows = None  # a full row index another process saved (ROW_STORE), proved at the next read
+        self.rows_saved = (0, None)  # how far the saved row index reaches, and monotonic() when this process wrote it
         self._reset(None)
 
     def _reset(self, inode):
+        self.epoch = next(_epochs)
         self.inode, self.offset, self.entries, self.responses, self.last = inode, 0, [], {}, None
         self.observed, self.chain = None, ''
         self.stamp, self.proven, self.prefix, self.tail = None, None, hashlib.sha256(), b''
@@ -277,11 +304,13 @@ class Transcript:
         handle.seek(self.offset - len(self.tail))
         return handle.read(len(self.tail)) == self.tail
 
-    def _intact(self, handle):
-        """Whether the bytes already indexed are still exactly what was read."""
+    def _intact(self, handle, check=None):
+        """Whether the bytes already indexed are still exactly what was read. `check`: called between chunks."""
         digest, left = hashlib.sha256(), self.offset
         handle.seek(0)
         while left:
+            if check is not None:
+                check()
             chunk = handle.read(min(left, 1 << 22))
             if not chunk:
                 return False
@@ -340,13 +369,153 @@ class Transcript:
         self.proven_at, self.saved_offset = monotonic(), self.offset
         return True
 
-    def read(self, *, prove=False):
+    def rows_snapshot(self):
+        """This index's rows and the proof of the bytes they cover, taken together (under _transcripts_lock, which a
+        read holds while it changes them), for a save to serialize: a read that goes on meanwhile can't put newer
+        rows or a newer offset in the file, nor have the save mark them saved."""
+        return _Snapshot(self.inode, self.offset, self.prefix.hexdigest(), self.chain, self.entries[:], self.epoch)
+
+    def row_sections(self, analysis):
+        """The saved form of this full index and its analysis (from the newest row, for these rows): a JSON header,
+        then one JSON array per row field and for the labels and history, each with its length and SHA-256 in the
+        header. No row text: a row keeps its mark, and a view reads a preview from the transcript. None past
+        ROW_STORE_BYTES."""
+        saving = _SERIALIZING.get()  # save_rows' snapshot and deadline, while it serializes
+        check, snap = (saving.check, saving.snapshot) if saving is not None else (None, self.rows_snapshot())
+        entries, tick, blobs = snap.entries, ticker(check), []
+
+        def step():
+            if check is not None:
+                check()
+
+        def encode(values):  # in chunks, each after a check, so no pass over every row runs past the deadline
+            parts = []
+            for start in range(0, len(values), ENCODE_ROWS):
+                step()
+                parts.append(json.dumps(values[start:start + ENCODE_ROWS], separators=(',', ':'))[1:-1])
+            return ('[' + ','.join(parts) + ']').encode()
+
+        for name in _ROW_FIELDS:
+            step()  # before each section's projection
+            values = []
+            for item in entries:
+                if tick is not None:
+                    tick()
+                values.append(_saved_field(name, getattr(item, name)))
+            blobs.append((name, encode(values)))
+        step()
+        codes = sorted({label for label, _ in analysis.labels})
+        number, labels = {label: n for n, label in enumerate(codes)}, []
+        for label, _ in analysis.labels:
+            if tick is not None:
+                tick()
+            labels.append(number[label])
+        blobs.append(('label', encode(labels)))
+        blobs.append(('codes', encode(codes)))
+        step()
+        blobs.append(('history', encode(list(analysis.history.rows))))
+        step()
+        header = {'schema': ROW_SCHEMA, 'derivation': ROW_DERIVATION, 'path': str(self.path), 'inode': snap.inode,
+                  'offset': snap.offset, 'prefix': snap.prefix, 'chain': snap.chain, 'rows': len(entries),
+                  'sections': [[name, len(blob), hashlib.sha256(blob).hexdigest()] for name, blob in blobs]}
+        data = json.dumps(header, separators=(',', ':')).encode() + b'\n' + b''.join(blob for _, blob in blobs)
+        return data if len(data) <= ROW_STORE_BYTES else None
+
+    def adopt_rows(self, data, check=None):
+        """Take a saved row index (row_sections' form) to prove at the next read: one with any fault (another
+        schema, reader version or path, a section's length or checksum, a field of the wrong shape) is ignored, and
+        the next read parses from the start. `check` holds a read's deadline through it."""
+        try:
+            end = data.index(b'\n')
+            header = json.loads(data[:end])
+            if (header.get('schema') != ROW_SCHEMA or header.get('derivation') != ROW_DERIVATION
+                    or header.get('path') != str(self.path)
+                    or not all(type(header.get(key)) is int and header[key] >= 0 for key in ('inode', 'offset', 'rows'))
+                    or not header['offset'] or not isinstance(header.get('chain'), str)
+                    or not re.fullmatch('[0-9a-f]{64}', str(header.get('prefix')))):
+                return False
+            position, got = end + 1, {}
+            for name, size, digest in header['sections']:
+                if check is not None:
+                    check()
+                blob = data[position:position + size]
+                position += size
+                if len(blob) != size or hashlib.sha256(blob).hexdigest() != digest:
+                    return False
+                got[name] = json.loads(blob)
+            count = header['rows']
+            if (position != len(data) or set(got) != {*_ROW_FIELDS, 'label', 'codes', 'history'}
+                    or any(len(got[name]) != count for name in (*_ROW_FIELDS, 'label'))
+                    or not all(type(n) is int and 0 <= n < count for n in got['history'])
+                    or not all(type(n) is int and 0 <= n < len(got['codes']) for n in got['label'])
+                    or not all(usage is None or isinstance(usage, dict) and set(usage) <= set(USAGE_KEYS)
+                               and all(type(n) in (int, float) for n in usage.values()) for usage in got['usage'])):
+                return False
+            columns = [[tuple(value) for value in got[name]] if name in _TUPLES else got[name] for name in _ROW_FIELDS]
+            columns.insert(_HEAD, [None] * count)  # no text: a view reads it from the transcript (with_text)
+            entries = []
+            for values in zip(*columns):
+                if check is not None:
+                    check()
+                entries.append(Entry(*values))
+            if not entries or entries[-1].chain != header['chain']:
+                return False
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
+        self.saved_rows = {**{key: header[key] for key in ('inode', 'offset', 'prefix', 'chain')}, 'entries': entries}
+        return True
+
+    def _take_rows(self, handle, status, check):
+        """Prove the saved row index's bytes unchanged (the same inode, then a hash of every byte it covers) and take
+        it over; False, and the index left empty, when they changed. A read's deadline cutting the proof keeps the
+        saved rows, to prove at the next read."""
+        saved = self.saved_rows
+        if status.st_ino != saved['inode'] or status.st_size < saved['offset']:
+            self.saved_rows = None
+            return False
+        digest, left, tail = hashlib.sha256(), saved['offset'], b''
+        handle.seek(0)
+        while left:
+            if check is not None:
+                check()
+            chunk = handle.read(min(left, 1 << 22))
+            if not chunk:
+                self.saved_rows = None
+                return False
+            digest.update(chunk)
+            tail = (tail + chunk)[-TAIL:]
+            left -= len(chunk)
+        if digest.hexdigest() != saved['prefix']:
+            self.saved_rows = None
+            return False
+        conversation, responses, last, observed = self.path.stem, {}, None, None
+        for item in saved['entries']:  # in locals: a cut here keeps the saved rows pending, and publishes nothing
+            if check is not None:
+                check()
+            last, observed = _account(item, conversation, responses, last, observed)
+        if check is not None:
+            check()
+        self.saved_rows = None
+        self._reset(status.st_ino)
+        self.offset, self.prefix, self.tail, self.chain = saved['offset'], digest, tail, saved['chain']
+        self.entries, self.responses, self.last, self.observed = saved['entries'], responses, last, observed
+        self.stamp = self.proven = (status.st_mtime_ns, status.st_size)
+        self.proven_at, self.rows_saved = monotonic(), (self.offset, None)
+        return True
+
+    def read(self, *, prove=False, check=None):
         """Read up to date. `prove`: also prove every byte indexed earlier unchanged, if the file changed since the
-        last proof; `self.proven` is the file's stamp then (or when the index was read whole)."""
+        last proof; `self.proven` is the file's stamp then (or when the index was read whole). `check`: called
+        between chunks and every CHECK_ROWS rows; it raises past a read's deadline, and the index is then left as
+        it was (or empty, when a proof had already found it stale), never partly read."""
+        if check is not None:
+            check()  # right before the transcript opens
         with open_regular(self.path) as handle:
             status = os.fstat(handle.fileno())
             if self.saved is not None:
                 self._take_saved(handle, status)
+            if self.saved_rows is not None:
+                self._take_rows(handle, status, check)
             stamp = (status.st_mtime_ns, status.st_size)
             proved = tail_only = False
             if status.st_ino != self.inode or status.st_size < self.offset:
@@ -354,54 +523,252 @@ class Transcript:
             elif not self.offset:
                 stale = False
             elif prove and stamp != self.proven:
-                stale, proved = not self._intact(handle), True
+                stale, proved = not self._intact(handle, check), True
             else:
                 due = self.proven_at is None or monotonic() - self.proven_at >= PROOF_INTERVAL
                 if stamp == self.stamp and not (self.unproved and due):
                     stale = False  # unchanged since a read that proved it, or not due yet
                 elif stamp == self.stamp or status.st_size == self.stamp[1] or due:
-                    stale, proved = not self._intact(handle), True  # no append to explain the change, or due a proof
+                    stale, proved = not self._intact(handle, check), True  # no append to explain the change, or due a proof
                 else:
                     stale, tail_only = not self._tail_intact(handle), True
             if stale:
                 if self.inode is not None:
                     self.rewrites += 1
                 self._reset(status.st_ino)
+                self.rows_saved = (0, None)  # a rewrite: whatever was saved covers other bytes now
             start = self.offset
             handle.seek(self.offset)
-            data = handle.read()
-        end = data.rfind(b'\n') + 1  # an unfinished last line waits for its newline
-        # Parse the new lines first and change nothing until all of them parsed: a failure leaves the index as it
-        # was, so the next read starts from the same place and never counts a row twice.
-        added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
-        conversation = self.path.stem  # a main transcript is named after its session
-        chain = self.chain
-        for line in data[:end].split(b'\n')[:-1]:
-            item = entry(position, line + b'\n', chain)
-            if self.rows:
-                added.append(item)
-            if item.kind == 'unreadable':
-                observed = None
-            if item.kind == 'assistant' and item.usage is not None and item.response:
-                responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
-                last = item.at or last
-                if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
-                    # The latest reply's own fields, even when its model is missing: never an older turn's.
-                    observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
-            position, chain = position + item.size, item.chain
+            # Read, split and parse a chunk at a time, so a deadline is checked throughout (one read and split of a
+            # large file is half a second alone). Change nothing until every new line parsed: a failure or a deadline
+            # leaves the index as it was, so the next read starts from the same place and never counts a row twice.
+            added, responses, last, observed, position = [], {}, self.last, self.observed, self.offset
+            conversation = self.path.stem  # a main transcript is named after its session
+            chain, prefix, tail, read_to = self.chain, self.prefix.copy(), self.tail, self.offset
+            pending = b''  # the start of a line whose newline hasn't been read yet
+            while True:
+                if check is not None:
+                    check()
+                part = handle.read(READ_CHUNK)
+                if not part:
+                    break  # an unfinished last line waits for its newline
+                buffer = pending + part
+                end = buffer.rfind(b'\n') + 1
+                whole, pending = buffer[:end], buffer[end:]
+                if not whole:
+                    continue
+                for line in whole.split(b'\n')[:-1]:
+                    if check is not None:
+                        check()  # every row: a check is cheap next to a row's parse
+                    item = entry(position, line + b'\n', chain)
+                    if self.rows:
+                        added.append(item)
+                    last, observed = _account(item, conversation, responses, last, observed)
+                    position, chain = position + item.size, item.chain
+                prefix.update(whole)
+                tail = (tail + whole)[-TAIL:]
+                read_to += len(whole)
         self.entries.extend(added)
         self.chain = chain
         self.responses.update(responses)
         self.last, self.observed = last, observed
-        self.prefix.update(data[:end])
-        self.tail = (self.tail + data[:end])[-TAIL:]
-        self.offset += end
+        self.prefix, self.tail, self.offset = prefix, tail, read_to
         self.stamp = stamp
         if prove or proved or not start:
             self.proven, self.proven_at, self.unproved = stamp, monotonic(), False
         elif tail_only:
             self.unproved = True
         return self
+
+
+def _saved_field(name, value):
+    """A row field as the saved index keeps it: tuples as lists, and of an assistant row's usage only the numeric
+    counters mv2 reads (Claude's usage can hold other keys, text among them)."""
+    if name in _TUPLES:
+        return list(value)
+    if name == 'usage' and value is not None:
+        return {key: value[key] for key in USAGE_KEYS if type(value.get(key)) in (int, float)}
+    return value
+
+
+def _account(item, conversation, responses, last, observed):
+    """One row's part in the index's usage: its response's counts, the latest reply's time and observed settings."""
+    if item.kind == 'unreadable':
+        observed = None
+    if item.kind == 'assistant' and item.usage is not None and item.response:
+        responses[item.response] = {key: item.usage[key] for key in USAGE_KEYS if key in item.usage}
+        last = item.at or last
+        if not item.sidechain and item.model != '<synthetic>' and not (item.has_session and item.session != conversation):
+            # The latest reply's own fields, even when its model is missing: never an older turn's.
+            observed = {'model': item.model, 'effort': item.effort, 'observed_at': item.at}
+    return last, observed
+
+
+# A process that opens reads a transcript's rows from its start: tens of seconds for a large one on a loaded machine.
+# So a full index is also kept in the agent's folder (`ROW_STORE`, one file per transcript copy): a new process
+# proves it by a hash of the bytes it covers, takes its rows, and parses only what Claude wrote since. It is mv2's own
+# state, checked against corruption and transcript change, not against deliberate rewriting by the same user. It
+# holds no row text (each row's mark stands for what labelling needs from it), and is written only by a process
+# that has just read, at most every ROW_SAVE_INTERVAL per transcript, and only when the read's deadline leaves
+# ROW_SAVE_MARGIN: never by a turn event's 0.5 s read. ROW_DERIVATION changes whenever the reader would derive a
+# row's fields or labels differently, so an index from older code is read again rather than trusted.
+ROW_STORE = 'claude-rows'
+ROW_SCHEMA = 1
+ROW_DERIVATION = 1
+ROW_STORE_BYTES = 128 << 20
+ENCODE_ROWS = 16384  # rows per encoded chunk of a saved section, each after a deadline check
+ROW_SAVE_INTERVAL = 5
+ROW_SAVE_MARGIN = 2.0
+
+
+def row_file(store, path):
+    """The saved row index of the transcript at `path`, in an agent's ROW_STORE folder."""
+    return Path(store) / f'{hashlib.sha256(str(path).encode()).hexdigest()[:24]}.idx'
+
+
+_NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+
+
+def _rows_folder(store, create=False):
+    """The agent's ROW_STORE folder, opened without following a link (a descriptor), or None when it is missing (and
+    not `create`), a link, or not a folder: the index is then neither read nor written."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | _NOFOLLOW | os.O_NONBLOCK
+    try:
+        return os.open(store, flags)
+    except FileNotFoundError:
+        if not create:
+            return None
+    except OSError:
+        return None
+    try:
+        os.mkdir(store)
+    except FileExistsError:
+        pass
+    except OSError:
+        return None
+    try:
+        return os.open(store, flags)
+    except OSError:
+        return None
+
+
+def _load_rows(file, check=None):
+    """A saved row index's bytes, or None when there is none, or it (or its folder) is a link, not a regular file,
+    unreadable or past ROW_STORE_BYTES (read through the opened file, so one swapped in after any check can't be
+    read past the bound)."""
+    if check is not None:
+        check()
+    folder = _rows_folder(file.parent)
+    if folder is None:
+        return None
+    try:
+        descriptor = os.open(file.name, os.O_RDONLY | _NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)  # a FIFO never blocks it
+    except OSError:
+        os.close(folder)
+        return None
+    try:
+        with os.fdopen(descriptor, 'rb') as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            if check is not None:
+                check()  # between the open and the read, as for the transcript
+            data = handle.read(ROW_STORE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(folder)
+    return data if len(data) <= ROW_STORE_BYTES else None
+
+
+_SERIALIZING = contextvars.ContextVar('serializing', default=None)  # save_rows' check, for row_sections
+
+
+class SaveStopped(Exception):
+    """An optional save's own budget ran out: nothing was replaced, and the read it followed stands."""
+
+
+def save_rows(index, analysis, store, check=None, interval=True):
+    """Write `index`'s rows and its analysis (from the newest row) to the agent's store, whole, beside the file and
+    moved over it; only when it reaches further than the copy there, and with `interval`, at most every
+    ROW_SAVE_INTERVAL. True when the saved copy now reaches as far as `index`. `check` holds a read's deadline
+    through it: past it the temporary file is removed and nothing is replaced. Never raises otherwise: a store that
+    can't be written only means the next process reads from the start."""
+    reached, written = index.rows_saved
+    if store is None or not index.offset or analysis.count != len(index.entries):
+        return False
+    if index.offset == reached:
+        return True
+    if interval and written is not None and monotonic() - written < ROW_SAVE_INTERVAL:
+        return False
+    with _holding(_transcripts_lock, check):  # a read holds it while it changes the index
+        snap = index.rows_snapshot()
+    if not snap.offset or snap.epoch != analysis.epoch or len(snap.entries) != analysis.count:
+        return False  # the index moved on since its analysis: the next save writes it
+    token = _SERIALIZING.set(_Saving(check, snap))
+    try:
+        data = index.row_sections(analysis)
+    finally:
+        _SERIALIZING.reset(token)
+    if check is not None:
+        check()  # serialization scales with the transcript
+    if data is None:
+        return False
+    name = row_file(store, index.path).name
+    folder = _rows_folder(store, create=True)
+    if folder is None:
+        return False
+    temporary = None
+    try:
+        # Created new beside it, in the folder as opened (never through a link), and moved over it whole.
+        candidate = f'{name}.{secrets.token_hex(8)}.tmp'
+        descriptor = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600, dir_fd=folder)
+        temporary = candidate
+        with os.fdopen(descriptor, 'wb') as handle:
+            for start in range(0, len(data), READ_CHUNK):
+                if check is not None:
+                    check()
+                handle.write(data[start:start + READ_CHUNK])
+        # Publication, under the lock taken within the deadline: an older save never replaces what a newer one of
+        # this index published, nor one after a rewrite, and the mark always names what the file now holds.
+        with _holding(_transcripts_lock, check):
+            if check is not None:
+                check()  # the acquire itself can cross the deadline
+            # Only the index this process holds for the transcript publishes: an evicted one's save would replace
+            # its successor's newer file.
+            if _transcripts.get(index.path) is not index or index.epoch != snap.epoch or index.rows_saved[0] > snap.offset:
+                return False
+            os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+            temporary = None
+            index.rows_saved = (snap.offset, monotonic())
+            return index.offset == snap.offset
+    except OSError:
+        return False
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=folder)
+            except OSError:
+                pass
+        os.close(folder)
+
+
+def with_text(handle, item):
+    """`item` with its head, read from the transcript at its offset, for a row taken from a saved index (which keeps
+    no text); its head as a cold read finds it, or empty when the line there is no longer that row."""
+    if item.head is not None:
+        return item
+    handle.seek(item.offset)
+    line = handle.read(item.size)
+    if len(line) != item.size or hashlib.sha256(line).hexdigest()[:16] != item.digest:
+        return dataclasses.replace(item, head='')
+    try:
+        row = json.loads(line)
+        message = row.get('message') if isinstance(row.get('message'), dict) else {}
+        attachment = row.get('attachment') if isinstance(row.get('attachment'), dict) else {}
+        head = _head(row, message.get('content', row.get('content')), attachment)
+    except (ValueError, AttributeError, TypeError):
+        head = ''
+    return dataclasses.replace(item, head=head)
 
 
 # Indexes by path. Usage reads every agent's transcripts on each listing, so its indexes keep no Entry per row (a
@@ -416,17 +783,43 @@ _transcripts_lock = threading.Lock()
 # eviction starts above any version a reader holds from before, so the reader parses again rather than trusting a
 # cursor into a history that changed while no index watched it.
 _versions = itertools.count(1)
+_epochs = itertools.count(1)  # one per index reset, for save_rows' snapshots
 
 
-def _index(path, rows, saved=None):
+READ_CHUNK = 1 << 22  # bytes read at a time
+CHECK_ROWS = 256  # rows between deadline checks: about 50 ms of parsing a large transcript
+
+
+def ticker(check, every=CHECK_ROWS):
+    """A function to call once per row: it calls `check` (which raises past a read's deadline) every `every` rows.
+    None when there is no check."""
+    if check is None:
+        return None
+    count = 0
+
+    def tick():
+        nonlocal count
+        count += 1
+        if count % every == 0:
+            check()
+    return tick
+
+
+def _index(path, rows, saved=None, store=None, check=None):
     """The kept index for `path` (a full one when `rows`), the most recently used last; under _transcripts_lock.
-    `saved`: an agent's saved usage indexes by path, one of which a new usage index takes over if it proves."""
+    `saved`: an agent's saved usage indexes by path, one of which a new usage index takes over if it proves.
+    `store`: the agent's ROW_STORE folder, whose saved row index a new full index takes over if it proves."""
     cache, limit = (_transcripts, FULL_INDEXES) if rows else (_usage, USAGE_INDEXES)
     index = cache.get(path)
     if index is None:
         index = cache[path] = Transcript(path, rows)
         if rows:
             index.history_version = next(_versions)
+            data = _load_rows(row_file(store, path), check) if store is not None else None
+            if data is not None:
+                if check is not None:
+                    check()  # right before its rows are taken
+                index.adopt_rows(data, check)
         elif saved and isinstance(saved.get(str(path)), dict):
             index.adopt(saved[str(path)])
     cache.move_to_end(path)
@@ -561,6 +954,22 @@ def raw_rows(path):
 # What a reader needs to know about one complete line of a copy, without its body: where it is, a hash of its
 # bytes for cursors, and the fields labels, the history walk and usage read. Built once per line.
 @dataclass(frozen=True)
+class _Snapshot:
+    inode: int
+    offset: int
+    prefix: str
+    chain: str
+    entries: list
+    epoch: int
+
+
+@dataclass(frozen=True)
+class _Saving:  # what save_rows hands row_sections while it serializes
+    check: object
+    snapshot: _Snapshot
+
+
+@dataclass(frozen=True)
 class Entry:
     offset: int
     size: int
@@ -593,6 +1002,13 @@ class Entry:
     effort: str | None = None       # the effort that row's request used, as Claude recorded it
     session: str | None = None      # the row's sessionId, when it is a string
     has_session: bool = False       # whether the row has a sessionId at all (null included)
+    mark: str = ''                  # which marker head starts with, all labelling reads (_mark): kept without the text
+
+
+# The saved row index's sections: every field but head, which it keeps no text of (ROW_STORE).
+_ROW_FIELDS = tuple(field.name for field in dataclasses.fields(Entry) if field.name != 'head')
+_HEAD = [field.name for field in dataclasses.fields(Entry)].index('head')
+_TUPLES = frozenset(field.name for field in dataclasses.fields(Entry) if field.name in ('answers', 'calls', 'preserved'))
 
 
 def _text(content):
@@ -634,16 +1050,14 @@ def _fields(offset, line, digest, chain, row):
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     usage = message.get('usage') if row.get('type') == 'assistant' and isinstance(message.get('usage'), dict) else None
     preserved = _map(_map(row.get('compactMetadata')).get('preservedMessages')).get('uuids')
-    text = _text(content) if row.get('type') in ('user', 'system') else ''
-    if attachment.get('type') == 'queued_command' and isinstance(attachment.get('prompt'), str):
-        text = attachment['prompt']
     string = lambda value: value if isinstance(value, str) and value else None
+    head = _head(row, content, attachment)
     return Entry(
         offset, len(line), digest, chain, kind, string(row.get('uuid')), string(row.get('parentUuid')),
         string(row.get('logicalParentUuid')), string(row.get('timestamp')), string(row.get('version')),
         string(row.get('promptId')), string(origin.get('kind')) if isinstance(origin, dict) else None,
         row.get('isMeta') is True, row.get('isCompactSummary') is True, row.get('isSidechain') is True,
-        string(attachment.get('type')), string(attachment.get('commandMode')), text.lstrip()[:200],
+        string(attachment.get('type')), string(attachment.get('commandMode')), head,
         any(block.get('type') == 'tool_result' for block in blocks), 'toolUseResult' in row,
         tuple(block['tool_use_id'] for block in blocks if block.get('type') == 'tool_result' and isinstance(block.get('tool_use_id'), str)),
         string(message.get('id')) if row.get('type') == 'assistant' else None,
@@ -655,17 +1069,44 @@ def _fields(offset, line, digest, chain, row):
         string(message.get('model')) if row.get('type') == 'assistant' else None,
         # Claude reads a turn's effort as perTurnEffort when the row has the key (null: none), else effort.
         string(row['perTurnEffort'] if 'perTurnEffort' in row else row.get('effort')) if row.get('type') == 'assistant' else None,
-        string(row.get('sessionId')), 'sessionId' in row)
+        string(row.get('sessionId')), 'sessionId' in row, _mark(head))
+
+
+def _head(row, content, attachment):
+    """The start of a user or command row's text, as labelling, previews and command names read it."""
+    text = _text(content) if row.get('type') in ('user', 'system') else ''
+    if attachment.get('type') == 'queued_command' and isinstance(attachment.get('prompt'), str):
+        text = attachment['prompt']
+    return text.lstrip()[:200]
+
+
+def _mark(head):
+    """The one thing labelling needs from a row's text: which of Claude's markers it starts with, if any."""
+    if head.startswith(COMMAND_OUTPUT):
+        return 'output'
+    if head.startswith('<command-name>'):
+        return 'command-name'
+    if head.startswith('/compact'):
+        return 'compact'
+    if head.startswith('/'):
+        return 'slash'
+    if head.startswith(INTERRUPTED):
+        return 'interrupted'
+    return ''
 
 
 INTERRUPTED = '[Request interrupted by user'  # Claude's marker for an Esc: it ends the turn, and usually no turn_duration follows
 COMMAND_OUTPUT = ('<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>')
 
 
-def labels(entries):
+def labels(entries, check=None):
     """(label, source) for each entry, by Claude's rules (docs/design/transcript-protocols.md, Labels)."""
     out, seen, command, span = [], set(), None, False  # command: the promptId of the latest typed command
+    outputs = set()  # the refs of command output rows: a meta row under one is the command's report (/context's)
+    tick = ticker(check)
     for item in entries:
+        if tick is not None:
+            tick()
         label, source = 'meta', None
         new = item.prompt_id is not None and item.prompt_id not in seen
         if item.kind == 'system/compact_boundary':
@@ -682,13 +1123,15 @@ def labels(entries):
                 label, source = 'prompt', item.origin
             elif item.tool_result:
                 label = 'compaction' if span else 'tool_result'
-            elif item.head.startswith(COMMAND_OUTPUT) or item.head.startswith('<command-name>') and item.prompt_id == command:
+            elif item.mark == 'output' or item.mark == 'command-name' and item.prompt_id == command:
                 label = 'command_output'
-            elif item.head.startswith('<command-name>'):
+            elif item.mark == 'command-name':
                 label, command = 'command', item.prompt_id
-            elif item.head.startswith('/') and new and not item.meta:
+            elif item.mark in ('slash', 'compact') and new and not item.meta:
                 label, command = 'command', item.prompt_id
-            elif item.companion or item.head.startswith(INTERRUPTED) or item.meta:
+            elif item.meta and item.parent is not None and item.parent in outputs:
+                label = 'command_output'
+            elif item.companion or item.mark == 'interrupted' or item.meta:
                 label = 'injected'
             elif span:
                 label = 'compaction'
@@ -700,18 +1143,20 @@ def labels(entries):
             label = 'mid_turn' if item.attachment == 'queued_command' and item.command_mode == 'prompt' else 'injected'
             source = item.origin if label == 'mid_turn' else None
         elif item.kind == 'system/local_command':
-            label = 'command_output' if item.head.startswith(COMMAND_OUTPUT) else 'command'
+            label = 'command_output' if item.mark == 'output' else 'command'
         elif item.kind == 'assistant':
             label = 'compaction' if span else 'response'
         if item.prompt_id:
             seen.add(item.prompt_id)
+        if label == 'command_output' and item.ref:
+            outputs.add(item.ref)
         out.append((label, source))
     return out
 
 
 def ends_turn(item):
     """A native turn-end marker: Claude's turn_duration row, or its interruption row."""
-    return item.kind == 'system/turn_duration' or item.kind == 'user' and item.head.startswith(INTERRUPTED)
+    return item.kind == 'system/turn_duration' or item.kind == 'user' and item.mark == 'interrupted'
 
 
 @dataclass(frozen=True)
@@ -754,14 +1199,17 @@ def _keeping(by_ref, order, summaries, tip):
     return max(found, key=lambda item: order[item.ref]) if found else None
 
 
-def walk(entries, tip=None, labelled=None):
+def walk(entries, tip=None, labelled=None, check=None):
     """The history: from `tip` when stored, else the newest leaf of the parent graph (the last stored: a batch of
     rows, such as a compaction's install, can carry older timestamps than a row before it), back through parent links and across a boundary by its logical parent, plus every block of each response it
     passes and every result answering one of their calls (parallel tool results branch off their own call), and
     the typed /compact row a boundary answers (the boundary's logical parent is the row before it)."""
-    labelled = labelled if labelled is not None else labels(entries)
+    labelled = labelled if labelled is not None else labels(entries, check)
+    tick = ticker(check)
     by_ref, order = {}, {}
     for index, item in enumerate(entries):
+        if tick is not None:
+            tick()
         if not item.ref or item.sidechain:
             continue
         by_ref[item.ref], order[item.ref] = item, index
@@ -828,13 +1276,17 @@ def walk(entries, tip=None, labelled=None):
         before = order[boundary.ref]
         after = order.get(boundary.logical, -1)
         typed = [index for index in range(after + 1, before) if labelled[index][0] == 'command'
-                 and entries[index].head.startswith('/compact') and entries[index].ref]
+                 and entries[index].mark == 'compact' and entries[index].ref]
         if typed:
             seen.add(entries[typed[-1]].ref)
     # A row without a ref (titles, modes, API request records, ...) belongs to the branch of the nearest row with a
     # ref before it in the file, and comes right after that row: stored order is conversation order.
+    if check is not None:
+        check()  # the passes above are one each over the rows, about 0.1 s for a large transcript
     keys, owner = {order[ref]: (position[ref], 0, order[ref]) for ref in seen if ref in order}, None
     for index, item in enumerate(entries):
+        if tick is not None:
+            tick()
         if item.ref and not item.sidechain:
             owner = item.ref
         elif not item.ref and not item.sidechain and (owner is None or owner in seen):
@@ -861,19 +1313,68 @@ class CantTell(Exception):
     """A read that can't say what the transcript holds: copies that disagree, or storage it can't read."""
 
 
-def newest_copy(native_id, environment, workspaces=()):
+class _Stopped(Exception):
+    """A read's check raised: carried past the handlers that turn an OSError into unreadable storage, so a deadline
+    is never mistaken for one, whatever the check raises."""
+    def __init__(self, error):
+        super().__init__(error)
+        self.error = error
+
+
+def _carried(check):
+    if check is None:
+        return None
+
+    def carried():
+        try:
+            check()
+        except Exception as error:
+            raise _Stopped(error) from error
+    return carried
+
+
+@contextlib.contextmanager
+def _holding(lock, check):
+    """The lock, taken under the read's deadline: a read past it never waits on another read holding the lock."""
+    if check is None:
+        with lock:
+            yield
+        return
+    check()
+    while not lock.acquire(timeout=LOCK_WAIT):
+        check()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+LOCK_WAIT = .01  # seconds between deadline checks while another read holds the shared index lock
+
+
+def newest_copy(native_id, environment, workspaces=(), check=None, store=None):
+    """_newest_copy, raising whatever `check` raised as itself. `store`: the agent's ROW_STORE folder."""
+    try:
+        return _newest_copy(native_id, environment, workspaces, check, store)
+    except _Stopped as stopped:
+        raise stopped.error from None
+
+
+def _newest_copy(native_id, environment, workspaces=(), check=None, store=None):
     """The index of the session's newest copy, read up to date, for the transcript reads. Older copies must hold a
     uuid prefix of the newest copy's rows (Claude moves a transcript by renaming it, so more than one copy is an
     anomaly), or CantTell names them. Usage reads the newest copy without this check or the full prefix proof."""
+    carried = _carried(check)
     try:
-        paths = session_transcripts(native_id, environment, workspaces)
+        paths = session_transcripts(native_id, environment, workspaces, check=carried)
     except Unreadable as error:
         raise CantTell(f"Claude's storage folder {error.path} can't be read: restore read access to it") from error
     if not paths:
         return None
-    with _transcripts_lock:
+    with _holding(_transcripts_lock, carried):
         try:
-            indexes = [_index(path, rows=True).read(prove=True) for path in paths]
+            indexes = [_index(path, rows=True, store=store, check=carried).read(prove=True, check=carried)
+                       for path in paths]
         except (OSError, Unreadable) as error:
             raise CantTell(f"Claude's transcript can't be read: {error}") from error
         newest = indexes[-1]
@@ -897,30 +1398,48 @@ class Analysis:
     on: frozenset          # entry indexes on the history
     context: frozenset     # entry indexes in context
     version: int           # rises when the history changes other than by growing at its end
+    epoch: int = 0         # the index's epoch these rows were read in (Transcript._reset starts a new one)
 
 
-def analyse(index, tip=None):
-    """Labels, history and context for the index as read, cached per index until it grows or is rewritten."""
-    key = (len(index.entries), index.rewrites, tip)
+def _on_history(history):
+    return frozenset(history.rows)
+
+
+def _history_refs(entries, history):
+    return tuple(entries[i].ref for i in history.rows)
+
+
+def analyse(index, tip=None, check=None):
+    """Labels, history and context for the index as read, cached per index until it grows or is rewritten. `check`
+    is called through it; past a deadline it raises, and nothing is cached or changed."""
+    # The epoch and the rows together: rows only grow within an epoch, so (epoch, count) names exactly these rows,
+    # and a save can tell an analysis of other rows of the same count apart.
+    epoch, entries = index.epoch, index.entries[:]
+    key = (len(entries), epoch, tip)
     cached = getattr(index, 'analysis', None)
     if cached is not None and cached[0] == key:
         return cached[1]
-    entries = index.entries
-    labelled = tuple(labels(entries))
-    history = walk(entries, tip, labelled)
-    on = frozenset(history.rows)
+    step = check if check is not None else (lambda: None)
+    step()
+    labelled = tuple(labels(entries, check))
+    step()
+    history = walk(entries, tip, labelled, check)
+    step()
+    on = _on_history(history)
+    step()
     context = frozenset(in_context(entries, history))
-    refs = tuple(entries[i].ref for i in history.rows)
-    version = getattr(index, 'history_version', 0)
+    step()
+    refs = _history_refs(entries, history)
     previous = getattr(index, 'history_refs', None)
+    # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones already
+    # read (its boundary and summary come before the rows it kept).
+    rewritten = tip is None and previous is not None and (
+        getattr(index, 'history_rewrites', index.rewrites) != index.rewrites or refs[:len(previous)] != previous)
+    step()  # last, with everything decided: nothing below waits, and nothing above changed the index
+    version = next(_versions) if rewritten else getattr(index, 'history_version', 0)
     if tip is None:
-        if previous is not None and (getattr(index, 'history_rewrites', index.rewrites) != index.rewrites
-                                     or refs[:len(previous)] != previous):
-            # A rewrite, a rewind that left rows of the history behind, or a compaction that put rows before ones
-            # already read (its boundary and summary come before the rows it kept).
-            version = next(_versions)
         index.history_version, index.history_refs, index.history_rewrites = version, refs, index.rewrites
-    result = Analysis(len(entries), labelled, history, on, context, version)
+    result = Analysis(len(entries), labelled, history, on, context, version, epoch)
     index.analysis = (key, result)
     return result
 

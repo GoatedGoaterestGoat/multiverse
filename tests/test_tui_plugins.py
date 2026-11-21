@@ -6,6 +6,7 @@ is also the base of the fakes in GOAT's dashboard tests (plugins/compaction).
 """
 import asyncio
 import contextlib
+import copy
 import os
 import signal
 import json
@@ -24,7 +25,7 @@ from multiverse.plugins.testing import PluginTestCase
 from multiverse.plugins.settings import DELETE
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, schema_fields
-from multiverse.ui.screens import ChoiceScreen
+from multiverse.ui.screens import ChoiceScreen, Details, Form
 from multiverse.ui.secrets_screen import SecretsScreen
 from tui_demo import DemoBackend
 
@@ -65,6 +66,10 @@ class FakeService:
         self.secret_error, self.secret_gate = None, None
         self.listing_gate, self.listing_held = None, False
         self.install_error, self.install_gate = None, None
+        self.previews, self.fetch_gate = {}, None  # source or name -> install_preview's or update_preview's answer
+        self.remove_gate = None
+        self.unlisted = set()  # names a listing leaves out, as if not yet read
+        self.listing_error = None  # raised by the next read, once
 
     def host_state(self, root):
         self.calls.append(("host_state", Path(root)))
@@ -81,7 +86,10 @@ class FakeService:
         self.host["running"] = False
 
     def listing(self, root):
-        found = [dict(entry) for entry in self.items]  # what this read saw, before it is held
+        if self.listing_error:
+            error, self.listing_error = self.listing_error, None
+            raise error
+        found = [dict(entry) for entry in self.items if entry["name"] not in self.unlisted]  # before it is held
         if self.listing_gate and not self.listing_held:  # one read is held, the first once the gate is set up
             self.listing_held = True
             self.listing_gate.wait(10)
@@ -145,6 +153,52 @@ class FakeService:
     def clear_secret(self, root, name, key):
         self.calls.append(("clear_secret", Path(root), name, key))
         return True
+
+    def fetched(self, what):
+        if self.fetch_gate:
+            self.fetch_gate.wait(10)
+        found = self.previews[what]
+        if isinstance(found, Exception):
+            raise found
+        return copy.deepcopy(found)
+
+    def install_preview(self, root, source):
+        self.calls.append(("install_preview", Path(root), source))
+        return self.fetched(source)
+
+    def update_preview(self, root, name, placement):
+        self.calls.append(("update_preview", Path(root), name, placement))
+        return self.fetched(name)
+
+    def install_confirm(self, root, key):
+        self.calls.append(("install_confirm", Path(root), key))
+        shown = next(found for found in self.previews.values() if isinstance(found, dict) and found["key"] == key)
+        found = next((entry for entry in self.items if entry["name"] == shown["name"]), None)
+        if found is None:
+            self.items.append(item(shown["name"], on=False, state="off",
+                                   install={"source": shown["source"], "placement": "personal"}))
+        elif "update" in shown and found.get("install"):  # an update: a new record, as core writes one
+            found["install"] = {**found["install"], "commit": shown["commit"], "version": shown["version"],
+                                "updated_at": "2026-11-20T12:00:00Z"}
+        return {"name": shown["name"], "version": shown["version"], "commit": shown["commit"],
+                "target": shown["target"], "placement": "personal", "updated": "update" in shown, "packages": []}
+
+    def install_cancel(self, root, key):
+        self.calls.append(("install_cancel", Path(root), key))
+        return True
+
+    def remove_installed(self, root, name, placement, expected):
+        self.calls.append(("remove_installed", Path(root), name, placement, expected))
+        if self.remove_gate:
+            self.remove_gate.wait(10)
+        self.items = [entry for entry in self.items if entry["name"] != name]
+        return {"name": name, "removed": f"/home/x/.multiverse/plugins/{name}", "placement": "personal",
+                "left": [{"what": "its settings, plugin-settings/notes.json",
+                          "clear": "mv2 plugins settings notes --reset"}]}
+
+    def preview_text(self, action, shown):
+        from multiverse.tools.plugins import preview_text
+        return preview_text(action, shown)
 
     def packages_state(self, root, name):
         found = self.packages.get(name)
@@ -397,6 +451,412 @@ class PackagesTests(DashboardCase):
                 await self.until(pilot, lambda: not screen.busy and "Installed alpha" in str(
                     screen.query_one(".cerror", Static).render()), "the install to finish")
                 self.assertEqual((self.called("install"), self.called("enable")), (["alpha"], []))  # already on
+
+
+def preview(name, key, **extra):
+    """What install_preview returns, with a description that looks like markup but is the plugin's own words."""
+    return {"key": key, "name": name, "version": "1.2.0", "description": "Notes [bold red]for[/] agents",
+            "source": "https://example.com/me/notes.git", "kind": "git", "ref": "v1.2.0", "path": None,
+            "commit": "a" * 40, "follows": "tag", "branch": None, "fingerprint": "f" * 64, "placement": "personal",
+            "target": f"/home/x/.multiverse/plugins/{name}",
+            "powers": {"access": {"request": "act", "minimum": "observe"}, "permissions": ["agents.read"],
+                       "extends": [], "harnesses": [], "packages": []},
+            "runs": {"python": ["plugin.py"], "claude": False, "compiled": []}, **extra}
+
+
+class InstallerTests(DashboardCase):
+    open_screen, asked = PackagesTests.open_screen, PackagesTests.asked
+
+    def setUp(self):
+        super().setUp()
+        record = {"source": "https://example.com/me/alpha.git", "kind": "git", "ref": "v1", "path": None,
+                  "commit": "c" * 40, "follows": "tag", "branch": None, "version": "1.0", "placement": "personal",
+                  "installed_at": "2026-11-20T10:00:00Z", "updated_at": None}
+        self.record = record
+        self.service.items = [item("alpha", install=record), item("beta", on=False, state="off")]
+        changes = {"from": {"commit": "c" * 40, "version": "1.0", "source": record["source"]},
+                   "changes": ["1234abc fix(notes): notes keep their order"], "same": False, "edited": False,
+                   "powers_changed": []}
+        self.service.previews = {
+            "https://example.com/me/notes.git": preview("notes", "k-notes"),
+            "~/src/broken": plugins.PluginError("Nothing was installed: ~/src/broken has no plugin.json"),
+            "alpha": preview("alpha", "k-alpha", update=changes, ask=False),
+            "https://example.com/me/alpha.git": preview("alpha", "k-alpha-again", on_here=True),
+            "~/src/unseen": preview("unseen", "k-unseen"), "~/src/dup": preview("dup", "k-dup"),
+            "~/src/long": preview("long", "k-long", description="A plugin that explains itself at length. " * 40,
+                                  runs={"python": [f"part{n}.py" for n in range(30)], "claude": True,
+                                        "compiled": []})}
+
+    def calls(self, name):
+        return [call[2:] for call in self.service.calls if call[0] == name]
+
+    async def press_install(self, pilot, source):
+        await pilot.press("i")
+        await self.until(pilot, lambda: isinstance(self.app.screen, Form), "the source form")
+        self.app.screen.query_one("#field-source").value = source
+        await pilot.press("ctrl+enter")
+
+    def note(self, screen):
+        return str(screen.query_one(".cerror", Static).render())
+
+    def details(self):
+        """Every line on the Details screen on top."""
+        return "\n".join(str(widget.render()) for widget in self.app.screen.query(Static))
+
+    async def test_install_update_and_remove_show_what_they_place_and_ask_as_the_cli_does(self):
+        """i fetches a source and shows the CLI's words before installing, u updates without a question only when
+        what a plugin can do is unchanged, d removes only an installed plugin and lists what stays, and Esc waits for
+        a fetch; fragile because a slip installs unseen code, leaves fetched files behind, or asks nothing when a
+        plugin's powers grow."""
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            screen = await self.open_screen(pilot, "alpha")
+            with self.subTest("an install shows what it is first; Cancel drops the fetch and installs nothing"):
+                await self.press_install(pilot, "https://example.com/me/notes.git")
+                text = await self.asked(pilot)
+                self.assertIn("notes 1.2.0: Notes [bold red]for[/] agents", text)  # the plugin's words, as written
+                self.assertIn("asks for act, works with at least observe", text)
+                self.assertIn("Install it only if you trust its source.", text)
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+                self.assertEqual((self.calls("install_cancel"), self.calls("install_confirm")), ([("k-notes",)], []))
+                self.assertIn("Nothing installed.", self.note(screen))
+
+            with self.subTest("a source that fails says why, asks nothing and installs nothing"):
+                await self.press_install(pilot, "~/src/broken")
+                await self.until(pilot, lambda: not screen.busy, "the fetch to fail")
+                self.assertIs(self.app.screen, screen)
+                self.assertIn("has no plugin.json", self.note(screen))
+                self.assertEqual(self.calls("install_confirm"), [])
+
+            with self.subTest("Esc waits for a fetch under way; Install installs exactly what was shown"):
+                self.service.fetch_gate = gate = threading.Event()
+                self.addCleanup(gate.set)
+                await self.press_install(pilot, "https://example.com/me/notes.git")
+                for _ in range(100):  # until() would wait for the held fetch itself
+                    if self.calls("install_preview")[2:]:
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("escape")
+                self.assertIs(self.app.screen, screen)
+                self.assertIn("wait for it to finish", self.note(screen))
+                gate.set()
+                self.service.fetch_gate = None
+                await self.asked(pilot)
+                self.service.listing_gate = listed = threading.Event()  # holds the read the install starts
+                self.addCleanup(listed.set)
+                await pilot.press("enter")
+                for _ in range(200):  # until() would wait for the held read itself
+                    if self.service.listing_held:
+                        break
+                    await pilot.pause(0.02)
+                self.assertEqual(self.calls("install_confirm"), [("k-notes",)])
+                self.assertIn("Installed notes 1.2.0 in your personal plugins.", self.note(screen))
+                self.assertNotIn("Space", self.note(screen))  # not until the new row is selected
+                await pilot.press("space")  # while the new row isn't drawn yet: it must not act on the old one
+                self.assertEqual([call for call in self.service.calls if call[0] == "enable"], [])
+                screen.load()  # a follow tick's newer read draws first; the held one is then discarded
+                for _ in range(200):
+                    if (screen.selected() or {}).get("name") == "notes":
+                        break
+                    await pilot.pause(0.02)
+                self.assertEqual((screen.selected() or {}).get("name"), "notes")
+                listed.set()
+                self.service.listing_gate = None
+                await self.until(pilot, lambda: not screen.busy, "the reads to finish")
+                self.assertEqual((screen.selected() or {}).get("name"), "notes")
+                self.assertIn("It's selected: Space turns it on or off here.", self.note(screen))
+
+            with self.subTest("an install whose row isn't listed yet keeps keys off the row still selected"):
+                self.service.unlisted = {"unseen"}
+                await self.press_install(pilot, "~/src/unseen")
+                await self.asked(pilot)
+                await pilot.press("enter")
+                await self.until(pilot, lambda: "isn't listed here yet" in self.note(screen), "the install")
+                before = (screen.selected() or {}).get("name")
+                enabled = [call for call in self.service.calls if call[0] == "enable"]
+                await pilot.press("space")
+                self.assertEqual([call for call in self.service.calls if call[0] == "enable"], enabled)
+                self.assertIn(f"keys don't act on {before} until you move", self.note(screen))
+                self.service.unlisted = set()
+                screen.load()  # a later read has it: selected then, and keys act again
+                await self.until(pilot, lambda: (screen.selected() or {}).get("name") == "unseen", "the row")
+                self.assertIsNone(screen.held)
+                self.assertEqual(self.note(screen),
+                                 "unseen is listed now, and selected: Space turns it on or off here.")
+
+            with self.subTest("a same-name plugin from elsewhere doesn't count as the one just installed"):
+                self.service.items.append(item("dup", on=False, state="off",
+                                               install={"source": "x", "placement": "universe"}))
+                screen.load()
+                await self.until(pilot, lambda: any(entry["name"] == "dup" for entry in screen.items), "dup")
+                await self.press_install(pilot, "~/src/dup")  # personal; the universe's own dup is the one listed
+                await self.asked(pilot)
+                await pilot.press("enter")
+                await self.until(pilot, lambda: "isn't listed here yet" in self.note(screen), "the install")
+                self.assertNotEqual((screen.selected() or {}).get("name"), "dup")
+                table = screen.query_one("#plugins-table", DataTable)
+                await pilot.press("down" if table.cursor_row + 1 < table.row_count else "up")  # moving off releases it
+                self.assertIsNone(screen.held)
+                self.assertNotIn("isn't listed here yet", self.note(screen))  # and its line goes with it
+
+            with self.subTest("installing a name still turned on here says it loads here at once"):
+                await self.press_install(pilot, "https://example.com/me/alpha.git")
+                text = await self.asked(pilot)
+                self.assertIn("This universe's plugins.json still turns alpha on, from before", text)
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+
+            with self.subTest("u and d refuse a plugin placed by hand"):
+                table = screen.query_one("#plugins-table", DataTable)
+                table.move_cursor(row=[entry["name"] for entry in screen.items].index("beta"))
+                await pilot.pause()
+                await pilot.press("u")
+                self.assertIn("beta wasn't installed with mv2 plugins install, so it can't be updated here.",
+                              self.note(screen))
+                await pilot.press("d")
+                self.assertIn("can't be removed here", self.note(screen))
+                self.assertEqual((self.calls("update_preview"), self.calls("remove_installed")), ([], []))
+
+            with self.subTest("an update that changes only code goes ahead without asking, and shows what changed"):
+                table.move_cursor(row=[entry["name"] for entry in screen.items].index("alpha"))
+                await pilot.pause()
+                self.service.listing_gate, self.service.listing_held = (reread := threading.Event()), False
+                self.addCleanup(reread.set)
+                await pilot.press("u")
+                for _ in range(200):  # until() would wait for the held read itself
+                    if self.service.listing_held:
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("d")  # before the updated record is read: held, never acting on the old one
+                self.assertIs(self.app.screen, screen)
+                reread.set()
+                self.service.listing_gate = None
+                await self.until(pilot, lambda: isinstance(self.app.screen, Details), "what changed")
+                shown = self.details()
+                self.assertIn("1 new commit:", shown)
+                self.assertIn("1234abc fix(notes): notes keep their order", shown)
+                self.assertEqual(self.calls("install_confirm")[-1], ("k-alpha",))
+                self.assertEqual(self.calls("update_preview")[-1], ("alpha", "personal"))  # exactly that install
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen, "the Plugins screen")
+                self.assertIn("Updated alpha 1.2.0.", self.note(screen))
+
+            with self.subTest("after an update whose list can't be read again, d waits for a read with its record"):
+                self.service.listing_error = OSError("plugins.json is busy")
+                self.service.listing_gate, self.service.listing_held = (retry := threading.Event()), False
+                self.addCleanup(retry.set)
+                await pilot.press("u")
+                for _ in range(200):  # until() would wait for the held retry itself
+                    if isinstance(self.app.screen, Details) and self.service.listing_held:
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIn("couldn't be read again (plugins.json is busy)", self.note(screen))
+                await pilot.press("down", "up")  # moving off and back doesn't make the old record current
+                await pilot.press("d")  # the row still has the replaced record: nothing opens
+                self.assertIs(self.app.screen, screen)
+                self.assertIn("keys don't act on it until it is", self.note(screen))
+                retry.set()
+                self.service.listing_gate = None
+                await self.until(pilot, lambda: not screen.stale, "a read with the current record")
+                self.assertNotIn("keys don't act", self.note(screen))  # the hold's line goes with it
+                await pilot.press("d")
+                await self.asked(pilot)
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+
+            with self.subTest("an update that changes what it can do asks first"):
+                self.service.previews["alpha"]["ask"] = True
+                self.service.previews["alpha"]["update"]["powers_changed"] = ["permissions"]
+                confirmed = len(self.calls("install_confirm"))
+                await pilot.press("u")
+                text = await self.asked(pilot)
+                self.assertIn("What it can do changes (permissions)", text)
+                self.assertEqual(len(self.calls("install_confirm")), confirmed)
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+                self.assertEqual(len(self.calls("install_confirm")), confirmed)
+                self.assertIn("Nothing changed.", self.note(screen))
+
+            with self.subTest("an update with nothing new says so and keeps nothing fetched"):
+                self.service.previews["alpha"]["update"]["same"] = True
+                await pilot.press("u")
+                await self.until(pilot, lambda: "is up to date" in self.note(screen), "up to date")
+                self.assertEqual(self.calls("install_cancel")[-1], ("k-alpha",))
+
+            with self.subTest("d asks, removes only on yes, and lists what it left"):
+                shown = screen.selected()["install"]
+                self.assertEqual(shown["commit"], "a" * 40)  # the updated install's record, read after the update
+                await pilot.press("d")
+                self.assertIn("Removes alpha from your personal plugins", await self.asked(pilot))
+                await pilot.press("escape")
+                await self.until(pilot, lambda: self.app.screen is screen and not screen.busy, "the question to close")
+                self.assertEqual(self.calls("remove_installed"), [])
+                await pilot.press("d")
+                await self.asked(pilot)
+                self.service.remove_gate = removing = threading.Event()
+                self.addCleanup(removing.set)
+                await pilot.press("enter")
+                for _ in range(100):  # until() would wait for the held removal itself
+                    if self.calls("remove_installed"):
+                        break
+                    await pilot.pause(0.02)
+                await pilot.press("escape")  # the removal's result and what it left must still show
+                self.assertIs(self.app.screen, screen)
+                self.assertIn("Removing alpha: wait for it to finish.", self.note(screen))
+                removing.set()
+                self.service.remove_gate = None
+                await self.until(pilot, lambda: isinstance(self.app.screen, Details), "what's left")
+                left = self.details()
+                self.assertIn("mv2 plugins settings notes --reset", left)
+                self.assertEqual(self.calls("remove_installed"), [("alpha", "personal", shown)])  # the row shown
+
+    async def test_a_long_preview_scrolls_above_choices_that_stay_in_view(self):
+        """A preview longer than the dialog scrolls with PgDn above its Install / Cancel choices, which stay on screen
+        at 80x24; fragile because the question shares ChoiceScreen, where a long description pushed its permissions
+        and both choices out of view while the choices still took the keys."""
+        for size in ((80, 24), (60, 20)):
+            with self.subTest(size=size):
+                await self.long_preview(size)
+
+    async def test_two_updates_whose_rereads_fail_each_keep_their_row_held(self):
+        """Two updates in a row whose list reads both fail keep both rows held until a read draws them, so d on the
+        first doesn't carry its replaced record; fragile because one hold slot let the second update release the
+        first (the reviewer's case on ece6403)."""
+        beta = self.service.items[1]
+        beta["install"] = {**self.record, "source": "https://example.com/me/beta.git"}
+        self.service.previews["beta"] = preview("beta", "k-beta", update=copy.deepcopy(
+            self.service.previews["alpha"]["update"]), ask=False)
+        gate, failed, listing = threading.Event(), set(), self.service.listing
+        self.addCleanup(gate.set)
+
+        def listings(root):  # each update's own reread fails; later reads wait for the gate
+            updates = len(self.calls("install_confirm"))
+            if updates and updates not in failed:
+                failed.add(updates)
+                raise OSError("listing temporarily unavailable")
+            if updates:
+                gate.wait(10)
+            return listing(root)
+
+        self.service.listing = listings
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            screen = await self.open_screen(pilot, "alpha")
+            for name in ("alpha", "beta"):
+                self.assertEqual(screen.selected()["name"], name)
+                await pilot.press("u")
+                for _ in range(150):  # until() would wait for the held reads themselves
+                    if isinstance(self.app.screen, Details):
+                        break
+                    await pilot.pause(0.02)
+                self.assertIsInstance(self.app.screen, Details)
+                await pilot.press("escape")
+                await pilot.press("down" if name == "alpha" else "up")
+            self.assertEqual(screen.selected()["install"]["commit"], "c" * 40)  # alpha's replaced record
+            await pilot.press("d")
+            self.assertIs(self.app.screen, screen)
+            self.assertIn("alpha was updated but the list couldn't be read again", self.note(screen))
+            gate.set()
+            await self.until(pilot, lambda: not screen.stale, "a read with the current records")
+            await pilot.press("d")
+            await self.asked(pilot)
+
+    async def test_a_drawn_update_keeps_the_line_of_an_install_still_held(self):
+        """With an updated row and a not-yet-listed install both held, a read that releases the update leaves the
+        install's status line, which still holds; fragile because both holds write the one status line, and
+        releasing either took the other's away."""
+        gate, failed, listing = threading.Event(), set(), self.service.listing
+        self.addCleanup(gate.set)
+        self.service.unlisted = {"notes"}
+
+        def listings(root):  # each change's own reread fails; later reads wait for the gate
+            changes = len(self.calls("install_confirm"))
+            if changes and changes not in failed:
+                failed.add(changes)
+                raise OSError("listing temporarily unavailable")
+            if changes:
+                gate.wait(10)
+            return listing(root)
+
+        self.service.listing = listings
+        async with self.app.run_test(size=(120, 40)) as pilot:
+            await self.start(pilot)
+            screen = await self.open_screen(pilot, "alpha")
+            await pilot.press("u")
+            for _ in range(150):  # until() would wait for the held reads themselves
+                if isinstance(self.app.screen, Details):
+                    break
+                await pilot.pause(0.02)
+            await pilot.press("escape", "down", "i")
+            for _ in range(150):  # not press_install: its until() would wait out the held read
+                if isinstance(self.app.screen, Form) and self.app.screen.query("#field-source"):
+                    break
+                await pilot.pause(0.02)
+            self.app.screen.query_one("#field-source").value = "https://example.com/me/notes.git"
+            await pilot.press("ctrl+enter")
+            for _ in range(150):
+                if isinstance(self.app.screen, ChoiceScreen) and self.app.screen.query("#choices"):
+                    break
+                await pilot.pause(0.02)
+            await pilot.press("enter")
+            for _ in range(150):
+                if "isn't listed here yet" in self.note(screen):
+                    break
+                await pilot.pause(0.02)
+            self.assertEqual((screen.held, screen.stale), ("beta", {"alpha"}))
+            gate.set()
+            await self.until(pilot, lambda: not screen.stale, "a read that draws the updated row")
+            self.assertEqual(screen.held, "beta")
+            self.assertIn("isn't listed here yet", self.note(screen))
+
+    async def test_a_chooser_without_a_long_description_pages_its_choices(self):
+        """PgDn pages a long list of choices when nothing above them scrolls; fragile because ChoiceScreen takes PgUp /
+        PgDn before its choices to scroll a long description, and every chooser shares it (open prompts, focus)."""
+        async with self.app.run_test(size=(80, 24)) as pilot:
+            await self.start(pilot)
+            for description in ("", "A short line."):
+                with self.subTest(description=description):
+                    self.app.push_screen(ChoiceScreen("Pick one", [(str(n), f"Choice {n}") for n in range(40)],
+                                                      description=description))
+                    await self.until(pilot, lambda: isinstance(self.app.screen, ChoiceScreen)
+                                     and self.app.screen.query("#choices"), "the chooser")
+                    choices = self.app.screen.query_one("#choices", OptionList)
+                    await pilot.press("pagedown")
+                    self.assertGreater(choices.highlighted, 1)
+                    await pilot.press("escape")
+                    await self.until(pilot, lambda: not isinstance(self.app.screen, ChoiceScreen), "it to close")
+
+    async def long_preview(self, size):
+        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=self.service)
+        async with self.app.run_test(size=size) as pilot:
+            await self.start(pilot)
+            await self.open_screen(pilot, "alpha")
+            await self.press_install(pilot, "~/src/long")
+            await self.asked(pilot)
+            dialog = self.app.screen
+            about, choices = dialog.query_one("#dialog-about"), dialog.query_one("#choices")
+            visible = dialog.region
+            self.assertTrue(choices.region.height >= 2 and visible.contains_region(choices.region), choices.region)
+            self.assertGreater(about.max_scroll_y, 0)
+            def frame():  # what the terminal shows
+                return "\n".join(strip.text for strip in dialog._compositor.render_strips())
+
+            self.assertIn("Install it", frame())
+            self.assertNotIn("asks for act", frame())  # below, in the scrolled part
+            for _ in range(40):
+                await pilot.press("pagedown")
+                if "asks for act" in frame():
+                    break
+            self.assertIn("asks for act", frame())  # its permissions, reached (lines wrap at 60 columns)
+            self.assertIn("Install it", frame())
+            for _ in range(40):
+                await pilot.press("pagedown")
+            self.assertIn("its source.", frame())  # its last line
+            self.assertIn("Cancel", frame())
+            self.assertIs(self.app.focused, choices)
 
 
 class SecretsTests(DashboardCase):

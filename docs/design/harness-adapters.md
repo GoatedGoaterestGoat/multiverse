@@ -836,6 +836,41 @@ Agent-message moderation display becomes a versioned show/hide/block enum. The q
 
 The authorized fixtures used a byte-verified private release package, disposable homes and daemons, and localhost scripted providers. They covered startup/resume, navigation and full local grant envelopes, queue continuation, permissions, side routing, shared identity, recovery, private ask/run and tool-free requests. Exact newer and retained release gates remain explicit; navigation, prompt and queue operations require matched CLI/daemon versions and the verified greeting. Unchecked and mixed pairs stay refused. The refusal fixture is the upstream renderer snapshot, not a tmux capture.
 
+### Codex 0.171.0 compatibility audit
+
+The official 0.170.0 and 0.171.0 tags are `29eb79e9866b` and `ccf9be8cc458`.
+The five recorded CLI help outputs match. The installed experimental schema
+export goes from 479 to 483 files, with six additions, two removals and 47
+changed files. The two bundled catalogs regenerate with only the release stamp
+changed. See the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.171.0).
+
+The current-directory update now retains the stored permission profile while
+environment and root selection can change. The bridge invalidates cached
+navigation grants before forwarding an explicit primary directory override
+that cannot be verified against the agent workspace. Even equal cwd and
+roots can trigger daemon default selection. The bridge pins the verified local
+selection on an owning terminal's turn start when the explicit cwd and roots
+and any grant settings match. Other unproven reselections invalidate grants
+before forwarding. In-terminal navigation
+still requires the owning verified bridge, matching checked releases, an
+ordinary root and one built-in local environment with the exact cwd and grant
+roots. A settings notification cannot restore invalidated grants. Task mention
+search cancellation can be refused by the stale-conversation fence during or
+after a switch.
+
+Prompt callbacks, retained async question identities and response formats keep
+their existing contracts. MCP registration scope is additive metadata. A late
+completion for an older turn cannot settle a newer turn's callback. Exact
+primary user-item and client IDs still support durable delivery observations.
+The queue's single-page read contract is unchanged. Codex now resolves local
+media paths in queued inputs using the thread cwd. mv2 queues text.
+
+Private macOS fixtures used isolated homes and daemons with updates disabled
+and localhost scripted providers. The checkout tests covered mixed and
+unchecked version refusal, launch and resume, permission and lineage checks,
+navigation, side conversations, queue continuation, prompt routing, delivery
+observations, rollout reading and private requests with empty tool lists.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -926,8 +961,12 @@ and their notes folder), and the `CLAUDE_CODE_PROJECT_DIR_NAME` and
 `CLAUDE_CODE_SCRATCHPAD_DIR` a host may set for the parent: with
 `CLAUDE_CONFIG_DIR` set, the first moves a Claude's transcripts to
 `projects/<name>/`, where mv2 would no longer find the agent's, and the second is
-the parent's scratchpad. Claude itself removes the identity names when it starts
-a fresh Claude, but keeps these two. Also removed is what Claude's background-session
+the parent's scratchpad. Also its `CLAUDE_CODE_CHROME_MCP_ORG_DENIED` (that its
+organization denied the Chrome tools), and since 2.1.330 the
+`CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE` Claude sets for its own tool shells
+when its host holds connector downloads, beside `CLAUDE_PID` and `CLAUDE_EFFORT`.
+Claude itself removes the identity names when it starts a fresh Claude, but keeps
+the project-folder name and scratchpad. Also removed is what Claude's background-session
 host gives a session, which Claude removes for a fresh Claude too: its credential
 (`CLAUDE_BG_SESSION_CREDENTIAL`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`), the pipes its
 tokens come through (five `*_FILE_DESCRIPTOR` names; an inherited
@@ -1017,7 +1056,9 @@ input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. A racing busy steer is never converted to a fresh turn.
 Codex can leave automatic queue draining paused after an interrupt. The owning
 terminal relay publishes interrupt intent before forwarding it, and records
-exact-primary turn starts and completions. An interrupted completion labels the
+exact-primary turn starts and completions. The relay writes only queue state
+on this path. Plugin journal recovery and transcript reads run separately
+from that write. An interrupted completion labels the
 queue paused; a newer start clears it. The public API flattens several abort
 reasons, so this label never blocks Codex's own native draining. Old-turn and
 side-thread events cannot change the primary's state.
@@ -1211,6 +1252,34 @@ fields still require valid records. Reporting itself does not need runtime data
 for its optional event metadata. Launch, terminal and delivery operations retain
 their full record validation.
 
+### Startup prompts
+
+An adapter may provide `launch_prompt(evidence) -> dict | None` beside the startup hooks: given the same owned-pane
+snapshot, it names a prompt the person must answer before the native session starts, as `{"title", "detail"}`
+(printable text, at most 120 and 500 characters; core refuses anything else). Such a prompt never fails the launch.
+Core records it in the runtime as `startup_prompt`, with status `waiting` while the harness has reported no status
+of its own in this launch (a harness report is never overwritten), and keeps watching past the startup window while
+it shows, at a slower pace; a wait that reaches the window meanwhile leaves the observation open. `launch_started`
+returning true clears it and settles startup, and the harness's own status takes over. A harness plugin's first
+report (Claude's bridge) also retires it, since a plugin reports only from a started session, and the screen can't
+record one after that. While one is recorded the launch isn't ready, so startup delivery and the ready event wait too. `--wait` ends at
+once at a startup prompt, as ok and not ready; `mv2 spawn` and `mv2 resume` without `--wait` wait up to 10 seconds
+for the screen to show the harness started or a startup prompt, and only for an adapter with the hook. Each pass of
+that short wait checks the pane, so a pane gone or dead says the launch didn't start, and it names a prompt only from
+a record read after a check found the pane alive. The check is read-only, one tmux query of a server it can prove and
+never the recovery lock; it gets only the time left, and a server that doesn't answer holds one query at a time. A
+query still running for another launch on the same server is waited on, never used, since it may predate this
+launch's pane. Raw screen text never leaves the observer.
+
+Claude implements both hooks from its screen (`harnesses/claude/screen.py`), since its plugin can't report these:
+Claude runs a plugin's calls only once a session has started. A startup prompt is a selection list (one row marked
+`❯`) with an "Enter to confirm" footer and no input box, named by the first line under the rule that opens the
+block ending in that footer (output above it, another section of the screen, never names it): the folder-trust
+question ("Accessing workspace", with the folder), its variant for a folder whose settings declare hooks, and the
+`--add-dir` question ("Adding a new directory"). A dialog inside a session (a tool's approval, a question, `/model`)
+has another footer, and the plugin reports those itself. Claude has started once its input box shows: a rule, a row
+starting `❯` (or `!` in shell mode), and another rule within a draft's rows.
+
 ### Successful plain startup observation
 
 An adapter may provide `launch_started(evidence) -> bool` beside its refusal
@@ -1334,6 +1403,27 @@ Every provider sends `Message.framed` as the message content. Receipt identifier
 remain separate: Codex uses `clientUserMessageId`, Pi persists custom-message
 details, and the Claude mod removes its transport tag before presenting text.
 
+### Codex waiting prompt detail
+
+Use the portable `display` fields for a prompt's title, subject and lines.
+Codex keeps its own request fields in `detail`. Their names and shapes are
+specific to Codex.
+
+| Prompt | Codex detail |
+| --- | --- |
+| Command approval | `command` and `reason` supply the command and purpose in `display`. `networkApprovalContext` can supply a host. `cwd`, `parsedCmd`, `kind` and `availableDecisions` describe the native request. |
+| File change approval | `changes` has `path`, `kind` and `diff` for each change. `display` shows paths and the request's `reason`. |
+| Permission grant | `permissions` holds the native grant profile. `display` shows its network and filesystem scopes, path and glob access, and reason. |
+| Callback question | `questions` holds the native question fields. `isBlocking` describes the terminal countdown. Read the portable `questions` field for the choices. |
+| Retained question | `question` holds the native title. The portable `questions` field supplies its options. |
+| MCP approval or form | `serverName`, `message`, `mode`, `requestedSchema`, `environmentId` and `_meta` come from the native request. `display` shows the requesting server or tool and its message, or the host for a URL request. |
+
+The callback detail can include routing fields such as `threadId`, `turnId`,
+`itemId` and `approvalId`. A terminal-only placeholder carries
+`terminal_only` and may carry `truncated` when a size bound was reached.
+The bounded display fields and choice meanings use a separate presentation
+budget from the native prompt and answer.
+
 ### Claude: a terminal-hosted bridge
 
 Claude fits the service, session and attachment model above with one piece
@@ -1366,7 +1456,7 @@ session. Seen on 2.1.302, it keeps `--resume`, `--settings`, every
 `--plugin-dir`, the model, the effort, `--append-system-prompt` and the
 environment, and turns `--dangerously-skip-permissions` into the session's
 permission mode and allowed tools; it drops `--messaging-socket-path`, `--name`
-and `--add-dir`. Claude then listens on its own default socket
+and `--add-dir` (mv2 passes the agent's folder in `--settings`, which it keeps). Claude then listens on its own default socket
 (`/tmp/cc-socks/<pid>.sock`, listed in `~/.claude/sessions/<pid>.json`) and
 publishes the key for that path, while the mod and its status and usage reports
 keep working. mv2's own socket then has no key, so the adapter follows Claude to
@@ -1384,7 +1474,7 @@ When it cannot follow (the file is another process's, or the launch was recorded
 before mv2 kept the start time), `mv2 list`, `inspect` and `send` say "Claude
 relaunched itself (/restart) without mv2's inbox; restart the agent". Restarting
 the agent through mv2 (stop, then resume) brings all of mv2's flags back,
-including `--name` and `--add-dir`.
+including `--name`.
 
 `/clear` keeps the process but moves it to a new session ID, and Claude's inbox
 drops a message addressed to another session. mv2 follows the move. With the
@@ -1441,7 +1531,25 @@ passes `--messaging-socket-path` (the core-assigned private socket),
 `--plugin-dir` for the source-owned `multiverse` mod, `--settings` with
 `crossSessionInbound: accept` (Claude otherwise holds peer messages for approval
 when the session skips permission prompts) and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
-(mods are early access). `send` reads the key Claude publishes for that socket and
+(mods are early access).
+
+The built-in Claude adapter gives every launch, bridge or plain, the agent's own
+folder as an extra working directory for permissions (the workspace stays the
+current directory) through `--settings`, as `permissions.additionalDirectories`.
+It is not `--add-dir`: since Claude Code 2.1.330 that flag stops the launch at an
+"Adding a new directory" dialog when the folder is under no folder the person
+trusts, because Claude then also loads the folder's own skills, commands and
+agents. The setting grants only access to the files, needs no dialog and trusts
+nothing on the person's behalf. Claude keeps only the last `--settings`, so when
+the harness's `args`, `spawn_args` or `resume_args`, as the launch renders them,
+hold anything shaped like their own (even after a `--`, which Claude can take as another flag's value), the
+adapter leaves theirs alone and gives the folder with `--add-dir` instead, as before
+(with that dialog on 2.1.330 when the folder isn't under a trusted one), and the
+bridge's `crossSessionInbound` is lost to theirs as it always was. A harness with
+its own launch recipe (schema 1) passes exactly the flags its recipe names. The
+rule is deliberately broad: an argument that only looks like `--settings`, such
+as a prompt after `--`, also gets `--add-dir`, which keeps both grants as before,
+whereas missing a real one would lose the agent's folder. `send` reads the key Claude publishes for that socket and
 writes one message at `next` priority, addressed to the exact session UUID. Its
 framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`:
 the mode, which the mod honors, and the message ID for its receipt. The mod acts
@@ -1652,6 +1760,78 @@ and an ask Claude lets hooks only deny (`hooksMayAllow: false`) isn't visible to
 the hook, so an allow there comes back unknown. A subagent's prompt and an MCP
 form are listed, never held.
 
+Each published choice carries its meaning from core's set: allow once is `allow`,
+deny (the agent carries on) `deny`, and a plan's approve and keep planning are
+`approve_plan` and `keep_planning`. A suggestion choice allows the call and applies
+one of Claude's suggestions: an allow rule or a directory is `allow_session`, or
+`allow_always` when it is saved to settings. A mode switch (`setMode`, such as
+accept edits) or another change of the rules does more than allow the same again,
+so it is `other` with its own short label ("Allow, accept edits"), saved or not:
+only the named meanings are tied to `saves_rule`. The adapter lists a meaning only
+when it is in the set, a named one agrees with `saves_rule`, and `other` comes with
+a short label of 1 to 24 printable characters (core's `isprintable` rule, so a bidi
+or zero-width control falls back to the long label); an older mod's choice has none. The adapter builds `display` from the published prompt: the
+tool's title ("Run a command", "Edit a file", "Use an MCP tool" with the server and
+tool), its main argument (the command's first line, the file path, a fetched page's
+host and port, never the URL's credentials, path, query or fragment, or the search
+query) and its other lines (a command's description, its further lines); a
+question's count and, for one, its header; a plan's first lines; a form's server
+and message. Text is cut to core's bounds. `detail` is Claude's own: `input` (the
+call's whole input, bounded; `display` repeats its main parts), `reason` (the
+reason Claude's permission check gave) and `permission_mode` (Claude's mode at the
+time; internal) for a permission, question or plan; `server`, `message`, `mode`
+and `schema` (the form's requested schema) for an MCP form.
+
+For the prompt events ([waiting-prompts.md](waiting-prompts.md)), the mod queues
+each prompt's open once its file is written, and its end as it is decided, and
+sends them with its status reports (`runtime_update --prompt-events-json`, one
+conversation's per call, at most 32): core records them before the report's status,
+so an end goes in or before the report that ends its wait. Claude reports `waiting`
+before the person's own hooks run and the mod can publish, so a prompt's open can
+follow its `waiting`. The end carries the state and cause `prompt_result` gives from
+the end record alone (`closedOutcome`); a reload's sweep reports the ends of this
+launch's prompts, and core closes an earlier launch's at that launch's end. A batch
+core fails three times is dropped, so it can never keep the status unreported; core
+closes what it still holds open from its own reads and the launch's end. A wait that
+publishes nothing (a command's dialog, a prompt the person's own hook answered) has
+no events. Each end record names its launch and conversation, so before an agent
+leaves `waiting` core can ask `prompt_outcome` in its metadata-only mode, which reads
+only that record and says `closed` only when the record is this launch's and
+conversation's, never from Claude's transcript.
+
+Turn events go the same way (`--turn-events-json`), from the rows Claude stores
+(`session.append`, with each row's id) and its turn hooks, grouped as the transcript
+reader groups rows. A user row with an origin opens a prompt turn: it is stored just
+before `turn.start`, which starts the turn under that row's id; a `turn.start` with
+no new row continues the last turn, which then ends again. A `queued_command` row
+in a running turn is a join. A local command's row opens a command turn, and its
+output row ends it, or the note it stores for the model right after its output
+(`/context`'s report), which the reader groups with it: the command's end waits for
+the next row in its conversation to say which; Claude raises no turn hooks for
+those. The source is the
+person's for a typed row (Claude stores a typed local command as its own) and the
+harness's otherwise, with the mv2 delivery attempt the mod matched the row to;
+core makes it mv2's. The first prompt row the person's side stores in a task
+launch's first load (`MV2_FIRST_TASK`) is the task. A row belongs to the turn
+running when its append is entered, and rows rank in that order, which is the order
+Claude stores them in (their appends can finish in another). A turn's end goes once
+its rows, from the first the file's tail holds on, are whole in the transcript file
+and none is still arriving: Claude raises `turn.complete` about 0.1 to 0.2 s before
+it writes them, so the agent stays `working` until then, at most 2 s, and the end
+goes with the idle report, naming the turn's row latest in the file. The end takes
+its place as `turn.complete` is entered, before Claude's own part of that hook runs,
+so a turn started meanwhile goes after it; it goes only once that part has returned
+(rows Claude stores meanwhile are the turn's), or at the bound. A continuation keeps
+the turn, but an end proves only the rows admitted before the next `turn.start`, and
+the hook leaves the status alone if any turn started while it waited. A join takes
+its place among the edges when its append is entered and gives it up if its step's
+end goes first (a continuation's join keeps its place when an earlier end goes); edges keep their order within a conversation, so an old
+conversation's never hold up a new one's after a `/clear`, which also stops the
+file reads for the old conversation's ends. Its state comes from `turn.complete`'s
+reason: `answer` and `refusal` are finished, `aborted` (Esc) interrupted, `error`
+an error. A load that never saw what opened the running turn (a reload mid-turn)
+reports no end for it; core closes it.
+
 The mod also writes `claude-queue.json`: the mv2 messages Claude holds now
 (`waitingRows`: taken, neither stored nor refused), each by its delivery attempt's
 ID, with its mode and when it was taken. It is rewritten whenever one is taken,
@@ -1718,7 +1898,14 @@ per row: a listing reads every agent's transcripts, and a per-row index holds
 about 1.5 times its file. The transcript reads keep their per-row index for the
 eight most recently read transcripts. History versions come from one counter
 that only grows, so an index built again after its eviction never reuses a
-version a reader holds.
+version a reader holds. A read has one deadline, core's reader's, which the
+adapter never re-arms: it is checked right before every step that can block or
+grow with the transcript (opening the projects listing and taking each entry,
+each project folder, opening the transcript and each chunk, each row parsed,
+each analysis phase, each fact of the view) and once more, with everything
+decided, before an analysis or a view is kept. A cold index of a large transcript takes tens of seconds, and a turn
+event's read has 0.5 s, so past the deadline a read stops and keeps nothing
+partial: the index is left as it was, and the next read starts from there.
 
 A new process would parse every transcript from its start, about a second per
 large agent, so each agent's usage indexes are also kept in its folder
@@ -1732,8 +1919,46 @@ process that reads usage writes it, whole and moved over the old one, at most
 every few seconds, for the session's current transcripts only; past 32 MiB it is
 neither written nor read.
 
+A transcript read's full row index is kept the same way, in `claude-rows/` in
+the agent's folder, one file per transcript copy, so a new process (the
+dashboard, the plugin host) doesn't parse a large transcript from its start. The
+index is mv2's own state, checked against corruption and transcript change, not
+against deliberate rewriting by the same user. Its header names the schema, the
+reader's derivation version (changed whenever the reader would derive a row's
+fields or labels differently), the transcript's path, and the inode, length,
+SHA-256 and line chain of the bytes it covers; then one section per row field,
+each with its own length and SHA-256, and the labels and history order from the
+newest row. It holds no row text: each row keeps only its labelling mark, which
+of Claude's markers its text starts with, and of a reply's usage only the
+counters mv2 reads; a view reads a prompt's preview or a command's name and
+arguments from the transcript at that row's offset. The folder is opened
+without following a link, and the index is read and written relative to it, so
+a linked folder is neither read nor written, and a FIFO in its place never
+blocks a read. A save writes one snapshot of the rows and the proof of the
+bytes they cover, taken together, and marks only that snapshot saved, so a read
+that goes on meanwhile is written by the next save. Its labels and history must
+be of exactly those rows, and an older save never replaces what a newer one for
+the same transcript published: only the index the process still holds for it
+publishes, after one more deadline check. A read whose deadline leaves less
+than 2 s neither loads nor saves it: reading the transcript itself comes first.
+A new
+process takes it over only after checking every section and hashing the
+transcript's bytes up to the point it covers, then parses only what Claude wrote
+since; another schema, version or path, a damaged section, another inode, a
+shorter file, another digest or a file past 128 MiB means a read from the start.
+It is written whole and moved over the old one, at most every 5 s per
+transcript, by a process that has just made a full view, and only when that
+read's deadline leaves 2 s, so a turn event's 0.5 s read never writes it; the
+save stops at that deadline, writing nothing, and the view stands. A
+big transcript's full read can end too close to its deadline to write one, so
+the adapter's `transcript_index` brings the saved index up to the transcript for
+a process with no report-path limit (the plugin host's worker), under that
+process's own deadline: it writes only when the saved copy is behind, once per
+change, and a deadline during the write leaves neither an index nor a temporary
+file.
+
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.329; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.330; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

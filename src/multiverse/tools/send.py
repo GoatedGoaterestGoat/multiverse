@@ -27,9 +27,10 @@ def configure(parser):
 
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
-        force=False, json=False, _present=None, _present_error=None, _note_for=None):
+        force=False, json=False, _present=None, _present_error=None, _note_for=None, as_user=False):
     """`_note_for` is a focus id: mv2's own note about that focus's held messages, sent only while no newer
-    focus has begun."""
+    focus has begun. `as_user` (a plugin's message only): the agent reads it as the person's own, as bare text;
+    mv2's record still names the plugin. Inside an agent's session it does nothing."""
     access.require('act', f'send to {agent}')
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
@@ -54,6 +55,15 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     from ..runtime.agent_identity import runs_in_agent
     in_agent = runs_in_agent(root=root)
     sender = _normalized(sender, in_agent)  # saved as it will be shown, live and in the inbox
+    from ..plugins import manifest
+    from ..runtime.native import _plugin_as_user
+    plugin = sender.get("plugin") if isinstance(sender, dict) else None
+    # A plugin's own, valid: outside an agent's session as its saved sender says; inside one, by the plugin it names
+    # (the mark is dropped below, and the message held or labelled as that session's).
+    if as_user and not (_plugin_as_user(sender) or in_agent and isinstance(plugin, str)
+                        and manifest.NAME.fullmatch(plugin)):
+        raise ValueError("Only a plugin's message is sent as the person's (as_user)")
+    as_user = bool(as_user) and not in_agent  # a plugin command an agent runs never reads as the person
     holds = focus.holds(sender) or in_agent  # from the sender as it will be saved, so a retry decides the same
     references = [reference.strip() for reference in agent.split(',')]
     if not all(references):
@@ -105,7 +115,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 continue
             if unread_senders is None:
                 unread_senders = _unread_senders(caller) if _present or _present_error else set()
-            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds)
+            result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds,
+                                        as_user)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             if result.get('upgrade_damaged'):
@@ -217,7 +228,7 @@ def _skipped(sender, text, delivery, reason):
              'reason': reason}, {})
 
 
-def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None, holds=True):
+def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None, holds=True, as_user=False):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
@@ -226,7 +237,7 @@ def _send_one(root, directory, text, sender, delivery, queue_only, note_for=None
         if upgraded:
             delivery = 'follow-up'
         result, receipt = _deliver_one(root, directory, text, sender, delivery, note_for, holds,
-                                       upgraded=upgraded)
+                                       upgraded=upgraded, as_user=as_user)
         if upgraded and result.get('saved') and (result['delivery'] == 'follow-up' or result['state'] == 'held'):
             result['upgraded_from'] = 'inbox-only'
         return result, receipt
@@ -251,7 +262,7 @@ def _upgrade_unavailable(root, directory, properties):
         return True  # No native attempt happened; keep the original inbox-only message.
 
 
-def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, *, upgraded=False):
+def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, *, upgraded=False, as_user=False):
     """The send lock covers the dependency decision, focus hold, save and native admission."""
     # A focus starts only under the send lock, so a newer one cannot begin between this check and the send.
     if note_for is not None and (focus.current(directory) or (focus.last(directory) or {}).get('id') != note_for):
@@ -316,7 +327,8 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, 
                 focus.commit_note(directory, note_for, message['id'])
         else:
             message = append_message(directory, text, sender, delivery, target_session=target,
-                                     inbox_only_text=original_text if upgraded and delivery == 'follow-up' else None)
+                                     inbox_only_text=original_text if upgraded and delivery == 'follow-up' else None,
+                                     as_user=as_user)
     result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
     if upgrade_unavailable:
         result['upgrade_unavailable'] = True

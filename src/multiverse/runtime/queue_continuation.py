@@ -6,7 +6,7 @@ only a new message's delivery may explicitly restart the FIFO head.
 from dataclasses import replace
 
 from . import effects
-from ..store import read
+from ..store import lock, now, read, write
 from ..universe import agents
 
 
@@ -21,7 +21,7 @@ def _saved_state(facts):
 
 
 def record_primary_event(directory, launch_id, event):
-    """The adapter validates owning-primary traffic before this durable callback."""
+    """Save queue authority before forwarding the owning terminal's event."""
     if (not isinstance(event, dict) or event.get('kind') not in ('interrupt', 'started', 'completed')
             or any(not isinstance(event.get(key), str) or not event[key] or len(event[key]) > 4096
                    or '\0' in event[key] for key in ('native_session_id', 'turn_id'))
@@ -30,8 +30,14 @@ def record_primary_event(directory, launch_id, event):
     properties = read(directory / 'properties.json')
     if properties.get('native_session_id') != event['native_session_id']:
         raise ValueError('Primary queue event belongs to a different conversation')
-    def changes(facts):
-        from .navigation import pending
+
+    # Queue readers need the durable state immediately. Ordered plugin events
+    # use their own admission and recovery paths and must not hold up this write.
+    from .navigation import pending
+    with lock(directory / '.runtime.lock', create_parent=False):
+        facts = agents.runtime(directory)
+        if facts.get('launch_id') != launch_id:
+            raise ValueError('Outdated launch; refusing to update current runtime')
         if pending(facts) or read(directory / 'properties.json').get('native_session_id') != event['native_session_id']:
             return None
         if facts.get('ending_at') or facts.get('state') not in ('starting', 'running'):
@@ -45,9 +51,11 @@ def record_primary_event(directory, launch_id, event):
             return None  # A newer turn wins over late completion/interrupt traffic.
         state = {'interrupt': 'interrupting', 'started': 'running', 'completed':
                  'paused' if event.get('status') == 'interrupted' else 'idle'}[event['kind']]
-        return {'queue_state': {**previous, 'native_session_id': event['native_session_id'],
-                                'turn_id': event['turn_id'], 'state': state}}
-    return agents.mutate_runtime(directory, launch_id, changes)
+        facts['queue_state'] = {**previous, 'native_session_id': event['native_session_id'],
+                                'turn_id': event['turn_id'], 'state': state}
+        facts['observed_at'] = now()
+        write(directory / 'runtime.json', facts)
+        return facts
 
 
 def claim_restart(directory, session, message_id):

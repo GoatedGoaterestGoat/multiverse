@@ -288,8 +288,10 @@ class LaunchRefusalTest(BaseTest):
             monitor.started = Mock(return_value=False)
             backend = Mock()
             backend.run.side_effect = lambda command, *args: 'Trust this folder?' if command == 'capture-pane' else '0'
-            with patch.object(runner.time, 'monotonic', side_effect=lambda: monitor.stopped.elapsed), \
-                    patch.object(lifecycle.time, 'sleep', side_effect=lambda seconds: monitor._run()), \
+            # Run the monitor on readiness polling only. File-read retries keep their own clocks.
+            clock = SimpleNamespace(monotonic=lambda: monitor.stopped.elapsed, sleep=lambda _: monitor._run())
+            with patch.object(runner, 'time', clock), patch.object(refusal, 'time', clock), \
+                    patch.object(lifecycle, 'time', clock), \
                     patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
                     patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
                 result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, default_timeout)

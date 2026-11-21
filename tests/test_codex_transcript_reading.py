@@ -8,7 +8,10 @@ from uuid import uuid4
 
 from multiverse import harnesses
 from multiverse.harnesses.codex import transcripts as t
-from multiverse.harnesses.types import SessionHandle, TranscriptRowsChanged
+from multiverse.harnesses.types import (SessionHandle, TranscriptRowsChanged, TurnEnded,
+                                        TurnProjection, TurnStarted)
+from multiverse.runtime import transcripts as core
+from multiverse.store import write
 from test_multiverse import BaseTest
 
 
@@ -118,6 +121,103 @@ class CodexTranscriptReadingTest(BaseTest):
             with self.subTest(name):
                 self.write([event('task_started', turn_id='t'), message('go'), event('user_message', message='go'), ending])
                 self.assertEqual(self.adapter.transcript_view(self.session).rows[-1].ends_turn, end)
+
+    def test_turn_start_waits_for_an_unwritten_rollout_header(self):
+        """An empty or partial first write can finish within budget, while a complete foreign header proves nothing."""
+        agent = self.root / 'state' / 'agents' / str(uuid4())
+        launch = str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'worker', 'harness': 'codex',
+              'workspace': str(self.work), 'native_session_id': self.native, 'native_session_home': str(self.home)})
+        write(agent / 'runtime.json', {'launch_id': launch, 'state': 'starting'})
+        edge = TurnStarted(turn='native-turn', kind='prompt', ref='wire-input', source='person')
+        rows = [event('task_started', turn_id='native-turn'), message('input', id='model-input'),
+                event('item_completed', thread_id=self.native, turn_id='native-turn',
+                      item={'type': 'UserMessage', 'id': 'wire-input', 'content': [{'type': 'text', 'text': 'input'}]})]
+        self.write(rows)
+        own = self.path.read_text()
+        deadline = core.time.monotonic() + .5
+        expected, = core.turn_references(self.root, agent, launch, self.native, 0, (edge,), deadline=deadline)
+        self.assertIsNotNone(expected.ref)
+        foreign = own.replace(self.native, str(uuid4()))
+        for initial, retries in (('', 1), ('{"type":"session_meta"', 1), (foreign, 0)):
+            with self.subTest(retries=retries, initial=initial[:22]):
+                self.path.write_text(initial)
+                elapsed = 0.0
+
+                def finish_write(delay):
+                    nonlocal elapsed
+                    elapsed += delay
+                    self.write(rows)
+
+                with patch.object(core, 'time') as clock:
+                    clock.monotonic.side_effect = lambda: elapsed
+                    clock.sleep.side_effect = finish_write
+                    got, = core.turn_references(self.root, agent, launch, self.native, 0, (edge,), deadline=.5)
+                self.assertEqual(clock.sleep.call_count, retries)
+                self.assertEqual(got, expected if retries else core.TurnReference())
+
+    def test_incomplete_rollout_copy_cannot_mask_foreign_metadata(self):
+        """A complete foreign header is terminal in either scan order."""
+        archive = self.home / 'archived_sessions' / self.path.name
+        archive.parent.mkdir()
+        foreign = json.dumps({'type': 'session_meta', 'payload': {'id': str(uuid4())}}) + '\n'
+        for archive_header, active_header in (('', foreign), (foreign, '')):
+            with self.subTest(archive_incomplete=not archive_header):
+                archive.write_text(archive_header)
+                self.path.write_text(active_header)
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(view.source.state, 'error')
+                self.assertFalse(view.source.retry)
+
+    def test_turn_projection_uses_the_validated_echo_and_the_exact_recovered_end(self):
+        """Wire item IDs do not address model rows and a recovered turn can have two distinct durable ends."""
+        def echo(identity, thread=None):
+            return event('item_completed', thread_id=thread or self.native, turn_id='native-turn',
+                         item={'type': 'UserMessage', 'id': identity, 'client_id': 'private-client',
+                               'content': [{'type': 'text', 'text': 'input'}]})
+        start = TurnStarted(turn='native-turn', kind='prompt', ref='wire-input', source='person')
+        prefix = [event('task_started', turn_id='native-turn'), message('input', id='model-input')]
+        first = event('turn_aborted', turn_id='native-turn', completed_at=100, duration_ms=25)
+        later = event('task_complete', turn_id='native-turn', completed_at=105, duration_ms=30)
+        self.write([*prefix, echo('wire-input'), echo('wire-input', str(uuid4())), first,
+                    event('task_started', turn_id='native-turn'), later])
+        view = self.adapter.transcript_view(self.session)
+        anchor = view.rows[2].position
+        actual = self.adapter.project_turn_event(self.session, view, start)
+        self.assertEqual(actual, TurnProjection(turn_position=anchor, row_position=view.rows[3].position))
+        self.assertEqual(view.rows[2].ref, 'model-input')
+        self.assertIsNone(view.rows[3].ref)
+        for ref, state, index in [('end_100_25', 'interrupted', 5), ('end_105_30', 'finished', 7),
+                                  ('end_110_25', 'finished', None), ('end_100_25', 'error', None)]:
+            with self.subTest(ref=ref, state=state):
+                end = TurnEnded(turn='native-turn', kind='prompt', ref=ref, state=state)
+                self.assertEqual(self.adapter.project_turn_event(self.session, view, end),
+                                 TurnProjection(turn_position=anchor,
+                                                row_position=view.rows[index].position if index is not None else None))
+        self.assertEqual(self.adapter.project_turn_event(replace(self.session, native_id=str(uuid4())), view, start),
+                         TurnProjection())
+
+        self.write([*prefix, echo('wire-input'), first, event('task_started', turn_id='native-turn')])
+        view = self.adapter.transcript_view(self.session)
+        unknown_occurrence = TurnEnded(turn='native-turn', kind='prompt', ref=None, state='interrupted')
+        self.assertEqual(self.adapter.project_turn_event(self.session, view, unknown_occurrence),
+                         TurnProjection(turn_position=view.rows[2].position))
+
+        # The first duplicate precedes the anchor and would be hidden by a
+        # truncated echo index, even though both still belong to this turn.
+        self.write([prefix[0], echo('wire-input'), prefix[1],
+                    *(echo(f'other-{number}') for number in range(4094)), echo('wire-input')])
+        view = self.adapter.transcript_view(self.session)
+        self.assertEqual(self.adapter.project_turn_event(self.session, view, start),
+                         TurnProjection(turn_position=view.rows[3].position))
+
+        for name, rows in [('legacy', [event('user_message', message='input')]),
+                           ('duplicate item', [echo('wire-input'), echo('wire-input')])]:
+            with self.subTest(name=name):
+                self.write([*prefix, *rows])
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(self.adapter.project_turn_event(self.session, view, start),
+                                 TurnProjection(turn_position=view.rows[2].position))
 
     def test_checked_native_rollout_labels_steering_followups_and_interruptions(self):
         """The checked release uses provenance and item_completed echoes, so legacy-only parsing silently loses every prompt."""
@@ -398,6 +498,119 @@ class CodexTranscriptReadingTest(BaseTest):
                 self.assertEqual(damaged_view.source.state, 'supported')
                 self.assertEqual((damaged_view.rows[-1].kind, damaged_view.rows[-1].label), ('unreadable', 'meta'))
                 self.assertEqual(self.adapter.transcript_bodies(self.session, damaged_view, [3], max_bytes=1 << 20), [None])
+
+    def test_saved_rollout_index_proves_prefix_before_reusing_rows(self):
+        """A new reader skips proven rows, but a rewrite followed by an append changes the saved cursor."""
+        directory = Path(self.session.session_file).parent
+        directory.mkdir()
+        saved = directory / 'codex-transcript-index.jsonl'
+        body = 'prompt-prefix ' + 'p' * 200 + 'private-prompt-tail'
+        self.write([message(body), event('user_message', message=body), {
+            'type': 'response_item', 'payload': {'type': 'function_call_output',
+                                                'output': 'private-tool-output'}}])
+        class BriefReader:
+            deadline = .5
+
+            def check(self):
+                pass
+
+        with patch.object(t, 'time', create=True) as clock:
+            clock.monotonic.return_value = 0
+            brief = self.adapter.transcript_view(self.session, reader=BriefReader())
+        self.assertEqual(brief.source.state, 'supported')
+        self.assertFalse(saved.exists())
+        t._indexes.clear()
+
+        first = self.adapter.transcript_view(self.session)
+        self.assertTrue(saved.is_file())
+        data = saved.read_bytes()
+        self.assertIn(b'prompt-prefix', data)
+        self.assertNotIn(b'private-prompt-tail', data)
+        self.assertNotIn(b'private-tool-output', data)
+
+        def read_from_disk(expected_parses):
+            t._indexes.clear()
+            with patch.object(t, 'entry', wraps=t.entry) as parsed:
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(parsed.call_count, expected_parses)
+                return view
+
+        self.assertEqual(read_from_disk(0), first)
+        extra = json.dumps(message('added', 'assistant')).encode()
+        with self.path.open('ab') as stream:
+            stream.write(extra)
+        self.assertEqual(read_from_disk(0), first)
+        self.assertEqual(saved.read_bytes(), data)
+        with self.path.open('ab') as stream:
+            stream.write(b'\n')
+        grown = read_from_disk(1)
+        self.assertEqual(grown.rows[:-1], first.rows)
+        self.assertEqual(len(grown.rows), len(first.rows) + 1)
+
+        original = self.path.read_bytes()
+        self.path.write_bytes(original.replace(b'prompt-prefix', b'edited-prefix') + extra + b'\n')
+        changed = read_from_disk(len(grown.rows))
+        self.assertEqual(changed.rows[1].preview[:13], 'edited-prefix')
+        self.assertNotEqual(changed.rows[1].position, first.rows[1].position)
+        self.assertEqual(changed.rows[0], first.rows[0])
+
+        t._indexes.clear()
+        with patch.object(t, 'time') as clock, patch.object(t.transcript_index, 'load') as load, \
+                patch.object(t.transcript_index, 'save') as save:
+            clock.monotonic.return_value = 0
+            self.assertEqual(self.adapter.transcript_view(self.session, reader=BriefReader()), changed)
+            load.assert_not_called()
+            save.assert_not_called()
+
+        for problem in ('checksum', 'truncated', 'oversized', 'link'):
+            with self.subTest(problem=problem):
+                valid = saved.read_bytes()
+                if problem == 'checksum':
+                    saved.write_bytes(valid.replace(b'edited-prefix', b'damage-prefix'))
+                elif problem == 'truncated':
+                    saved.write_bytes(valid[:-1])
+                elif problem == 'oversized':
+                    with saved.open('ab') as stream:
+                        stream.truncate(t.transcript_index.MAX_BYTES + 1)
+                else:
+                    foreign = directory / 'foreign'
+                    foreign.write_bytes(valid)
+                    saved.unlink()
+                    saved.symlink_to(foreign)
+                self.assertEqual(read_from_disk(len(changed.rows)), changed)
+                self.assertFalse(saved.is_symlink())
+                self.assertEqual(saved.read_bytes(), valid)
+                if problem == 'link':
+                    self.assertEqual(foreign.read_bytes(), valid)
+
+    def test_saved_compressed_index_still_checks_decoded_history(self):
+        """A saved index cannot hide a corrupt or rewritten compressed archive."""
+        from codex_compression import compress
+        directory = Path(self.session.session_file).parent
+        directory.mkdir()
+        compressed = self.path.with_suffix('.jsonl.zst')
+        self.write([message('before'), event('user_message', message='before')])
+        data = self.path.read_bytes()
+        compressed.write_bytes(compress(data))
+        self.path.unlink()
+        first = self.adapter.transcript_view(self.session)
+        self.assertTrue((directory / 'codex-transcript-index.jsonl').is_file())
+
+        t._indexes.clear()
+        with patch.object(t, 'entry', wraps=t.entry) as parsed:
+            self.assertEqual(self.adapter.transcript_view(self.session), first)
+        parsed.assert_not_called()
+
+        compressed.write_bytes(compress(data.replace(b'before', b'edited')))
+        t._indexes.clear()
+        changed = self.adapter.transcript_view(self.session)
+        self.assertEqual(changed.rows[1].preview, 'edited')
+        self.assertNotEqual(changed.rows[1].position, first.rows[1].position)
+
+        with compressed.open('ab') as stream:
+            stream.write(b'broken')
+        t._indexes.clear()
+        self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
 
     def test_compressed_copies_preserve_logical_rows_bodies_and_plain_precedence(self):
         """Cold compressed history must preserve exact identity/cursors without writing a sibling or selecting stale compressed bytes over plain data."""

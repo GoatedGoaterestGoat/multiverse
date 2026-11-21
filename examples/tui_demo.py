@@ -45,12 +45,15 @@ class DemoBackend:
         self.prompts = {writer: [{
             "id": "demo-permission", "kind": "permission", "tool": "Bash", "summary": "git push origin draft-pr",
             "detail": {"command": "git push origin draft-pr", "description": "Publish the draft branch"},
+            "display": {"title": "Run a command", "subject": "git push origin draft-pr",
+                        "lines": ["Publish the draft branch"]},
             "asked_at": None, "answerable": True, "reason": None, "subagent": None, "questions": [],
-            "choices": [{"id": "allow", "label": "Yes", "saves_rule": False, "takes_message": False},
+            "choices": [{"id": "allow", "label": "Yes", "saves_rule": False, "takes_message": False,
+                         "meaning": "allow", "short": "Allow once"},
                         {"id": "allow_always", "label": "Yes, and don't ask again for git push", "saves_rule": True,
-                         "takes_message": False},
+                         "takes_message": False, "meaning": "allow_always", "short": "Allow always"},
                         {"id": "deny", "label": "No, and tell it what to do instead", "saves_rule": False,
-                         "takes_message": True}]}]}
+                         "takes_message": True, "meaning": "deny", "short": "Deny"}]}]}
 
     def snapshot(self, root):
         with self.lock:

@@ -1,6 +1,7 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import error_text, model_label, phase_label, shorten, state, summary_label, live_label
+from ..display import (error_text, model_label, phase_label, shorten, startup_prompt_line, state, summary_label,
+                       live_label)
 from ..runtime import lifecycle
 from ..universe import focus
 from .. import universe
@@ -109,6 +110,9 @@ def problems(row, wide):
         lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide or damage else error_text(error)))
     if row.get('delivery_problem'):
         lines.append('  ! ' + row['delivery_problem'])
+    asked = startup_prompt_line(row, (row.get('runtime') or {}).get('startup_prompt')) if row.get('live') == 'alive' else None
+    if asked:
+        lines.append('  ' + asked)
     if row.get('recovery_note'):
         lines.append('  Note: Reconnected automatically.')
     if row.get('focus'):

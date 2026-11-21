@@ -109,6 +109,37 @@ class NavigationCommitTest(DeliveryFixture):
                 self.assertIsNone(snapshot(**changes))
 
 
+def terminal_turn_completed(pane, tag):
+    reply = f'• NAV_DONE_{tag}'
+    seen_reply = False
+    for line in pane.splitlines():
+        text = line.strip()
+        if text == reply:
+            seen_reply = True
+        elif text.startswith('› '):
+            seen_reply = False
+        elif seen_reply and text.startswith('Worked for '):
+            return True
+    return False
+
+
+class NavigationReadyTest(unittest.TestCase):
+    def test_only_this_turns_displayed_completion_counts(self):
+        """The status watcher can see idle before the terminal processes the turn's completion."""
+        older = '  • NAV_DONE_NAV_OLD\n  Worked for <1s • 04:00\n'
+        reply = '  • NAV_DONE_NAV_NEW_AFTER_REATTACH  \n'
+        separator = '  Worked for 1s • 04:01\n'
+        for name, pane, expected in (
+            ('prior turn', older, False),
+            ('streamed answer', older + reply, False),
+            ('different reply tag', reply.replace('REATTACH ', 'REATTACHED ') + separator, False),
+            ('later turn', reply + '  › NEXT\n' + separator, False),
+            ('completed turn', older + reply + '\n' + separator + '  › Ask Codex to do anything\n', True),
+        ):
+            with self.subTest(name=name):
+                self.assertIs(terminal_turn_completed(pane, 'NAV_NEW_AFTER_REATTACH'), expected)
+
+
 def read_transcript(operation, *, timeout=30):
     """Retry transient identity contention without changing the requested cursor."""
     deadline = time.monotonic() + timeout
@@ -482,8 +513,11 @@ class NativeNavigationTest(TerminalBase):
             except (OSError, RuntimeError, ValueError) as error:
                 return f'Private pane unavailable: {error}'
 
-        def idle():
-            until(lambda: agents.runtime(directory).get('status') == 'idle', seconds=30)
+        def idle(tag=None):
+            # The status watcher learns idle on a different connection from the
+            # TUI, which still rejects navigation until it processes completion.
+            until(lambda: agents.runtime(directory).get('status') == 'idle'
+                  and (tag is None or terminal_turn_completed(capture(), tag)), seconds=30)
 
         def command(text):
             backend.run('send-keys', '-t', pane, 'C-u')
@@ -507,7 +541,7 @@ class NativeNavigationTest(TerminalBase):
                 callback(tag, target)
                 until(lambda: (native.deliver(self.root, started['id'], saved['id'], check=True)
                                .get('value') or {}).get('transcript_confirmed') is True, seconds=30)
-                idle()
+                idle(tag)
             return saved['id']
 
         def complete_switch(previous, generation, offset, reason):
@@ -532,7 +566,7 @@ class NativeNavigationTest(TerminalBase):
 
         try:
             callback('NAV_A_SEED', original)
-            idle()
+            idle('NAV_A_SEED')
             command('/rename NAV_FIRST')
             initial = read_transcript(lambda: transcripts.info(self.root, directory))
             second = switch('/new', original)
@@ -629,7 +663,7 @@ class NativeNavigationTest(TerminalBase):
             self.assertEqual(len(sessions.journal(directory)), before)
             self.assertFalse(agents.runtime(directory).get('native_refusal'))
             (work / 'release-hold').touch()
-            idle()
+            idle('NAV_PICKER_HOLD')
             checked = native.deliver(self.root, started['id'], picker_hold, check=True)
             self.assertTrue((checked.get('value') or {}).get('transcript_confirmed'), checked)
             command('/resume')
@@ -722,7 +756,7 @@ class NativeNavigationTest(TerminalBase):
             self.assertFalse(directory.is_relative_to(work))
             for row in primary_replies:
                 self.assertEqual(grant_set(row), effective_grants, row)
-                if CHECKED_VERSION in ((0, 169, 0), (0, 170, 0)):
+                if CHECKED_VERSION in ((0, 169, 0), (0, 170, 0), (0, 171, 0)):
                     for relation in ('parentThreadId', 'attachedToThreadId', 'forkedFromId'):
                         self.assertIn(relation, row['thread'], row)
                         self.assertIsNone(row['thread'][relation], row)
@@ -737,6 +771,13 @@ class NativeNavigationTest(TerminalBase):
                     self.assertEqual(selected['cwd'], str(work), row)
                     self.assertEqual(sorted(set(selected['runtimeWorkspaceRoots'])),
                                      effective_grants['runtimeWorkspaceRoots'], row)
+            if CHECKED_VERSION >= (0, 171, 0):
+                initial_input = next(row for row in wire.records if row.get('direction') == 'request'
+                    and row.get('method') == 'turn/start' and row.get('params', {}).get('threadId') == original)
+                self.assertEqual(initial_input['params'].get('environments'), [{
+                    'environmentId': 'local', 'cwd': str(work),
+                    'runtimeWorkspaceRoots': effective_grants['runtimeWorkspaceRoots'],
+                }], initial_input)
             starts = [row for row in wire.records if row.get('direction') == 'request'
                       and row.get('method') == 'thread/start' and type(row.get('id')) is int]
             self.assertEqual([row['params'].get('sessionStartSource') for row in starts], [None, 'clear', None, None])

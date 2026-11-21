@@ -14,11 +14,11 @@ from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
 from . import views
-from .columns import BLOCKED_ON, COLUMNS, EFFORT, UNREAD, core_key
+from .columns import BLOCKED_ON, COLUMNS, EFFORT, INACTIVE, UNREAD, core_key
 
-HOSTS = {UNREAD: "name", EFFORT: "model", BLOCKED_ON: "summary"}  # each mark adds to that column's cell
+HOSTS = {UNREAD: "name", EFFORT: "model", BLOCKED_ON: "summary", INACTIVE: "status"}  # each adds to that cell
 MARK_TITLES = {UNREAD: "Unread count, on the name", EFFORT: "Effort, in the Model cell",
-               BLOCKED_ON: "Blocked on, in Working on"}
+               BLOCKED_ON: "Blocked on, in Working on", INACTIVE: "Time inactive, in the Status cell"}
 HIDDEN = {"universe"}  # never drawn as a column: the tree shows each agent's universe
 
 

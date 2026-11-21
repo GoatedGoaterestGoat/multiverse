@@ -401,6 +401,93 @@ class RunsTest(BaseTest):
                 parent.close()
                 connection.close()
 
+    def test_the_calling_and_supervisor_identities_are_retried_within_the_same_bound(self):
+        """A loaded machine (GOAT's tests under the whole suite) made one ps query of the calling process or of the
+        supervisor take over two seconds, and either read, unlike the child's, was made once: the run failed
+        "unavailable". Both now retry within the child's bound; a lasting refusal still refuses the run."""
+        for condition in ('transient', 'lasting'):
+            with self.subTest('caller', condition=condition):
+                now, queries = [10.0], []
+                clock = SimpleNamespace(monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+                def observation(pid, *, timeout):
+                    self.assertEqual(pid, os.getpid())
+                    self.assertLessEqual(timeout, 2)
+                    queries.append(timeout)
+                    now[0] += timeout
+                    return 'fixture-start' if condition == 'transient' and len(queries) > 1 else None
+                executor = SimpleNamespace(deadline=40.0, check=lambda: None)
+                with patch.object(runs, 'time', clock), patch.object(runs, 'process_started', side_effect=observation):
+                    token = runs._own_start(executor)
+                if condition == 'transient':
+                    self.assertEqual((token, len(queries)), ('fixture-start', 2))
+                else:
+                    self.assertIsNone(token)
+                    self.assertLessEqual(now[0] - 10.0, runs.IDENTITY_SECONDS + .1)
+        for boundary in ('identity bound', 'run deadline', 'cancellation'):
+            with self.subTest('caller: a token that arrives too late is refused', boundary=boundary):
+                # lifecycle's owner read: the caller's retry checked only before each read, so a token arriving at
+                # the identity bound, at the run's deadline or after a cancel was accepted, and the run went on
+                # toward before_start.
+                now, cancel = [10.0], threading.Event()
+                executor = runs.RunExecutor(deadline=11.0 if boundary == 'run deadline' else 40.0, cancel=cancel,
+                                            scopes=[])
+                clock = SimpleNamespace(monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+                def late(pid, *, timeout):
+                    if boundary == 'cancellation':
+                        cancel.set()
+                        return 'fixture-start'
+                    now[0] += timeout
+                    return 'fixture-start' if now[0] >= (11.0 if boundary == 'run deadline' else 15.0) else None
+                with patch.object(runs, 'time', clock), patch.object(runs, 'process_started', side_effect=late):
+                    if boundary == 'identity bound':
+                        self.assertIsNone(runs._own_start(executor))
+                    else:
+                        with self.assertRaises(RunFailure) as caught:
+                            runs._own_start(executor)
+                        self.assertEqual(caught.exception.kind, 'timeout' if boundary == 'run deadline' else 'cancelled')
+        for condition in ('transient', 'lasting'):
+            with self.subTest('supervisor', condition=condition):
+                directory = runs.base() / 'fixture/fake' / str(uuid4())
+                marker = self.work / ('executed-supervisor-' + condition)
+                code = (f'import pathlib\nwith pathlib.Path({str(marker)!r}).open("a") as out: out.write("paid\\n")\n'
+                        'print("paid answer")\n')
+                parent, connection = socket.socketpair()
+                offset, own = [0.0], []
+                clock = SimpleNamespace(monotonic=lambda: time.monotonic() + offset[0], sleep=time.sleep)
+                payload = {'directory': str(directory), 'universe': str(self.root), 'owner': None,
+                           'files': [], 'argv': [sys.executable, '-I', '-S', '-c', code],
+                           'environment': {k: v for k, v in self.environment.items() if v is not None},
+                           'scopes': runs.capture_scope(self.root).records(),
+                           'deadline': clock.monotonic() + 30}
+                started = run_supervisor.process_started
+
+                def supervisor_observation(pid, **kwargs):
+                    if pid != os.getpid():
+                        return started(pid)
+                    own.append(kwargs.get('timeout'))
+                    if condition == 'lasting':
+                        offset[0] += 2
+                        return None
+                    return None if len(own) == 1 else started(pid)
+                try:
+                    with patch.object(run_supervisor, 'time', clock), \
+                            patch.object(run_supervisor, 'process_started', side_effect=supervisor_observation):
+                        result = run_supervisor.supervise(connection, payload)
+                    if condition == 'transient':
+                        self.assertEqual(result.get('outcome', {}).get('stdout'), 'paid answer\n', result)
+                        self.assertEqual(len(own), 2)
+                    else:
+                        self.assertEqual(result.get('failure', {}).get('kind'), 'unavailable', result)
+                        self.assertIn('supervisor identity', result['failure'].get('reason', ''), result)
+                        self.assertFalse(marker.exists())  # refused before any native execution
+                        self.assertLessEqual(len(own), 3, 'Identity preparation needs a finite bound')
+                    self.assertFalse(directory.exists())
+                finally:
+                    parent.close()
+                    connection.close()
+
     def test_collisions_and_linked_store_paths_are_never_overwritten(self):
         """An exclusive session file cannot follow a link or overwrite an existing conversation, even if that
         collision appears only after the run plan was built."""
@@ -514,6 +601,32 @@ class RunsTest(BaseTest):
                 self.assertIn('size bound', caught.exception.reason)
                 self.assertNotIn('ssss', caught.exception.reason)
                 self.no_content()
+
+    def test_a_slow_group_listing_still_proves_an_ended_run_stopped(self):
+        """plugins under a load of about 30, and its live agent's merges: "The private run could not be proven
+        stopped" after runs that had ended, since each group listing was capped at half a second and a loaded
+        machine's listing took longer every time. A group that never empties is still unproven."""
+        for case in ('a listing that needs 0.6 s', 'a group that never empties'):
+            with self.subTest(case):
+                child = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+                track(pid=child.pid)
+                timeouts = []
+
+                def members(pgid, timeout):
+                    timeouts.append(timeout)
+                    if case == 'a group that never empties':
+                        return [pgid + 1]
+                    if timeout < .6:
+                        raise subprocess.TimeoutExpired(['ps'], timeout)
+                    return []
+                try:
+                    until(lambda: run_supervisor._exited(child))
+                    with patch.object(run_supervisor, '_members', side_effect=members):
+                        stopped = run_supervisor._stop(child)
+                    self.assertIs(stopped, case == 'a listing that needs 0.6 s', timeouts[:5])
+                finally:
+                    if child.returncode is None:
+                        child.wait(timeout=5)
 
     def test_cleanup_proof_and_doctor_preserve_uncertain_targets(self):
         """A leftover cleanup needs dead producer identities and unchanged files; otherwise it can delete a

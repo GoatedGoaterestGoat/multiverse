@@ -13,7 +13,7 @@ from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inbox
 from .. import display, plugins
 from ..runtime import lifecycle, model_choices as model_policy, prompts
 from . import columns, plugin_panels, theme
-from .columns import BLOCKED_ON, COLUMNS, EFFORT, MARKS, UNREAD
+from .columns import BLOCKED_ON, COLUMNS, EFFORT, INACTIVE, MARKS, UNREAD
 from .panels import error_widget
 from .tree import counts, within
 from .views import view
@@ -213,6 +213,10 @@ class LocalBackend:
             effort = EFFORT in config["columns"]  # effort shows only inside the Model cell
             for member in members:
                 member["model_label"] = display.model_label(member, effort=effort)
+        if INACTIVE in config["columns"] and any(columns.core_key(key) == "status" or key == "status"
+                                                 for key in config["columns"]):
+            for member in members:  # how long it has been inactive shows only inside the Status cell
+                member["status_label"] = display.status_label(member)
         if BLOCKED_ON not in config["columns"] or not any(columns.core_key(key) == "summary" or key == "summary"
                                                            for key in config["columns"]):
             # Shown only where the view lists both: otherwise a blocked agent's summary is its own everywhere, the

@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -13,7 +14,7 @@ from websockets.asyncio.client import unix_connect
 from websockets.asyncio.server import unix_serve
 
 from multiverse.universe import agents
-from multiverse.runtime import rpc
+from multiverse.runtime import queue_continuation, rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, SessionHandle
@@ -77,7 +78,9 @@ class CodexLaunchTest(unittest.TestCase):
             # 0.163.0's screens are checked too, so it gets no notice: its checks stay on.
             for version, relation in (((0, 154, 0), 'older'), ((0, 162, 1), 'older'), ((0, 163, 0), None),
                                       ((0, 164, 0), None), ((0, 165, 0), 'older'), ((0, 166, 0), None),
-                                      ((0, 167, 0), None), ((0, 167, 1), None), ((0, 167, 2), None), ((0, 169, 0), None), ((0, 170, 0), None), ((0, 169, 1), 'older'), ((0, 170, 1), 'newer'), (None, None)):
+                                      ((0, 167, 0), None), ((0, 167, 1), None), ((0, 167, 2), None), ((0, 169, 0), None), ((0, 170, 0), None), ((0, 171, 0), None),
+                                      ((0, 169, 1), 'older'), ((0, 170, 1), 'older'),
+                                      ((0, 171, 1), 'newer'), (None, None)):
                 with patch('multiverse.harnesses.codex.plugins.codex_version', return_value=version):
                     for mode in ('spawn', 'resume'):
                         adapter = CodexAdapter.configured('codex', {})
@@ -267,6 +270,61 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
 
     async def receive(self):
         return await asyncio.wait_for(self.received.get(), 2)
+
+    async def test_completion_records_queue_state_without_waiting_for_the_journal(self):
+        """A busy journal must leave the terminal able to process completion with durable queue state."""
+        await self.connect(record_primary_event=lambda event: queue_continuation.record_primary_event(
+            self.directory, 'launch', event))
+        await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+        await self.receive()
+        bound = json.dumps({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(bound)
+        self.assertEqual(await self.client.recv(), bound)
+        runtime_path = self.directory / 'runtime.json'
+        loop = asyncio.get_running_loop()
+
+        for turn, status, state in (('first-turn', 'completed', 'idle'),
+                                    ('second-turn', 'interrupted', 'paused')):
+            with self.subTest(status=status):
+                started = json.dumps({'method': 'turn/started', 'params': {
+                    'threadId': self.native_id, 'turn': {'id': turn},
+                }})
+                await self.upstream.send(started)
+                self.assertEqual(await asyncio.wait_for(self.client.recv(), 3), started)
+                restart = {'id': 'new-message', 'state': 'claimed'}
+                facts = read(runtime_path)
+                saved = {**facts['queue_state'], 'restart': restart}
+                write(runtime_path, {**facts, 'status': 'working', 'queue_state': saved})
+                release, entered = Event(), asyncio.Event()
+
+                def held_journal(*args, **kwargs):
+                    loop.call_soon_threadsafe(entered.set)
+                    release.wait(5)
+                    return []
+
+                frame = json.dumps({'method': 'turn/completed', 'params': {
+                    'threadId': self.native_id, 'turn': {'id': turn, 'status': status},
+                }})
+                with patch.object(agents, '_stage_status_intents', side_effect=held_journal):
+                    await self.upstream.send(frame)
+                    received = asyncio.create_task(self.client.recv())
+                    journal = asyncio.create_task(entered.wait())
+                    try:
+                        done, _ = await asyncio.wait((received, journal), timeout=3,
+                                                     return_when=asyncio.FIRST_COMPLETED)
+                        self.assertIn(received, done, 'The completion waited for journal staging')
+                        self.assertFalse(entered.is_set())
+                        self.assertEqual(received.result(), frame)
+                        current = read(runtime_path)
+                        self.assertEqual(current['queue_state'], {**saved, 'state': state})
+                        self.assertEqual(current['status'], 'working')
+                    finally:
+                        release.set()
+                        await asyncio.wait((received,), timeout=3)
+                        for task in (received, journal):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(received, journal, return_exceptions=True)
 
     async def test_start_merges_instructions_and_roots_and_binds_exact_reply(self):
         """mv2's bootstrap and writable roots are merged into the TUI's thread/start and the exact reply binds, also

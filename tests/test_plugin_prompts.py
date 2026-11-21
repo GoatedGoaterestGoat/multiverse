@@ -46,6 +46,50 @@ class PromptApiTest(PluginTestCase):
         self.directory = self.agent("worker", harness="claude", native_id=str(uuid4()), runtime={"status": "waiting"})
         self.worker = self.loaded_plugin("answerer").universe(self.root).agent("worker")
 
+    def test_a_result_says_who_answered_and_what_only_to_a_plugin_that_reads_conversations(self):
+        """prompt_result says who answered, and what only with transcripts.read, never a secret; else answers leak."""
+        from dataclasses import replace
+        fake = self.fake_prompts([BASH, ASK, replace(BASH, id="perm-2")], {}, {}, {})
+        self.write_plugin("listener", {"extends": ["events"], "events": ["agent.prompt", "prompt.*"]})
+        self.enable("listener")  # so the journal records the answers' events
+        reader = {**ANSWERER, "permissions": [*ANSWERER["permissions"], "transcripts.read"]}
+        self.write_plugin("reader", reader, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("reader")
+        reading = self.loaded_plugin("reader").universe(self.root).agent("worker")
+        done = reading.answer_prompt("ask-1", answers={"colour": "blue", "token": "s3cret", "vault": "open"},
+                                     notes={"colour": "a calm one", "vault": "n0te-secret"})
+        self.assertEqual((done.state, done.by), ("answered", {"kind": "plugin", "name": "reader"}))
+        expected = {"answers": {"colour": ["blue"], "token": {"secret": True}, "vault": {"secret": True}},
+                    "notes": {"colour": "a calm one", "vault": {"secret": True}}}
+        self.assertEqual(done.answer, expected)
+        self.assertEqual(reading.prompt_result("ask-1").answer, expected)  # kept, after it settled
+        found = self.worker.prompt_result("ask-1")  # a plugin without transcripts.read
+        self.assertEqual((found.by, found.answer, found.person_answer),
+                         ({"kind": "plugin", "name": "reader"}, None, None))
+        from multiverse.runtime import prompts
+        mine = prompts.answer(self.root, "worker", "perm-1", choice="deny", message="not now", wait=False)
+        self.assertEqual((mine.by, mine.answer), ({"kind": "mv2"}, {  # the person through mv2 answer
+            "choice": {"id": "deny", "label": "Deny", "short": None}, "message": "not now"}))
+        long = prompts.answer(self.root, "worker", "perm-2", choice="deny", message="m" * 40_000, wait=False).answer
+        self.assertEqual((len(long["message"]), "truncated" in long), (40_000, False))  # fits its record: kept whole
+        record = read(self.directory / "prompts" / "perm-2.json")
+        self.assertLessEqual(len(json.dumps(record, ensure_ascii=False).encode()), prompts.LIMIT)  # the record fits
+        from multiverse.plugins import events
+        journal = json.dumps(events.read(self.root, 0)[0])
+        self.assertIn('"agent.prompt"', journal)
+        for kept_out in ("s3cret", "n0te-secret"):
+            self.assertNotIn(kept_out, (self.directory / "prompts" / "ask-1.json").read_text())
+        for text in ("a calm one", "not now", "blue"):
+            self.assertNotIn(text, journal)  # the journal stays text-free
+        self.assertEqual(len(fake.answers), 3)
+        self.write_plugin("sender", {**ANSWERER, "permissions": ["prompts.answer"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("sender")
+        self.fake_prompts([replace(BASH, id="perm-3")], {})
+        blind = api.Agent(self.worker.record, self.loaded_plugin("sender"))  # prompts.answer only
+        done = blind.answer_prompt("perm-3", choice="deny")
+        self.assertEqual((done.state, done.by), ("answered", None))  # no agents.read: no 'by'
+
     def loaded_plugin(self, name):
         loader.reset()
         return api.Plugin(loader.load(self.entry(name)))
@@ -98,7 +142,7 @@ class PromptApiTest(PluginTestCase):
             self.assertEqual(fake.answers[-1]["answers"], {"colour": ("blue",), "token": ("***",), "vault": ("***",)})
             self.assertEqual(fake.answers[-1]["notes"], {"colour": "a calm one", "vault": "***"})
             stored = (self.directory / "prompts" / "ask-1.json").read_text()
-            for kept_out in ("s3cret", "n0te-secret", "a calm one"):  # no note, nor a secret, is kept
+            for kept_out in ("s3cret", "n0te-secret"):  # no secret answer or note is kept
                 self.assertNotIn(kept_out, stored)
         self.assertEqual([item["id"] for item in fake.answers], ["perm-1", "ask-1"])  # once each, never resent
         with self.subTest("an agent that isn't waiting"):
@@ -128,6 +172,51 @@ class PromptApiTest(PluginTestCase):
         with mock.patch.dict(os.environ, {"MV2_AGENT_ID": "someone"}):
             return call()
 
+
+    def test_a_plugin_follows_prompts_by_their_events_in_order(self):
+        """Prompts open and close in the journal for a subscribed plugin, by id, in order and without text (1.21); else a plugin polls every agent or misses a prompt that came and went."""
+        from multiverse.plugins import events
+        self.write_plugin("follower", {"module": "plugin", "extends": ["events"],
+                                       "events": ["prompt.*", "agent.prompt"]}, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("follower")
+        fake = self.fake_prompts([], {})
+        fake.show(BASH, self.directory)
+        fake.show(LATER, self.directory)
+        fake.end("later-1", self.directory, state="person")  # the person answered it in the terminal
+        answered = self.worker.answer_prompt("perm-1", choice="allow")
+        self.assertEqual(answered.state, "answered")
+        found, _ = events.read(self.root, 0)
+        seen = [(event["type"], event["data"]["id"], event["data"].get("state")) for event in found]
+        self.assertEqual([row for row in seen if row[0].startswith("prompt.")],
+                         [("prompt.opened", "perm-1", None), ("prompt.opened", "later-1", None),
+                          ("prompt.closed", "later-1", "person"), ("prompt.closed", "perm-1", "submitted")])
+        self.assertEqual(found[1]["data"], {"id": "later-1", "kind": "question", "requires_waiting": False})
+        # mv2's own answer closes the prompt as it stood then; how it settled comes as agent.prompt.
+        outcome = [event["data"] for event in found if event["type"] == "agent.prompt"]
+        self.assertEqual((outcome[-1]["id"], outcome[-1]["state"], outcome[-1]["outcome"]),
+                         ("perm-1", "answered", "answered"))
+        text = json.dumps(found)
+        for private in (BASH.summary, "rm -rf", events.REPLAY):
+            self.assertNotIn(private, text)  # no prompt text, and never core's replay key
+
+    def test_a_prompts_choices_and_display_read_the_same_for_every_harness(self):
+        """A choice's meaning gets core's short label and a prompt's display passes through intact (1.21); else plugins parse each harness's labels and details again."""
+        shown = api.WaitingPrompt(
+            id="perm-2", kind="permission", tool="Bash", summary="npm test",
+            display=api.PromptDisplay(title="Run a command", subject="npm test", lines=("Runs the test suite",)),
+            choices=(api.PromptChoice(id="allow", label="Allow once", meaning="allow"),
+                     api.PromptChoice(id="session", label="Allow, and also allow Bash(npm test), for this session",
+                                      meaning="allow_session"),
+                     api.PromptChoice(id="strict", label="Allow with strict review", meaning="other",
+                                      short="Allow, strict review"),
+                     api.PromptChoice(id="old", label="Deny")))  # a harness that doesn't map it yet
+        self.fake_prompts([shown])
+        [listed] = self.worker.waiting_prompts().prompts
+        self.assertEqual([(choice.meaning, choice.short) for choice in listed.choices],
+                         [("allow", "Allow once"), ("allow_session", "Allow for session"),
+                          ("other", "Allow, strict review"), (None, None)])
+        self.assertEqual(listed.display, api.PromptDisplay(title="Run a command", subject="npm test",
+                                                           lines=("Runs the test suite",)))
 
     def test_a_question_that_does_not_stop_the_agent_is_answered_once_as_its_input(self):
         """Async questions are answered while the agent runs, sent once, text kept nowhere; a lost gate is unseen."""

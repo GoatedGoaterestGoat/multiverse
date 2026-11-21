@@ -23,7 +23,8 @@ from ..plugins import access as plugin_access, loader, packages as plugin_packag
 from ..plugins.settings import DELETE
 from .columns import COLUMNS
 from .plugin_service import universe_name
-from .screens import ChoiceScreen
+from ..plugins import installer as plugin_installer
+from .screens import ChoiceScreen, Details, Form
 from .secrets_screen import SecretsScreen
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
@@ -128,6 +129,10 @@ def describe(item):
         lines.append(f"Overrides the {clean(over.get('source'))} {clean(item['name'])} plugin ({clean(over.get('directory'))})")
     if item.get("description"):
         lines.append(clean(item["description"]))
+    record = item.get("install")
+    if record:
+        commit = f" at {clean(record['commit'])[:12]}" if record.get("commit") else ""
+        lines.append(f"Installed from {clean(record.get('source') or '')}{commit} (u updates, d removes)")
     if item.get("problem"):
         lines.append("Problem: " + clean(item["problem"]))
     adds = provided(item.get("provides"))
@@ -164,13 +169,21 @@ class PluginsScreen(ModalScreen):
     PluginsScreen .cerror { height: auto; color: $mv-red; }
     """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("space", "toggle", "On / off"),
-                Binding("enter", "settings", "Configure"), Binding("h", "host", "Host")]
+                Binding("enter", "settings", "Configure"), Binding("i", "install", "Install"),
+                Binding("u", "update", "Update"), Binding("d", "remove", "Remove"), Binding("h", "host", "Host")]
 
     def __init__(self, root, name="", service=None):
         super().__init__()
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
         self.items, self.problems, self.host = [], [], None
         self.changed = self.busy = self.opening = self.installing = False
+        self.waiting = None  # why Esc must wait: a fetch or install under way would leave files behind
+        self.wanted = None  # (name, placement) to select once a read that has it is drawn: a plugin just installed
+        # Rows keys wait on. `held`: the row selected when an install finished and the new row wasn't drawn, until
+        # the person moves off it. `stale`: rows whose record is from before an update, each until a read draws the
+        # current records (one per update: a second failed reread never lets the first go).
+        self.held, self.stale = None, set()
+        self.hold_note = None  # (text, "held" or "stale"): the status line last shown about a hold, and whose
         self.reads = 0  # list reads started: only the latest shows what it read
         self.note = None  # a status line a plugin screen left
 
@@ -212,6 +225,23 @@ class PluginsScreen(ModalScreen):
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))
+
+    def hold_error(self, message, owner):
+        """A status line about a held row (`owner`: "held" or "stale"): it goes when that hold is let go."""
+        self.hold_note = (clean(message), owner)
+        self.error(message)
+
+    def release(self, message=""):
+        """Let the held row go, and replace the status line about it if it still shows (not one written since)."""
+        self.held = None
+        self.release_note("held", message)
+
+    def release_note(self, owner, message=""):
+        """Replace the status line `owner`'s hold wrote, if it still shows: never another hold's, or a newer line."""
+        if (self.hold_note and self.hold_note[1] == owner
+                and str(self.query_one(".cerror", Static).render()) == self.hold_note[0]):
+            self.error(message)
+            self.hold_note = None
 
     def selected(self):
         table = self.query_one("#plugins-table", DataTable)
@@ -314,6 +344,15 @@ class PluginsScreen(ModalScreen):
 
     def fill(self, keep=None):
         table = self.query_one("#plugins-table", DataTable)
+        if self.wanted and any(item["name"] == self.wanted[0] and (item.get("install") or {}).get("placement")
+                               == self.wanted[1] for item in self.items):
+            # whichever read draws it first (a newer one can supersede the install's own), and only that install:
+            # a same-name plugin from elsewhere isn't the one just installed
+            keep, self.wanted = self.wanted[0], None
+            self.release(f"{keep} is listed now, and selected: Space turns it on or off here.")
+        if self.stale:  # this read has every row's current record
+            self.stale.clear()
+            self.release_note("stale")
         keep = keep or (self.selected() or {}).get("name")
         table.clear()
         for item in self.items:
@@ -343,7 +382,21 @@ class PluginsScreen(ModalScreen):
             text += "\n\n" + "\n".join("• " + clean(problem) for problem in problems)
         self.query_one("#plugin-details", Static).update(text)
 
+    def held_back(self, item):
+        """Whether keys must wait on this row: an install finished while it was selected and the new row wasn't
+        drawn, so a key pressed now would act on this one, not the plugin just installed."""
+        if item is None or item["name"] not in self.stale and item["name"] != self.held:
+            return False
+        name, stale = clean(item["name"]), item["name"] in self.stale
+        self.hold_error(f"{name} was updated but the list couldn't be read again, so keys don't act on it until it "
+                        "is (reopen the screen to try again)." if stale else
+                        f"The plugin just installed isn't listed yet, so keys don't act on {name} until you move "
+                        "to another row.", "stale" if stale else "held")
+        return True
+
     def on_data_table_row_highlighted(self, event):
+        if self.held and (self.selected() or {}).get("name") != self.held:
+            self.release()  # the person moved off it
         self.describe_selected()
 
     def on_data_table_row_selected(self, event):
@@ -354,11 +407,14 @@ class PluginsScreen(ModalScreen):
             self.error(f"Installing Python packages: wait for it to finish (it gives up after "
                        f"{plugin_packages.INSTALL_SECONDS // 60} minutes).")
             return
+        if self.waiting:
+            self.error(self.waiting)
+            return
         self.dismiss(self.note or self.changed)
 
     def action_toggle(self):
         item = self.selected()
-        if item is None or self.busy:
+        if item is None or self.busy or self.held_back(item):
             return
         self.busy = True  # also while the access chooser is open, so a held Space opens one
         self.error("")
@@ -411,6 +467,185 @@ class PluginsScreen(ModalScreen):
         self.error(f"Installed {name}'s Python packages.")
         self.load()
 
+    def action_install(self):
+        """Ask for a source, then show what it is, as mv2 plugins install does, before anything is placed."""
+        if self.busy:
+            return
+        self.busy = True
+
+        def entered(values):
+            if not values:
+                self.busy = False
+                return
+            self.fetch("install", values["source"])
+
+        self.app.push_screen(Form("Install a plugin", [("source", "Git URL or folder", "", False, True)],
+                                  description="A git URL, optionally with @REF (a tag, branch or commit) and #PATH "
+                                              "(a folder inside it), or a plugin's folder on this machine. Nothing "
+                                              "is installed until you've seen what it is and said yes. It goes in "
+                                              "your personal plugins."), entered)
+
+    def installed_record(self, item, action):
+        """The row's install record, or None after saying why it can't be updated or removed here."""
+        if item is None or self.busy or self.held_back(item):
+            return None
+        if not item.get("install"):
+            self.error(f"{item['name']} wasn't installed with mv2 plugins install, so it can't be {action} here.")
+            return None
+        return item["install"]
+
+    def action_update(self):
+        item = self.selected()
+        record = self.installed_record(item, "updated")
+        if record is not None:
+            self.busy = True
+            self.fetch("update", item["name"], record.get("placement"))
+
+    @work(group="plugins-installer", exit_on_error=False)
+    async def fetch(self, action, name, placement=None):
+        """Fetch off the event loop (git can take minutes), then show what would be placed: install always asks;
+        update asks only when what the plugin can do changes, as the CLI does, and otherwise goes ahead and shows
+        what changed. Esc waits while fetching, since a fetch the screen no longer waits for leaves its files."""
+        self.waiting = (f"Fetching {name}: wait for it to finish (it gives up after "
+                        f"{plugin_installer.FETCH_SECONDS // 60} minutes).")
+        self.error(f"Fetching {name}…")
+        try:
+            if action == "install":
+                shown = await asyncio.to_thread(self.service.install_preview, self.root, name)
+            else:
+                shown = await asyncio.to_thread(self.service.update_preview, self.root, name, placement)
+            text = await asyncio.to_thread(self.service.preview_text, action, shown)
+        except Exception as error:
+            self.waiting, self.busy = None, False
+            self.error(str(error))  # core's reason, which says nothing was installed or changed
+            return
+        self.waiting = None
+        self.error()  # the fetch is done; what it found is the question
+        text = "\n".join(clean(line) for line in str(text).split("\n"))  # the plugin's own words, as plain text
+        if action == "update" and shown["update"]["same"]:
+            self.discard(shown["key"], f"{name} is up to date.")
+            return
+        if action == "update" and not shown.get("ask"):  # only its code changes: no question, but say what changed
+            self.place(action, shown, text)
+            return
+
+        def chosen(choice):
+            if choice == "yes":
+                self.place(action, shown, None)
+            else:
+                self.discard(shown["key"], "Nothing installed." if action == "install" else "Nothing changed.")
+
+        verb = "Install" if action == "install" else "Update"
+        self.app.push_screen(ChoiceScreen(f"{verb} {shown['name']}?", [
+            ("yes", f"{verb} it"), ("no", "Cancel")], description=text), chosen)
+
+    @work(group="plugins-installer", exit_on_error=False)
+    async def discard(self, key, message):
+        try:
+            await asyncio.to_thread(self.service.install_cancel, self.root, key)
+        except Exception as error:
+            message += f" ({error})"
+        self.busy = False
+        self.error(message)
+
+    @work(group="plugins-installer", exit_on_error=False)
+    async def place(self, action, shown, text):
+        """Install or update exactly what was shown; `text` is shown afterwards when nobody was asked."""
+        name = shown["name"]
+        self.waiting = f"{'Installing' if action == 'install' else 'Updating'} {name}: wait for it to finish."
+        self.error(self.waiting.split(":")[0] + "…")
+        try:
+            result = await asyncio.to_thread(self.service.install_confirm, self.root, shown["key"])
+        except Exception as error:
+            self.waiting, self.busy = None, False
+            self.error(str(error))
+            self.load()
+            return
+        # Keys stay held until the list is read again, so the next one acts on what is there now: Space on the new
+        # row, not the one selected before; d with the updated install's record, not the one it replaced.
+        self.waiting, self.changed = None, True
+        title = f"{clean(name)} {clean(result.get('version') or '')}".rstrip()
+        if action == "install":
+            where = "your personal plugins" if result.get("placement") == "personal" else "this universe's plugins"
+            self.wanted = (name, result.get("placement"))
+            self.error(f"Installed {title} in {where}.")
+            failed = await self.reread(None)
+            if self.wanted is None:  # drawn and selected
+                self.error(f"Installed {title} in {where}. It's selected: Space turns it on or off here.")
+            else:  # not listed yet (or the read failed): keys wait on the row still selected until the person moves
+                self.held = (self.selected() or {}).get("name")
+                self.hold_error(f"Installed {title} in {where}, but it isn't listed here yet"
+                                + (f" ({clean(failed)})" if failed else "") + ". It's selected once it is.", "held")
+        else:
+            self.error(f"Updated {title}.")
+            failed = await self.reread(name)
+            if failed:  # its row still has the replaced install's record, which core would refuse
+                self.stale.add(name)
+                self.hold_error(f"Updated {title}, but the list couldn't be read again ({clean(failed)}): keys wait "
+                                f"on {clean(name)} until it is.", "stale")
+        self.busy = False
+        self.load()  # its problems and the host, as for any read
+        if text is not None:
+            self.app.push_screen(Details(f"Updated {name}", text))
+
+    async def reread(self, keep):
+        """Read the list now and draw it, keeping `keep` (or the row selected, or self.wanted once it is there)
+        selected, superseding any read under way (none starts while busy). Why it couldn't, or None."""
+        self.reads += 1
+        mine = self.reads
+        try:
+            items = await asyncio.to_thread(self.service.listing, self.root)
+            await asyncio.to_thread(self.read_packages, items)
+        except Exception as error:
+            return str(error)
+        if mine == self.reads:
+            self.items = items
+            self.fill(keep)
+        return None
+
+    def action_remove(self):
+        item = self.selected()
+        record = self.installed_record(item, "removed")
+        if record is None:
+            return
+        self.busy = True
+        name, placement = item["name"], record.get("placement")
+
+        def chosen(choice):
+            if choice == "remove":
+                self.uninstall(name, placement, record)
+            else:
+                self.busy = False
+
+        where = "your personal plugins" if placement == "personal" else "this universe's plugins"
+        about = (f"Removes {clean(name)} from {where}: what mv2 plugins install placed, its folder, its record and "
+                 "its pin. "
+                 "It's turned off nowhere, and its settings, grants, secrets and Python packages stay; the next "
+                 "screen lists them with how to clear each.")
+        self.app.push_screen(ChoiceScreen(f"Remove {name}?", [("remove", "Remove it"), ("cancel", "Cancel")],
+                                          description=about), chosen)
+
+    @work(group="plugins-installer", exit_on_error=False)
+    async def uninstall(self, name, placement, expected):
+        self.waiting = f"Removing {name}: wait for it to finish."
+        self.error(f"Removing {name}…")
+        try:
+            # exactly the install the person saw: another placement, or a record changed since, is refused
+            result = await asyncio.to_thread(self.service.remove_installed, self.root, name, placement, expected)
+        except Exception as error:
+            self.waiting, self.busy = None, False
+            self.error(str(error))
+            return
+        self.waiting, self.busy, self.changed = None, False, True
+        self.error(f"Removed {clean(name)}.")
+        self.load()
+        lines = [f"Removed {clean(str(result.get('removed') or name))}."]
+        left = result.get("left") or ()
+        if left:
+            lines += ["", "Left in place:"] + [f"  {clean(entry.get('what') or '')}: {clean(entry.get('clear') or '')}"
+                                               for entry in left]
+        self.app.push_screen(Details(f"Removed {name}", "\n".join(lines)))
+
     def action_host(self):
         """h: start the plugin host when it is off, stop it when it runs (it outlives the dashboard otherwise)."""
         if self.busy:
@@ -446,8 +681,8 @@ class PluginsScreen(ModalScreen):
 
     def action_settings(self):
         item = self.selected()
-        if item is None or self.busy or self.opening:  # opening: a held Enter must not stack identical screens
-            return
+        if item is None or self.busy or self.opening or self.held_back(item):  # opening: a held Enter must not
+            return  # stack identical screens
         if item["on"] and self.missing_packages(item):  # on but unable to load without them: install first
             self.busy = True
             self.ask_packages(item, lambda: self.installed(item["name"]))

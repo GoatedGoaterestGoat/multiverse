@@ -22,11 +22,13 @@ directories, and read its transcripts through the transcript protocol.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+import contextlib
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 import stat
 import shutil
 import subprocess
@@ -43,13 +45,15 @@ from ...store import read, retry_missing
 from ..types import CommandSpec, RunFailure, RunFile, RunOptions, RunPlan, RunReply, SlashCommand
 from . import models as model_table
 from . import pane
+from . import screen
 from . import run as one_shot
 from . import transcripts as rows_source
+from . import turn_projection
 from .transcripts import (  # every transcript reader reads through this one row source
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
     has_saved_conversation, Transcript, _transcripts, _transcripts_lock, counted, context_reading, context_usage,
-    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE)
+    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE, ROW_STORE, ROW_SAVE_MARGIN)
 
 MOD = Path(__file__).parent / 'mod'
 # The mod acts only on text between these tags and removes them. The opening
@@ -358,9 +362,19 @@ def _deadline(reader):
 VIEWS = 4  # views kept per transcript index, one per tip a reader asked for
 
 
-def _empty_view(state, reason):
-    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(), context_from=0,
-                          tip=None, gap=None, history_version=0)
+def _empty_view(state, reason, *, retry=False):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason, retry=retry), rows=(), history=(),
+                          context_from=0, tip=None, gap=None, history_version=0)
+
+
+def _room(reader):
+    """Whether a read's deadline leaves ROW_SAVE_MARGIN, enough to load or save the optional saved index."""
+    return reader is None or reader.deadline - time.monotonic() >= ROW_SAVE_MARGIN
+
+
+def _row_store(session):
+    """The agent's ROW_STORE folder, beside its session file; None when the session has none."""
+    return Path(session.session_file).parent / ROW_STORE if session.session_file else None
 
 
 def _fact(item, label, source):
@@ -830,9 +844,102 @@ def published_prompt(record, id, session):
         answerable = False
         reason = (f"mv2's answers aren't checked on Claude Code {record.get('claude') or 'of unknown version'}: answer it in "
                   'the terminal')
-    return {'id': id, 'kind': record['kind'], 'summary': summary, 'detail': detail, 'asked_at': _short(record.get('asked_at'), 64),
+    return {'id': id, 'kind': record['kind'], 'summary': summary, 'display': prompt_display(record, questions), 'detail': detail,
+            'asked_at': _short(record.get('asked_at'), 64),
             'tool': _short(record.get('tool'), 256), 'choices': choices, 'questions': questions, 'answerable': answerable,
             'reason': reason if not answerable else None, 'subagent': _short(record.get('subagent'), 256)}
+
+
+MEANINGS = ('allow', 'allow_session', 'allow_always', 'deny', 'deny_always', 'stop', 'dismiss', 'approve_plan',
+            'keep_planning', 'other')  # core's set (types.PromptChoiceMeaning)
+SAVING = ('allow_always', 'deny_always')
+
+
+def _short_label(text):
+    """An 'other' choice's short label as core takes it: 1 to 24 printable characters, not all blank. Core checks
+    every character with str.isprintable and refuses the whole listing otherwise (a bidi control, say)."""
+    return isinstance(text, str) and 0 < len(text) <= 24 and text.isprintable() and bool(text.strip())
+
+
+def choice_meaning(item):
+    """{'meaning', 'short'} the mod published for a choice, or both None: an older mod's choice, one outside core's
+    set, an 'other' without a plain short label of at most 24 characters, or a named meaning that disagrees with
+    saves_rule (core would refuse the whole listing; 'other' may save or not). Core fills the short label of every
+    meaning but 'other'."""
+    meaning, short = item.get('meaning'), item.get('short')
+    if (meaning not in MEANINGS or meaning != 'other' and (meaning in SAVING) != item['saves_rule']
+            or meaning == 'other' and not _short_label(short)):
+        return {'meaning': None, 'short': None}
+    return {'meaning': meaning, 'short': short if meaning == 'other' else None}
+
+
+TOOL_TITLES = {'Bash': ('Run a command', 'command'), 'Edit': ('Edit a file', 'file_path'),
+               'MultiEdit': ('Edit a file', 'file_path'), 'Write': ('Write a file', 'file_path'),
+               'NotebookEdit': ('Edit a notebook', 'notebook_path'), 'Read': ('Read a file', 'file_path'),
+               'Glob': ('Find files', 'pattern'), 'Grep': ('Search files', 'pattern'), 'WebFetch': ('Fetch a web page', None),
+               'WebSearch': ('Search the web', 'query'), 'Task': ('Start a subagent', 'description'),
+               'Agent': ('Start a subagent', 'description'), 'Skill': ('Use a skill', 'skill')}
+TOOL_LINES = {'Bash': ('description',), 'Grep': ('path', 'glob'), 'Glob': ('path',), 'WebFetch': ('prompt',),
+              'Task': ('subagent_type',), 'Agent': ('subagent_type',)}
+DISPLAY_LINES, DISPLAY_LINE = 8, 200
+
+
+def _url_host(value):
+    """A fetched URL's host and port, for display: never its credentials, path, query or fragment, any of which can
+    hold a secret (a signed link's token, a password before the host)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value.strip())
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = f'[{host}]' if ':' in host else host
+    return f'{host}:{port}' if port else host
+
+
+def _plain(text, limit):
+    """Printable text cut to `limit` characters with an ellipsis; None when nothing printable is left."""
+    if not isinstance(text, str):
+        return None
+    text = ''.join(ch if ch.isprintable() else ' ' for ch in text).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def prompt_display(record, questions):
+    """What the prompt asks, in core's display shape ({title, subject, lines}), from what the mod published: the tool
+    and its input for a permission, the questions, the plan, or the form's server and message."""
+    kind, detail = record['kind'], record.get('detail') if isinstance(record.get('detail'), dict) else {}
+    data = detail.get('input') if isinstance(detail.get('input'), dict) else {}
+    title, subject, lines = None, None, []
+    if kind == 'question':
+        title = 'Answer a question' if len(questions) == 1 else f'Answer {len(questions)} questions'
+        subject = questions[0]['header'] if len(questions) == 1 else None
+    elif kind == 'plan':
+        title = 'Approve the plan'
+        lines = [line for line in str(data.get('plan') or '').splitlines() if line.strip()]
+    elif kind == 'form':
+        title, subject = 'Fill in a form', detail.get('server')
+        lines = str(detail.get('message') or '').splitlines()
+    else:
+        tool = record.get('tool') if isinstance(record.get('tool'), str) else ''
+        mcp = re.fullmatch(r'mcp__(.+?)__(.+)', tool)
+        if mcp:
+            title, subject = 'Use an MCP tool', f'{mcp[1]}: {mcp[2]}'
+        elif tool in TOOL_TITLES:
+            title, key = TOOL_TITLES[tool]
+            value = data.get(key) if key else None
+            text = value if isinstance(value, str) else ''
+            subject = _url_host(data.get('url')) if tool == 'WebFetch' else text.splitlines()[0] if text.splitlines() else None
+            lines = [data[k] for k in TOOL_LINES.get(tool, ()) if isinstance(data.get(k), str)] + text.splitlines()[1:]
+        else:
+            title = f'Use {tool}' if tool else 'Allow a tool'
+    kept = [cut for line in lines if (cut := _plain(line, DISPLAY_LINE)) is not None][:DISPLAY_LINES]
+    return {'title': _plain(title, 80) or 'Answer a prompt', 'subject': _plain(subject, 500), 'lines': kept}
 
 
 def prompt_schema(record):
@@ -844,7 +951,7 @@ def prompt_schema(record):
                 or _short(item.get('label'), 512) is None or type(item.get('saves_rule')) is not bool
                 or type(item.get('takes_message')) is not bool or any(c['id'] == item['id'] for c in choices)):
             return None
-        choices.append({k: item[k] for k in ('id', 'label', 'saves_rule', 'takes_message')})
+        choices.append({**{k: item[k] for k in ('id', 'label', 'saves_rule', 'takes_message')}, **choice_meaning(item)})
     for item in record.get('questions') or []:
         if not isinstance(item, dict) or _short(item.get('id')) is None or _short(item.get('question')) is None:
             return None
@@ -891,9 +998,31 @@ def prompt_answer_problem(prompt, answer):
     return None
 
 
-def _person(decision, row):
-    """What the person chose, from the call's stored result: their choice, or their answers to its questions."""
+# How Claude words a person's refusal in the call's result (2.1.330). A No with text typed after Tab lets the agent
+# carry on with that text, as mv2's deny does with its message; a plain No or Esc stops the turn ("[Request
+# interrupted by user for tool use]" follows), which no choice mv2 offers does. A note may follow either, behind a
+# flag of Claude's.
+REJECTED = ("The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file "
+            "edit, the new_string was NOT written to the file). ")
+SAID = 'To tell you how to proceed, the user said:\n'
+STOP_WORDS = 'STOP what you are doing and wait for the user to tell you how to proceed.'
+REJECT_NOTE = ("\n\nNote: The user's next message may contain a correction or preference. Pay close attention \u2014 "
+               "if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for "
+               "future sessions.")
+STOPPED = {'choice': 'stop', 'label': 'No (the turn stopped)', 'meaning': 'stop'}  # Claude's own, none mv2 offers
+
+
+def _person(decision, row, text=None):
+    """What the person chose, from the call's stored result (`text`, its words): their choice, or their answers to
+    its questions. A refusal with text they typed is mv2's deny with that text as its message; a plain No or Esc is
+    Claude's own stop; a refusal in words mv2 doesn't know stays a deny, its effect unread."""
     if decision.get('decision') == 'reject' or row.get('toolDenialKind') == 'user-rejected':
+        if isinstance(text, str) and text.startswith(REJECTED + SAID):
+            said = text[len(REJECTED + SAID):]
+            said = said[:-len(REJECT_NOTE)] if said.endswith(REJECT_NOTE) else said
+            return {'choice': 'deny', 'message': said} if said.strip() else {'choice': 'deny'}
+        if isinstance(text, str) and text.startswith(REJECTED + STOP_WORDS):
+            return dict(STOPPED)
         return {'choice': 'deny'}
     result = row.get('toolUseResult')
     answers = result.get('answers') if isinstance(result, dict) else None
@@ -971,15 +1100,19 @@ def prompt_call_evidence(session, end):
         if isinstance(attachment, dict) and attachment.get('type') == 'hook_permission_decision' and attachment.get('toolUseID') == call:
             hooks.add(attachment.get('decision'))
         content = (row.get('message') or {}).get('content') if isinstance(row.get('message'), dict) else None
-        if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id') == call
-                                             for b in content):
+        block = next((b for b in content if isinstance(b, dict) and b.get('type') == 'tool_result'
+                      and b.get('tool_use_id') == call), None) if isinstance(content, list) else None
+        if block is not None:
             found['resolved'] = True
+            words = block.get('content')
+            if isinstance(words, list):  # text blocks, as a result may also be stored
+                words = ''.join(b.get('text', '') for b in words if isinstance(b, dict) and isinstance(b.get('text'), str))
             decision = row.get('permissionDecision') if isinstance(row.get('permissionDecision'), dict) else {}
             origin = decision.get('source')
             if origin == 'hook':
                 hooks.add({'accept': 'allow', 'reject': 'deny'}.get(decision.get('decision'), decision.get('decision')))
             elif isinstance(origin, str) and origin.startswith('user') or row.get('toolDenialKind') == 'user-rejected':
-                found['person'] = _person(decision, row)
+                found['person'] = _person(decision, row, words)
     # One decision, or the rows disagree: two decisions, or a hook's and the person's both for one call. A word other
     # than allow or deny never matches the decision mv2 sent (prompt_settled), so it is never credited either.
     if len(hooks) > 1 or hooks and found['person'] is not None:
@@ -990,6 +1123,22 @@ def prompt_call_evidence(session, end):
 
 CONTRADICTED = {'state': 'unknown', 'cause': 'contradicted', 'reason': (
     "Claude's stored rows for this call don't match the answer mv2 sent, so mv2 can't tell whose answer took.")}
+
+
+def closed_outcome(end):
+    """The state and cause a prompt's end record alone gives, with nothing Claude stored: what the mod's prompt.closed
+    event carries (hooks/prompts.ts closedOutcome) and what a metadata-only outcome returns. An answer mv2 sent is
+    'submitted' here; core puts its own record's state on it."""
+    how, cause = end.get('how'), end.get('cause')
+    if how == 'sent':
+        return {'state': 'submitted', 'cause': None}
+    if how == 'refused':
+        return {'state': 'refused', 'cause': 'invalid_answer'}
+    if cause == 'person':
+        return {'state': 'person', 'cause': 'person'}
+    if cause in ('interrupted', 'turn_ended', 'stopped'):
+        return {'state': 'gone', 'cause': cause}
+    return {'state': 'gone', 'cause': 'closed'}
 
 
 def prompt_settled(end, evidence, session=None):
@@ -1019,12 +1168,16 @@ def prompt_settled(end, evidence, session=None):
             "auto mode couldn't classify, for example), so this one may still be waiting in the terminal.")}
     cause = end.get('cause')
     if evidence and evidence['person'] is not None or cause == 'person':
-        person = evidence and evidence['person']
-        # Claude stores Esc on its dialog as the person's rejection, the same as No: both stop the turn.
-        refused = isinstance(person, dict) and person.get('choice') == 'deny'
-        return {'state': 'person', 'cause': 'person', 'person_answer': person, 'reason': (
-            'The person refused it in the terminal first (No, or Esc). Nothing was sent.' if refused else
-            'The person answered it in the terminal first. Nothing was sent.')}
+        person = evidence and evidence['person'] if isinstance(evidence and evidence['person'], dict) else {}
+        # Claude stores Esc on its dialog as the person's rejection, the same as a plain No: both stop the turn.
+        reason = ('The person refused it in the terminal first (No, or Esc), which stopped the turn.'
+                  if person.get('meaning') == 'stop' else
+                  'The person refused it in the terminal first and told the agent how to proceed.'
+                  if person.get('choice') == 'deny' and 'message' in person else
+                  'The person refused it in the terminal first.' if person.get('choice') == 'deny' else
+                  'The person answered it in the terminal first.')
+        return {'state': 'person', 'cause': 'person', 'person_answer': evidence and evidence['person'],
+                'reason': reason + ' Nothing was sent.'}
     if cause in ('interrupted', 'turn_ended', 'stopped'):
         return {'state': 'gone', 'cause': cause, 'reason': None}
     # Stopping the agent closed it, whatever the old mod saw last (its calls end as it stops): its launch is no
@@ -1127,6 +1280,28 @@ def unavailable(bridge):
     whether that is final (core may close its messages) or lasts until Claude is updated and the agent resumed."""
     return NativeResult('unavailable', bridge.reason,
                         {'launch_only': True, 'final': bridge.final} if bridge.launch_only else None)
+
+
+def _agent_folder(context, configured):
+    """How the agent's own folder becomes a working directory: (settings for mv2's --settings, extra arguments).
+
+    `--add-dir` would do it, but since Claude Code 2.1.330 it stops the launch at an "Adding a new directory" dialog
+    when the folder is under no folder the person trusts, because Claude then also loads the folder's own skills,
+    commands and agents. The folder is mv2's state, and an agent only needs to read and write files there, which
+    `permissions.additionalDirectories` grants without loading anything from it and without a dialog. Claude keeps
+    only the last --settings, though, so when the harness's own arguments (`configured`: its `args` and this mode's
+    `spawn_args` or `resume_args`, never a value the recipe fills in, such as the bootstrap) may carry one, mv2's
+    would be replaced: the folder then goes in `--add-dir`, as before, and their settings stay theirs.
+    """
+    folder = context.values.get('agent_dir')
+    if not folder:
+        return {}, ()
+    # Any argument shaped like the flag counts, even after a '--': Claude takes '--' as the value of a flag such as
+    # --append-system-prompt, so telling a real one apart would take its whole option table. Counting one too many
+    # only keeps --add-dir, as before this setting; counting one too few would lose the folder.
+    if any(isinstance(item, str) and (item == '--settings' or item.startswith('--settings=')) for item in configured):
+        return {}, ('--add-dir', folder)
+    return {'permissions': {'additionalDirectories': [folder]}}, ()
 
 
 class ClaudeAdapter(ConfiguredAdapter):
@@ -1312,6 +1487,19 @@ class ClaudeAdapter(ConfiguredAdapter):
                 return replace(command, argv=tuple(argv))
         return None
 
+    def _configured_args(self, context):
+        """The harness's own arguments for this launch, `args` then `spawn_args` or `resume_args`, as the launch
+        renders them: a placeholder such as {task} can become --settings=FILE."""
+        settings = getattr(self, 'settings', None) or {}
+        values = {**context.values, 'model': context.model or ''}
+        rendered = []
+        for item in (*settings.get('args', []), *settings.get(f'{context.mode}_args', [])):
+            try:
+                rendered.append(item.format_map(values) if isinstance(item, str) else item)
+            except (KeyError, IndexError, ValueError):
+                rendered.append(item)  # the launch itself refuses it; this only decides how the folder goes
+        return tuple(rendered)
+
     def _with_bridge(self, command, context):
         # auto uses the bridge unless this Claude cannot run it (and says why), required raises instead of
         # falling back, plain never loads the mod.
@@ -1327,7 +1515,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
-        settings = {'crossSessionInbound': 'accept'}
+        folder, added = _agent_folder(context, self._configured_args(context))
+        settings = {'crossSessionInbound': 'accept', **folder}
         environment = {**command.environment, FUNCTION_HOOKS: '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
@@ -1338,7 +1527,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', json.dumps(plan.claude_settings), *directories, *command.argv[1:]),
+                  '--settings', json.dumps(plan.claude_settings), *directories, *added, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
             environment=plan.environment, native_mode=native_mode, plugins=plan.record())
 
@@ -1351,7 +1540,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         if FUNCTION_HOOKS not in plan.environment:
             # A tmux server first started from a Claude session passes its hooks switch on; only the bridge sets it.
             unset = tuple(dict.fromkeys((*unset, FUNCTION_HOOKS)))
-        return replace(command, environment=plan.environment, unset_env=unset, plugins=plan.record())
+        # mv2's own settings, or --add-dir beside the harness's own: plugins' Claude settings reach only the bridge.
+        own, added = _agent_folder(context, self._configured_args(context))
+        argv = (command.argv[0], *(('--settings', json.dumps(own)) if own else ()), *added, *command.argv[1:])
+        return replace(command, argv=argv, environment=plan.environment, unset_env=unset, plugins=plan.record())
 
     def session_home(self, environment):
         """Claude's storage for a launch: CLAUDE_CONFIG_DIR, else HOME/.claude, of that launch's environment."""
@@ -1442,6 +1634,16 @@ class ClaudeAdapter(ConfiguredAdapter):
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
 
+    def launch_prompt(self, evidence):
+        """The prompt Claude's launch screen asks before its session starts (folder trust, an `--add-dir` folder), as
+        {'title', 'detail'}, or None. Its plugin can't report these: Claude runs a plugin's calls only once a session
+        has started."""
+        return screen.startup_prompt(evidence.get('text') if isinstance(evidence, dict) else None)
+
+    def launch_started(self, evidence):
+        """Whether the launch screen shows Claude's input box, the session started."""
+        return screen.ready(evidence.get('text') if isinstance(evidence, dict) else None)
+
     def attachment_ready(self, session):
         """A launch with no inbox is ready once its process runs; a bridged one when the mod has registered.
 
@@ -1510,12 +1712,21 @@ class ClaudeAdapter(ConfiguredAdapter):
         home, why = reading_storage(session)
         if home is None:
             return _empty_view('unavailable', why)
+        # One deadline, core's reader's, never re-armed here: it is checked right before every step that can block or
+        # grow with the transcript (finding its copies, opening and reading it, each row, each analysis phase, the
+        # view's facts) and once more before anything is kept. A cold index of a large transcript takes tens of
+        # seconds, which a 0.5 s turn-event read must never wait out.
+        check = (lambda: _deadline(reader)) if reader is not None else None
+        # A short read (a turn event's 0.5 s) neither loads nor saves the saved index: reading the transcript itself
+        # comes first, and the index is optional.
+        store = _row_store(session) if _room(reader) else None
         try:
-            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,))
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check, store)
         except rows_source.CantTell as error:
             return _empty_view('error', str(error))
         if index is None:
-            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet')
+            return _empty_view('unavailable', 'Claude has not written a transcript for this session yet', retry=True)
         _check(reader)  # indexing a large copy cold takes a moment
         # A read takes several pages, each asking again for an unchanged transcript: keep the view while the index
         # is as it was (a change to the file, or to which copy is newest, rebuilds it).
@@ -1523,9 +1734,21 @@ class ClaudeAdapter(ConfiguredAdapter):
                tuple(getattr(index, 'copies', None) or ()))
         if key in index.views:
             return index.views[key]
-        analysis = rows_source.analyse(index, tip)
+        analysis = rows_source.analyse(index, tip, check)
         entries = index.entries
-        facts = tuple(_fact(item, *labelled) for item, labelled in zip(entries, analysis.labels))
+        made = []
+        with contextlib.ExitStack() as opened:
+            transcript = None  # opened for a row taken from the saved index, whose text a view needs read from it
+            for item, labelled in zip(entries, analysis.labels):
+                if check is not None:
+                    check()  # every row, as the parse does
+                if item.head is None and labelled[0] in ('prompt', 'command'):
+                    transcript = transcript or opened.enter_context(rows_source.open_regular(index.path))
+                    item = rows_source.with_text(transcript, item)
+                made.append(_fact(item, *labelled))
+        facts = tuple(made)
+        if check is not None:
+            check()  # before the view's last fields
         source = TranscriptSource(state='supported', home=home, format='claude-jsonl',
                                   version=next((item.version for item in reversed(entries) if item.version), None),
                                   size=index.offset, updated_at=next((item.at for item in reversed(entries) if item.at), None))
@@ -1533,10 +1756,54 @@ class ClaudeAdapter(ConfiguredAdapter):
                               context_from=rows_source.context_from(entries, analysis.history), tip=analysis.history.tip,
                               gap=analysis.history.gap, summary=analysis.history.summary,
                               history_version=analysis.version)
+        if check is not None:
+            check()  # last, right before the view is kept
         while len(index.views) >= VIEWS:
             index.views.pop(next(iter(index.views)))
         index.views[key] = view
+        if tip is None and store is not None and _room(reader):
+            def budget():  # the optional save's own: past the read's deadline it stops, and the view stands
+                if reader is not None and time.monotonic() >= reader.deadline:
+                    raise rows_source.SaveStopped()
+            try:
+                rows_source.save_rows(index, analysis, store, budget)  # so a new process reads from here (ROW_STORE)
+            except rows_source.SaveStopped:
+                pass
         return view
+
+    def transcript_index(self, session, *, reader=None):
+        """Bring the agent's saved row index (ROW_STORE) up to the transcript, for a process with no report-path limit
+        (the plugin host's worker): a full read can finish too close to its deadline to write one, and the transcript
+        would then stay cold for good. Reads up to date, analyses from the newest row and writes the index whenever
+        the copy there is behind, under the read's deadline. True when the saved index reaches the transcript's end,
+        False when it couldn't be written, None when there is nothing to index."""
+        _check(reader)
+        store = _row_store(session)
+        home, _ = reading_storage(session)
+        if not session.native_id or store is None or home is None:
+            return None
+        check = (lambda: _deadline(reader)) if reader is not None else None
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check, store)
+        except rows_source.CantTell:
+            return None
+        if index is None:
+            return None
+        analysis = rows_source.analyse(index, None, check)
+        return rows_source.save_rows(index, analysis, store, check, interval=False)
+
+    def turn_cursor_projection(self, session, transitions, *, reader=None):
+        """Prove turn cursors from the saved metadata, or use the general view."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        if home is None or not session.native_id:
+            return None
+        try:
+            return turn_projection.project(session, home, _row_store(session), transitions, lambda: _deadline(reader))
+        except (OSError, Unreadable, ValueError, TypeError, KeyError, AttributeError, IndexError, RecursionError):
+            _check(reader)
+            return None
 
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for
@@ -1546,12 +1813,16 @@ class ClaudeAdapter(ConfiguredAdapter):
         _check(reader)
         home, _ = reading_storage(session)
         try:
-            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,)) if home else None
+            check = (lambda: _deadline(reader)) if reader is not None else None
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check, _row_store(session) if _room(reader) else None) if home else None
         except rows_source.CantTell as error:  # the copies stopped agreeing since the view
             raise TranscriptRowsChanged() from error
         if index is None:
             raise TranscriptRowsChanged()
         out = []
+        if check is not None:
+            check()  # right before the body file opens
         with rows_source.open_regular(index.path) as handle:
             for number in indexes:
                 _deadline(reader)
@@ -1976,6 +2247,16 @@ class ClaudeAdapter(ConfiguredAdapter):
         folder = Path(session.session_file).parent / PROMPTS_FOLDER
         # An end record keeps the prompt's choices and questions, as the published one does: read it as large.
         end = _json_record(folder / f'{answer.id}.end.json', PROMPT_BYTES)
+        if getattr(answer, 'metadata_only', False):
+            # Core's check before an agent leaves waiting: closed only on this launch's and conversation's own end
+            # record for that prompt, never from Claude's transcript; anything less proves nothing.
+            if (isinstance(end, dict) and type(end.get('schema')) is int and end['schema'] == 1 and end.get('id') == answer.id
+                    and end.get('how') in ('sent', 'refused', 'closed') and isinstance(end.get('launch'), str)
+                    and end['launch'] == session.launch_id and isinstance(end.get('session'), str)
+                    and end['session'] == session.native_id):
+                return NativeResult('ok', value={'closed': True, **closed_outcome(end)})
+            return NativeResult('ok', value={'state': 'unknown', 'reason': (
+                "No end record of this launch and conversation shows that prompt closed")})
         if end is None:
             still = _json_record(folder / f'{answer.id}.json', PROMPT_BYTES)
             # Submitted only with core's answer for it, waiting or already taken by the mod: an open prompt mv2 sent

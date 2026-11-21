@@ -15,14 +15,16 @@ def configure(parser):
     parser.add_argument("--json", action="store_true", help="Print the full launch record as JSON")
 
 
-def run(root=None, *, agent, model=None, effort=None, wait=False, wait_timeout=60, json=False, start_fresh=False):  # `json`: presentation only
+def run(root=None, *, agent, model=None, effort=None, wait=False, wait_timeout=60, json=False, start_fresh=False,
+        screen=False):  # `json`: presentation only
     return lifecycle.start(universe.resolve(root), resume=agent, model=model, wait=wait, wait_timeout=wait_timeout,
-                           start_fresh=start_fresh, effort=effort)
+                           start_fresh=start_fresh, effort=effort, screen=screen)
 
 
 def cli_run(root=None, *, agent, model=None, effort=None, wait=False, wait_timeout=60, json=False, start_fresh=False):
     try:
-        record = run(root, agent=agent, model=model, effort=effort, wait=wait, wait_timeout=wait_timeout, start_fresh=start_fresh)
+        record = run(root, agent=agent, model=model, effort=effort, wait=wait, wait_timeout=wait_timeout, start_fresh=start_fresh,
+                     screen=True)
     except agents.AgentNotFound as error:
         if not json:
             raise
