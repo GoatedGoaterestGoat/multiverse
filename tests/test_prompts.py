@@ -557,6 +557,54 @@ class PromptTest(BaseTest):
             self.assertEqual((found.by, found.answer, found.person_answer == found.answer), ({'kind': 'person'}, {
                 'choice': {'id': 'deny', 'label': 'Deny', 'short': None}, 'message': 'not that',
                 'notes': {'q': 'why'}}, True))
+        with self.subTest("a terminal answer no offered choice describes"):
+            # Claude's plain No stops the turn, where the offered deny lets the agent carry on: the harness names the
+            # person's choice itself, and core's short label for its meaning goes with it, read first and read back.
+            own = {'choice': 'stop', 'label': 'No (the turn stopped)', 'meaning': 'stop'}
+            expected = {'choice': {'id': 'stop', 'label': 'No (the turn stopped)', 'short': 'Stop'}}
+            for given, shown, answered_first in ((own, expected, False), (own, expected, True),
+                                                 ({**own, 'meaning': 'other'}, None, False)):  # 'other' has no short
+                self.fresh()
+                if answered_first:
+                    self.answer(choice='allow')  # a record to keep the person's answer in
+                self.catalog = []
+                self.receipts[self.prompt_id] = NativeResult('ok', value={
+                    'state': 'person', 'choices': [asdict(c) for c in self.prompt.choices],
+                    'questions': [asdict(q) for q in self.prompt.questions], 'person_answer': given})
+                found = prompts.result(self.root, self.agent, self.prompt_id)
+                self.assertEqual((found.state, found.answer), ('person', shown))
+            self.fresh()
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            for stored, shown in ((expected['choice'], expected), ({**expected['choice'], 'short': 'Whatever'}, None)):
+                record = store.read(path)
+                record['result'] = {**record.get('result', {}), 'state': 'person', 'person_answer': {'choice': stored}}
+                store.write(path, record)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer, shown)  # the record alone
+            # Only a person's answer, never a message, and only against a valid list of offered choices.
+            self.fresh()
+            self.answer(choice='allow')
+            record = store.read(path := self.directory / 'prompts' / (self.prompt_id + '.json'))
+            store.write(path, {**record, 'answer': {'choice': expected['choice']}})
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'answered'})
+            self.assertIsNone(prompts.result(self.root, self.agent, self.prompt_id).answer)  # mv2's kept answer
+            self.fresh()
+            self.answer(choice='allow')
+            record = store.read(path := self.directory / 'prompts' / (self.prompt_id + '.json'))
+            store.write(path, {**record, 'message_choices': ['stop']})
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'person_answer': {**own, 'message': 'x'}})
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer, expected)
+            self.assertNotIn('message', store.read(path)['result']['person_answer'])  # nor kept in the record
+            self.fresh()
+            self.catalog = []
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'choices': None, 'questions': [],
+                                                                       'person_answer': own})
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer,
+                             {'choice': {'id': 'stop', 'label': None, 'short': None}})  # bare, as before
+            # A record so full that the person's answer keeps only its minimal form: the choice and its short label.
+            fitted = prompts._fitted({'choice': expected['choice']}, 1, person=True)
+            self.assertEqual(prompts._rebuilt(fitted, {'choices': ['allow', 'deny']}, person=True),
+                             {'choice': {'id': 'stop', 'label': None, 'short': 'Stop'}, 'truncated': True})
         with self.subTest('a record from before answers were kept'):
             self.fresh(choices=(), questions=(PromptQuestion(id='q', question='Which?', options=(('A', ''), ('B', '')),
                                                              free_text=False),))

@@ -361,13 +361,15 @@ def _safe_person(value, record):
         return len(json.dumps(safe, ensure_ascii=False).encode())
     if size() > room:
         return {'truncated': True}
-    choice = value.get('choice')
-    if (choice in record.get('choices', ()) or 'choices' not in record and isinstance(choice, str)
-            and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
+    choice, meaning = value.get('choice'), value.get('meaning')
+    own = _terminal_choice(choice, value.get('label'),
+                           PROMPT_CHOICE_LABELS.get(meaning) if isinstance(meaning, str) else None, _offered(record))
+    if own is not None or (choice in record.get('choices', ()) or 'choices' not in record and isinstance(choice, str)
+                           and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
         labels = record.get('choice_labels', {}).get(choice, {})
-        safe['choice'] = {'id': choice, 'label': labels.get('label'), 'short': labels.get('short')}
+        safe['choice'] = own or {'id': choice, 'label': labels.get('label'), 'short': labels.get('short')}
         message = value.get('message')
-        if choice in record.get('message_choices', ()) and _text(message, empty=False):
+        if own is None and choice in record.get('message_choices', ()) and _text(message, empty=False):
             safe['message'] = message
             while size() > room and safe['message']:
                 safe['message'] = safe['message'][:len(safe['message']) // 2]
@@ -449,8 +451,10 @@ def _kept_answer(prompt, request, schema, budget):
     return _fitted(answer, budget)
 
 
-def _fitted(answer, budget):
-    """`answer` cut to `budget` encoded bytes: its longest text halved until it fits, marked truncated."""
+def _fitted(answer, budget, person=False):
+    """`answer` cut to `budget` encoded bytes: its longest text halved until it fits, marked truncated. A person's
+    answer cut to its minimal form keeps its choice's short label too, when it is core's own text, so a choice of the
+    harness's own (which the prompt didn't offer, so no record names it) still reads back."""
     def size():
         return len(json.dumps(answer, ensure_ascii=False).encode())
 
@@ -471,7 +475,9 @@ def _fitted(answer, budget):
             kept = {category: {key: value for key, value in (answer.get(category) or {}).items()
                                if value == {'secret': True}} for category in ('answers', 'notes')}
             choice = answer.get('choice')
-            return {**({'choice': {'id': choice['id'], 'label': None, 'short': None}}
+            short = choice.get('short') if person and isinstance(choice, dict) else None
+            short = short if short in PROMPT_CHOICE_LABELS.values() else None
+            return {**({'choice': {'id': choice['id'], 'label': None, 'short': short}}
                        if isinstance(choice, dict) and isinstance(choice.get('id'), str) else {}),
                     **{category: values for category, values in kept.items() if values}, 'truncated': True}
         container, key = place
@@ -485,7 +491,7 @@ def _record_size(record):
     return len(json.dumps(record, indent=2, ensure_ascii=False).encode()) + 1
 
 
-def _fit_in(record, place, value, margin=0):
+def _fit_in(record, place, value, margin=0, person=False):
     """`value` cut (as _fitted cuts) until `record` with `value` set at `place` (a key path) stays `margin` bytes
     under LIMIT on disk; returns the value that fits."""
     target = record
@@ -493,7 +499,7 @@ def _fit_in(record, place, value, margin=0):
         target = target[key]
     budget = len(json.dumps(value, ensure_ascii=False).encode())
     while True:
-        fitted = _fitted(json.loads(json.dumps(value)), budget)
+        fitted = _fitted(json.loads(json.dumps(value)), budget, person)
         target[place[-1]] = fitted
         over = _record_size(record) - (LIMIT - margin)
         if over <= 0 or budget <= 0:
@@ -706,7 +712,7 @@ def _caller_of(record):
     return None
 
 
-def _rebuilt(answer, record):
+def _rebuilt(answer, record, person=False):
     """A kept answer as its record's schema allows it: the choice it offered (its label from the schema), a message
     only with a choice that takes one, offered labels, typed text where the question takes it, notes where it takes
     one; a withheld question's entry {"secret": true} whatever was stored. Whatever else a damaged record holds is
@@ -726,11 +732,15 @@ def _rebuilt(answer, record):
     free, noted = names('public_free_text'), names('public_notes')
     labels = record.get('choice_labels') if isinstance(record.get('choice_labels'), dict) else {}
     rebuilt = {}
-    choice = answer.get('choice')
-    choice = choice.get('id') if isinstance(choice, dict) else None
+    stored = answer.get('choice') if isinstance(answer.get('choice'), dict) else {}
+    choice = stored.get('id')
     allowed = record.get('choices')
-    if isinstance(choice, str) and (choice in allowed if texts(allowed) else 'choices' not in record
-                                    and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
+    own = (_terminal_choice(choice, stored.get('label'), stored.get('short'), _offered(record),
+                            cut=answer.get('truncated') is True) if person else None)
+    if own is not None:
+        rebuilt['choice'] = own
+    elif isinstance(choice, str) and (choice in allowed if texts(allowed) else 'choices' not in record
+                                      and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
         named = labels.get(choice) if isinstance(labels.get(choice), dict) else {}
         rebuilt['choice'] = {'id': choice, 'label': named.get('label') if isinstance(named.get('label'), str) else None,
                              'short': named.get('short') if isinstance(named.get('short'), str) else None}
@@ -754,6 +764,26 @@ def _rebuilt(answer, record):
     return rebuilt or None
 
 
+def _offered(record):
+    """The ids of the choices the prompt offered, as its record holds them, or None when it holds no valid list."""
+    listed = record.get('choices')
+    return listed if isinstance(listed, list) and all(isinstance(item, str) for item in listed) else None
+
+
+def _terminal_choice(choice, label, short, listed, cut=False):
+    """A person's terminal answer whose choice no choice the prompt offered describes (Claude's plain No stops the
+    turn, where mv2's deny lets it carry on): the harness's own id and long label, with core's short label for its
+    canonical meaning ('other' has none), never with a message. Only for state person, and only against the valid
+    list of offered ids (`listed`, None when there is none): without one, an id is kept bare as before. An answer cut
+    to its minimal form (`cut`) has lost the long label, and keeps the choice without it."""
+    if (listed is not None and isinstance(choice, str) and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)
+            and choice not in listed and short in PROMPT_CHOICE_LABELS.values()
+            and (label is None and cut or isinstance(label, str) and label.strip() and len(label) <= 512
+                 and label.isprintable())):
+        return {'id': choice, 'label': label, 'short': short}
+    return None
+
+
 def _common(answer):
     """A terminal answer kept before 1.21 in today's shape: a bare choice id becomes {id, label, short}."""
     if isinstance(answer, dict) and isinstance(answer.get('choice'), str):
@@ -768,7 +798,7 @@ def _attributed(outcome, record, directory=None, scope=None):
     if outcome.state == 'person':
         answer = _common(outcome.person_answer)
         if isinstance(record, dict):  # as stored: read again through its schema, never as it stands
-            answer = _rebuilt(answer, record)
+            answer = _rebuilt(answer, record, person=True)
         return replace(outcome, by={'kind': 'person'}, answer=answer, person_answer=answer)
     # answered and sent_first are the harness's word that it took; submitted counts only once mv2 recorded that it
     # handed the answer over (a record read mid-attempt, or left by an interrupted one, is a candidate, not an answer).
@@ -865,7 +895,8 @@ def _save(directory, record, outcome):
     if isinstance(outcome.person_answer, dict):
         # The record's LIMIT holds mv2's kept answer and the person's together: the person's gets the room left.
         record['result'] = {key: value for key, value in asdict(outcome).items() if key not in ('by', 'answer')}
-        outcome = replace(outcome, person_answer=_fit_in(record, ('result', 'person_answer'), outcome.person_answer))
+        outcome = replace(outcome, person_answer=_fit_in(record, ('result', 'person_answer'), outcome.person_answer,
+                                                          person=True))
     stored = {key: value for key, value in asdict(outcome).items() if key not in ('by', 'answer')}
     record['result'] = stored
     while _record_size(record) > LIMIT and stored.get('reason'):  # the whole record stays within LIMIT

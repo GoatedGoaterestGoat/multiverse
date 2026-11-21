@@ -998,9 +998,31 @@ def prompt_answer_problem(prompt, answer):
     return None
 
 
-def _person(decision, row):
-    """What the person chose, from the call's stored result: their choice, or their answers to its questions."""
+# How Claude words a person's refusal in the call's result (2.1.330). A No with text typed after Tab lets the agent
+# carry on with that text, as mv2's deny does with its message; a plain No or Esc stops the turn ("[Request
+# interrupted by user for tool use]" follows), which no choice mv2 offers does. A note may follow either, behind a
+# flag of Claude's.
+REJECTED = ("The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file "
+            "edit, the new_string was NOT written to the file). ")
+SAID = 'To tell you how to proceed, the user said:\n'
+STOP_WORDS = 'STOP what you are doing and wait for the user to tell you how to proceed.'
+REJECT_NOTE = ("\n\nNote: The user's next message may contain a correction or preference. Pay close attention \u2014 "
+               "if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for "
+               "future sessions.")
+STOPPED = {'choice': 'stop', 'label': 'No (the turn stopped)', 'meaning': 'stop'}  # Claude's own, none mv2 offers
+
+
+def _person(decision, row, text=None):
+    """What the person chose, from the call's stored result (`text`, its words): their choice, or their answers to
+    its questions. A refusal with text they typed is mv2's deny with that text as its message; a plain No or Esc is
+    Claude's own stop; a refusal in words mv2 doesn't know stays a deny, its effect unread."""
     if decision.get('decision') == 'reject' or row.get('toolDenialKind') == 'user-rejected':
+        if isinstance(text, str) and text.startswith(REJECTED + SAID):
+            said = text[len(REJECTED + SAID):]
+            said = said[:-len(REJECT_NOTE)] if said.endswith(REJECT_NOTE) else said
+            return {'choice': 'deny', 'message': said} if said.strip() else {'choice': 'deny'}
+        if isinstance(text, str) and text.startswith(REJECTED + STOP_WORDS):
+            return dict(STOPPED)
         return {'choice': 'deny'}
     result = row.get('toolUseResult')
     answers = result.get('answers') if isinstance(result, dict) else None
@@ -1078,15 +1100,19 @@ def prompt_call_evidence(session, end):
         if isinstance(attachment, dict) and attachment.get('type') == 'hook_permission_decision' and attachment.get('toolUseID') == call:
             hooks.add(attachment.get('decision'))
         content = (row.get('message') or {}).get('content') if isinstance(row.get('message'), dict) else None
-        if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id') == call
-                                             for b in content):
+        block = next((b for b in content if isinstance(b, dict) and b.get('type') == 'tool_result'
+                      and b.get('tool_use_id') == call), None) if isinstance(content, list) else None
+        if block is not None:
             found['resolved'] = True
+            words = block.get('content')
+            if isinstance(words, list):  # text blocks, as a result may also be stored
+                words = ''.join(b.get('text', '') for b in words if isinstance(b, dict) and isinstance(b.get('text'), str))
             decision = row.get('permissionDecision') if isinstance(row.get('permissionDecision'), dict) else {}
             origin = decision.get('source')
             if origin == 'hook':
                 hooks.add({'accept': 'allow', 'reject': 'deny'}.get(decision.get('decision'), decision.get('decision')))
             elif isinstance(origin, str) and origin.startswith('user') or row.get('toolDenialKind') == 'user-rejected':
-                found['person'] = _person(decision, row)
+                found['person'] = _person(decision, row, words)
     # One decision, or the rows disagree: two decisions, or a hook's and the person's both for one call. A word other
     # than allow or deny never matches the decision mv2 sent (prompt_settled), so it is never credited either.
     if len(hooks) > 1 or hooks and found['person'] is not None:
@@ -1142,12 +1168,16 @@ def prompt_settled(end, evidence, session=None):
             "auto mode couldn't classify, for example), so this one may still be waiting in the terminal.")}
     cause = end.get('cause')
     if evidence and evidence['person'] is not None or cause == 'person':
-        person = evidence and evidence['person']
-        # Claude stores Esc on its dialog as the person's rejection, the same as No: both stop the turn.
-        refused = isinstance(person, dict) and person.get('choice') == 'deny'
-        return {'state': 'person', 'cause': 'person', 'person_answer': person, 'reason': (
-            'The person refused it in the terminal first (No, or Esc). Nothing was sent.' if refused else
-            'The person answered it in the terminal first. Nothing was sent.')}
+        person = evidence and evidence['person'] if isinstance(evidence and evidence['person'], dict) else {}
+        # Claude stores Esc on its dialog as the person's rejection, the same as a plain No: both stop the turn.
+        reason = ('The person refused it in the terminal first (No, or Esc), which stopped the turn.'
+                  if person.get('meaning') == 'stop' else
+                  'The person refused it in the terminal first and told the agent how to proceed.'
+                  if person.get('choice') == 'deny' and 'message' in person else
+                  'The person refused it in the terminal first.' if person.get('choice') == 'deny' else
+                  'The person answered it in the terminal first.')
+        return {'state': 'person', 'cause': 'person', 'person_answer': evidence and evidence['person'],
+                'reason': reason + ' Nothing was sent.'}
     if cause in ('interrupted', 'turn_ended', 'stopped'):
         return {'state': 'gone', 'cause': cause, 'reason': None}
     # Stopping the agent closed it, whatever the old mod saw last (its calls end as it stops): its launch is no
