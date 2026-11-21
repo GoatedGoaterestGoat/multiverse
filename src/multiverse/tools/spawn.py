@@ -20,17 +20,18 @@ def configure(parser):
 
 
 def run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, effort=None, wait=False, wait_timeout=60,
-        json=False):  # `json` is the command line's presentation flag: the record is always returned here
+        json=False, screen=False):  # `json` is the command line's presentation flag: the record is always returned here
     root = universe.resolve(root)
     prompt = Path(task_file).read_text() if task_file is not None else task
-    return lifecycle.start(root, name, prompt, harness, model, effort=effort, wait=wait, wait_timeout=wait_timeout)
+    return lifecycle.start(root, name, prompt, harness, model, effort=effort, wait=wait, wait_timeout=wait_timeout,
+                           screen=screen)
 
 
 def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", model=None, effort=None, wait=False,
             wait_timeout=60, json=False):
     try:
         record = run(root, name=name, task=task, task_file=task_file, harness=harness, model=model,
-                     effort=effort, wait=wait, wait_timeout=wait_timeout)
+                     effort=effort, wait=wait, wait_timeout=wait_timeout, screen=True)
     except (RuntimeError, ValueError) as error:
         if json:
             from ._launch import failure_record

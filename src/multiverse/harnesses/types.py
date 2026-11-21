@@ -15,7 +15,7 @@ EFFECTS: Mapping[str, Effect] = {
         'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
         'attachment_ready', 'attachment_recovery', 'retained_usage', 'navigation_target',
         'connection_problem', 'status_watch', 'supports_launch_refusal',
-        'launch_started', 'launch_refusal', 'startup_retryable',
+        'launch_started', 'launch_refusal', 'launch_prompt', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable', 'transcript_index',

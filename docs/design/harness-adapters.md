@@ -1252,6 +1252,34 @@ fields still require valid records. Reporting itself does not need runtime data
 for its optional event metadata. Launch, terminal and delivery operations retain
 their full record validation.
 
+### Startup prompts
+
+An adapter may provide `launch_prompt(evidence) -> dict | None` beside the startup hooks: given the same owned-pane
+snapshot, it names a prompt the person must answer before the native session starts, as `{"title", "detail"}`
+(printable text, at most 120 and 500 characters; core refuses anything else). Such a prompt never fails the launch.
+Core records it in the runtime as `startup_prompt`, with status `waiting` while the harness has reported no status
+of its own in this launch (a harness report is never overwritten), and keeps watching past the startup window while
+it shows, at a slower pace; a wait that reaches the window meanwhile leaves the observation open. `launch_started`
+returning true clears it and settles startup, and the harness's own status takes over. A harness plugin's first
+report (Claude's bridge) also retires it, since a plugin reports only from a started session, and the screen can't
+record one after that. While one is recorded the launch isn't ready, so startup delivery and the ready event wait too. `--wait` ends at
+once at a startup prompt, as ok and not ready; `mv2 spawn` and `mv2 resume` without `--wait` wait up to 10 seconds
+for the screen to show the harness started or a startup prompt, and only for an adapter with the hook. Each pass of
+that short wait checks the pane, so a pane gone or dead says the launch didn't start, and it names a prompt only from
+a record read after a check found the pane alive. The check is read-only, one tmux query of a server it can prove and
+never the recovery lock; it gets only the time left, and a server that doesn't answer holds one query at a time. A
+query still running for another launch on the same server is waited on, never used, since it may predate this
+launch's pane. Raw screen text never leaves the observer.
+
+Claude implements both hooks from its screen (`harnesses/claude/screen.py`), since its plugin can't report these:
+Claude runs a plugin's calls only once a session has started. A startup prompt is a selection list (one row marked
+`❯`) with an "Enter to confirm" footer and no input box, named by the first line under the rule that opens the
+block ending in that footer (output above it, another section of the screen, never names it): the folder-trust
+question ("Accessing workspace", with the folder), its variant for a folder whose settings declare hooks, and the
+`--add-dir` question ("Adding a new directory"). A dialog inside a session (a tool's approval, a question, `/model`)
+has another footer, and the plugin reports those itself. Claude has started once its input box shows: a rule, a row
+starting `❯` (or `!` in shell mode), and another rule within a draft's rows.
+
 ### Successful plain startup observation
 
 An adapter may provide `launch_started(evidence) -> bool` beside its refusal

@@ -20,7 +20,15 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 
 A harness can [narrow its model and effort choices](../use/harnesses.md#narrow-the-available-choices). Those choices apply to both spawn and resume. Without a subset or a recorded or requested effort, spawn, resume and wake pass the model spelling unchanged to the harness, including choices saved by older mv2 versions. The harness decides whether it can use that model. A subset or effort choice still requires model validation.
 
-Without `--wait`, `spawn` returns as soon as the launch is registered. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
+Without `--wait`, `spawn` returns as soon as the launch is registered. For a harness that can read its own launch screen (Claude Code), it first waits up to 10 seconds, until the screen shows the harness started or a prompt you must answer before the session starts, such as Claude's folder-trust question. A normal start takes a few seconds. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
+
+A launch that stops at such a prompt is neither ready nor failed. `spawn`, `resume` and `--wait` say it's waiting there and name the prompt, `mv2 list` and `mv2 inspect` show it under the agent, and its status is `waiting`:
+
+```text
+Started tester (Claude, bridge). It's waiting at Claude's prompt "Accessing workspace" (/home/me/project): answer it in its pane with mv2 attach tester.
+```
+
+mv2 never answers these prompts for you: each asks whether to trust a folder or a mode. Once you answer, the session starts and the agent's status comes from its plugin again.
 
 To start an agent in a subverse, select the subverse with `-u`:
 

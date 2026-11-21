@@ -125,6 +125,8 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
         changes["usage"] = usage(usage_json)
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
+        if changes["native_bridge"]:
+            changes["startup_prompt"] = None  # a plugin reports only from a started session
     if turn_batch is not None:
         turn_batch = (root, *turn_batch)
     if prompt_batch is not None or turn_batch is not None:

@@ -1265,7 +1265,9 @@ class LaunchIsolationTest(unittest.TestCase):
 
         with self.subTest(action='runtime-update --bridge'):
             bridged = self.agent('bridged', harness='claude')
-            write(bridged / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
+            # A prompt read from the screen before the plugin loaded: its first report says the session started.
+            write(bridged / 'runtime.json', {'launch_id': 'current', 'state': 'running',
+                                             'startup_prompt': {'title': 'Accessing workspace', 'detail': None}})
             with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
                 runtime_update.run(self.root, agent=bridged.name, status='idle', bridge='claude-mod-v1')
                 runtime_update.run(self.root, agent=bridged.name, status='waiting')
@@ -1274,6 +1276,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 runtime_update.run(self.root, agent=bridged.name, status='working', bridge='other-bridge-v1')
             facts = read(bridged / 'runtime.json')
             self.assertEqual((facts['native_bridge'], facts['status']), ('claude-mod-v1', 'waiting'))
+            self.assertIsNone(facts.get('startup_prompt'))
 
         with self.subTest(action='bind_session'):
             bound = self.agent('bound')
