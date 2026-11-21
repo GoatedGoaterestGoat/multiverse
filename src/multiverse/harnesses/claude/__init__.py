@@ -22,6 +22,7 @@ directories, and read its transcripts through the transcript protocol.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+import contextlib
 import hashlib
 import json
 import os
@@ -50,7 +51,7 @@ from .transcripts import (  # every transcript reader reads through this one row
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
     has_saved_conversation, Transcript, _transcripts, _transcripts_lock, counted, context_reading, context_usage,
-    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE)
+    measured_usage, DAMAGED, raw_rows, USAGE_KEYS, USAGE_STORE, ROW_STORE, ROW_SAVE_MARGIN)
 
 MOD = Path(__file__).parent / 'mod'
 # The mod acts only on text between these tags and removes them. The opening
@@ -362,6 +363,16 @@ VIEWS = 4  # views kept per transcript index, one per tip a reader asked for
 def _empty_view(state, reason, *, retry=False):
     return TranscriptView(source=TranscriptSource(state=state, reason=reason, retry=retry), rows=(), history=(),
                           context_from=0, tip=None, gap=None, history_version=0)
+
+
+def _room(reader):
+    """Whether a read's deadline leaves ROW_SAVE_MARGIN, enough to load or save the optional saved index."""
+    return reader is None or reader.deadline - time.monotonic() >= ROW_SAVE_MARGIN
+
+
+def _row_store(session):
+    """The agent's ROW_STORE folder, beside its session file; None when the session has none."""
+    return Path(session.session_file).parent / ROW_STORE if session.session_file else None
 
 
 def _fact(item, label, source):
@@ -1625,9 +1636,12 @@ class ClaudeAdapter(ConfiguredAdapter):
         # view's facts) and once more before anything is kept. A cold index of a large transcript takes tens of
         # seconds, which a 0.5 s turn-event read must never wait out.
         check = (lambda: _deadline(reader)) if reader is not None else None
+        # A short read (a turn event's 0.5 s) neither loads nor saves the saved index: reading the transcript itself
+        # comes first, and the index is optional.
+        store = _row_store(session) if _room(reader) else None
         try:
             index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
-                                            check)
+                                            check, store)
         except rows_source.CantTell as error:
             return _empty_view('error', str(error))
         if index is None:
@@ -1642,10 +1656,15 @@ class ClaudeAdapter(ConfiguredAdapter):
         analysis = rows_source.analyse(index, tip, check)
         entries = index.entries
         made = []
-        for item, labelled in zip(entries, analysis.labels):
-            if check is not None:
-                check()  # every row, as the parse does
-            made.append(_fact(item, *labelled))
+        with contextlib.ExitStack() as opened:
+            transcript = None  # opened for a row taken from the saved index, whose text a view needs read from it
+            for item, labelled in zip(entries, analysis.labels):
+                if check is not None:
+                    check()  # every row, as the parse does
+                if item.head is None and labelled[0] in ('prompt', 'command'):
+                    transcript = transcript or opened.enter_context(rows_source.open_regular(index.path))
+                    item = rows_source.with_text(transcript, item)
+                made.append(_fact(item, *labelled))
         facts = tuple(made)
         if check is not None:
             check()  # before the view's last fields
@@ -1661,7 +1680,37 @@ class ClaudeAdapter(ConfiguredAdapter):
         while len(index.views) >= VIEWS:
             index.views.pop(next(iter(index.views)))
         index.views[key] = view
+        if tip is None and store is not None and _room(reader):
+            def budget():  # the optional save's own: past the read's deadline it stops, and the view stands
+                if reader is not None and time.monotonic() >= reader.deadline:
+                    raise rows_source.SaveStopped()
+            try:
+                rows_source.save_rows(index, analysis, store, budget)  # so a new process reads from here (ROW_STORE)
+            except rows_source.SaveStopped:
+                pass
         return view
+
+    def transcript_index(self, session, *, reader=None):
+        """Bring the agent's saved row index (ROW_STORE) up to the transcript, for a process with no report-path limit
+        (the plugin host's worker): a full read can finish too close to its deadline to write one, and the transcript
+        would then stay cold for good. Reads up to date, analyses from the newest row and writes the index whenever
+        the copy there is behind, under the read's deadline. True when the saved index reaches the transcript's end,
+        False when it couldn't be written, None when there is nothing to index."""
+        _check(reader)
+        store = _row_store(session)
+        home, _ = reading_storage(session)
+        if not session.native_id or store is None or home is None:
+            return None
+        check = (lambda: _deadline(reader)) if reader is not None else None
+        try:
+            index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
+                                            check, store)
+        except rows_source.CantTell:
+            return None
+        if index is None:
+            return None
+        analysis = rows_source.analyse(index, None, check)
+        return rows_source.save_rows(index, analysis, store, check, interval=False)
 
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for
@@ -1673,7 +1722,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         try:
             check = (lambda: _deadline(reader)) if reader is not None else None
             index = rows_source.newest_copy(session.native_id, {'CLAUDE_CONFIG_DIR': home}, (session.workspace,),
-                                            check) if home else None
+                                            check, _row_store(session) if _room(reader) else None) if home else None
         except rows_source.CantTell as error:  # the copies stopped agreeing since the view
             raise TranscriptRowsChanged() from error
         if index is None:
