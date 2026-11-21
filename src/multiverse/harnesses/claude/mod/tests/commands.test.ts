@@ -2,7 +2,7 @@
 // The test's hooks stand in for Claude's core: its command list, its command runs (held where a test needs a run
 // to wait), the session's model and ID, and the files the mod writes.
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 
 const RUN = '7a1b2c3d-1111-4222-8333-944455556671'
 const LIST = '7a1b2c3d-1111-4222-8333-944455556672'

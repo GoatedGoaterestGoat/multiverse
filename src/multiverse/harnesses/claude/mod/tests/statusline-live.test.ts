@@ -2,7 +2,7 @@
 // A virtual disk and the mock clock stand in for the host; the 2 s timer is
 // moved by hand.
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 
 const AGENT = '/universe/state/agents/a1'
 const UNIVERSE = '/universe'

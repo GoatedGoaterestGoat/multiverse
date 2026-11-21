@@ -2,7 +2,7 @@
 // The test's hooks stand in for the host: `mv2` runs, prompts submitted and the
 // commands registered.
 import type { On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 import { DESCRIPTION, HINT, NAME, inbox, parse } from '../hooks/multiverse'
 
 type Run = { argv: readonly string[]; env?: Record<string, string> }

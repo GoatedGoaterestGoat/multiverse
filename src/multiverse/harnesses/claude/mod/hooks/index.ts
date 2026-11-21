@@ -344,7 +344,10 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
       if (after <= 0) break
       // A row arriving for it, the next row deciding, a /clear or Claude's part returning wakes it at once; otherwise the
       // next read is a pause away.
-      await Promise.race([$.clock.sleep(Math.min(TURN_ROWS_POLL_MS, after)), new Promise<void>((resolve) => { owner.wake = resolve })])
+      // The pause a wake-up beats is left running: it must not reject unheard when the plugin unloads meanwhile.
+      const pause = $.clock.sleep(Math.min(TURN_ROWS_POLL_MS, after))
+      pause.catch(() => {})
+      await Promise.race([pause, new Promise<void>((resolve) => { owner.wake = resolve })])
     }
   } catch { /* no file to prove a row by: the end goes with what was found */ }
   // With no file to read (no path, a failed lookup), the end still waits for Claude's part to return; the backstop
@@ -449,6 +452,14 @@ async function processFileSession($: EngineInterface) {
 }
 
 async function moved($: EngineInterface, previous: string, session: string) {
+  // It runs on its own after a /clear: a wait the plugin's unloading cuts short has no one to tell, and nothing left
+  // to record. Its own failures are logged below.
+  try {
+    await recordMove($, previous, session)
+  } catch { /* the plugin unloaded while it waited */ }
+}
+
+async function recordMove($: EngineInterface, previous: string, session: string) {
   const python = await $.env.get("MV2_PYTHON")
   if (!python) return
   let published = false

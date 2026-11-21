@@ -1,5 +1,5 @@
 // The status line's pure logic: config parsing, rendering and the slot.
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, test } from './kit'
 import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from '../hooks/statusline'
 
 // `compaction` is the compaction plugin's item, read from its file like any plugin's.
