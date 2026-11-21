@@ -499,6 +499,119 @@ class CodexTranscriptReadingTest(BaseTest):
                 self.assertEqual((damaged_view.rows[-1].kind, damaged_view.rows[-1].label), ('unreadable', 'meta'))
                 self.assertEqual(self.adapter.transcript_bodies(self.session, damaged_view, [3], max_bytes=1 << 20), [None])
 
+    def test_saved_rollout_index_proves_prefix_before_reusing_rows(self):
+        """A new reader skips proven rows, but a rewrite followed by an append changes the saved cursor."""
+        directory = Path(self.session.session_file).parent
+        directory.mkdir()
+        saved = directory / 'codex-transcript-index.jsonl'
+        body = 'prompt-prefix ' + 'p' * 200 + 'private-prompt-tail'
+        self.write([message(body), event('user_message', message=body), {
+            'type': 'response_item', 'payload': {'type': 'function_call_output',
+                                                'output': 'private-tool-output'}}])
+        class BriefReader:
+            deadline = .5
+
+            def check(self):
+                pass
+
+        with patch.object(t, 'time', create=True) as clock:
+            clock.monotonic.return_value = 0
+            brief = self.adapter.transcript_view(self.session, reader=BriefReader())
+        self.assertEqual(brief.source.state, 'supported')
+        self.assertFalse(saved.exists())
+        t._indexes.clear()
+
+        first = self.adapter.transcript_view(self.session)
+        self.assertTrue(saved.is_file())
+        data = saved.read_bytes()
+        self.assertIn(b'prompt-prefix', data)
+        self.assertNotIn(b'private-prompt-tail', data)
+        self.assertNotIn(b'private-tool-output', data)
+
+        def read_from_disk(expected_parses):
+            t._indexes.clear()
+            with patch.object(t, 'entry', wraps=t.entry) as parsed:
+                view = self.adapter.transcript_view(self.session)
+                self.assertEqual(parsed.call_count, expected_parses)
+                return view
+
+        self.assertEqual(read_from_disk(0), first)
+        extra = json.dumps(message('added', 'assistant')).encode()
+        with self.path.open('ab') as stream:
+            stream.write(extra)
+        self.assertEqual(read_from_disk(0), first)
+        self.assertEqual(saved.read_bytes(), data)
+        with self.path.open('ab') as stream:
+            stream.write(b'\n')
+        grown = read_from_disk(1)
+        self.assertEqual(grown.rows[:-1], first.rows)
+        self.assertEqual(len(grown.rows), len(first.rows) + 1)
+
+        original = self.path.read_bytes()
+        self.path.write_bytes(original.replace(b'prompt-prefix', b'edited-prefix') + extra + b'\n')
+        changed = read_from_disk(len(grown.rows))
+        self.assertEqual(changed.rows[1].preview[:13], 'edited-prefix')
+        self.assertNotEqual(changed.rows[1].position, first.rows[1].position)
+        self.assertEqual(changed.rows[0], first.rows[0])
+
+        t._indexes.clear()
+        with patch.object(t, 'time') as clock, patch.object(t.transcript_index, 'load') as load, \
+                patch.object(t.transcript_index, 'save') as save:
+            clock.monotonic.return_value = 0
+            self.assertEqual(self.adapter.transcript_view(self.session, reader=BriefReader()), changed)
+            load.assert_not_called()
+            save.assert_not_called()
+
+        for problem in ('checksum', 'truncated', 'oversized', 'link'):
+            with self.subTest(problem=problem):
+                valid = saved.read_bytes()
+                if problem == 'checksum':
+                    saved.write_bytes(valid.replace(b'edited-prefix', b'damage-prefix'))
+                elif problem == 'truncated':
+                    saved.write_bytes(valid[:-1])
+                elif problem == 'oversized':
+                    with saved.open('ab') as stream:
+                        stream.truncate(t.transcript_index.MAX_BYTES + 1)
+                else:
+                    foreign = directory / 'foreign'
+                    foreign.write_bytes(valid)
+                    saved.unlink()
+                    saved.symlink_to(foreign)
+                self.assertEqual(read_from_disk(len(changed.rows)), changed)
+                self.assertFalse(saved.is_symlink())
+                self.assertEqual(saved.read_bytes(), valid)
+                if problem == 'link':
+                    self.assertEqual(foreign.read_bytes(), valid)
+
+    def test_saved_compressed_index_still_checks_decoded_history(self):
+        """A saved index cannot hide a corrupt or rewritten compressed archive."""
+        from codex_compression import compress
+        directory = Path(self.session.session_file).parent
+        directory.mkdir()
+        compressed = self.path.with_suffix('.jsonl.zst')
+        self.write([message('before'), event('user_message', message='before')])
+        data = self.path.read_bytes()
+        compressed.write_bytes(compress(data))
+        self.path.unlink()
+        first = self.adapter.transcript_view(self.session)
+        self.assertTrue((directory / 'codex-transcript-index.jsonl').is_file())
+
+        t._indexes.clear()
+        with patch.object(t, 'entry', wraps=t.entry) as parsed:
+            self.assertEqual(self.adapter.transcript_view(self.session), first)
+        parsed.assert_not_called()
+
+        compressed.write_bytes(compress(data.replace(b'before', b'edited')))
+        t._indexes.clear()
+        changed = self.adapter.transcript_view(self.session)
+        self.assertEqual(changed.rows[1].preview, 'edited')
+        self.assertNotEqual(changed.rows[1].position, first.rows[1].position)
+
+        with compressed.open('ab') as stream:
+            stream.write(b'broken')
+        t._indexes.clear()
+        self.assertEqual(self.adapter.transcript_view(self.session).source.state, 'error')
+
     def test_compressed_copies_preserve_logical_rows_bodies_and_plain_precedence(self):
         """Cold compressed history must preserve exact identity/cursors without writing a sibling or selecting stale compressed bytes over plain data."""
         from codex_compression import compress
