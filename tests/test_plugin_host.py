@@ -153,7 +153,8 @@ class HostStartTest(PluginTestCase):
         from multiverse.store import lock
 
         with mock.patch.object(events, "subscribers", return_value=["fixture"]), \
-                mock.patch.object(host, "WORKER_POLL_SECONDS", 0.02):
+                mock.patch.object(host, "needed", return_value={}), \
+                mock.patch.object(host, "SUPERVISE_SECONDS", 0.02):
             for phase in ("capture", "ack"):
                 with self.subTest(phase=phase):
                     occupied, healthy = sorted(self.agent(f"{phase}-{index}") for index in range(2))
@@ -178,7 +179,8 @@ class HostStartTest(PluginTestCase):
                         return [row for row in events.read(self.root)[0] if row["type"] == "prompt.opened"
                                 and row["agent"]["id"] == directory.name]
 
-                    thread = threading.Thread(target=host._recover_agent_events, args=(self.root, stopping), daemon=True)
+                    thread = threading.Thread(target=host.supervise, args=(self.root,),
+                                              kwargs={"exit_when_idle": False, "stopping": stopping}, daemon=True)
                     with mock.patch.object(prompt_events, "_journal_event", side_effect=pause_after_append):
                         try:
                             if phase == "ack":
@@ -215,9 +217,9 @@ class HostStartTest(PluginTestCase):
         stamp = prompt_events.outbox_stamp(directory)
         self.assertIsNotNone(stamp)
         with mock.patch.object(prompt_events, "open_replaced", side_effect=FileNotFoundError):
-            self.assertFalse(prompt_events.outbox_empty(directory, stamp))
+            self.assertEqual(prompt_events.turn_work(directory, stamp), (False, None))
         self.assertEqual(prompt_events.outbox_stamp(directory), stamp)
-        self.assertFalse(prompt_events.outbox_empty(directory, stamp))
+        self.assertEqual(prompt_events.turn_work(directory, stamp), (False, None))
 
     def test_a_second_start_that_finds_the_session_is_already_starting(self):
         """Concurrent host starts never make two supervisors or overwrite a running one's status, whether the other

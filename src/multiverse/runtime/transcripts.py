@@ -17,7 +17,9 @@ from threading import Lock
 from typing import Any
 
 from .. import harnesses
-from ..harnesses.types import (SessionHandle, RowFact, TranscriptView, TranscriptRowsChanged, TurnProjection,
+from ..harnesses.transcript_groups import turn_anchors
+from ..harnesses.types import (SessionHandle, RowFact, TranscriptView, TranscriptRowsChanged, TurnCursorProjection,
+                              TurnProjection,
                               normalize_session_id)
 from ..plugins.access import Denied
 from ..plugins.agent_files import AgentGone
@@ -432,10 +434,7 @@ def _validate_view(view):
         raise Unavailable('The harness returned invalid transcript history', state='error')
 
 
-def _load(root, directory, *, generation=None, tip=None, snapshot=None):
-    if tip is not None and not isinstance(tip, str):
-        raise ValueError('Transcript tip must be a row ref')
-    snapshot = snapshot or _snapshot(root, directory, allow_navigation=generation is not None)
+def _selected_session(snapshot, generation):
     session = snapshot.session
     if generation is not None:
         _unpack(generation, GENERATION_PREFIX)
@@ -457,6 +456,14 @@ def _load(root, directory, *, generation=None, tip=None, snapshot=None):
             raise Retry('Conversation switch is unresolved; retry after it completes')
     if session.native_id is None:
         raise Unavailable('No native conversation is bound to this agent yet')
+    return session
+
+
+def _load(root, directory, *, generation=None, tip=None, snapshot=None):
+    if tip is not None and not isinstance(tip, str):
+        raise ValueError('Transcript tip must be a row ref')
+    snapshot = snapshot or _snapshot(root, directory, allow_navigation=generation is not None)
+    session = _selected_session(snapshot, generation)
     view = _provider(snapshot, 'transcript_view', session, tip=tip)
     analysis = _analyze(view)
     home = view.source.home
@@ -703,29 +710,13 @@ def _timestamp(value):
 
 
 def _build_groups(loaded):
-    groups, prompt, command, latest, preamble = [], None, None, None, None
-    for index in loaded.view.history:
-        row = loaded.view.rows[index]
-        if row.label in ('prompt', 'command'):
-            group = {'kind': row.label, 'indexes': []}
-            groups.append(group)
-            latest = group
-            if row.label == 'prompt':
-                prompt = group
-            else:
-                command = group
-        elif row.label == 'command_output' and command is not None:
-            group = command
-        elif row.label == 'compaction' and latest is not None and latest['kind'] == 'command':
-            group = latest
-        elif prompt is not None:
-            group = prompt
-        else:
-            if preamble is None:
-                preamble = {'kind': 'preamble', 'indexes': []}
-                groups.append(preamble)
-            group = preamble
-        group['indexes'].append(index)
+    by_anchor = {}
+    history = ((index, loaded.view.rows[index].label) for index in loaded.view.history)
+    for index, label, anchor in turn_anchors(history):
+        if anchor not in by_anchor:
+            by_anchor[anchor] = {'kind': label if anchor is not None else 'preamble', 'indexes': []}
+        by_anchor[anchor]['indexes'].append(index)
+    groups = list(by_anchor.values())
     context = loaded.analysis.context
     result = []
     last_prompt = max((n for n, group in enumerate(groups) if group['kind'] == 'prompt'), default=-1)
@@ -788,19 +779,34 @@ class TurnReference:
 
 @dataclass(frozen=True)
 class _TurnRead:
-    loaded: _Loaded
+    snapshot: _Snapshot
+    generation: str
+    view: TranscriptView | None
     references: tuple[TurnReference, ...]
     pending_rows: bool
 
 
-def turn_references(root, directory, launch_id, native_id, generation, transitions, *, deadline):
+class TurnIndexRequired(Exception):
+    """Projection needs a full read in an isolated process."""
+
+
+def turn_references(root, directory, launch_id, native_id, generation, transitions, *, deadline, storage=None,
+                    row_wait=None, prepare_index=False, indexed_only=False):
     """Resolve one scoped event batch off-loop, waiting briefly for its reported rows."""
     unresolved = (TurnReference(),) * len(transitions)
     has_rows = any(edge.ref is not None for edge in transitions)
     last = None
-    while time.monotonic() < deadline:
+    binding_retry = None
+    while time.monotonic() < min(deadline, binding_retry if binding_retry is not None else deadline):
+        waiting_for_binding = False
         try:
-            last = _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline, last)
+            options = {'storage': storage} if storage is not None else {}
+            if prepare_index:
+                options['prepare_index'] = True
+            if indexed_only:
+                options['indexed_only'] = True
+            last = _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline,
+                                         last, **options)
             if last is None:
                 return unresolved  # The launch or conversation moved; no earlier view is current.
             if not last.pending_rows:
@@ -810,34 +816,71 @@ def turn_references(root, directory, launch_id, native_id, generation, transitio
         except _ReadDeadline:
             # The deadline elapsed before the next view was established.
             return unresolved
-        except (Retry, _PendingTranscript):
+        except Retry:
+            last = None
+            if not has_rows:
+                return unresolved
+            waiting_for_binding = True
+        except _PendingTranscript:
             last = None
             if not has_rows:
                 return unresolved
         except (AgentGone, Unavailable, TranscriptRowsChanged, OSError, ValueError, TypeError, KeyError):
             return unresolved
-        remaining = deadline - time.monotonic()
+        moment = time.monotonic()
+        if row_wait is not None and waiting_for_binding:
+            # A busy binding can be retried briefly. Once it is available, the
+            # provider still has its original read budget to prove stored rows.
+            if binding_retry is None:
+                binding_retry = min(deadline, moment + row_wait)
+        else:
+            binding_retry = None
+            if row_wait is not None:
+                deadline = min(deadline, moment + row_wait)
+        remaining = (binding_retry if binding_retry is not None else deadline) - moment
         if remaining > 0:
             time.sleep(min(.025, remaining))
     if last is None:
         return unresolved
     try:
-        last.loaded.snapshot.reader._validate()
+        last.snapshot.reader._validate()
     except (AgentGone, Unavailable, OSError, ValueError, TypeError, KeyError):
         return unresolved
     return last.references
 
 
-def _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline, previous):
+def _read_turn_references(root, directory, launch_id, native_id, generation, transitions, deadline, previous,
+                          *, storage=None, prepare_index=False, indexed_only=False):
     try:
         snap = _snapshot(root, directory, allow_navigation=True, reconcile=False, deadline=deadline)
     except _ReadDeadline as error:
         raise _BeforeProviderDeadline(str(error)) from None
     facts = records.runtime(snap.directory / 'runtime.json')
-    if ((snap.session.launch_id, snap.session.native_id) != (launch_id, native_id)
-            or facts.get('session_generation', 0) != generation):
+    current = ((snap.session.launch_id, snap.session.native_id, facts.get('session_generation', 0)) ==
+               (launch_id, native_id, generation))
+    if storage is None and not current:
         return None
-    loaded = _load(root, directory, snapshot=snap)
+    selected = None
+    if storage is not None:
+        if any(getattr(storage, field) != getattr(snap.session, field) for field in ('agent_id', 'harness', 'workspace')):
+            return None
+        if storage.home is not None:
+            selected = _generation(storage)
+        elif not current:
+            return None
+        if native.adapter_hook(snap.adapter, 'turn_cursor_projection') is not None:
+            indexed = _indexed_turn_references(snap, selected, transitions)
+            if indexed is not None:
+                return indexed
+            if prepare_index and previous is None and native.adapter_hook(snap.adapter, 'transcript_index') is not None:
+                session = _selected_session(snap, selected)
+                if session.home is not None and _provider(snap, 'transcript_index', session) is True:
+                    indexed = _indexed_turn_references(snap, selected, transitions)
+                    if indexed is not None:
+                        return indexed
+    if indexed_only:
+        raise TurnIndexRequired
+    loaded = _load(root, directory, generation=selected, snapshot=snap)
     project = native.adapter_hook(snap.adapter, 'project_turn_event')
     groups, by_row = _grouped(loaded)
     anchors = {indexes[0]: turn for turn, indexes in groups if turn.kind in ('prompt', 'command')}
@@ -846,10 +889,10 @@ def _read_turn_references(root, directory, launch_id, native_id, generation, tra
     pending_rows = False
     try:
         snap.reader._check_deadline()
-        if (previous is not None and previous.loaded.generation == loaded.generation
-                and previous.loaded.snapshot.universe_id == snap.universe_id and previous.loaded.view == loaded.view):
+        if (previous is not None and previous.generation == loaded.generation
+                and previous.snapshot.universe_id == snap.universe_id and previous.view == loaded.view):
             snap.reader._check_deadline()
-            previous.loaded.snapshot.reader._validate()
+            previous.snapshot.reader._validate()
             fallback = previous.references
         for edge in transitions:
             snap.reader._check_deadline()
@@ -879,7 +922,42 @@ def _read_turn_references(root, directory, launch_id, native_id, generation, tra
         # The unvisited suffix can keep its proof only from an identical validated view.
         results.extend(fallback[len(results):])
         pending_rows = False
-    return _TurnRead(loaded, tuple(results), pending_rows)
+    return _TurnRead(snap, loaded.generation, loaded.view, tuple(results), pending_rows)
+
+
+def _indexed_turn_references(snapshot, selected, transitions):
+    session = _selected_session(snapshot, selected)
+    if session.home is None or selected is not None and _generation(session) != selected:
+        return None  # The ordinary view supplies and proves legacy storage.
+    projections = _provider(snapshot, 'turn_cursor_projection', session, transitions)
+    if projections is None:
+        return None
+    if not isinstance(projections, tuple) or len(projections) != len(transitions):
+        raise Unavailable('The harness returned invalid indexed turn evidence')
+    generation = _generation(session)
+
+    def cursor(position, nearest):
+        return _pack(CURSOR_PREFIX, {'u': snapshot.universe_id, 'a': session.agent_id, 'g': generation,
+                                    'p': position, 'r': nearest, 'h': False, 's': 'after', 'b': None})
+
+    ready, pending_rows = [], False
+    for edge, proof in zip(transitions, projections):
+        snapshot.reader._check_deadline()
+        if (not isinstance(proof, TurnCursorProjection) or type(proof.pending) is not bool
+                or proof.kind not in (None, 'prompt', 'command')
+                or any(value is not None and (not isinstance(value, str) or not value)
+                       for value in (proof.turn_position, proof.turn_ref, proof.turn_nearest,
+                                     proof.row_position, proof.row_nearest))):
+            raise Unavailable('The harness returned invalid indexed turn evidence')
+        pending_rows |= edge.ref is not None and proof.pending
+        if proof.turn_position is None or proof.kind is None or proof.row_position is None:
+            ready.append(TurnReference())
+            continue
+        anchor = proof.turn_ref or '@' + cursor(proof.turn_position, proof.turn_nearest)
+        ready.append(TurnReference(turn=anchor, ref=cursor(proof.row_position, proof.row_nearest),
+                                   generation=generation, kind=proof.kind))
+    snapshot.reader.check()
+    return _TurnRead(snapshot, generation, None, tuple(ready), pending_rows)
 
 
 def _turn_boundary(loaded, groups, anchor, *, before=False):

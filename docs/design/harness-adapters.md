@@ -1056,7 +1056,9 @@ input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. A racing busy steer is never converted to a fresh turn.
 Codex can leave automatic queue draining paused after an interrupt. The owning
 terminal relay publishes interrupt intent before forwarding it, and records
-exact-primary turn starts and completions. An interrupted completion labels the
+exact-primary turn starts and completions. The relay writes only queue state
+on this path. Plugin journal recovery and transcript reads run separately
+from that write. An interrupted completion labels the
 queue paused; a newer start clears it. The public API flattens several abort
 reasons, so this label never blocks Codex's own native draining. Old-turn and
 side-thread events cannot change the primary's state.

@@ -18,7 +18,8 @@ EFFECTS: Mapping[str, Effect] = {
         'launch_started', 'launch_refusal', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
-        'transcript_view', 'transcript_bodies', 'transcript_readable', 'project_turn_event',
+        'transcript_view', 'transcript_bodies', 'transcript_readable', 'transcript_index',
+        'project_turn_event', 'turn_cursor_projection',
         'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
         'waiting_prompts', 'prompt_outcome', 'queued_prompts',
     ), 'observe'),
@@ -660,6 +661,23 @@ class TranscriptProvider(Protocol):
 
 
 @dataclass(frozen=True, kw_only=True)
+class TurnCursorProjection:
+    """Metadata from a proved transcript index, using the public reader's stored-order positions.
+
+    Give the turn anchor's native row ref if it has one, otherwise core forms the turn ID from its cursor.
+    Each nearest ref is the last native row ref at or before that position, as the transcript view
+    would supply it. The reported row must belong to the anchor's turn.
+    """
+    turn_position: str | None = None
+    turn_ref: str | None = None
+    turn_nearest: str | None = None
+    row_position: str | None = None
+    row_nearest: str | None = None
+    kind: str | None = None
+    pending: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
 class TurnStarted:
     """The first input of a native turn, observed by its owning conversation."""
     turn: str
@@ -702,6 +720,11 @@ class TurnEventProvider(Protocol):
     """Optionally project native turn observations within one immutable transcript view."""
     def project_turn_event(self, session: SessionHandle, view: TranscriptView, transition: TurnTransition, *,
                            reader: TranscriptReader | None = None) -> TurnProjection: ...
+
+    def turn_cursor_projection(self, session: SessionHandle, transitions: tuple[TurnTransition, ...], *,
+                               reader: TranscriptReader | None = None) -> tuple[TurnCursorProjection, ...] | None: ...
+
+    def transcript_index(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
 
 
 @dataclass(frozen=True, kw_only=True)

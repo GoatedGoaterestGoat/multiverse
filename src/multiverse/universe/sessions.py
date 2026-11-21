@@ -215,6 +215,8 @@ def recover(directory, data):
     if repaired:
         if data.get('native_session_id') != rows[-1]['to']:
             updated['updated_at'] = rows[-1]['at']
+            if rows[-1]['schema'] == 1:
+                updated['ordered_session_transition'] = rows[-1]['id']
         write(directory / 'properties.json', updated)
     return updated, rows[-1] if repaired else None
 
@@ -465,7 +467,8 @@ def transition(root, directory, previous, target, reason, launch_id, home):
         row = {'schema': 1, 'id': uid(), 'at': now(), 'harness': data['harness'], 'home': home,
                'launch': launch_id, 'from': previous, 'to': target, 'reason': reason}
         _append(directory, row)
-        data.update(native_session_id=target, native_session_home=home, updated_at=row['at'])
+        data.update(native_session_id=target, native_session_home=home, updated_at=row['at'],
+                    ordered_session_transition=row['id'])
         if data.get('agent_identity'):
             data['agent_identity'] = {**data['agent_identity'], 'native_id': target}
         write(directory / 'properties.json', data)

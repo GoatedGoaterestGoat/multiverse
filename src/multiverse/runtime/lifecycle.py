@@ -742,9 +742,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             waiting = end_waiting(agent_dir, reason)
             if waiting:
                 notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
-        write(agent_dir / "runtime.json",
-              {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
-               'run_directory': str(run_root)})
+        with lock(agent_dir / '.runtime.lock', create_parent=False):
+            latest = agents.runtime(agent_dir)
+            initial = {**previous, **{key: latest.get(key) for key in _ORDERED_RUNTIME_FIELDS}}
+            write(agent_dir / "runtime.json",
+                  {**_initial_runtime(launch_id, command, adapter, session, initial, resume and not fresh, _recovery),
+                   'run_directory': str(run_root)})
         if fresh:
             # The replacement launch has now been published. If retirement
             # crashed earlier, its next resume used spawn preparation above.
@@ -1044,9 +1047,16 @@ def _cli_path():
     return cli_path
 
 
+_ORDERED_RUNTIME_FIELDS = ('journal_status', 'journal_status_spill', 'ordered_session_transition',
+                           'ordered_binding_check', 'ordered_binding_fence')
+
+
 def _initial_runtime(launch_id, command, adapter, session, previous, resume, recovery):
     runtime_record = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
                       "started_at": now(), "native_mode": command.native_mode}
+    for key in _ORDERED_RUNTIME_FIELDS:
+        if previous.get(key) is not None:
+            runtime_record[key] = previous[key]
     if resume and previous.get('automatic_restarts'):
         runtime_record['automatic_restarts'] = previous['automatic_restarts'][-5:]
     queue = previous.get('queue_state')
@@ -1214,8 +1224,8 @@ def _event(agent_dir, kind, launch=None, data=None, properties=None):
     try:
         if kind in ('agent.launched', 'agent.exited', 'agent.killed'):
             from . import prompt_events
-            prompt_events.finish(agent_dir, launch, previous=kind == 'agent.launched')
-            if prompt_events.publish_ordered(agent_dir, kind, launch, data):
+            if prompt_events.publish_ordered(agent_dir, kind, launch, data,
+                                             close_scope={'previous': kind == 'agent.launched'}):
                 return
         from ..plugins import events
         events.for_agent(agent_dir, kind, launch, data, properties)
