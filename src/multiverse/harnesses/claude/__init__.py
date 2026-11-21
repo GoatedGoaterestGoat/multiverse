@@ -47,6 +47,7 @@ from . import models as model_table
 from . import pane
 from . import run as one_shot
 from . import transcripts as rows_source
+from . import turn_projection
 from .transcripts import (  # every transcript reader reads through this one row source
     claude_home, Unreadable, open_regular, read_regular, PROJECT_KEY_LENGTH, project_key, could_hold, project_keys,
     holds_name, session_transcripts, _scan_transcripts, IDENTITY_BYTES, transcript_identity, subagent_transcripts,
@@ -1750,6 +1751,18 @@ class ClaudeAdapter(ConfiguredAdapter):
             return None
         analysis = rows_source.analyse(index, None, check)
         return rows_source.save_rows(index, analysis, store, check, interval=False)
+
+    def turn_cursor_projection(self, session, transitions, *, reader=None):
+        """Prove turn cursors from the saved metadata, or use the general view."""
+        _check(reader)
+        home, _ = reading_storage(session)
+        if home is None or not session.native_id:
+            return None
+        try:
+            return turn_projection.project(session, home, _row_store(session), transitions, lambda: _deadline(reader))
+        except (OSError, Unreadable, ValueError, TypeError, KeyError, AttributeError, IndexError, RecursionError):
+            _check(reader)
+            return None
 
     def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
         """The rows at `indexes` of `view` as stored, a fresh dict each, read again from the newest copy; None for

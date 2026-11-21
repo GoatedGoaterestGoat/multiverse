@@ -108,7 +108,7 @@ def segments(root):
 
 
 def subscribers(root, kind, admit=False):
-    """Names of the enabled plugins subscribed to events of `kind`: the authority, from the types of
+    """Names of the enabled plugins subscribed to any of the given event kinds: the authority, from the types of
     what runs (a pin made before types were kept with it counts for nothing until they're proved). With `admit`,
     for journal admission (admits()), such a plugin counts too, conservatively.
 
@@ -119,8 +119,10 @@ def subscribers(root, kind, admit=False):
         return []
     from . import config, registry, trust
 
+    kinds = (kind,) if isinstance(kind, str) else tuple(kind)
+
     def matches(patterns):
-        return any(fnmatch.fnmatchcase(kind, pattern) for pattern in patterns)
+        return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns for name in kinds)
 
     found = []
 
@@ -204,7 +206,7 @@ def _manifest_events(directory):
 
 
 def admits(root, kind):
-    """Whether an event of `kind` is to be journaled: a subscriber, or, conservatively, a plugin
+    """Whether an event of `kind` (or any of several) is to be journaled: a subscriber, or, conservatively, a plugin
     that is on whose pin was made before types were kept with it and whose manifest or record could follow it
     (nothing proves which until the person's listing keeps them, and a lookup never hashes). More is journaled,
     never lost; the host delivers only what the verified plugin follows."""

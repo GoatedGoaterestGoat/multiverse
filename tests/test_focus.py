@@ -1,5 +1,5 @@
 """Focus: a focused agent refuses steer and follow-up messages and takes inbox-only ones."""
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import io
@@ -238,11 +238,16 @@ class FocusRecordTest(BaseTest):
         the new focus at once, before the turn it was meant for."""
         self.status('working')
         started = []
-        def focus_in_the_gap(*arguments, **options):
-            # Runs where the turn end used to be counted: after the status is saved and the runtime lock released.
-            if not started:
+        runtime_lock = agents.lock
+
+        @contextmanager
+        def focus_after_commit(path, *args, **kwargs):
+            with runtime_lock(path, *args, **kwargs):
+                yield
+            if path == self.directory / '.runtime.lock' and not started:
                 started.append(focus.start(self.directory, turn=True))
-        with patch.object(agents, '_event', side_effect=focus_in_the_gap):
+
+        with patch.object(agents, 'lock', side_effect=focus_after_commit):
             self.status('idle')
         self.assertEqual(started[0]['turns'], 1)
         self.assertEqual(focus.current(self.directory), started[0])

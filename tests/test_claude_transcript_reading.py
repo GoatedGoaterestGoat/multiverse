@@ -14,6 +14,7 @@ from multiverse import harnesses
 from multiverse.harnesses import claude
 from multiverse.harnesses.claude import NO_STORAGE, transcripts as t
 from multiverse.harnesses.types import SessionHandle, TranscriptRowsChanged
+from multiverse.plugins import events
 from multiverse.runtime import prompt_events, transcripts as core
 from multiverse.store import read, write
 from multiverse.tools import runtime_update
@@ -693,7 +694,6 @@ class ClaudeTranscriptReadingTest(BaseTest):
         def make_row_visible(delay):
             nonlocal elapsed
             self.assertEqual(read(agent / 'runtime.json')['status'], 'working')
-            status.assert_called_once_with(agent, 'agent.status', launch, {'from': None, 'to': 'working'})
             elapsed += delay
             if self.path.exists():
                 self.write([{'type': 'user', 'uuid': row_ref, 'sessionId': self.native,
@@ -701,15 +701,21 @@ class ClaudeTranscriptReadingTest(BaseTest):
             else:
                 self.path.touch()
 
-        with patch.object(core, 'time') as clock, patch.object(agents, '_event') as status, \
+        with patch.object(core, 'time') as clock, \
+                patch.object(events, 'subscribers', return_value=['fixture']), \
                 patch.object(prompt_events, '_journal_event', return_value='retry'), \
                 patch.object(runtime_update, 'callback', return_value=(self.root, agent, launch)):
             clock.monotonic.side_effect = lambda: start + elapsed
             clock.sleep.side_effect = make_row_visible
             runtime_update.run(status='working', turn_session_id=self.native, turn_events_json=json.dumps([edge]))
+            clock.sleep.assert_not_called()
+            self.assertFalse(self.path.exists())
+            prompt_events.publish(agent, resolve_turns=True)
 
-        [event] = read(agent / 'prompts' / 'journal' / 'events.json')['pending']
+        event, status = read(agent / 'prompts' / 'journal' / 'events.json')['pending']
+        self.assertEqual(status['kind'], 'agent.status')
         self.assertEqual(event['kind'], 'turn.started')
+        self.assertTrue(event['data']['resolved'])
         self.assertEqual((event['data']['source'], event['data']['message'], event['data']['first_task']),
                          ('mv2', None, True))
         self.assertEqual(clock.sleep.call_count, 2)
@@ -717,6 +723,40 @@ class ClaudeTranscriptReadingTest(BaseTest):
         [row] = page.rows
         self.assertEqual((event['data']['turn'], event['data']['ref'], event['data']['generation']),
                          (row.turn, row.cursor, page.generation))
+
+    def test_deferred_turn_reads_its_earlier_conversation_after_a_switch(self):
+        """A delayed edge follows its admitted transcript, even after a new conversation owns runtime.json."""
+        agent, launch, new_native = self.root / 'state' / 'agents' / str(uuid4()), str(uuid4()), str(uuid4())
+        row_id = str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'worker', 'harness': 'claude',
+              'workspace': str(self.work), 'native_session_id': self.native, 'native_session_home': str(self.storage)})
+        write(agent / 'runtime.json', {'launch_id': launch, 'state': 'running', 'status': 'working'})
+        old_row = {'type': 'user', 'uuid': row_id, 'sessionId': self.native, 'origin': {'kind': 'human'},
+                   'message': {'role': 'user', 'content': 'Earlier conversation'}}
+        self.write([old_row])
+        self.write([{**old_row, 'sessionId': new_native, 'uuid': str(uuid4())}], self.path.with_stem(new_native))
+        earlier = core.rows(self.root, agent, bodies=False)
+        edge = {'type': 'started', 'turn': row_id, 'ref': row_id, 'kind': 'prompt', 'source': 'person'}
+        published = []
+
+        def capture(directory, row):
+            published.append(row)
+            return 'unsubscribed'
+
+        with patch.object(events, 'subscribers', return_value=['fixture']), \
+                patch.object(prompt_events, '_journal_event', side_effect=capture), \
+                patch.object(runtime_update, 'callback', return_value=(self.root, agent, launch)):
+            runtime_update.run(turn_session_id=self.native, turn_events_json=json.dumps([edge]))
+            agents.rebind_session(self.root, agent.name, self.native, new_native, 'clear', launch,
+                                  home=str(self.storage))
+            self.assertEqual(published, [])
+            prompt_events.publish(agent, resolve_turns=True)
+            prompt_events.publish(agent, resolve_turns=True)
+        self.assertEqual([row['kind'] for row in published], ['turn.started', 'turn.ended', 'agent.session'])
+        self.assertEqual((published[0]['data']['ref'], published[0]['data']['generation']),
+                         (earlier.rows[0].cursor, earlier.generation))
+        self.assertTrue(published[0]['data']['resolved'])
+        self.assertFalse(published[1]['data']['resolved'])
 
     def test_each_row_is_labelled_by_claudes_own_fields(self):
         """Labels decide what a plugin counts as a prompt or a turn's end; fragile because Claude marks them only by

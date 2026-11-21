@@ -28,6 +28,7 @@ host still running the code from before to restart (restart.json): it drains
 its workers, then runs itself again with the new code, in the same pane.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
 import fnmatch
@@ -35,6 +36,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import select
 import signal
 import subprocess
@@ -45,13 +47,15 @@ import time
 from .. import universe as universes
 from ..runtime import process as processes
 from ..store import now, write, lock, retry_missing, is_file_replaced
-from . import api, events, loader, trust
+from . import api, events, loader, projection_wake, trust
 
 HEARTBEAT_SECONDS = 15.0  # a supervisor whose status is older than this is not running
 RESTARTS = 3
 RESTART_WINDOW = 300
 SUPERVISE_SECONDS = 2.0
 WORKER_POLL_SECONDS = 0.5
+TURN_PROJECTION_POLL_SECONDS = 0.125
+TURN_PROJECTION_WORKERS = 2
 PRUNE_SECONDS = 3600
 HANDLER_SECONDS = 60.0
 STOP_SECONDS = 10.0  # a stopped worker has this long before its process group is ended (a restart waits, unbounded)
@@ -207,37 +211,178 @@ def running(root):
     return _age(recorded.get("updated_at", ""), unknown=float("inf")) <= HEARTBEAT_SECONDS
 
 
-def _recover_agent_events(root, stopping):
-    """Retry ordered events independently of callbacks, heartbeats and plugin handlers."""
+def _project_agent_events(root, stopping):
+    """Service durable turn work separately from plugin handlers and the host heartbeat."""
     from ..runtime import prompt_events
     from ..universe import agents
 
-    idle = {}
-    while not stopping.is_set():
-        previous_idle, idle = idle, {}
+    with projection_wake.receiver(root) as receiver:
+        workers = ThreadPoolExecutor(max_workers=TURN_PROJECTION_WORKERS, thread_name_prefix="turn projection")
+        cold = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cold turn projection")
+        indexed = _IndexedProjectionPool(root, stopping)
+        pending = {}
+        idle = {}
         try:
-            for scope in universes.tree(root):
-                for record in agents.record_paths(scope):
-                    if stopping.is_set():
-                        return
-                    directory = record.parent
-                    if directory.is_symlink():
-                        continue
-                    try:
-                        stamp = prompt_events.outbox_stamp(directory)
-                        if stamp is None:
+            while not stopping.is_set():
+                try:
+                    previous_idle, idle = idle, {}
+                    for directory, (scope, keys, work) in tuple(pending.items()):
+                        if not work.done():
                             continue
-                        if stamp == previous_idle.get(directory):
-                            idle[directory] = stamp
+                        del pending[directory]
+                        try:
+                            needs_cold = work.result()
+                        except Exception as error:
+                            _log(root, f"turn projection worker for {directory.name} failed ({type(error).__name__})")
+                            needs_cold = False
+                        if needs_cold:
+                            job = cold.submit(_run_turn_projection, root, scope, directory, keys, stopping)
+                            pending[directory] = (scope, keys, job)
+                            job.add_done_callback(lambda _: projection_wake.wake(root))
+                    for scope in universes.tree(root):
+                        try:
+                            records = tuple(agents.record_paths(scope))
+                        except Exception as error:
+                            _log(root, f"could not list turn projection records in {scope} ({type(error).__name__})")
                             continue
-                        prompt_events.publish(directory, recovery_stop=stopping)
-                        if not stopping.is_set() and prompt_events.outbox_empty(directory, stamp):
-                            idle[directory] = stamp
-                    except Exception as error:
-                        _log(root, f"could not recover events for {directory.name} ({type(error).__name__})")
-        except Exception as error:
-            _log(root, f"ordered event recovery scan failed ({type(error).__name__})")
-        stopping.wait(WORKER_POLL_SECONDS)
+                        for record in records:
+                            if stopping.is_set():
+                                return
+                            directory = record.parent
+                            if directory in pending or directory.is_symlink():
+                                continue
+                            try:
+                                stamp = prompt_events.outbox_stamp(directory)
+                                runtime_stamp = agents.runtime_status_stamp(directory)
+                                if stamp is None and runtime_stamp is None:
+                                    continue
+                                scanned = stamp, runtime_stamp
+                                if scanned == previous_idle.get(directory):
+                                    idle[directory] = scanned
+                                    continue
+                                runtime_clear = runtime_stamp is None or agents.recover_status_events(directory, maximum=8)
+                                stamp = prompt_events.outbox_stamp(directory)
+                                if stamp is None:
+                                    if runtime_clear:
+                                        idle[directory] = scanned
+                                    continue
+                                prompt_events.publish(directory, recovery_stop=stopping)
+                                empty, keys = prompt_events.turn_work(directory, stamp)
+                                if empty and runtime_clear:
+                                    idle[directory] = scanned
+                                if keys:
+                                    work = workers.submit(indexed.project, scope, directory)
+                                    pending[directory] = (scope, keys, work)
+                                    work.add_done_callback(lambda _: projection_wake.wake(root))
+                            except Exception as error:
+                                _log(root, f"could not schedule turn projection for {directory.name} "
+                                           f"({type(error).__name__})")
+                except Exception as error:
+                    _log(root, f"turn projection scan failed ({type(error).__name__})")
+                projection_wake.wait(receiver, stopping, TURN_PROJECTION_POLL_SECONDS)
+        finally:
+            workers.shutdown(wait=True, cancel_futures=True)
+            cold.shutdown(wait=True, cancel_futures=True)
+            indexed.close()
+
+
+class _IndexedProjectionPool:
+    """Reuse a bounded number of processes. They never run a full transcript read."""
+
+    def __init__(self, root, stopping):
+        self.root = root
+        self.stopping = stopping
+        self.idle = SimpleQueue()
+
+    def project(self, scope, directory):
+        if self.stopping.is_set():
+            return False
+        try:
+            process = self.idle.get_nowait()
+        except Empty:
+            process = None
+        try:
+            if process is None:
+                command = loader.module_command("multiverse.plugins.host", "--indexed-turn-worker", self.root)
+                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL)
+            request = json.dumps([str(scope), directory.name]).encode() + b"\n"
+            process.stdin.write(request)
+            process.stdin.flush()
+            deadline = time.monotonic() + _projection_timeout()
+            while not self.stopping.is_set() and time.monotonic() < deadline:
+                if select.select([process.stdout], [], [], 0.025)[0]:
+                    response = os.read(process.stdout.fileno(), 1)
+                    if response in (b"d", b"c"):
+                        self.idle.put(process)
+                        process = None
+                        return response == b"c"
+                    break
+        except OSError:
+            pass
+        finally:
+            if process is not None:
+                _end_projection_process(process)
+        if self.stopping.is_set():
+            return False
+        _log(self.root, f"indexed turn projection for {directory.name} failed; trying isolated read")
+        return True
+
+    def close(self):
+        while not self.idle.empty():
+            _end_projection_process(self.idle.get_nowait())
+
+
+def _projection_timeout():
+    from ..runtime import prompt_events
+
+    return prompt_events._TURN_PROJECTION_SECONDS + 3
+
+
+def _end_projection_process(process):
+    try:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=1)
+    except ProcessLookupError:
+        process.wait()
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
+    finally:
+        for stream in (process.stdin, process.stdout):
+            if stream is not None:
+                stream.close()
+
+
+def _run_turn_projection(root, scope, directory, keys, stopping):
+    """Each background process owns one projection. Its cache exits with it."""
+    from ..runtime import prompt_events
+
+    if stopping.is_set():
+        return
+    command = loader.module_command("multiverse.plugins.host", "--turn-projection", scope, directory.name)
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+    except OSError as error:
+        if not stopping.is_set():
+            _log(root, f"could not start turn projection for {directory.name} ({type(error).__name__})")
+            prompt_events.abandon_turn_projection(directory, keys)
+        return
+    deadline = time.monotonic() + _projection_timeout()
+    try:
+        while process.poll() is None and not stopping.wait(0.025):
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        _end_projection_process(process)
+        if process.returncode and not stopping.is_set():
+            _log(root, f"turn projection for {directory.name} exited with status {process.returncode}")
+            prompt_events.abandon_turn_projection(directory, keys)
 
 
 def supervise(root, *, exit_when_idle=True, stopping=None):
@@ -259,10 +404,10 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     beating = threading.Event()
     beat = threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True)
     beat.start()
-    recovery_stopping = threading.Event()
-    recovery = threading.Thread(target=_recover_agent_events, args=(root, recovery_stopping),
-                                name="host ordered events", daemon=True)
-    recovery.start()
+    projection_stopping = threading.Event()
+    projection = threading.Thread(target=_project_agent_events, args=(root, projection_stopping),
+                                  name="turn event projection", daemon=True)
+    projection.start()
     try:
         while not stopping.is_set():
             if _restart_requested(root, started):
@@ -271,8 +416,9 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 _log(root, "restarting with the new code: draining the workers")
                 _write_status(root, started, workers, restarts, stopped, code=running_code, restarting=True,
                               pid_started=as_started)
-                recovery_stopping.set()
-                recovery.join()
+                projection_stopping.set()
+                projection_wake.wake(root)
+                projection.join()
                 if _drain_workers(list(workers.values()), stopping):
                     workers.clear()
                     restart = True
@@ -316,9 +462,10 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     finally:
         # All at once, each finishing its call in flight; the heartbeat goes on meanwhile, so the host still counts
         # as running and nothing starts a second one beside it.
-        recovery_stopping.set()
-        recovery.join()
+        projection_stopping.set()
+        projection_wake.wake(root)
         _stop_workers(list(workers.values()))
+        projection.join()
         beating.set()
         beat.join(5)  # no status write left half way when the new code takes over the process
         if not restart:
@@ -1100,14 +1247,62 @@ def gave_up(scope, name):
     return found
 
 
+def _indexed_turn_worker(root):
+    from ..runtime import prompt_events, transcripts
+
+    root = Path(root).resolve()
+    # Keep adapter stdout away from the private single-byte response channel.
+    with os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0) as reply:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        while line := sys.stdin.buffer.readline(16384):
+            signal.alarm(prompt_events._TURN_PROJECTION_SECONDS + 1)
+            try:
+                scope_name, name = json.loads(line)
+                scope = Path(scope_name).resolve()
+                ancestor = scope
+                while ancestor != root and (ancestor := universes.parent(ancestor)) is not None:
+                    pass
+                if ancestor != root or not name or Path(name).name != name or name in (".", ".."):
+                    return 2
+                directory = scope / "state" / "agents" / name
+                response = b"d"
+                if not directory.is_symlink() and events.root_of(directory) == scope:
+                    try:
+                        prompt_events.publish(directory, resolve_turns=True, indexed_only=True)
+                    except transcripts.TurnIndexRequired:
+                        response = b"c"
+                reply.write(response)
+            finally:
+                signal.alarm(0)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m multiverse.plugins.host", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--worker", action="store_true", help="run one plugin's worker")
+    parser.add_argument("--turn-projection", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--indexed-turn-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--supervisor", type=int, help=argparse.SUPPRESS)
     parser.add_argument("root")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args(argv)
+    if args.indexed_turn_worker:
+        return _indexed_turn_worker(args.root)
+    if args.turn_projection:
+        from ..runtime import prompt_events
+
+        if not args.name or Path(args.name).name != args.name or args.name in (".", ".."):
+            parser.error("--turn-projection needs an agent directory name")
+        signal.alarm(prompt_events._TURN_PROJECTION_SECONDS + 1)
+        try:
+            root = Path(args.root).resolve()
+            directory = root / "state" / "agents" / args.name
+            if not directory.is_symlink() and events.root_of(directory) == root:
+                prompt_events.publish(directory, resolve_turns=True)
+        finally:
+            signal.alarm(0)
+        return 0
     if args.worker:
         if not args.name:
             parser.error("--worker needs the plugin's name")

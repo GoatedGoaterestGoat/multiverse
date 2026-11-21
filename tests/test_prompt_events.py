@@ -64,7 +64,7 @@ class PromptEventsTest(BaseTest):
         def stage(native_id, generation, edges):
             entered.set()
             if release.wait(5):
-                prompt_events.stage(self.agent, 'launch', native_id, edges, generation=generation)
+                return prompt_events.stage(self.agent, 'launch', native_id, edges, generation=generation)
 
         relay = rpc.LaunchProxy({}, None, None, record_prompt_transitions=stage)
         relay.prompt_batches.append((stage, 'first', 0, (

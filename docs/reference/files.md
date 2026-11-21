@@ -127,7 +127,7 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/events.cursor` | The last event the plugin's handlers finished in this universe. |
 | `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Written after the cursor: an interrupted write delivers again, never skips. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
-| `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
+| `host/` | In a top-level universe: `host.lock`, `status.json` and `host.log` for the plugin host, and `turn-wake`, the pipe that wakes its turn projection lane. |
 | `registry.json` | Each plugin that's on here: the event types it subscribes to, the source that found it, and, for one found only in your own environment (`MV2_PLUGIN_PATH`, a package found only through your `PYTHONPATH`), its folder. Every process here records the plugin's events from it, and finds it there, at the content pinned for it when you turned it on (`mv2 plugins trust NAME` approves an edit). One only an agent's own environment finds is marked `private`: its event types are recorded for it, never its folder. Written when you turn a plugin on or off and when you list the plugins. |
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
@@ -276,6 +276,27 @@ cancellation applies the deferred report to the continuing launch.
 status and when it changed. The time comes from the harness callback,
 including a report whose effect on the displayed status is deferred
 during a stop. Other runtime updates leave the time alone.
+
+`journal_status` briefly holds the latest transition that still needs to enter
+the agent's ordered event queue. When the queue cannot accept it before another
+event arrives, `journal-status-N.json` holds the older event and
+`journal_status_spill` records the order in which to replay it. A later report
+or the plugin host can recover these saved events. When a status follows
+relay metadata, its reservation waits for `journal-fence-ID.json` to confirm
+the earlier batch. That file can hold the batch itself if the ordinary outbox
+write failed. The host admits both in one ordered write. A private
+`journal-relay-ID.json` preserves known predecessors if the launch ends
+before the companion reaches the queue. A recorded conversation switch can
+also be replayed from its lineage row before events for the new conversation.
+If it cannot be published yet, its position is retained ahead of later
+reports in the same runtime event queue. An unreadable lineage can delay
+those journal entries while the current runtime status and exit still record.
+When both the conversation pointer and its lineage were unavailable, a switch
+waits for the relay to secure the earlier batch under its original binding.
+Status subscriptions are checked when the runtime status commits, so a later
+subscription cannot publish an older status outside the ordered queue.
+Native prompt and turn edges received during an outage also keep the launch
+and conversation they were reported in.
 
 For a bridged conversation switch, `runtime.json` also holds a `navigation`
 record with its request correlation and admission token. `checking` and

@@ -125,22 +125,12 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
         changes["usage"] = usage(usage_json)
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
-    # The mod serializes these reports. Publish activity before waiting for rows, while keeping this batch in
-    # front of the next one. An idle report still follows the end it carries.
-    active = status in ('working', 'waiting')
-    if turn_batch is not None and not active:
-        prompt_events.stage_turns(root, directory, launch_id, *turn_batch)
-    if prompt_batch is not None:
-        result = agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
-                                       status_observed=status is not None)
-    else:
-        result = agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes) if changes else None
     if turn_batch is not None:
-        if active:
-            prompt_events.stage_turns(root, directory, launch_id, *turn_batch)
-        if active or status is None:
-            prompt_events.publish(directory)
-    return result
+        turn_batch = (root, *turn_batch)
+    if prompt_batch is not None or turn_batch is not None:
+        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
+                                     turn_batch=turn_batch, status_observed=status is not None)
+    return agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes) if changes else None
 
 
 def rebind(root, directory, launch_id, previous, session_id, reason):

@@ -12,8 +12,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import plugins
 from multiverse.plugins import api, events, host, loader
-from multiverse.plugins.testing import PluginTestCase
-from multiverse.store import write
+from multiverse.plugins.testing import ClaudeRows, PluginTestCase
+from multiverse.store import read, write
+from multiverse.tools import runtime_update
 
 LISTENER = """
 import json, os
@@ -929,6 +930,48 @@ class HostTest(PluginTestCase):
     def lines(self, path=None):
         path = path or self.out
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_host_resumes_turn_projection_before_delivering_following_status(self):
+        """Reports made without a host must survive for later ordered delivery to a real subscriber."""
+        handlers = LISTENER.replace('@mv.events.on("agent.*")',
+                                    '@mv.events.on("turn.*")\n    @mv.events.on("agent.status")')
+        self.write_plugin("listener", {"module": "plugin", "api": "1.21", "extends": ["events"],
+                                       "events": ["turn.*", "agent.status", "events.gap"]},
+                          {"plugin.py": handlers})
+        plugins.set_enabled(self.root, "listener", True)
+        agent = self.agent("worker")
+        rows = ClaudeRows()
+        start = rows.prompt("private-task-marker")
+        rows.response("private-response-marker")
+        end = rows.turn_end()
+        self.transcript(agent, rows.rows)
+        launch = read(agent / "runtime.json")["launch_id"]
+        native = read(agent / "properties.json")["native_session_id"]
+        with mock.patch.object(runtime_update, "callback", return_value=(self.root, agent, launch)):
+            runtime_update.run(status="working", turn_session_id=native, turn_events_json=json.dumps([{
+                "type": "started", "turn": start["uuid"], "kind": "prompt", "ref": start["uuid"], "source": "person",
+            }]))
+            runtime_update.run(status="idle", turn_session_id=native, turn_events_json=json.dumps([{
+                "type": "ended", "turn": start["uuid"], "kind": "prompt", "ref": end["uuid"], "state": "finished",
+            }]))
+        self.assertEqual(read(agent / "runtime.json")["status"], "idle")
+        self.assertEqual(events.read(self.root)[0], [])
+        self.run_host()
+        try:
+            self.until(lambda: len(self.lines()) >= 4)
+        except AssertionError:
+            journal, _ = events.read(self.root)
+            log = host.host_directory(self.root) / "host.log"
+            self.fail(f"Seen {[item['type'] for item in self.lines()]}; journal "
+                      f"{[item['type'] for item in journal]}; {log.read_text() if log.exists() else 'no host log'}")
+        seen = self.lines()
+        self.assertEqual([item["type"] for item in seen],
+                         ["turn.started", "agent.status", "turn.ended", "agent.status"])
+        self.assertTrue(seen[0]["data"]["resolved"])
+        self.assertTrue(seen[2]["data"]["resolved"])
+        self.assertEqual(seen[-1]["data"]["to"], "idle")
+        self.assertNotIn("private-task-marker", self.out.read_text())
+        self.assertNotIn("private-response-marker", self.out.read_text())
 
     def test_handlers_get_events_once_per_cursor_and_the_host_stops_when_unneeded(self):
         """The real supervise loop delivers to one handler in two universes, runs a service, and exits, stopping

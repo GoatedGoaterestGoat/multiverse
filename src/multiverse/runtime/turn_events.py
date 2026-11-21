@@ -1,5 +1,6 @@
 """Validate and order metadata-only native turn edges for the event outbox."""
 
+from dataclasses import asdict
 import json
 import re
 import time
@@ -14,6 +15,7 @@ MAX_BATCH = 256
 MAX_RELAY_BATCHES = 128
 _RECENT_LIMIT = 512
 _TYPES = {'started': TurnStarted, 'joined': TurnJoined, 'ended': TurnEnded}
+_NAMES = {kind: name for name, kind in _TYPES.items()}
 
 
 def _identity(value):
@@ -32,6 +34,23 @@ def valid(edge):
             and (not isinstance(edge, TurnStarted) or type(edge.first_task) is bool))
 
 
+def encode(edge):
+    return {'type': _NAMES[type(edge)], **asdict(edge)}
+
+
+def decode(row):
+    if not isinstance(row, dict):
+        raise ValueError('Invalid turn-event metadata')
+    fields = dict(row)
+    try:
+        edge = _TYPES[fields.pop('type')](**fields)
+    except (KeyError, TypeError):
+        raise ValueError('Invalid turn-event metadata') from None
+    if not valid(edge):
+        raise ValueError('Invalid turn-event metadata')
+    return edge
+
+
 def parse(value):
     """Decode only the in-session event fields, with a fixed error for rejected metadata."""
     try:
@@ -40,17 +59,16 @@ def parse(value):
         rows = json.loads(value)
         if not isinstance(rows, list) or len(rows) > MAX_BATCH:
             raise ValueError
-        edges = []
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError
-            edge = _TYPES[row.pop('type')](**row)
-            if not valid(edge):
-                raise ValueError
-            edges.append(edge)
-        return tuple(edges)
+        return tuple(map(decode, rows))
     except (KeyError, TypeError, ValueError, RecursionError):
         raise ValueError('Invalid turn-event metadata') from None
+
+
+def public(data):
+    """Expose a cursor only when all its public references were proved."""
+    if all(isinstance(data.get(key), str) and data[key] for key in ('turn', 'ref', 'generation')):
+        return {**data, 'resolved': True}
+    return {**data, 'turn': None, 'ref': None, 'generation': None, 'resolved': False}
 
 
 def _private_attempt(directory, session, generation, wire):

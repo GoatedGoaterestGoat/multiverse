@@ -10,7 +10,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.harnesses.types import (ObservedBinding, RowFact, TranscriptSource, TranscriptView,
-                                       TranscriptRowsChanged, TurnEnded, TurnJoined, TurnProjection, TurnStarted)
+                                       TranscriptRowsChanged, TurnCursorProjection, TurnEnded, TurnJoined,
+                                       TurnProjection, TurnStarted)
 from multiverse.plugins.access import within, Denied
 from multiverse.plugins.agent_files import AgentGone
 from multiverse.runtime import transcripts as t
@@ -134,6 +135,40 @@ class TranscriptCoreTest(BaseTest):
                 self.assertEqual(reference, t.TurnReference(turn=rows.rows[1].turn, ref=rows.rows[1].cursor,
                                                              generation=rows.generation, kind='prompt'))
 
+    def test_indexed_turn_projection_matches_public_reader_without_loading_a_view(self):
+        """Indexed edges must identify the same rows and turns as both public transcript readers."""
+        edges = (TurnStarted(turn='native-turn', ref='native-start', kind='prompt', source='person'),
+                 TurnJoined(turn='native-turn', ref='native-join', source='person'),
+                 TurnEnded(turn='native-turn', ref='native-end', kind='prompt', state='finished'))
+        _, session, _ = t.transcript_snapshot(self.root, self.directory)
+        for has_refs in (False, True):
+            with self.subTest(has_refs=has_refs):
+                self.set_rows(['prompt', 'mid_turn', 'response'], refs=has_refs)
+                page = t.rows(self.root, self.directory, bodies=False)
+                turn_page = t.turns(self.root, self.directory)
+                public_turn, = turn_page.turns
+                anchor = page.rows[0]
+
+                def project(selected, transitions, *, reader):
+                    self.assertEqual(selected.native_id, self.native_id)
+                    self.assertEqual(transitions, edges)
+                    reader.check()
+                    return tuple(TurnCursorProjection(turn_position='0:original', turn_ref=anchor.ref,
+                                                      turn_nearest=anchor.ref, row_position=f'{index}:original',
+                                                      row_nearest=row.ref, kind='prompt')
+                                 for index, row in enumerate(page.rows))
+
+                self.provider.turn_cursor_projection = project
+                self.provider.calls.clear()
+                got = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, edges,
+                                        storage=session, deadline=monotonic() + 5)
+                self.assertEqual(page.generation, turn_page.generation)
+                self.assertEqual([row.turn for row in page.rows], [public_turn.id] * len(edges))
+                self.assertEqual(got, tuple(t.TurnReference(turn=public_turn.id, ref=row.cursor,
+                                                           generation=page.generation, kind=public_turn.kind)
+                                            for row in page.rows))
+                self.assertEqual(self.provider.calls, [])
+
     def test_turn_start_keeps_null_when_the_row_misses_the_deadline(self):
         """A reported start must use the shared deadline even when its row becomes readable on the next attempt."""
         self.set_rows([])
@@ -152,6 +187,40 @@ class TranscriptCoreTest(BaseTest):
         clock.sleep.assert_called_once_with(.01)
         self.assertEqual(result, (t.TurnReference(),))
         self.assertEqual([call[0] for call in self.provider.calls], ['view'])
+
+    def test_busy_binding_does_not_cut_the_budget_for_a_stored_turn_row(self):
+        """Namespace contention must not turn a readable row into an unresolved event."""
+        self.set_rows(['prompt', 'response'])
+        page = t.rows(self.root, self.directory, bodies=False)
+        edge = TurnEnded(turn='r0', kind='prompt', ref='r1', state='finished')
+        real_snapshot = t._snapshot
+        real_view = self.provider.transcript_view
+        elapsed, attempts = 0.0, 0
+
+        def snapshot(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise t.Retry('Native conversation ownership is updating')
+            return real_snapshot(*args, **kwargs)
+
+        def advance(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        def view(*args, **kwargs):
+            advance(.6)
+            return real_view(*args, **kwargs)
+
+        with patch.object(t, 'time') as clock, patch.object(t, '_snapshot', side_effect=snapshot), \
+                patch.object(self.provider, 'transcript_view', side_effect=view):
+            clock.monotonic.side_effect = lambda: elapsed
+            clock.sleep.side_effect = advance
+            result, = t.turn_references(self.root, self.directory, 'launch', self.native_id, 0, (edge,),
+                                        deadline=2, row_wait=.5)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(result, t.TurnReference(turn=page.rows[1].turn, ref=page.rows[1].cursor,
+                                                generation=page.generation, kind='prompt'))
 
     def test_turn_projection_keeps_partial_proof_only_for_the_current_scope(self):
         """A later edge running out of time must preserve an earlier verified cursor only for the same binding."""

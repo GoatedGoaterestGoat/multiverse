@@ -255,19 +255,18 @@ rows through this protocol, with `transcripts.read`.
 
 | Event | `data` |
 | --- | --- |
-| `turn.started` | `turn`, `kind`, `ref`, `generation`, `source`, `message`, `first_task` |
-| `turn.joined` | `turn`, `ref`, `generation`, `source`, `message` |
-| `turn.ended` | `turn`, `kind`, `ref`, `generation`, `state` |
+| `turn.started` | `turn`, `kind`, `ref`, `generation`, `resolved`, `source`, `message`, `first_task` |
+| `turn.joined` | `turn`, `ref`, `generation`, `resolved`, `source`, `message` |
+| `turn.ended` | `turn`, `kind`, `ref`, `generation`, `resolved`, `state` |
 
 - `turn` and `kind` are the turn's ID and kind as the turns above group it, so
   a skill a harness stores as a prompt is a `prompt` turn. `ref` and
   `generation` are the row's cursor: the input's row for a start or join, the
   turn's last stored row for an end, its own turn-end row included where the
-  harness has stored one. For a reported row, mv2 retries within the event's
-  existing read deadline if the row isn't visible yet. Any of these
-  fields is null when mv2 can't prove which row it is. The event still says
-  what happened, and a plugin pairs a null-turn start and end by order, since
-  a conversation runs one turn at a time.
+  harness has stored one. `resolved` is true when mv2 proved all three; false
+  when it couldn't, and then they are null. An unresolved event is published
+  anyway, in its place, never dropped; a plugin pairs a null-turn start and
+  end by order, since a conversation runs one turn at a time.
 - `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
   a message, a plugin's send, an answer, a command run with `mv2 slash`, the
   launch's task) or `harness` (anything else). `message` is the mv2 message ID
@@ -280,14 +279,12 @@ rows through this protocol, with `transcripts.read`.
   tell, or mv2 closed the turn because its end was never reported). A plugin
   never matches a harness's interruption text.
 
-**Order.** A turn starts once, before its joins and its end. A turn's end is
-recorded once its rows are stored and before the status change to `idle` that
-follows it, whenever mv2 can see the end by then. A start or join is recorded
-once its row is readable, within the read deadline, or with null fields when
-the deadline runs out. Working and waiting status can publish while the row
-is pending. Later edges of that turn in that conversation come after it.
-A harness may continue a turn on its own after it ended, with no new input.
-The turn then ends again with a later `ref`, and the latest end wins.
+**Order.** A turn starts once, before its joins and its end, and the journal
+keeps the order the harness reported them in, prompt events and status changes
+included: a turn's end comes before the `idle` that follows it, whenever mv2
+can see the end by then. A harness may continue a turn on its own after it
+ended, with no new input; the turn then ends again with a later `ref`, and the
+latest end wins.
 
 **Missed ends.** A new turn whose predecessor's end was never reported records
 that end as `unknown` first. A launch's end, a crash noticed later, or a
@@ -297,10 +294,30 @@ whose turn's start mv2 never saw (the in-session part reloaded mid-turn) is
 recorded alone. After a gap the journal no longer holds, a plugin reads the
 turns once.
 
-**How it's kept.** Harnesses report each edge with its native row and turn;
-core builds the public turn ID, cursor and generation, maps the delivery to
-the message, and keeps a ledger per agent and launch with the prompt events,
-written in order and never held up by the change it reports.
+**How it's kept.** A status report never reads a transcript: the harness's
+report of each edge, with its native row and turn, is staged with the status
+change in the agent's ordered queue, and the agent's status is recorded at
+once. A status report looks up which plugins subscribe once for all the events
+it records, and skips reading plugin settings only when no plugin here could
+subscribe to any of them. The plugin host then resolves each staged edge off
+every report path: it proves the public turn ID, cursor and generation (from
+the harness's own small index where it keeps one, otherwise from a bounded
+read in a separate process), maps the delivery to the message, and publishes
+the queue in order. So a status event in the journal can trail the agent's
+status by the time resolution takes, but never comes before an edge staged
+ahead of it. Edges are staged only while a plugin subscribes to turn events.
+The queue lives in the agent's folder, so a host restart resumes it. At most
+512 entries per agent wait to be resolved; anything staged beyond them goes to
+fixed files beside the queue, in order, and its turn events are published
+unresolved, which keeps the work bounded, while its other events publish as
+usual. Those files exist only while the host falls behind or isn't running,
+and each is removed, oldest first, once everything in it is published. Nothing
+staged is ever dropped. Turn events carry only the public turn ID and cursor
+fields; what the harness reports privately for each edge stays in the queue.
+
+A staged edge wakes the host, and a recovery scan picks up missed wakes. The
+host reuses workers for indexed reads. Full reads and index builds run one at
+a time in a process that exits.
 
 ## The adapter's part
 

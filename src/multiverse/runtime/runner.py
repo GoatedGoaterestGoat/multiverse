@@ -12,7 +12,7 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime
+from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime, stage_before_boundary
 from multiverse.store import exists_replaced, lock, now, read, retry_missing, write
 from multiverse.runtime.process import process_started
 
@@ -32,6 +32,18 @@ def bounded_output(text):
     text = ''.join(character for character in text if character.isprintable() or character in '\n\t')
     text = '\n'.join(text.rstrip().splitlines()[-OUTPUT_LINES:])
     return text.encode('utf-8')[-OUTPUT_BYTES:].decode('utf-8', errors='ignore')
+
+
+def _finish_relay_events(agent_dir, launch_id, proxy, *, stopping=lambda: False):
+    """Keep admitted edges before marking their exact launch terminal."""
+    if proxy is not None:
+        while stage_before_boundary(agent_dir, proxy.stage_boundary_events) is False:
+            if stopping():
+                print('Multiverse stopped with native relay metadata that could not be saved', file=sys.stderr)
+                return
+            if not agent_dir.is_dir() or runtime(agent_dir).get('launch_id') != launch_id:
+                return
+            time.sleep(.05)
 
 
 def launch_diagnostic(agent_dir, launch_id, reason):
@@ -708,7 +720,8 @@ def main():
 
             def navigate(action, event):
                 if action == 'commit' and proxy is not None:
-                    proxy.stage_adapter_events()
+                    if stage_before_boundary(agent_dir, proxy.stage_boundary_events) is False:
+                        raise OSError('Could not keep the pending native events before the conversation switch')
                 return apply_navigation(action, event)
 
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
@@ -725,9 +738,9 @@ def main():
                 record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None,
                 record_prompt_transitions=lambda native_id, generation, edges: prompt_events.stage(
                     agent_dir, launch.name, native_id, edges, generation=generation),
-                record_turn_transitions=lambda native_id, generation, edges, *, deadline: prompt_events.stage_turns(
+                record_turn_transitions=lambda native_id, generation, edges: prompt_events.stage_turns(
                     Path(env['MV2_UNIVERSE']), agent_dir, launch.name, native_id, edges, generation=generation,
-                    task_launch=request.get('task_launch') is True, deadline=deadline),
+                    task_launch=request.get('task_launch') is True),
                 publish_prompt_events=lambda: prompt_events.publish(agent_dir))
             roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
@@ -885,8 +898,7 @@ def main():
         if not startup_checked:
             finish_failed_wake(launch, request, env, process,
                                diagnostic.get('reason') or 'Runner ended before launch readiness')
-        if proxy is not None:
-            proxy.stage_adapter_events()
+        _finish_relay_events(agent_dir, launch.name, proxy, stopping=lambda: stop_signal is not None)
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code in (0, -signal.SIGTERM, 143) or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
@@ -904,8 +916,7 @@ def main():
     except Exception as error:
         print(f"Multiverse launch failed: {error}", file=sys.stderr)
         diagnostic = launch_diagnostic(agent_dir, launch.name, f'Multiverse launch failed: {error}')
-        if proxy is not None:
-            proxy.stage_adapter_events()
+        _finish_relay_events(agent_dir, launch.name, proxy, stopping=lambda: stop_signal is not None)
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error), **diagnostic)
         if not exited:  # failed before the process ended, or before it could start: still its one exit
             from multiverse.runtime.lifecycle import _event
