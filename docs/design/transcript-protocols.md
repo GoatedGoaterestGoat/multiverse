@@ -8,7 +8,7 @@ history starts after the harness's own compaction, and the one-shot run.
 Harness-neutral conversation entries come later (see [Later](#later)).
 
 The protocols are mv2's own. A plugin uses them; it never defines what an
-adapter implements ([plugins](plugins.md)). Reading is implemented for Claude and Codex. Pi reports it unavailable
+adapter implements ([plugins](plugins.md)). Reading is implemented for Claude, Codex and Antigravity CLI. Pi reports it unavailable
 ("not implemented for this harness yet") until it gets its own implementation.
 
 ## Rules
@@ -168,6 +168,15 @@ rollout yet reads as not stored yet, never as the previous thread. While a
 switch is unresolved, current reads and Codex ask are unavailable (try again)
 rather than choosing a conversation; a read of an explicitly selected earlier
 generation still works.
+
+### Antigravity transcript rules
+
+Antigravity reads `brain/<uuid>/.system_generated/logs/transcript_full.jsonl` under the agent's recorded `~/.gemini/antigravity-cli` home, falling back to `transcript.jsonl` when the full log is absent. Components are opened with `O_NOFOLLOW`; symlinks and unreadable files report an error rather than absence, while a missing log reports unavailable with `retry=True`.
+
+- Every complete newline-terminated JSONL line is one row; an unfinished last line waits for its newline, and damaged rows remain `meta` with no body. Unique nonnegative `step_index` values form refs `step-<n>`. Positions chain the SHA-256 digests of preceding line bytes; body reads re-prove the prefix on concurrent growth and raise `TranscriptRowsChanged` on rewrites.
+- `USER_INPUT` is `prompt` (`source="human"` for `USER_EXPLICIT`). `PLANNER_RESPONSE` is `response` and ends the turn when `status` is `DONE` with text and no `tool_calls` (or `CANCELLED`/`INTERRUPTED`). `GENERIC` rows from `MODEL` are `tool_result`.
+- `SYSTEM_MESSAGE` rows carrying Antigravity's `Stop hook blocked termination:` envelope are `prompt` (`source="plugin"`). Rows carrying `[Message] ... content=` with `sender=system` and `priority=MESSAGE_PRIORITY_HIGH`, `priority=MESSAGE_PRIORITY_NORMAL` or no priority field (excluding server-restart notices) are `agentapi` deliveries: `mid_turn` while a turn is open and `prompt` when idle (`source="plugin"`). Rows with `sender=<conversation>/task-<n>` (background-task notifications) use `source="task-notification"` (`mid_turn` while a turn is open, `prompt` when idle). Low-priority system notices (such as Antigravity's `priority=MESSAGE_PRIORITY_LOW` server-restart notice), other `[Message]` senders and all other system messages are `injected`.
+- `CHECKPOINT` rows are `compaction` and advance `context_from` so earlier rows read as out of context.
 
 ## History and context
 
@@ -405,7 +414,7 @@ transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
 `models.FAMILY`) gets one model reply to a context the plugin supplies, with
 no tools and no saved conversation. `run_options()` (`observe`, but it may start
 the harness once per process to read its version) says whether a
-harness runs at all and what it keeps. Claude and checked Codex releases implement it; Pi and custom harnesses report it unsupported.
+harness runs at all and what it keeps. Claude and checked Codex releases implement it; Antigravity CLI (1.5.14 lacks a zero-tools headless mode, a persistence-free option and synthetic conversation-history import), Pi and custom harnesses report it unsupported.
 
 - **Messages.** A `Row` is the native passthrough: this harness's format, with
   its body, used in the order given as one linear conversation, with the

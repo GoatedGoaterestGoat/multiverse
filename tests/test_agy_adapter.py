@@ -2492,6 +2492,646 @@ class AgyAdapterUnitTest(BaseTest):
                 self.assertEqual((res.value['coverage'], res.value['entries']), ('unknown', []))
 
 
+    def test_transcript_reading_compaction_and_turn_projection(self):
+        """Antigravity's TranscriptProvider and TurnEventProvider expose real transcript_full.jsonl/transcript.jsonl
+        rows, labels, CHECKPOINT compaction context boundaries, rewrite detection and turn projection through core's
+        public transcript reader without touching live processes or leaking symlinks."""
+        from time import monotonic
+        from multiverse.harnesses.types import TurnEnded, TurnJoined, TurnStarted
+        from multiverse.runtime import transcripts as core_transcripts
+
+        agent_id, launch_id, conv1, conv2 = str(uuid4()), str(uuid4()), str(uuid4()), str(uuid4())
+        agent_dir = self.root / 'state' / 'agents' / agent_id
+        agent_dir.mkdir(parents=True)
+        home = self._create_saved_conversation(conv1)
+        real_home = os.path.realpath(home)
+        uni_id = read(self.root / 'universe.json')['id']
+        write(agent_dir / 'properties.json', {
+            'id': agent_id, 'name': 'reader', 'harness': 'agy', 'workspace': str(self.work),
+            'universe_id': uni_id, 'native_session_provider': 'agy',
+            'native_session_id': conv1, 'native_session_home': real_home,
+        })
+        write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'running', 'status': 'idle'})
+
+        # Before any transcript exists, info reports unavailable, view marks retry=True for event wait, readable=False.
+        adapter = AgyAdapter.configured('agy', {})
+        session = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
+        missing_info = core_transcripts.info(self.root, agent_dir)
+        self.assertEqual(missing_info.state, 'unavailable')
+        self.assertTrue(adapter.transcript_view(session).source.retry)
+        self.assertFalse(adapter.transcript_readable(session))
+
+        logs = home / 'brain' / conv1 / '.system_generated' / 'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        full_path = logs / 'transcript_full.jsonl'
+        compact_path = logs / 'transcript.jsonl'
+        rows_data = [
+            {'step_index': 0, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+             'created_at': '2026-11-22T12:00:00Z', 'content': '<USER_REQUEST>\nFirst task\n</USER_REQUEST>'},
+            {'step_index': 1, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:00:01Z', 'model': 'gemini-4-neon-medium',
+             'tool_calls': [{'name': 'run_command', 'args': {}}]},
+            {'step_index': 2, 'source': 'MODEL', 'type': 'GENERIC', 'status': 'DONE',
+             'created_at': '2026-11-22T12:00:02Z', 'content': 'command output'},
+            {'step_index': 3, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:00:03Z',
+             'content': '<SYSTEM_MESSAGE>\n[Message] sender=system content=Message from lead:\nmid-turn steer\n</SYSTEM_MESSAGE>'},
+            {'step_index': 4, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:00:04Z', 'model': 'gemini-4-neon-medium', 'content': 'First answer'},
+            {'step_index': 5, 'source': 'SYSTEM', 'type': 'CHECKPOINT', 'status': 'DONE',
+             'created_at': '2026-11-22T12:01:00Z', 'content': '# Resuming from a compaction\nSummary body'},
+            {'step_index': 6, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:01:05Z',
+             'content': '<SYSTEM_MESSAGE>\nStop hook blocked termination: Message from peer:\nfollow-up turn\n</SYSTEM_MESSAGE>'},
+            {'step_index': 7, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:01:06Z', 'content': 'Reminder: work efficiently'},
+            {'step_index': 8, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+             'created_at': '2026-11-22T12:01:08Z', 'model': 'gemini-4-neon-medium', 'content': 'Second answer'},
+        ]
+        # Include one damaged JSONL line and one unfinished line (no trailing newline).
+        full_path.write_text(
+            ''.join(json.dumps(item) + '\n' for item in rows_data)
+            + '{damaged json line\n'
+            + '{"step_index": 99, "type": "USER_INPUT"'
+        )
+        # Compact sibling has fewer rows; transcript_full.jsonl must take precedence.
+        compact_path.write_text(json.dumps(rows_data[0]) + '\n')
+
+        info = core_transcripts.info(self.root, agent_dir)
+        self.assertEqual(info.state, 'supported')
+        self.assertEqual(info.format, 'agy-jsonl')
+        self.assertEqual(info.rows, 10)  # 9 valid + 1 damaged; unfinished trailing line ignored
+        self.assertEqual(info.turns, 2)
+        self.assertEqual(info.context_rows, 5)  # CHECKPOINT (idx 5) through damaged row (idx 9)
+
+        page = core_transcripts.rows(self.root, agent_dir, bodies=True)
+        self.assertEqual(
+            [row.label for row in page.rows],
+            ['prompt', 'response', 'tool_result', 'mid_turn', 'response', 'compaction', 'prompt', 'injected', 'response', 'meta'],
+        )
+        self.assertEqual(page.rows[0].source, 'human')
+        self.assertEqual(page.rows[3].source, 'plugin')
+        self.assertTrue(page.rows[4].ends_turn)
+        self.assertFalse(page.rows[4].in_context)
+        self.assertTrue(page.rows[5].in_context)
+        self.assertEqual(page.rows[6].source, 'plugin')
+        self.assertEqual(page.rows[0].data['step_index'], 0)
+        self.assertIsNone(page.rows[9].data)
+
+        turn_page = core_transcripts.turns(self.root, agent_dir)
+        self.assertEqual(len(turn_page.turns), 2)
+        self.assertEqual(turn_page.turns[0].id, 'step-0')
+        self.assertTrue(turn_page.turns[0].finished)
+        self.assertIn('First task', turn_page.turns[0].preview)
+        self.assertEqual(turn_page.turns[1].id, 'step-6')
+        self.assertTrue(turn_page.turns[1].finished)
+
+        # TurnEventProvider projects refs within the same view cleanly.
+        edges = (
+            TurnStarted(turn='step-0', ref='step-0', kind='prompt', source='person'),
+            TurnJoined(turn='step-0', ref='step-3', source='harness'),
+            TurnEnded(turn='step-0', ref='step-4', kind='prompt', state='finished'),
+        )
+        projected = core_transcripts.turn_references(
+            self.root, agent_dir, launch_id, conv1, 0, edges, deadline=monotonic() + 5,
+        )
+        self.assertEqual(projected[0].turn, 'step-0')
+        self.assertEqual(projected[0].ref, page.rows[0].cursor)
+        self.assertEqual(projected[1].ref, page.rows[3].cursor)
+        self.assertEqual(projected[2].ref, page.rows[4].cursor)
+
+        # Tip slicing stops history at the chosen step and adjusts context_from; readable=True on regular transcript.
+        self.assertTrue(adapter.transcript_readable(session))
+        tipped = core_transcripts.info(self.root, agent_dir, tip='step-4')
+        self.assertEqual((tipped.tip, tipped.turns, tipped.context_rows), ('step-4', 1, 5))
+
+        # Rewriting the file invalidates earlier cursors cleanly with Changed('rewritten').
+        rewritten_row = {**rows_data[0], 'content': '<USER_REQUEST>\nChanged\n</USER_REQUEST>'}
+        full_path.write_text(json.dumps(rewritten_row) + '\n')
+        with self.assertRaises(core_transcripts.Changed) as changed:
+            core_transcripts.rows(self.root, agent_dir, after=page.rows[4].cursor, bodies=False)
+        self.assertEqual(changed.exception.reason, 'rewritten')
+
+        # Falling back to compact transcript.jsonl when transcript_full.jsonl is absent works cleanly.
+        full_path.unlink()
+        compact_info = core_transcripts.info(self.root, agent_dir)
+        self.assertEqual((compact_info.state, compact_info.rows), ('supported', 1))
+
+        # Background-task notifications (sender=<conv>/task-N) use source='task-notification', Antigravity's
+        # MESSAGE_PRIORITY_LOW server-restart notice and other [Message] senders stay injected, and only
+        # sender=system with high/unset priority confirms route='agentapi' delivery.
+        full_path.unlink(missing_ok=True)
+        task_text = 'Task task-213 completed'
+        other_text = 'Subagent note'
+        restart_text = (
+            '[Notice] All your subagents and background tasks have been stopped due to server restart. '
+            'If resuming work, please check on status and restart as needed.'
+        )
+        sys_text = 'Message from lead:\nactual agentapi delivery'
+        env_rows = [
+            {'step_index': 0, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:00Z', 'content': '<USER_REQUEST>\nstart\n</USER_REQUEST>'},
+            {'step_index': 1, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:01Z', 'content': 'done'},
+            {'step_index': 2, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:02Z',
+             'content': f'[Message] timestamp=2026-11-24T10:00:02Z sender={conv1}/task-213 content={task_text}'},
+            {'step_index': 3, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:03Z',
+             'content': f'[Message] timestamp=2026-11-24T10:00:03Z sender=other-agent content={other_text}'},
+            {'step_index': 4, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:04Z',
+             'content': (
+                 'The following is a <SYSTEM_MESSAGE>...\n\n<SYSTEM_MESSAGE>\n'
+                 f'[Message] timestamp=2026-11-24T10:00:04Z sender=system priority=MESSAGE_PRIORITY_LOW content={restart_text}\n'
+                 '</SYSTEM_MESSAGE>'
+             )},
+            {'step_index': 5, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+             'created_at': '2026-11-24T10:00:05Z',
+             'content': f'[Message] timestamp=2026-11-24T10:00:05Z sender=system priority=MESSAGE_PRIORITY_HIGH content={sys_text}'},
+        ]
+        full_path.write_text(''.join(json.dumps(item) + '\n' for item in env_rows))
+        env_view = adapter.transcript_view(session)
+        self.assertEqual(
+            [(row.label, row.source) for row in env_view.rows[2:]],
+            [('prompt', 'task-notification'), ('injected', None), ('injected', None), ('mid_turn', 'plugin')],
+        )
+        self.assertIs(agy_storage.transcript_has_message(
+            conv1, home, text_sha256=agy_storage.message_hash(task_text), route='agentapi',
+            since='2026-11-24T09:59:59Z',
+        ), False)
+        self.assertIs(agy_storage.transcript_has_message(
+            conv1, home, text_sha256=agy_storage.message_hash(other_text), route='agentapi',
+            since='2026-11-24T09:59:59Z',
+        ), False)
+        self.assertIs(agy_storage.transcript_has_message(
+            conv1, home, text_sha256=agy_storage.message_hash(restart_text), route='agentapi',
+            since='2026-11-24T09:59:59Z',
+        ), False)
+        self.assertIs(agy_storage.transcript_has_message(
+            conv1, home, text_sha256=agy_storage.message_hash(sys_text), route='agentapi',
+            since='2026-11-24T09:59:59Z',
+        ), True)
+        full_path.unlink()
+
+        # Symlinked transcript fails closed with error (and readable=None) without falling back to transcript.jsonl.
+        outside = self.work / 'outside.jsonl'
+        outside.write_text(json.dumps(rows_data[0]) + '\n')
+        full_path.symlink_to(outside)
+        err_info = core_transcripts.info(self.root, agent_dir)
+        self.assertEqual(err_info.state, 'error')
+        self.assertIsNone(adapter.transcript_readable(session))
+
+    def test_turn_events_from_hooks_and_esc_cancel(self):
+        """Antigravity PreInvocation, Stop (finished, continue, error) and Esc-without-Stop idle transitions must
+        publish ordered, transcript-resolved turn.started and turn.ended events, including wake turns followed by
+        Antigravity's low-priority server-restart notice, because a broken emission or projection leaves plugins
+        blind to live Antigravity turns."""
+        from multiverse.plugins import events as plugin_events
+        from multiverse.runtime import prompt_events, transcripts as core_transcripts
+        from multiverse.universe.mailbox import append_message, update_message
+
+        agent_id, launch_id, conv1 = str(uuid4()), str(uuid4()), str(uuid4())
+        agent_dir = self.root / 'state' / 'agents' / agent_id
+        launch_dir = agent_dir / 'launches' / launch_id
+        launch_dir.mkdir(parents=True)
+        home = self._create_saved_conversation(conv1)
+        real_home = os.path.realpath(home)
+        uni_id = read(self.root / 'universe.json')['id']
+        write(agent_dir / 'properties.json', {
+            'id': agent_id, 'name': 'turns', 'harness': 'agy', 'workspace': str(self.work),
+            'universe_id': uni_id, 'native_session_provider': 'agy',
+            'native_session_id': conv1, 'native_session_home': real_home,
+        })
+        write(agent_dir / 'runtime.json', {
+            'launch_id': launch_id, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+            'native_bridge': BRIDGE,
+        })
+        launch_files.write_request(agent_dir, launch_id, {
+            'argv': ['agy', '--prompt-interactive=first task'],
+            'expected_native_id': None, 'task_launch': True,
+        })
+        logs = home / 'brain' / conv1 / '.system_generated' / 'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        full_path = logs / 'transcript_full.jsonl'
+        env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_id}
+        journal_path = agent_dir / 'prompts' / 'journal' / 'events.json'
+
+        def append_rows(*rows):
+            with full_path.open('a') as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + '\n')
+
+        drained = []
+        with patch.object(plugin_events, 'subscribers', return_value=['fixture']), \
+                patch.object(prompt_events, '_journal_event', return_value='retry') as journal_mock:
+
+            def drain_all():
+                batch = []
+                def capture(_directory, row):
+                    batch.append((row['kind'], row['data']))
+                    return 'unsubscribed'
+                journal_mock.side_effect = capture
+                try:
+                    for _ in range(16):
+                        if not journal_path.exists() or not read(journal_path).get('pending'):
+                            break
+                        prompt_events.publish(agent_dir, resolve_turns=True)
+                finally:
+                    journal_mock.side_effect = None
+                    journal_mock.return_value = 'retry'
+                drained.extend(batch)
+                return batch
+
+            # 1. Initial task turn: PreInvocation(0, initialNumSteps=1) -> tool loop PreInvocation(1, 3) -> Stop(continue).
+            append_rows(
+                {'step_index': 0, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:00Z', 'content': '<USER_REQUEST>\nfirst task\n</USER_REQUEST>'},
+            )
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 1,
+            }, env=env)
+            append_rows(
+                {'step_index': 1, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:01Z', 'tool_calls': [{'name': 'run_command', 'args': {}}]},
+                {'step_index': 2, 'source': 'MODEL', 'type': 'GENERIC', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:02Z', 'content': 'ok'},
+            )
+            # Mid-turn tool-loop PreInvocation must not emit a duplicate turn.started.
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 1, 'initialNumSteps': 3,
+            }, env=env)
+            append_rows(
+                {'step_index': 3, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:03Z', 'content': 'first done'},
+            )
+            # Enqueue a Stop-hook follow-up with a recorded mailbox attempt so turn 2 attributes source='mv2' + message ID.
+            fu_msg = append_message(agent_dir, 'follow-up task', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            fu_id = fu_msg['id']
+            update_message(agent_dir, fu_id, submission_state='accepted', delivery_method='native', attempts=[{
+                'state': 'native_queued', 'mode': 'follow-up', 'message_id': fu_id,
+                'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+            }])
+            agy_bridge.write_receipt(agent_dir, fu_id, launch_id=launch_id, native_id=conv1, route='stop-hook',
+                                     submitted_at=now(), text_sha256=agy_storage.message_hash('follow-up task'))
+            agy_bridge.enqueue_followup(agent_dir, launch_id, fu_id, conv1, 'follow-up task')
+            stop1 = agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env)
+            self.assertEqual(stop1, {'decision': 'continue', 'reason': 'follow-up task'})
+            b1 = drain_all()
+            self.assertEqual([k for k, _ in b1], ['turn.started', 'agent.status', 'turn.ended'])
+            self.assertTrue(b1[0][1]['resolved'])
+            self.assertTrue(b1[0][1]['first_task'])
+            self.assertEqual((b1[0][1]['source'], b1[0][1]['message']), ('mv2', None))
+            self.assertEqual(b1[1][1], {'from': 'idle', 'to': 'working'})
+            self.assertTrue(b1[2][1]['resolved'])
+            self.assertEqual(b1[2][1]['state'], 'finished')
+            self.assertEqual(b1[2][1]['turn'], b1[0][1]['turn'])
+
+            # 2. Stop-hook continuation turn (invocationNum keeps incrementing to 2) ends on ERROR.
+            append_rows(
+                {'step_index': 4, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:04Z',
+                 'content': '<SYSTEM_MESSAGE>\nStop hook blocked termination: follow-up task\n</SYSTEM_MESSAGE>'},
+            )
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 2, 'initialNumSteps': 5,
+            }, env=env)
+            agy_bridge.handle_hook('Stop', {
+                'conversationId': conv1, 'fullyIdle': True, 'terminationReason': 'ERROR',
+            }, env=env)
+            b2 = drain_all()
+            self.assertEqual([k for k, _ in b2], ['turn.started', 'turn.ended'])
+            self.assertTrue(b2[0][1]['resolved'])
+            self.assertFalse(b2[0][1]['first_task'])
+            self.assertEqual((b2[0][1]['source'], b2[0][1]['message']), ('mv2', fu_id))
+            self.assertTrue(b2[1][1]['resolved'])
+            self.assertEqual(b2[1][1]['state'], 'error')
+            self.assertEqual(b2[1][1]['turn'], b2[0][1]['turn'])
+
+            # 3. Wake-style turn where Antigravity appends a MESSAGE_PRIORITY_LOW restart notice right after
+            #    USER_INPUT before PreInvocation (initialNumSteps lands on the notice step), cancelled by Esc
+            #    (2 consecutive idle statusLine renders with no Stop hook).
+            append_rows(
+                {'step_index': 5, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:01:00Z', 'content': '<USER_REQUEST>\nwake prompt\n</USER_REQUEST>'},
+                {'step_index': 6, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:01:00Z',
+                 'content': (
+                     '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:01:00Z sender=system '
+                     'priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks '
+                     'have been stopped due to server restart.\n</SYSTEM_MESSAGE>'
+                 )},
+            )
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 7,
+            }, env=env)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            b3 = drain_all()
+            self.assertEqual([k for k, _ in b3], ['turn.started', 'agent.status', 'turn.ended'])
+            rows_after = core_transcripts.rows(self.root, agent_dir, bodies=False).rows
+            self.assertTrue(b3[0][1]['resolved'])
+            self.assertEqual(b3[0][1]['source'], 'person')
+            self.assertEqual(b3[0][1]['turn'], 'step-5')
+            self.assertEqual(b3[0][1]['ref'], rows_after[5].cursor)
+            self.assertTrue(b3[2][1]['resolved'])
+            self.assertEqual(b3[2][1]['state'], 'interrupted')
+            self.assertEqual(b3[2][1]['turn'], 'step-5')
+            self.assertEqual(b3[2][1]['ref'], rows_after[6].cursor)
+            self.assertNotEqual(b3[0][1]['turn'], b2[0][1]['turn'])
+
+            # 4. Post-logged idle agentapi turn after a completed/cancelled response (PreInvocation fires BEFORE
+            #    Antigravity appends step-8, and statusLine(working) beats PreInvocation): must still correlate
+            #    message ID and resolve to step-8.
+            append_rows(
+                {'step_index': 7, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'CANCELLED',
+                 'created_at': '2026-11-24T10:01:05Z', 'content': ''},
+            )
+            kite_msg = append_message(agent_dir, 'KITE', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            kite_id = kite_msg['id']
+            update_message(agent_dir, kite_id, submission_state='accepted', delivery_method='native', attempts=[{
+                'state': 'native_submitted', 'mode': 'follow-up', 'message_id': kite_id,
+                'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+            }])
+            agy_bridge.begin_idle_turn(agent_dir, launch_id, message_id=kite_id)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'working'}, env=env)
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 8,
+            }, env=env)
+            append_rows(
+                {'step_index': 8, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:02:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:02:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=KITE\n</SYSTEM_MESSAGE>'},
+                {'step_index': 9, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:02:01Z', 'content': 'KITE'},
+            )
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': False}, env=env)
+            b4 = drain_all()
+            b4_turns = [(k, d) for k, d in b4 if k.startswith('turn.')]
+            self.assertEqual([k for k, _ in b4_turns], ['turn.started', 'turn.ended'])
+            self.assertTrue(b4_turns[0][1]['resolved'])
+            self.assertEqual(b4_turns[0][1]['turn'], 'step-8')
+            self.assertEqual((b4_turns[0][1]['source'], b4_turns[0][1]['message']), ('mv2', kite_id))
+            self.assertTrue(b4_turns[1][1]['resolved'])
+            self.assertEqual(b4_turns[1][1]['turn'], 'step-8')
+
+            # 5. Post-logged task-notification turn right after KITE (step-9 is PLANNER_RESPONSE):
+            #    PreInvocation(0, initialNumSteps=10) fires before step-10 is appended; must resolve to step-10,
+            #    never walking back across PLANNER_RESPONSE step-9 into previous turn step-8 (F6b regression).
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 10,
+            }, env=env)
+            append_rows(
+                {'step_index': 10, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:02:10Z',
+                 'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:02:10Z sender={conv1}/task-1 priority=MESSAGE_PRIORITY_HIGH content=done\n</SYSTEM_MESSAGE>'},
+                {'step_index': 11, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:02:11Z', 'tool_calls': [{'name': 'run_command', 'args': {}}]},
+            )
+            # Cancelled tool call omits step-12; idle statusLine ends turn step-10 as interrupted.
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            b5 = drain_all()
+            b5_turns = [(k, d) for k, d in b5 if k.startswith('turn.')]
+            self.assertEqual([k for k, _ in b5_turns], ['turn.started', 'turn.ended'])
+            self.assertTrue(b5_turns[0][1]['resolved'])
+            self.assertEqual(b5_turns[0][1]['turn'], 'step-10')
+            self.assertEqual(b5_turns[0][1]['source'], 'harness')
+            self.assertTrue(b5_turns[1][1]['resolved'])
+            self.assertEqual(b5_turns[1][1]['turn'], 'step-10')
+
+            # 6. Post-logged agentapi turn G1 after an Esc-cancelled tool call (step-12 omitted -> step-13):
+            #    step-index gap closes prior open tool turn so step-13 classifies as prompt and resolves cleanly.
+            g1_msg = append_message(agent_dir, 'G1', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            g1_id = g1_msg['id']
+            update_message(agent_dir, g1_id, submission_state='accepted', delivery_method='native', attempts=[{
+                'state': 'native_submitted', 'mode': 'follow-up', 'message_id': g1_id,
+                'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+            }])
+            agy_bridge.begin_idle_turn(agent_dir, launch_id, message_id=g1_id)
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 13,
+            }, env=env)
+            append_rows(
+                {'step_index': 13, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:03:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:03:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=G1\n</SYSTEM_MESSAGE>'},
+            )
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            b6 = drain_all()
+            b6_turns = [(k, d) for k, d in b6 if k.startswith('turn.')]
+            self.assertEqual([k for k, _ in b6_turns], ['turn.started', 'turn.ended'])
+            self.assertEqual(b6_turns[0][1]['turn'], 'step-13')
+            self.assertEqual((b6_turns[0][1]['source'], b6_turns[0][1]['message']), ('mv2', g1_id))
+            self.assertEqual((b6_turns[1][1]['turn'], b6_turns[1][1]['state']), ('step-13', 'interrupted'))
+
+            # 7. Direct project_turn_event on a PLANNER_RESPONSE step must never walk back into the preceding prompt.
+            adapter = AgyAdapter.configured('agy', {})
+            sess_obj = SessionHandle(agent_id, 'agy', str(self.work), launch_id=launch_id,
+                                     native_id=conv1, home=real_home)
+            view_now = adapter.transcript_view(sess_obj)
+            from multiverse.harnesses.types import TurnStarted as _TurnStarted
+            proj_resp = adapter.project_turn_event(
+                sess_obj, view_now, _TurnStarted(turn='step-9', kind='prompt', ref='step-9', source='harness'),
+            )
+            self.assertIsNone(proj_resp.turn_position)
+
+            # 8. Wake launch carrying resume_message_id attributes turn 1 as source='harness' (never 'person'),
+            #    and a duplicate PreInvocation(0, same initialNumSteps) fired ~0.16 s later when Antigravity
+            #    attaches its low-priority restart notice must not split the turn or emit a phantom person turn (F6c).
+            launch2 = str(uuid4())
+            (agent_dir / 'launches' / launch2).mkdir(parents=True)
+            wake_msg = append_message(agent_dir, 'wake up', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            write(agent_dir / 'runtime.json', {
+                'launch_id': launch2, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+                'native_bridge': BRIDGE,
+            })
+            launch_files.write_request(agent_dir, launch2, {
+                'argv': ['agy', '--conversation', conv1, '--prompt-interactive=wake up'],
+                'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': wake_msg['id'],
+            })
+            append_rows(
+                {'step_index': 14, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:00Z', 'content': '<USER_REQUEST>\nwake up\n</USER_REQUEST>'},
+            )
+            env2 = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch2}
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 15,
+            }, env=env2)
+            # Duplicate PreInvocation(0, initialNumSteps=15) arrives as Antigravity logs the PRIORITY_LOW restart notice.
+            append_rows(
+                {'step_index': 15, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:01Z',
+                 'content': (
+                     '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:04:01Z sender=system '
+                     'priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks '
+                     'have been stopped due to server restart.\n</SYSTEM_MESSAGE>'
+                 )},
+            )
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 15,
+            }, env=env2)
+            append_rows(
+                {'step_index': 16, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:02Z', 'content': 'AWAKE'},
+            )
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env2)
+            b8 = drain_all()
+            b8_turns = [(k, d) for k, d in b8 if k.startswith('turn.')]
+            self.assertEqual([k for k, _ in b8_turns], ['turn.started', 'turn.ended'])
+            self.assertTrue(b8_turns[0][1]['resolved'])
+            self.assertEqual(b8_turns[0][1]['turn'], 'step-14')
+            self.assertEqual(b8_turns[0][1]['source'], 'harness')
+            self.assertFalse(b8_turns[0][1]['first_task'])
+            self.assertTrue(b8_turns[1][1]['resolved'])
+            self.assertEqual(b8_turns[1][1]['turn'], 'step-14')
+            self.assertEqual(b8_turns[1][1]['state'], 'finished')
+
+            # 8b. Exact startup-input witness gate (F6a): an unrelated first prompt on a wake launch or spawn
+            #     task launch, or a launch whose stored opening USER_INPUT cannot be proved, must stay unattributed
+            #     (source='person', attempt=None, first_task=False); a proved wake opener emits attempt=wake_id
+            #     with source='harness', first_task=False, and a second turn repeating that text is not attributed.
+            launch_unrel = str(uuid4())
+            (agent_dir / 'launches' / launch_unrel).mkdir(parents=True)
+            unrel_wake = append_message(agent_dir, 'expected wake text', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            write(agent_dir / 'runtime.json', {
+                'launch_id': launch_unrel, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+                'native_bridge': BRIDGE,
+            })
+            launch_files.write_request(agent_dir, launch_unrel, {
+                'argv': ['agy', '--conversation', conv1, '--prompt-interactive=expected wake text'],
+                'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': unrel_wake['id'],
+                'env': {'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_unrel},
+            })
+            append_rows(
+                {'step_index': 17, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:10Z', 'content': '<USER_REQUEST>\nunrelated typed prompt\n</USER_REQUEST>'},
+                {'step_index': 18, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:11Z', 'content': 'ok'},
+            )
+            env_unrel = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_unrel}
+            unrel_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=18, env=env_unrel,
+            )
+            self.assertEqual(len(unrel_edges), 1)
+            self.assertEqual((unrel_edges[0].source, unrel_edges[0].attempt, unrel_edges[0].first_task),
+                             ('person', None, False))
+            # Even if turn 2 later repeats the exact wake text, the one-shot startup gate does not attribute it.
+            append_rows(
+                {'step_index': 19, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:12Z', 'content': '<USER_REQUEST>\nexpected wake text\n</USER_REQUEST>'},
+            )
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env_unrel)
+            turn2_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=20, env=env_unrel,
+            )
+            self.assertEqual(len(turn2_edges), 1)
+            self.assertEqual((turn2_edges[0].source, turn2_edges[0].attempt, turn2_edges[0].first_task),
+                             ('person', None, False))
+            # Unrelated first prompt on a spawn --task launch must NOT mark first_task=True.
+            conv_unrel_spawn = str(uuid4())
+            launch_unrel_spawn = str(uuid4())
+            (agent_dir / 'launches' / launch_unrel_spawn).mkdir(parents=True)
+            spawn_logs = home / 'brain' / conv_unrel_spawn / '.system_generated' / 'logs'
+            spawn_logs.mkdir(parents=True, exist_ok=True)
+            (spawn_logs / 'transcript_full.jsonl').write_text(json.dumps({
+                'step_index': 0, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                'created_at': '2026-11-24T10:04:15Z', 'content': '<USER_REQUEST>\nsomething else\n</USER_REQUEST>',
+            }) + '\n')
+            launch_files.write_request(agent_dir, launch_unrel_spawn, {
+                'argv': ['agy', '--prompt-interactive=expected spawn task'],
+                'expected_native_id': None, 'task_launch': True, 'resume_message_id': None,
+            })
+            unrel_spawn_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_unrel_spawn, conv_unrel_spawn, invocation_num=0, initial_num_steps=1,
+            )
+            self.assertEqual(len(unrel_spawn_edges), 1)
+            self.assertEqual((unrel_spawn_edges[0].source, unrel_spawn_edges[0].attempt, unrel_spawn_edges[0].first_task),
+                             ('person', None, False))
+            # Missing/unreadable transcript or missing initialNumSteps on a wake launch stays unattributed
+            # with source='harness', attempt=None, first_task=False (never claiming the person typed it).
+            conv_missing = str(uuid4())
+            launch_missing = str(uuid4())
+            (agent_dir / 'launches' / launch_missing).mkdir(parents=True)
+            launch_files.write_request(agent_dir, launch_missing, {
+                'argv': ['agy', '--conversation', conv_missing, '--prompt-interactive=expected wake text'],
+                'expected_native_id': conv_missing, 'task_launch': False, 'resume_message_id': unrel_wake['id'],
+            })
+            missing_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_missing, conv_missing, invocation_num=0, initial_num_steps=1,
+            )
+            self.assertEqual(len(missing_edges), 1)
+            self.assertEqual((missing_edges[0].source, missing_edges[0].attempt, missing_edges[0].first_task),
+                             ('harness', None, False))
+            launch_nosteps = str(uuid4())
+            (agent_dir / 'launches' / launch_nosteps).mkdir(parents=True)
+            launch_files.write_request(agent_dir, launch_nosteps, {
+                'argv': ['agy', '--conversation', conv1, '--prompt-interactive=expected wake text'],
+                'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': unrel_wake['id'],
+            })
+            nosteps_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_nosteps, conv1, invocation_num=0, initial_num_steps=None,
+            )
+            self.assertEqual(len(nosteps_edges), 1)
+            self.assertEqual((nosteps_edges[0].source, nosteps_edges[0].attempt, nosteps_edges[0].first_task),
+                             ('harness', None, False))
+            # Real wake opener WITH a trailing PRIORITY_LOW restart notice before PreInvocation proves step-20
+            # and emits source='harness', attempt=real_wake['id'], first_task=False.
+            launch_real_wake = str(uuid4())
+            (agent_dir / 'launches' / launch_real_wake).mkdir(parents=True)
+            real_wake = append_message(agent_dir, 'real wake opener', {'name': 'lead'}, 'follow-up', target_session=conv1)
+            launch_files.write_request(agent_dir, launch_real_wake, {
+                'argv': ['agy', '--conversation', conv1, '--prompt-interactive=real wake opener'],
+                'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': real_wake['id'],
+                'env': {'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_real_wake},
+            })
+            append_rows(
+                {'step_index': 20, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:20Z',
+                 'content': '<USER_REQUEST>\nreal wake opener\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime\n</ADDITIONAL_METADATA>'},
+                {'step_index': 21, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:20Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:04:20Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>'},
+            )
+            real_wake_edges = agy_bridge._on_turn_start(
+                agent_dir, launch_real_wake, conv1, invocation_num=0, initial_num_steps=22,
+            )
+            self.assertEqual(len(real_wake_edges), 1)
+            self.assertEqual((real_wake_edges[0].source, real_wake_edges[0].attempt, real_wake_edges[0].first_task),
+                             ('harness', real_wake['id'], False))
+            # Close step-20's wake turn and restore runtime.json to launch2 before step 9.
+            append_rows(
+                {'step_index': 22, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:04:22Z', 'content': 'REAL_AWAKE'},
+            )
+            write(agent_dir / 'runtime.json', {
+                'launch_id': launch2, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+                'native_bridge': BRIDGE,
+            })
+
+            # 9. Batched SYSTEM_MESSAGE rows delivered together with omitted odd steps between them (e.g. steps
+            #    24, 26, 28 before one response at 29) must stay one turn: ['prompt', 'mid_turn', 'mid_turn'].
+            append_rows(
+                {'step_index': 24, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:05:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch1\n</SYSTEM_MESSAGE>'},
+                {'step_index': 26, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:05:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch2\n</SYSTEM_MESSAGE>'},
+                {'step_index': 28, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:05:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch3\n</SYSTEM_MESSAGE>'},
+                {'step_index': 29, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:05:02Z', 'content': 'BATCH_DONE'},
+            )
+            batch_view = adapter.transcript_view(sess_obj)
+            by_step = {r.ref: r.label for r in batch_view.rows}
+            self.assertEqual(
+                [by_step['step-24'], by_step['step-26'], by_step['step-28'], by_step['step-29']],
+                ['prompt', 'mid_turn', 'mid_turn', 'response'],
+            )
+
     def test_stop_hook_pins_launch_id_and_yields_to_idle_before_continuation_cap(self):
         """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's
         follow-up queue, and Stop must yield to idle after MAX_STOP_CONTINUATIONS so Antigravity's 10-block

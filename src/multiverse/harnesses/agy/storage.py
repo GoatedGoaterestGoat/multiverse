@@ -26,7 +26,10 @@ _SQLITE_HEADER = b'SQLite format 3\x00'
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _USER_REQUEST_BLOCK = re.compile(r'<USER_REQUEST>\s*((?:(?!<USER_REQUEST>).)*?)\s*</USER_REQUEST>', re.DOTALL)
 _SYSTEM_MESSAGE_BLOCK = re.compile(r'<SYSTEM_MESSAGE>\s*((?:(?!<SYSTEM_MESSAGE>).)*?)\s*</SYSTEM_MESSAGE>', re.DOTALL)
-_AGENTAPI_ENVELOPE = re.compile(r'^\[Message\]\s+[^\n]*?\bcontent=(.*)$', re.DOTALL)
+_MESSAGE_ENVELOPE = re.compile(r'^\[Message\]\s+((?:[^\n]*?\s)?)content=(.*)$', re.DOTALL)
+_ENVELOPE_SENDER = re.compile(r'(?:^|\s)sender=(\S+)')
+_ENVELOPE_PRIORITY = re.compile(r'(?:^|\s)priority=(\S+)')
+_RESTART_NOTICE_PREFIX = '[Notice] All your subagents and background tasks have been stopped due to server restart'
 _STOP_HOOK_ENVELOPE = re.compile(r'^Stop hook blocked termination:\s*(.*)$', re.DOTALL)
 
 
@@ -342,10 +345,45 @@ def _row_content(row: dict) -> str | None:
     return None
 
 
+def _is_agentapi_envelope(sender: str | None, priority: str | None, body: str) -> bool:
+    """True only for `agentapi send-message` rows (sender=system, normal/high/unset priority, not a restart notice)."""
+    if sender != 'system':
+        return False
+    if priority not in (None, 'MESSAGE_PRIORITY_HIGH', 'MESSAGE_PRIORITY_NORMAL'):
+        return False
+    if body.lstrip().startswith(_RESTART_NOTICE_PREFIX):
+        return False
+    return True
+
+
+def _extract_message_envelopes(row: dict) -> tuple[tuple[str | None, str | None, str], ...]:
+    """Extract `(sender, priority, content)` triples from Antigravity `[Message] ... content=` SYSTEM_MESSAGE rows."""
+    if row.get('type') != 'SYSTEM_MESSAGE':
+        return ()
+    content = _row_content(row)
+    if content is None:
+        return ()
+    blocks = [match.group(1).strip() for match in _SYSTEM_MESSAGE_BLOCK.finditer(content)]
+    if not blocks:
+        blocks = [content.strip()]
+    found = []
+    for block in blocks:
+        envelope = _MESSAGE_ENVELOPE.match(block)
+        if envelope:
+            header = envelope.group(1)
+            sender_match = _ENVELOPE_SENDER.search(header)
+            priority_match = _ENVELOPE_PRIORITY.search(header)
+            sender = sender_match.group(1) if sender_match else None
+            priority = priority_match.group(1) if priority_match else None
+            found.append((sender, priority, envelope.group(2)))
+    return tuple(found)
+
+
 def _extracted_candidates(row: dict, route: str | None = None) -> tuple[str, ...]:
     """Candidate message payloads inside Antigravity's transcript row envelopes, constrained by `route`.
 
-    - `route == 'agentapi'`: only `SYSTEM_MESSAGE` rows carrying `[Message] ... content=<payload>`.
+    - `route == 'agentapi'`: only `SYSTEM_MESSAGE` rows carrying `[Message] ... sender=system ... content=<payload>`
+      with high/unset priority (excluding `MESSAGE_PRIORITY_LOW` server-restart notices).
     - `route == 'stop-hook'`: only `SYSTEM_MESSAGE` rows carrying `Stop hook blocked termination: <payload>`.
     - `route is None`: any `USER_INPUT` or `SYSTEM_MESSAGE` payload (for route-agnostic inspection).
     """
@@ -354,18 +392,10 @@ def _extracted_candidates(row: dict, route: str | None = None) -> tuple[str, ...
         return ()
     row_type = row.get('type')
     if route == 'agentapi':
-        if row_type != 'SYSTEM_MESSAGE':
-            return ()
-        candidates = []
-        for match in _SYSTEM_MESSAGE_BLOCK.finditer(content):
-            envelope = _AGENTAPI_ENVELOPE.match(match.group(1).strip())
-            if envelope:
-                candidates.append(envelope.group(1))
-        if not candidates:
-            envelope = _AGENTAPI_ENVELOPE.match(content.strip())
-            if envelope:
-                candidates.append(envelope.group(1))
-        return tuple(candidates)
+        return tuple(
+            body for sender, priority, body in _extract_message_envelopes(row)
+            if _is_agentapi_envelope(sender, priority, body)
+        )
     if route == 'stop-hook':
         if row_type != 'SYSTEM_MESSAGE':
             return ()
@@ -386,15 +416,16 @@ def _extracted_candidates(row: dict, route: str | None = None) -> tuple[str, ...
             inner = match.group(1)
             candidates.append(inner)
             stripped = inner.strip()
-            for env_pattern in (_AGENTAPI_ENVELOPE, _STOP_HOOK_ENVELOPE):
-                envelope = env_pattern.match(stripped)
-                if envelope:
-                    candidates.append(envelope.group(1))
+            envelope = _STOP_HOOK_ENVELOPE.match(stripped)
+            if envelope:
+                candidates.append(envelope.group(1))
+    for sender, priority, body in _extract_message_envelopes(row):
+        if _is_agentapi_envelope(sender, priority, body):
+            candidates.append(body)
     stripped = content.strip()
-    for env_pattern in (_AGENTAPI_ENVELOPE, _STOP_HOOK_ENVELOPE):
-        envelope = env_pattern.match(stripped)
-        if envelope:
-            candidates.append(envelope.group(1))
+    envelope = _STOP_HOOK_ENVELOPE.match(stripped)
+    if envelope:
+        candidates.append(envelope.group(1))
     return tuple(candidates)
 
 

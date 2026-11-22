@@ -33,6 +33,7 @@ from . import bridge as agy_bridge
 from . import models as agy_models
 from . import pane as agy_pane
 from . import storage
+from . import transcripts as agy_transcripts
 
 
 MIN_BRIDGE_VERSION = (1, 5, 0)
@@ -1445,6 +1446,22 @@ class AgyAdapter(ConfiguredAdapter):
         """The live pane without Antigravity's input box and footer (pane.py)."""
         return agy_pane.display(text)
 
+    def transcript_view(self, session, *, tip=None, reader=None):
+        """Read-only metadata view of this conversation's Antigravity JSONL transcript."""
+        return agy_transcripts.view(session, tip=tip, reader=reader)
+
+    def transcript_bodies(self, session, view, indexes, *, max_bytes, reader=None):
+        """Read verified JSON bodies for rows in `view`, raising TranscriptRowsChanged on rewrites."""
+        return agy_transcripts.bodies(session, view, indexes, max_bytes=max_bytes, reader=reader)
+
+    def transcript_readable(self, session, *, reader=None):
+        """Whether this exact conversation's Antigravity transcript is readable, absent or unknown."""
+        return agy_transcripts.readable(session, reader=reader)
+
+    def project_turn_event(self, session, view, transition, *, reader=None):
+        """Project a native turn transition onto exact row positions within `view`."""
+        return agy_transcripts.project_turn_event(session, view, transition, reader=reader)
+
     def session_storage_evidence(self, session, home) -> NativeResult:
         return storage.session_storage_evidence(session, home)
 
@@ -1767,7 +1784,7 @@ class AgyAdapter(ConfiguredAdapter):
         # Stamp idle_flushed BEFORE submitting so a fast turn that completes before agentapi returns
         # clears the marker via PreInvocation/Stop instead of having it stamped afterwards.
         pre_turn_seq = (
-            agy_bridge.begin_idle_turn(agent_dir, session.launch_id)
+            agy_bridge.begin_idle_turn(agent_dir, session.launch_id, message_id=message.id)
             if (not claimed_for_agentapi and current_status == 'idle')
             else None
         )

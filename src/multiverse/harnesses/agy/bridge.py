@@ -6,6 +6,7 @@ Antigravity's `statusLine` and `.agents/hooks.json` handlers:
     python bridge.py statusline
     python bridge.py hook SessionStart|PreInvocation|Stop
 """
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import errno
 import ipaddress
@@ -17,15 +18,16 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from multiverse.harnesses.agy import storage
+from multiverse.harnesses.agy import storage, transcripts
 from multiverse.harnesses.base import PARENT_AGY
-from multiverse.harnesses.types import normalize_session_id
+from multiverse.harnesses.types import TurnEnded, TurnStarted, normalize_session_id
 from multiverse.store import lock, now, read, retry_missing, write
 
 
@@ -418,6 +420,10 @@ def _nonneg_int(value, default: int = 0) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
 
 
+def _opt_str(value) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _load_followups_record_locked(path: Path) -> dict:
     """Load full follow-up queue state record; raises ValueError on damaged/oversized files."""
     try:
@@ -433,6 +439,13 @@ def _load_followups_record_locked(path: Path) -> dict:
             'turn_active_at': None,
             'idle_after_turn': 0,
             'idle_after_turn_at': None,
+            'turn_open': False,
+            'turn_id': None,
+            'pending_turn_attempt': None,
+            'pending_turn_source': None,
+            'pending_idle_attempt': None,
+            'pending_idle_attempt_at': None,
+            'last_init_steps': None,
             'stop_continue_streak': 0,
         }
     except OSError as error:
@@ -448,6 +461,9 @@ def _load_followups_record_locked(path: Path) -> dict:
             or not isinstance(record.get('entries'), list)
             or any(not isinstance(entry, dict) for entry in record['entries'])):
         raise ValueError('Antigravity follow-up queue has an invalid schema')
+    raw_source = record.get('pending_turn_source')
+    raw_last_steps = record.get('last_init_steps')
+    last_steps = (raw_last_steps if type(raw_last_steps) is int and raw_last_steps >= 1 else None)
     return {
         'entries': list(record['entries']),
         'idle_flushed': bool(record.get('idle_flushed')),
@@ -457,6 +473,13 @@ def _load_followups_record_locked(path: Path) -> dict:
         'turn_active_at': _opt_timestamp(record.get('turn_active_at')),
         'idle_after_turn': _nonneg_int(record.get('idle_after_turn'), 0),
         'idle_after_turn_at': _opt_timestamp(record.get('idle_after_turn_at')),
+        'turn_open': bool(record.get('turn_open')),
+        'turn_id': _opt_str(record.get('turn_id')),
+        'pending_turn_attempt': _opt_str(record.get('pending_turn_attempt')),
+        'pending_turn_source': raw_source if raw_source in ('person', 'harness') else None,
+        'pending_idle_attempt': _opt_str(record.get('pending_idle_attempt')),
+        'pending_idle_attempt_at': _opt_timestamp(record.get('pending_idle_attempt_at')),
+        'last_init_steps': last_steps,
         'stop_continue_streak': _nonneg_int(record.get('stop_continue_streak'), 0),
     }
 
@@ -484,6 +507,12 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
                            turn_seq: int = 0, turn_active: bool = False,
                            turn_active_at: str | None = None,
                            idle_after_turn: int = 0, idle_after_turn_at: str | None = None,
+                           turn_open: bool = False, turn_id: str | None = None,
+                           pending_turn_attempt: str | None = None,
+                           pending_turn_source: str | None = None,
+                           pending_idle_attempt: str | None = None,
+                           pending_idle_attempt_at: str | None = None,
+                           last_init_steps: int | None = None,
                            stop_continue_streak: int = 0) -> None:
     canonical_launch = normalize_session_id(launch_id)
     # Never keep message text on already handed-off entries so delivered prompts cannot exhaust the queue budget.
@@ -504,23 +533,29 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
     active_at = (turn_active_at or now()) if active else None
     idle_count = int(idle_after_turn) if active else 0
     idle_at = (idle_after_turn_at or now()) if (active and idle_count > 0) else None
-    _write_private_json(
-        path,
-        {
-            'schema': 1,
-            'launch_id': canonical_launch,
-            'idle_flushed': flushed,
-            'idle_flushed_at': stamped_at,
-            'turn_seq': int(turn_seq),
-            'turn_active': active,
-            'turn_active_at': active_at,
-            'idle_after_turn': idle_count,
-            'idle_after_turn_at': idle_at,
-            'stop_continue_streak': max(0, int(stop_continue_streak)),
-            'entries': entries,
-        },
-        max_bytes=MAX_QUEUE_BYTES,
-    )
+    has_idle_attempt = isinstance(pending_idle_attempt, str) and bool(pending_idle_attempt)
+    idle_attempt_at = (pending_idle_attempt_at or stamped_at or now()) if has_idle_attempt else None
+    payload = {
+        'schema': 1,
+        'launch_id': canonical_launch,
+        'idle_flushed': flushed,
+        'idle_flushed_at': stamped_at,
+        'turn_seq': int(turn_seq),
+        'turn_active': active,
+        'turn_active_at': active_at,
+        'idle_after_turn': idle_count,
+        'idle_after_turn_at': idle_at,
+        'turn_open': bool(turn_open),
+        'turn_id': turn_id if turn_open and isinstance(turn_id, str) and turn_id else None,
+        'pending_turn_attempt': pending_turn_attempt if isinstance(pending_turn_attempt, str) and pending_turn_attempt else None,
+        'pending_turn_source': pending_turn_source if pending_turn_source in ('person', 'harness') else None,
+        'pending_idle_attempt': pending_idle_attempt if has_idle_attempt else None,
+        'pending_idle_attempt_at': idle_attempt_at,
+        'last_init_steps': last_init_steps if type(last_init_steps) is int and last_init_steps >= 1 else None,
+        'stop_continue_streak': max(0, int(stop_continue_streak)),
+        'entries': entries,
+    }
+    _write_private_json(path, payload, max_bytes=MAX_QUEUE_BYTES)
 
 
 def _save_record_locked(path: Path, launch_id: str, rec: dict) -> None:
@@ -533,18 +568,38 @@ def _save_record_locked(path: Path, launch_id: str, rec: dict) -> None:
         turn_active_at=rec['turn_active_at'],
         idle_after_turn=rec['idle_after_turn'],
         idle_after_turn_at=rec['idle_after_turn_at'],
+        turn_open=rec.get('turn_open', False),
+        turn_id=rec.get('turn_id'),
+        pending_turn_attempt=rec.get('pending_turn_attempt'),
+        pending_turn_source=rec.get('pending_turn_source'),
+        pending_idle_attempt=rec.get('pending_idle_attempt'),
+        pending_idle_attempt_at=rec.get('pending_idle_attempt_at'),
+        last_init_steps=rec.get('last_init_steps'),
         stop_continue_streak=rec.get('stop_continue_streak', 0),
     )
 
 
+def _turn_end_edges(turn_id: str | None, state: str) -> tuple[TurnEnded, ...]:
+    if not isinstance(turn_id, str) or not turn_id:
+        return ()
+    end_ref = f'end:{turn_id}' if turn_id.startswith(('step-', 'init:', 'post:')) else None
+    return (TurnEnded(turn=turn_id, kind='prompt', ref=end_ref, state=state),)
+
+
+def _universe_root(agent_dir) -> Path | None:
+    root = Path(agent_dir).parent.parent.parent
+    return root if (root / 'universe.json').exists() else None
+
+
 def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = None,
                            observed_idle: bool = False, conv_id: str | None = None,
-                           pause_on_idle_reap: bool = True) -> tuple[bool, bool]:
+                           pause_on_idle_reap: bool = True) -> tuple[bool, bool, str | None]:
     """Re-check and expire bounded delivery state against live evidence so no missed Stop hook strands or auto-flushes.
 
-    Returns `(changed, cancelled_by_idle)` where `cancelled_by_idle` is True when an active turn returned to
-    unbroken `idle` without `Stop` (as Antigravity 1.5.16 does on `Esc`), pausing queued follow-ups with
-    `paused_reason='cancel'` instead of flushing them on `statusLine` renders or keystrokes.
+    Returns `(changed, cancelled_by_idle, closed_turn_id)` where `cancelled_by_idle` is True when an active turn
+    returned to unbroken `idle` without `Stop` (as Antigravity 1.5.16 does on `Esc`), pausing queued follow-ups with
+    `paused_reason='cancel'` instead of flushing them on `statusLine` renders or keystrokes, and `closed_turn_id`
+    names any open turn closed by that cancellation.
 
     Handles:
     1. Expired `idle_flushed` (> IDLE_FLUSH_GRACE_SECONDS or missing timestamp).
@@ -559,12 +614,17 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
     """
     changed = False
     cancelled_by_idle = False
+    closed_turn_id = None
     now_dt = datetime.now(timezone.utc)
 
-    # 1. Self-expiring idle_flushed gate.
+    # 1. Self-expiring idle_flushed and pending_idle_attempt gates.
     if rec['idle_flushed'] and not _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at']):
         rec['idle_flushed'] = False
         rec['idle_flushed_at'] = None
+        changed = True
+    if rec.get('pending_idle_attempt') and not _idle_flushed_active(True, rec.get('pending_idle_attempt_at')):
+        rec['pending_idle_attempt'] = None
+        rec['pending_idle_attempt_at'] = None
         changed = True
 
     # 2. Stale agentapi_submitting claim reaper (e.g., SIGKILL / crash mid-flush).
@@ -628,8 +688,13 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
             rec['idle_after_turn_at'] = None
             rec['idle_flushed'] = False
             rec['idle_flushed_at'] = None
+            rec['pending_idle_attempt'] = None
             rec['turn_seq'] = rec['turn_seq'] + 1
             if pause_on_idle_reap:
+                if rec.get('turn_open'):
+                    closed_turn_id = rec.get('turn_id')
+                    rec['turn_open'] = False
+                    rec['turn_id'] = None
                 for entry in rec['entries']:
                     if (entry.get('state', 'queued') == 'queued'
                             and (conv_id is None or entry.get('native_id') == conv_id)):
@@ -638,7 +703,7 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
                 cancelled_by_idle = True
             changed = True
 
-    return changed, cancelled_by_idle
+    return changed, cancelled_by_idle, closed_turn_id
 
 
 def enqueue_followup(agent_dir, launch_id: str, message_id: str, native_id: str, text: str) -> None:
@@ -695,6 +760,7 @@ def release_followup_claim(agent_dir, launch_id: str, message_id: str, *,
                 if reset_idle_flush:
                     rec['idle_flushed'] = False
                     rec['idle_flushed_at'] = None
+                    rec['pending_idle_attempt'] = None
                 _save_record_locked(queue_path, launch_id, rec)
                 return True
     return False
@@ -746,14 +812,18 @@ def _clear_idle_flushed(agent_dir, launch_id: str) -> None:
         pass
 
 
-def begin_idle_turn(agent_dir, launch_id: str) -> int | None:
+def begin_idle_turn(agent_dir, launch_id: str, *, message_id: str | None = None) -> int | None:
     """Stamp `idle_flushed` BEFORE an idle agentapi send and return `turn_seq` for rollback if unconfirmed."""
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
+        canonical_msg = normalize_session_id(message_id) if message_id else None
         with lock(lock_path):
             rec = _load_followups_record_locked(queue_path)
+            stamped = now()
             rec['idle_flushed'] = True
-            rec['idle_flushed_at'] = now()
+            rec['idle_flushed_at'] = stamped
+            rec['pending_idle_attempt'] = canonical_msg
+            rec['pending_idle_attempt_at'] = stamped if canonical_msg else None
             _save_record_locked(queue_path, launch_id, rec)
             return rec['turn_seq']
     except (OSError, ValueError):
@@ -770,9 +840,11 @@ def cancel_idle_turn_if_unstarted(agent_dir, launch_id: str, expected_seq: int |
             return
         with lock(lock_path, create_parent=False):
             rec = _load_followups_record_locked(queue_path)
-            if rec['idle_flushed'] and rec['turn_seq'] == expected_seq and not rec['turn_active']:
+            if (rec['idle_flushed'] or rec.get('pending_idle_attempt')) and rec['turn_seq'] == expected_seq and not rec['turn_active']:
                 rec['idle_flushed'] = False
                 rec['idle_flushed_at'] = None
+                rec['pending_idle_attempt'] = None
+                rec['pending_idle_attempt_at'] = None
                 _save_record_locked(queue_path, launch_id, rec)
     except (OSError, ValueError):
         pass
@@ -791,13 +863,16 @@ def should_queue_idle_followup(agent_dir, launch_id: str, native_id: str, *,
     try:
         with lock(lock_path, create_parent=False):
             rec = _load_followups_record_locked(queue_path)
-            reaped, cancelled = _reap_followups_locked(
+            reaped, cancelled, closed_turn = _reap_followups_locked(
                 agent_dir, rec, live_facts=live_facts, conv_id=canonical_conv,
             )
             if reaped:
                 _save_record_locked(queue_path, launch_id, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, launch_id, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, launch_id, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
     except (OSError, ValueError):
         return True
     if rec['turn_active'] or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at']):
@@ -836,7 +911,7 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
         except (OSError, ValueError):
             return 'queued'
         rec = _load_followups_record_locked(queue_path)
-        reaped, cancelled = _reap_followups_locked(
+        reaped, cancelled, closed_turn = _reap_followups_locked(
             agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv,
         )
         entries = rec['entries']
@@ -849,26 +924,38 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'missing'
         state = target.get('state', 'queued')
         if state == 'handed_off':
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'handed_off'
         if state == 'agentapi_submitting':
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'submitting'
         if state != 'queued':
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'missing'
         if (current_facts.get('status') != 'idle'
                 or current_facts.get('launch_id') != canonical_launch
@@ -880,7 +967,10 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'queued'
         if (rec['turn_active']
                 or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
@@ -888,20 +978,29 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'queued'
         head = _fifo_head_queued(entries, canonical_conv)
         if head is None or head.get('id') != canonical_msg or head.get('paused') is True:
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             return 'queued'
+        stamped = now()
         target['state'] = 'agentapi_submitting'
-        target['claimed_at'] = now()
+        target['claimed_at'] = stamped
         target['claim_token'] = token
         rec['idle_flushed'] = True
-        rec['idle_flushed_at'] = now()
+        rec['idle_flushed_at'] = stamped
+        rec['pending_idle_attempt'] = canonical_msg
+        rec['pending_idle_attempt_at'] = stamped
         rec['turn_active'] = False
         rec['turn_active_at'] = None
         rec['idle_after_turn'] = 0
@@ -961,8 +1060,9 @@ def commit_followup_agentapi_receipt(agent_dir, launch_id: str, message_id: str,
 
 
 def _sync_runtime_queue_state_locked(agent_dir, launch_id: str, native_id: str | None, entries: list[dict], *,
-                                     clear_stale_launch: bool = False) -> None:
-    """Persist or clear `runtime.json['queue_state']` fenced by live launch and conversation binding."""
+                                     clear_stale_launch: bool = False,
+                                     root: Path | None = None, turn_edges: tuple = ()) -> None:
+    """Persist or clear `runtime.json['queue_state']` (and optional `turn_edges`) fenced by launch/conversation."""
     try:
         from multiverse.universe import agents
         canonical_launch = normalize_session_id(launch_id)
@@ -1030,13 +1130,16 @@ def _sync_runtime_queue_state_locked(agent_dir, launch_id: str, native_id: str |
                         return None
             return {'queue_state': None}
 
-        agents.mutate_runtime(Path(agent_dir), canonical_launch, _update)
+        turn_batch = (root, canonical_conv, tuple(turn_edges)) if (root is not None and canonical_conv and turn_edges) else None
+        agents.mutate_runtime(Path(agent_dir), canonical_launch, _update, turn_batch=turn_batch)
     except (OSError, ValueError):
         pass
 
 
-def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, turn_active: bool) -> None:
-    """Pause queued follow-ups after USER_CANCELED, ERROR, or non-idle Stop so idle statusLine does not auto-flush them."""
+def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, turn_active: bool,
+                     root: Path | None = None, end_state: str | None = None,
+                     next_source: str | None = None) -> None:
+    """Pause queued follow-ups after USER_CANCELED, ERROR, or non-idle Stop and emit TurnEnded when open."""
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
         canonical_launch = normalize_session_id(launch_id)
@@ -1054,7 +1157,10 @@ def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, 
                     or current_props.get('native_session_id') != canonical_conv):
                 return
             rec = _load_followups_record_locked(queue_path)
-            changed = bool(rec['idle_flushed']) or (rec['turn_active'] != bool(turn_active))
+            closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
+            changed = (bool(rec['idle_flushed']) or (rec['turn_active'] != bool(turn_active))
+                       or bool(rec.get('turn_open'))
+                       or (next_source is not None and rec.get('pending_turn_source') != next_source))
             for entry in rec['entries']:
                 if entry.get('state', 'queued') == 'queued' and entry.get('native_id') == canonical_conv:
                     if entry.get('paused') is not True or entry.get('paused_reason') != reason:
@@ -1064,14 +1170,24 @@ def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, 
             if changed:
                 rec['idle_flushed'] = False
                 rec['idle_flushed_at'] = None
+                rec['pending_idle_attempt'] = None
+                rec['pending_idle_attempt_at'] = None
                 rec['turn_seq'] = rec['turn_seq'] + 1
                 rec['turn_active'] = bool(turn_active)
                 rec['turn_active_at'] = now() if turn_active else None
                 rec['idle_after_turn'] = 0
                 rec['idle_after_turn_at'] = None
+                rec['turn_open'] = False
+                rec['turn_id'] = None
                 rec['stop_continue_streak'] = 0
+                if next_source in ('person', 'harness'):
+                    rec['pending_turn_source'] = next_source
                 _save_record_locked(queue_path, canonical_launch, rec)
-            _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+            edges = _turn_end_edges(closed_turn, end_state) if end_state else ()
+            _sync_runtime_queue_state_locked(
+                agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                root=root, turn_edges=edges,
+            )
     except (OSError, ValueError):
         pass
 
@@ -1120,12 +1236,30 @@ def resume_paused_for_new_send(agent_dir, launch_id: str, native_id: str) -> boo
         return False
 
 
-def _on_turn_start(agent_dir, launch_id: str, native_id: str | None) -> None:
-    """Advance `turn_seq`, mark `turn_active=True`, clear `idle_flushed`, and unpause queued follow-ups."""
+def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
+                   invocation_num=None, initial_num_steps=None,
+                   env: Mapping[str, str] | None = None) -> tuple[TurnStarted, ...]:
+    """Advance `turn_seq`, mark `turn_active=True`, clear `idle_flushed`, unpause follow-ups, and return TurnStarted."""
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
         canonical_launch = normalize_session_id(launch_id)
         canonical_conv = normalize_session_id(native_id) if native_id else None
+        inv_num = invocation_num if isinstance(invocation_num, int) and not isinstance(invocation_num, bool) and invocation_num >= 0 else None
+        init_steps = (
+            initial_num_steps
+            if isinstance(initial_num_steps, int) and not isinstance(initial_num_steps, bool) and initial_num_steps >= 1
+            else None
+        )
+        # Prove any launch startup prompt (--task or wake resume_prompt) against the exact stored opening
+        # USER_INPUT row before taking the queue lock; fail closed (unattributed) when proof is unavailable.
+        startup_expectation = None
+        startup_proof = 'unavailable'
+        if canonical_conv is not None and _peek_turn_seq(queue_path) == 0:
+            startup_expectation = _launch_startup_expectation(Path(agent_dir), canonical_launch, canonical_conv)
+            if startup_expectation is not None:
+                startup_proof = _prove_startup_input(
+                    Path(agent_dir), canonical_conv, init_steps, startup_expectation[2], env=env,
+                )
         with lock(lock_path):
             rec = _load_followups_record_locked(queue_path)
             for entry in rec['entries']:
@@ -1133,19 +1267,83 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None) -> None:
                         and (canonical_conv is None or entry.get('native_id') == canonical_conv)):
                     entry.pop('paused', None)
                     entry.pop('paused_reason', None)
-            if not rec['turn_active']:
-                rec['stop_continue_streak'] = 0
-            rec['idle_flushed'] = False
-            rec['idle_flushed_at'] = None
+            idle_attempt_active = _idle_flushed_active(
+                bool(rec.get('pending_idle_attempt')), rec.get('pending_idle_attempt_at'),
+            )
+            # On resume/wake, Antigravity can re-invoke PreInvocation(invocationNum=0) with the same
+            # initialNumSteps ~0.16 s later when it attaches its low-priority server-restart notice while the
+            # wake turn is still open. Treat that duplicate invocation as part of the open turn, not a new turn.
+            same_open_turn = (
+                bool(rec.get('turn_open'))
+                and inv_num == 0
+                and init_steps is not None
+                and rec.get('last_init_steps') == init_steps
+                and not rec.get('pending_turn_attempt')
+                and not (idle_attempt_active and rec.get('pending_idle_attempt'))
+            )
+            starting_new = (not rec.get('turn_open')) or (inv_num == 0 and not same_open_turn)
             rec['turn_seq'] = rec['turn_seq'] + 1
             rec['turn_active'] = True
             rec['turn_active_at'] = now()
             rec['idle_after_turn'] = 0
             rec['idle_after_turn_at'] = None
+            edges: tuple[TurnStarted, ...] = ()
+            if starting_new:
+                attempt = rec.get('pending_turn_attempt')
+                source = rec.get('pending_turn_source')
+                is_post_logged = False
+                first_task = False
+                if attempt:
+                    source = 'harness'
+                elif idle_attempt_active and rec.get('pending_idle_attempt'):
+                    attempt = rec.get('pending_idle_attempt')
+                    source = 'harness'
+                    is_post_logged = True
+                    rec['stop_continue_streak'] = 0
+                else:
+                    rec['stop_continue_streak'] = 0
+                    if rec['turn_seq'] == 1 and startup_expectation is not None:
+                        kind_exp, wake_msg, _ = startup_expectation
+                        if kind_exp == 'wake' and wake_msg is not None:
+                            if startup_proof == 'matched':
+                                attempt = wake_msg
+                                source = 'harness'
+                            elif startup_proof == 'unavailable':
+                                source = 'harness'
+                        elif kind_exp == 'task' and startup_proof == 'matched':
+                            first_task = True
+                    source = source if source in ('person', 'harness') else 'person'
+                last_steps = rec.get('last_init_steps')
+                if init_steps is not None:
+                    # Antigravity appends USER_INPUT and Stop-hook prompts before PreInvocation (step-{K-1}),
+                    # but appends agentapi and background task-notification messages after PreInvocation (step-{K}).
+                    # Also use post:{K} if K <= last_init_steps (the previous turn ended with zero extra steps).
+                    if is_post_logged or (last_steps is not None and init_steps <= last_steps):
+                        turn_id = f'post:{init_steps}:{rec["turn_seq"]}'
+                    else:
+                        turn_id = f'init:{init_steps}:{rec["turn_seq"]}'
+                    ref = turn_id
+                    rec['last_init_steps'] = init_steps
+                else:
+                    turn_id = f'turn-{rec["turn_seq"]}'
+                    ref = None
+                rec['turn_open'] = True
+                rec['turn_id'] = turn_id
+                rec['pending_turn_attempt'] = None
+                rec['pending_turn_source'] = None
+                edges = (TurnStarted(
+                    turn=turn_id, kind='prompt', ref=ref, source=source,
+                    attempt=attempt, first_task=first_task,
+                ),)
+            rec['idle_flushed'] = False
+            rec['idle_flushed_at'] = None
+            rec['pending_idle_attempt'] = None
+            rec['pending_idle_attempt_at'] = None
             _save_record_locked(queue_path, canonical_launch, rec)
             _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
+            return edges
     except (OSError, ValueError):
-        pass
+        return ()
 
 
 def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None = None) -> None:
@@ -1155,7 +1353,10 @@ def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None
         if queue_path.exists():
             with lock(lock_path, create_parent=False):
                 rec = _load_followups_record_locked(queue_path)
-                if rec['idle_flushed'] or rec['turn_active'] or rec['idle_after_turn'] > 0 or rec.get('stop_continue_streak', 0) > 0:
+                if (rec['idle_flushed'] or rec['turn_active'] or rec['idle_after_turn'] > 0
+                        or rec.get('turn_open') or rec.get('pending_turn_attempt')
+                        or rec.get('pending_turn_source') or rec.get('pending_idle_attempt')
+                        or rec.get('last_init_steps') is not None):
                     rec['idle_flushed'] = False
                     rec['idle_flushed_at'] = None
                     rec['turn_seq'] = rec['turn_seq'] + 1
@@ -1163,6 +1364,13 @@ def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None
                     rec['turn_active_at'] = None
                     rec['idle_after_turn'] = 0
                     rec['idle_after_turn_at'] = None
+                    rec['turn_open'] = False
+                    rec['turn_id'] = None
+                    rec['pending_turn_attempt'] = None
+                    rec['pending_turn_source'] = None
+                    rec['pending_idle_attempt'] = None
+                    rec['pending_idle_attempt_at'] = None
+                    rec['last_init_steps'] = None
                     rec['stop_continue_streak'] = 0
                     _save_record_locked(queue_path, launch_id, rec)
                 _sync_runtime_queue_state_locked(agent_dir, launch_id, departed_conv, [])
@@ -1512,6 +1720,213 @@ def _read_session_state(directory: Path, launch_id: str) -> dict:
     }
 
 
+def _peek_turn_seq(queue_path: Path) -> int:
+    """Unlocked fast check for turn_seq so turns 2+ skip startup-input transcript verification."""
+    record = _read_private_json(queue_path, limit=MAX_QUEUE_BYTES, require_private_mode=True)
+    if record is None:
+        return 0
+    if not isinstance(record, dict) or record.get('schema') != 1:
+        return -1
+    return _nonneg_int(record.get('turn_seq'), 0)
+
+
+def _launch_startup_expectation(
+    directory: Path, launch_id: str, conv_id: str | None,
+) -> tuple[str, str | None, str] | None:
+    """Return `('wake', wake_id, text)` or `('task', None, text)` for this launch's CLI startup prompt, or None."""
+    from multiverse.runtime import launch_files
+    try:
+        req = launch_files.read_request(directory, launch_id)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(req, dict):
+        return None
+    req_env = req.get('env')
+    if isinstance(req_env, dict):
+        if req_env.get('MV2_LAUNCH_ID') not in (None, launch_id):
+            return None
+        if req_env.get('MV2_AGENT_ID') not in (None, directory.name):
+            return None
+    argv = req.get('argv')
+    if not isinstance(argv, list) or not argv or not isinstance(argv[-1], str):
+        return None
+    prefix = '--prompt-interactive='
+    if not argv[-1].startswith(prefix):
+        return None
+    expected_text = argv[-1][len(prefix):]
+    if not expected_text.strip():
+        return None
+    try:
+        if len(expected_text.encode('utf-8')) > storage.MAX_TRANSCRIPT_LINE:
+            return None
+    except UnicodeError:
+        return None
+    raw_wake = req.get('resume_message_id')
+    if isinstance(raw_wake, str) and raw_wake:
+        if req.get('task_launch') is True or not conv_id:
+            return None
+        expected_native = req.get('expected_native_id')
+        if not isinstance(expected_native, str) or not expected_native:
+            return None
+        try:
+            wake_id = normalize_session_id(raw_wake)
+            if normalize_session_id(expected_native) != normalize_session_id(conv_id):
+                return None
+        except ValueError:
+            return None
+        return 'wake', wake_id, expected_text
+    if raw_wake is None and req.get('task_launch') is True and req.get('expected_native_id') is None:
+        return 'task', None, expected_text
+    return None
+
+
+def _extract_opener_user_text(row: dict) -> str | None:
+    """Extract the exact prompt text from a stored `USER_INPUT` opener row, or None."""
+    if row.get('type') != 'USER_INPUT' or row.get('source') not in (None, 'USER_EXPLICIT'):
+        return None
+    content = row.get('content')
+    if not isinstance(content, str) or not content:
+        return None
+    stripped = content.lstrip()
+    if stripped.startswith('<USER_REQUEST>'):
+        after = stripped[len('<USER_REQUEST>'):]
+        before_meta = after.split('\n<ADDITIONAL_METADATA>', 1)[0]
+        end = before_meta.rfind('</USER_REQUEST>')
+        return before_meta[:end] if end >= 0 else None
+    if '<USER_REQUEST>' in content:
+        matches = storage._USER_REQUEST_BLOCK.findall(content)
+        return matches[0] if len(matches) == 1 else None
+    return content
+
+
+def _parse_transcript_window(handle, offset: int) -> list[dict] | None:
+    """Parse JSONL dict rows from `offset` to EOF; returns None if any line is damaged or oversized."""
+    handle.seek(offset)
+    if offset > 0:
+        if not handle.readline(storage.MAX_TRANSCRIPT_LINE + 1).endswith(b'\n'):
+            return None
+    rows: list[dict] = []
+    while True:
+        raw = handle.readline(storage.MAX_TRANSCRIPT_LINE + 1)
+        if not raw:
+            break
+        if len(raw) > storage.MAX_TRANSCRIPT_LINE:
+            return None
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped.decode('utf-8'))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        rows.append(parsed)
+    return rows
+
+
+def _locate_opener_in_rows(rows: list[dict], target_step: int, *, truncated_prefix: bool) -> tuple[str, dict | None]:
+    matches = [idx for idx, row in enumerate(rows) if type(row.get('step_index')) is int and row['step_index'] == target_step]
+    if len(matches) > 1:
+        return 'unreadable', None
+    if not matches:
+        steps = [row['step_index'] for row in rows if type(row.get('step_index')) is int]
+        if truncated_prefix and (not steps or min(steps) > target_step):
+            return 'need_full', None
+        max_step = max(steps, default=-1)
+        return ('pending', None) if max_step < target_step else ('mismatch', None)
+    idx = matches[0]
+    if rows[idx].get('type') == 'USER_INPUT':
+        return 'found', rows[idx]
+    _, label, *_ = transcripts._classify_row(rows[idx], turn_open=False)
+    if label in ('injected', 'meta'):
+        cursor = idx - 1
+        while cursor >= 0:
+            _, cur_label, *_ = transcripts._classify_row(rows[cursor], turn_open=False)
+            if cur_label not in ('injected', 'meta'):
+                break
+            cursor -= 1
+        if cursor < 0:
+            return ('need_full', None) if truncated_prefix else ('mismatch', None)
+        if rows[cursor].get('type') == 'USER_INPUT':
+            return 'found', rows[cursor]
+    return 'mismatch', None
+
+
+def _read_opener_at_step(home: str, canonical_conv: str, target_step: int,
+                         expected_bytes: int) -> tuple[str, dict | None]:
+    """Read the exact stored opening `USER_INPUT` at `step-{target_step}`, safely without following symlinks."""
+    try:
+        _, handle, info = transcripts._open_transcript_file(home, canonical_conv)
+    except transcripts.Unreadable:
+        return 'unreadable', None
+    if handle is None or info is None:
+        return 'pending', None
+    try:
+        with handle:
+            window = min(storage.MAX_TRANSCRIPT_LINE, max(65536, expected_bytes * 4 + 16384))
+            offset = max(0, info.st_size - window)
+            rows = _parse_transcript_window(handle, offset)
+            if rows is None:
+                return 'unreadable', None
+            state, opener = _locate_opener_in_rows(rows, target_step, truncated_prefix=offset > 0)
+            if state == 'need_full':
+                full_rows = _parse_transcript_window(handle, 0)
+                if full_rows is None:
+                    return 'unreadable', None
+                return _locate_opener_in_rows(full_rows, target_step, truncated_prefix=False)
+            return state, opener
+    except OSError:
+        return 'unreadable', None
+
+
+def _prove_startup_input(
+    directory: Path,
+    conv_id: str | None,
+    init_steps: int | None,
+    expected_text: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    wait_seconds: float = 0.15,
+) -> str:
+    """Return `'matched'`, `'mismatch'`, or `'unavailable'` for the opener at `step-{init_steps - 1}`."""
+    if not conv_id or init_steps is None or init_steps < 1 or not expected_text.strip():
+        return 'unavailable'
+    try:
+        canonical_conv = normalize_session_id(conv_id)
+    except ValueError:
+        return 'unavailable'
+    home = None
+    try:
+        props = retry_missing(lambda: read(directory / 'properties.json'))
+        raw_home = props.get('native_session_home') if isinstance(props, dict) else None
+        if isinstance(raw_home, str) and os.path.isabs(raw_home):
+            home = raw_home
+    except (OSError, ValueError):
+        home = None
+    if not home:
+        home = os.path.realpath(storage.agy_home(env))
+    expected_norm = expected_text.strip()
+    expected_bytes = len(expected_text.encode('utf-8'))
+    target_step = init_steps - 1
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        state, opener = _read_opener_at_step(home, canonical_conv, target_step, expected_bytes)
+        if state == 'found' and isinstance(opener, dict):
+            stored = _extract_opener_user_text(opener)
+            if not isinstance(stored, str):
+                return 'unavailable'
+            return 'matched' if stored.strip() == expected_norm else 'mismatch'
+        if state == 'mismatch':
+            return 'mismatch'
+        if state != 'pending':
+            return 'unavailable'
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 'unavailable'
+        time.sleep(min(0.025, remaining))
+
+
 def _launch_expected_id(directory: Path, launch_id: str) -> tuple[str, str | None]:
     """Classify launch request proof as `('fresh', None)`, `('resume', uuid)` or `('invalid', None)`."""
     from multiverse.runtime import launch_files
@@ -1788,13 +2203,16 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
         with lock(lock_path, create_parent=False):
             current_facts = retry_missing(lambda: read(directory / 'runtime.json'))
             rec = _load_followups_record_locked(queue_path)
-            reaped, cancelled = _reap_followups_locked(
+            reaped, cancelled, closed_turn = _reap_followups_locked(
                 directory, rec, live_facts=current_facts, conv_id=conv_id,
             )
             if reaped:
                 _save_record_locked(queue_path, launch_id, rec)
             if cancelled:
-                _sync_runtime_queue_state_locked(directory, launch_id, conv_id, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    directory, launch_id, conv_id, rec['entries'],
+                    root=_universe_root(directory), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
             if (rec['turn_active']
                     or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
                     or any(entry.get('state') == 'agentapi_submitting' for entry in rec['entries'])):
@@ -1826,7 +2244,7 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                     or current_props.get('native_session_id') != conv_id):
                 return False
             rec = _load_followups_record_locked(queue_path)
-            reaped, cancelled = _reap_followups_locked(
+            reaped, cancelled, closed_turn = _reap_followups_locked(
                 directory, rec, live_facts=current_facts, conv_id=conv_id,
             )
             if (rec['turn_active']
@@ -1835,14 +2253,20 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                 if reaped:
                     _save_record_locked(queue_path, launch_id, rec)
                 if cancelled:
-                    _sync_runtime_queue_state_locked(directory, launch_id, conv_id, rec['entries'])
+                    _sync_runtime_queue_state_locked(
+                        directory, launch_id, conv_id, rec['entries'],
+                        root=_universe_root(directory), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                    )
                 return False
             head = _fifo_head_queued(rec['entries'], conv_id)
             if head is None or head.get('paused') is True:
                 if reaped:
                     _save_record_locked(queue_path, launch_id, rec)
                 if cancelled:
-                    _sync_runtime_queue_state_locked(directory, launch_id, conv_id, rec['entries'])
+                    _sync_runtime_queue_state_locked(
+                        directory, launch_id, conv_id, rec['entries'],
+                        root=_universe_root(directory), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                    )
                 return False
             claimed_id = head['id']
             claimed_text = head['text']
@@ -1850,13 +2274,18 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
             prior_receipt = read_receipt(directory, claimed_id)
             submitted_at = (prior_receipt.get('submitted_at') if isinstance(prior_receipt, dict)
                             and isinstance(prior_receipt.get('submitted_at'), str) else now())
+            stamped = now()
             head['state'] = 'agentapi_submitting'
-            head['claimed_at'] = now()
+            head['claimed_at'] = stamped
             head['claim_token'] = claim_token
             prev_flushed = rec['idle_flushed']
             prev_flushed_at = rec['idle_flushed_at']
+            prev_idle_attempt = rec.get('pending_idle_attempt')
+            prev_idle_attempt_at = rec.get('pending_idle_attempt_at')
             rec['idle_flushed'] = True
-            rec['idle_flushed_at'] = now()
+            rec['idle_flushed_at'] = stamped
+            rec['pending_idle_attempt'] = claimed_id
+            rec['pending_idle_attempt_at'] = stamped
             rec['turn_active'] = False
             rec['turn_active_at'] = None
             rec['idle_after_turn'] = 0
@@ -1875,6 +2304,8 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                 head.pop('claim_token', None)
                 rec['idle_flushed'] = prev_flushed
                 rec['idle_flushed_at'] = prev_flushed_at
+                rec['pending_idle_attempt'] = prev_idle_attempt
+                rec['pending_idle_attempt_at'] = prev_idle_attempt_at
                 _save_record_locked(queue_path, launch_id, rec)
                 return False
         if claimed_id is None or claimed_text is None:
@@ -1940,32 +2371,49 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
         return False
 
 
-def _has_flushable_followup(directory: Path, launch_id: str, conv_id: str, *,
-                            observed_idle: bool = False, live_facts: dict | None = None) -> bool:
-    """Re-check/reap bounded queue state under lock before spawning the detached `flush-idle` helper."""
+def _inspect_idle_followup(directory: Path, launch_id: str, conv_id: str, *,
+                           observed_idle: bool = False, live_facts: dict | None = None,
+                           sync_queue_state: bool = True) -> tuple[bool, bool, str | None]:
+    """Re-check/reap bounded queue state on idle; returns `(flushable, cancelled, closed_turn_id)`."""
     queue_path, lock_path = _followups_paths(directory, launch_id)
     if not queue_path.exists():
-        return False
+        return False, False, None
+    cancelled = False
+    closed_turn = None
     try:
         with lock(lock_path, create_parent=False):
             rec = _load_followups_record_locked(queue_path)
-            reaped, cancelled = _reap_followups_locked(
+            reaped, cancelled, closed_turn = _reap_followups_locked(
                 directory, rec, live_facts=live_facts, observed_idle=observed_idle, conv_id=conv_id,
             )
             if reaped:
                 _save_record_locked(queue_path, launch_id, rec)
-            if cancelled:
-                _sync_runtime_queue_state_locked(directory, launch_id, conv_id, rec['entries'])
+            if cancelled and sync_queue_state:
+                _sync_runtime_queue_state_locked(
+                    directory, launch_id, conv_id, rec['entries'],
+                    root=_universe_root(directory), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
+                )
     except (OSError, ValueError):
-        return False
+        return False, False, None
     if rec['turn_active'] or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at']):
-        return False
+        return False, cancelled, closed_turn
     if any(entry.get('state') == 'agentapi_submitting' for entry in rec['entries']):
-        return False
+        return False, cancelled, closed_turn
     head = _fifo_head_queued(rec['entries'], conv_id)
     if head is None or head.get('paused') is True:
-        return False
-    return read_ls_info(directory, launch_id) is not None
+        return False, cancelled, closed_turn
+    if read_ls_info(directory, launch_id) is None:
+        return False, cancelled, closed_turn
+    return True, cancelled, closed_turn
+
+
+def _has_flushable_followup(directory: Path, launch_id: str, conv_id: str, *,
+                            observed_idle: bool = False, live_facts: dict | None = None) -> bool:
+    """Re-check/reap bounded queue state under lock before spawning the detached `flush-idle` helper."""
+    flushable, _, _ = _inspect_idle_followup(
+        directory, launch_id, conv_id, observed_idle=observed_idle, live_facts=live_facts, sync_queue_state=True,
+    )
+    return flushable
 
 
 def kick_idle_flush_if_ready(agent_dir, launch_id: str, conv_id: str) -> bool:
@@ -2110,15 +2558,42 @@ def handle_statusline(payload: dict, env=None) -> str:
         changes['status'] = status
     if usage is not None and usage != (cached.get('usage') if isinstance(cached, dict) else None):
         changes['usage'] = {**usage, 'reported_at': now()}
-    if changes:
-        agents.update_runtime(directory, launch_id, status_observed='status' in changes, **changes)
+    bound_conv = properties.get('native_session_id')
+    flushable = False
+    idle_turn_edges = ()
+    if status == 'idle' and isinstance(bound_conv, str) and bound_conv:
+        # Check idle reap BEFORE publishing status='idle' so Esc-cancel TurnEnded precedes agent.status(to='idle').
+        flushable, cancelled, closed_turn = _inspect_idle_followup(
+            directory, launch_id, bound_conv, observed_idle=True, sync_queue_state=False,
+        )
+        idle_turn_edges = _turn_end_edges(closed_turn, 'interrupted')
+        if cancelled or closed_turn is not None:
+            queue_path, lock_path = _followups_paths(directory, launch_id)
+            if queue_path.exists():
+                try:
+                    with lock(lock_path, create_parent=False):
+                        rec_after = _load_followups_record_locked(queue_path)
+                    _sync_runtime_queue_state_locked(
+                        directory, launch_id, bound_conv, rec_after['entries'],
+                        root=root, turn_edges=idle_turn_edges,
+                    )
+                    idle_turn_edges = ()
+                except (OSError, ValueError):
+                    pass
+    if changes or idle_turn_edges:
+        turn_batch = (root, bound_conv, idle_turn_edges) if (idle_turn_edges and isinstance(bound_conv, str) and bound_conv) else None
+        agents.mutate_runtime(
+            directory, launch_id,
+            lambda _facts: changes if changes else None,
+            status_observed='status' in changes,
+            turn_batch=turn_batch,
+        )
     if cached != fingerprint:
         _write_private_json(cache_path, fingerprint)
     if status != 'idle':
         _clear_idle_flushed(directory, launch_id)
-    elif isinstance(properties.get('native_session_id'), str):
-        if _has_flushable_followup(directory, launch_id, properties['native_session_id'], observed_idle=True):
-            _spawn_idle_flush(source)
+    elif flushable:
+        _spawn_idle_flush(source)
     return _status_line_text(directory, properties, facts)
 
 
@@ -2168,9 +2643,21 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                 _sync_runtime_queue_state_locked(directory, launch_id, conv_id, [], clear_stale_launch=True)
         if outcome == 'ok' and event == 'PreInvocation':
             target_conv = conv_id or retry_missing(lambda: read(directory / 'properties.json')).get('native_session_id')
-            _on_turn_start(directory, launch_id, target_conv)
-            if facts.get('status') not in ('working', 'waiting'):
-                agents.update_runtime(directory, launch_id, status='working', status_observed=True)
+            start_edges = _on_turn_start(
+                directory, launch_id, target_conv,
+                invocation_num=payload.get('invocationNum'),
+                initial_num_steps=payload.get('initialNumSteps'),
+                env=source,
+            )
+            turn_batch = (root, target_conv, start_edges) if (start_edges and target_conv) else None
+            need_status = facts.get('status') not in ('working', 'waiting')
+            if need_status or turn_batch is not None:
+                agents.mutate_runtime(
+                    directory, launch_id,
+                    lambda current: {'status': 'working'} if current.get('status') not in ('working', 'waiting') else None,
+                    status_observed=True,
+                    turn_batch=turn_batch,
+                )
         return {}
 
     if event == 'Stop':
@@ -2181,13 +2668,22 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
             return {}
         reason = str(payload.get('terminationReason') or '').upper()
         if 'CANCEL' in reason:
-            _pause_followups(directory, launch_id, target_conv, reason='cancel', turn_active=False)
+            _pause_followups(
+                directory, launch_id, target_conv, reason='cancel', turn_active=False,
+                root=root, end_state='interrupted',
+            )
             return {}
         if 'ERROR' in reason or payload.get('error'):
-            _pause_followups(directory, launch_id, target_conv, reason='error', turn_active=False)
+            _pause_followups(
+                directory, launch_id, target_conv, reason='error', turn_active=False,
+                root=root, end_state='error',
+            )
             return {}
         if payload.get('fullyIdle') is False:
-            _pause_followups(directory, launch_id, target_conv, reason='subagent', turn_active=False)
+            _pause_followups(
+                directory, launch_id, target_conv, reason='subagent', turn_active=False,
+                root=root, end_state='finished', next_source='harness',
+            )
             return {}
         queue_path, lock_path = _followups_paths(directory, launch_id)
         if not queue_path.exists():
@@ -2204,9 +2700,11 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                     or current_props.get('native_session_id') != target_conv):
                 return {}
             rec = _load_followups_record_locked(queue_path)
-            reaped, _ = _reap_followups_locked(
+            reaped, _, _ = _reap_followups_locked(
                 directory, rec, live_facts=current_facts, conv_id=target_conv, pause_on_idle_reap=False,
             )
+            closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
+            end_edges = _turn_end_edges(closed_turn, 'finished')
             entries = rec['entries']
             chosen = None
             unpaused = False
@@ -2225,17 +2723,24 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
             stop_streak = rec.get('stop_continue_streak', 0)
             if chosen is None or stop_streak >= MAX_STOP_CONTINUATIONS:
                 if (reaped or rec['idle_flushed'] or unpaused or rec['turn_active']
-                        or rec['idle_after_turn'] > 0 or stop_streak > 0):
+                        or rec['idle_after_turn'] > 0 or rec.get('turn_open') or stop_streak > 0):
                     rec['idle_flushed'] = False
                     rec['idle_flushed_at'] = None
+                    rec['pending_idle_attempt'] = None
+                    rec['pending_idle_attempt_at'] = None
                     rec['turn_seq'] = rec['turn_seq'] + 1
                     rec['turn_active'] = False
                     rec['turn_active_at'] = None
                     rec['idle_after_turn'] = 0
                     rec['idle_after_turn_at'] = None
+                    rec['turn_open'] = False
+                    rec['turn_id'] = None
                     rec['stop_continue_streak'] = 0
                     _save_record_locked(queue_path, launch_id, rec)
-                _sync_runtime_queue_state_locked(directory, launch_id, target_conv, rec['entries'])
+                _sync_runtime_queue_state_locked(
+                    directory, launch_id, target_conv, rec['entries'],
+                    root=root, turn_edges=end_edges,
+                )
                 return {}
             text = chosen['text']
             # Persist receipt delivery BEFORE transitioning the queue entry so an OSError keeps it queued.
@@ -2245,14 +2750,23 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
             chosen.pop('text', None)
             rec['idle_flushed'] = False
             rec['idle_flushed_at'] = None
+            rec['pending_idle_attempt'] = None
+            rec['pending_idle_attempt_at'] = None
             rec['turn_seq'] = rec['turn_seq'] + 1
             rec['turn_active'] = True
             rec['turn_active_at'] = now()
             rec['idle_after_turn'] = 0
             rec['idle_after_turn_at'] = None
+            rec['turn_open'] = False
+            rec['turn_id'] = None
+            rec['pending_turn_attempt'] = chosen['id']
+            rec['pending_turn_source'] = 'harness'
             rec['stop_continue_streak'] = stop_streak + 1
             _save_record_locked(queue_path, launch_id, rec)
-            _sync_runtime_queue_state_locked(directory, launch_id, target_conv, rec['entries'])
+            _sync_runtime_queue_state_locked(
+                directory, launch_id, target_conv, rec['entries'],
+                root=root, turn_edges=end_edges,
+            )
             return {'decision': 'continue', 'reason': text}
 
     return {}
