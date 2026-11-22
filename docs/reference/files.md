@@ -168,21 +168,21 @@ Schema 2 points at a built-in adapter and adjusts it:
 | Field | Meaning |
 | --- | --- |
 | `schema` | `2`. |
-| `adapter` | `codex`, `claude` or `pi`. |
+| `adapter` | `codex`, `claude`, `pi` or `agy`. |
 | `description` | Shown by `mv2 catalog`. |
 | `settings` | An object in which every key is optional. Unknown keys are errors. |
 
 | Setting | Meaning |
 | --- | --- |
-| `executable` | Command to run instead of `codex`, `claude` or `pi`. |
+| `executable` | Command to run instead of `codex`, `claude`, `pi` or `agy`. |
 | `model` | Default model for agents spawned without `--model`. |
 | `model_names` | Optional map from exact recorded model spellings to nonempty, single-line display names. It changes labels only; see [display names](../use/harnesses.md#model-display-names). |
 | `models` | Optional nonempty object from a catalog model ID or alias to `{}` or `{"efforts": ["low", "high"]}`. An effort list is nonempty, distinct and limited to offered levels. Unknown entries refuse launches and runs; see [model choices](../use/harnesses.md#narrow-the-available-choices). |
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |
 | `env` | Variables (name to string) set for every spawn and resume. It can't set `MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`, or the storage variables mv2 reads (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). Pi's can set `PI_CODING_AGENT_DIR`, which mv2 does not use to locate Pi sessions: spawn records that value, and a resume keeps the recorded one and names a changed setting or shell value it ignored; `mv2 resume --start-fresh` takes the current one. |
-| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID` and a parent Claude session's markers ([environment](environment.md)) are always removed when inherited. |
-| `inbox_bridge` | The live connection (the bridge). For Codex and Claude, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
+| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID`, parent Claude session markers and parent Antigravity CLI session markers ([environment](environment.md)) are always removed when inherited. |
+| `inbox_bridge` | The live connection (the bridge). For Codex, Claude and Antigravity CLI, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
 | `system_prompt_snapshot` | Claude only. `"off"`, the default, gives a resumed agent the current bootstrap. `"on"` keeps the system prompt Claude recorded at the conversation's first request, so a bootstrap change reaches only new conversations. A `--system-prompt-snapshot` flag in `args` or `resume_args` overrides it. |
 
 ### Schema 1
@@ -207,7 +207,7 @@ Arguments may use these substitutions:
 | Value | Meaning |
 | --- | --- |
 | `{name}`, `{agent_id}`, `{workspace}` | Agent name, UUID and working directory |
-| `{agent_dir}`, `{harness_dir}` | The agent's state directory and `harnesses/NAME/` |
+| `{agent_dir}`, `{harness_dir}`, `{launch_dir}` | The agent's state directory, `harnesses/NAME/` and this launch's directory under `launches/UUID/` |
 | `{task}`, `{task_file}` | Initial prompt, or the file it is saved in |
 | `{bootstrap}`, `{bootstrap_file}` | Bootstrap text, or the file it is saved in |
 | `{bootstrap_json}` | Bootstrap as a quoted JSON string, also valid as a TOML string |
@@ -265,6 +265,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
 | `claude-usage.json` | Claude only: the agent's usage indexes, so a new process parses only what Claude wrote since (per transcript its inode, the offset read to, a SHA-256 of those bytes, the latest time and turn, each response's counted usage; no transcript text). Written by any process that reads usage; taken over only when the digest matches. Safe to delete. |
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
+| `agy-receipts/` | Delivery receipts for the Antigravity CLI bridge only: metadata and a SHA-256 hash of the framed message, never raw message text. |
 | `launches/UUID/` | One directory per spawn or resume. |
 
 `runtime.json` temporarily keeps a reported `working` or `idle` as
@@ -325,6 +326,7 @@ Each launch directory holds:
 | `cleanup.json`, `roles/` | Whether this launch's own connections and helpers have closed. A resume or a finished `kill` waits for them. |
 | `.connections.lock` | Serializes connection records with cleanup inspection. Readers use an existing lock without creating one. An empty regular lock left by an older inspection is not startup evidence. |
 | `native-refusal.json` | A native refusal recorded for this launch, such as Codex's "open in another app". |
+| Adapter launch files | Private (`0600`) files declared by an adapter, such as Antigravity CLI's `AGENTS.md`, `settings.json`, `.agents/hooks.json`, and ephemeral handoff files (`agy-ls.json`) removed when the runner exits normally (a force-killed runner leaves them until cleanup). |
 
 ## subverses/ and trash/
 
@@ -351,4 +353,4 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | `~/.multiverse/tmux-servers/` | Server identity records and per-socket recovery locks, keyed by the canonical socket path. The records retain the socket, PID, process start token and tmux start epoch; they contain no prompts. A locked caller removes its touched record and lock once that server is proven gone, or a lone lock when no record was written. Waiters recheck the lock's identity before entering. Live, uncertain and damaged records remain; there is no directory-wide sweep. |
 | `~/.multiverse/run/` | Private runtime directory (mode `0700`), overridden by `MV2_RUN_DIR`. `tmux.sock` serves new agent terminals unless `MV2_TMUX_SOCKET` selects another address. `native/LAUNCH/rpc.sock` is a launch's private bridge socket; its launch folder is removed on exit. See [Environment](environment.md). |
 | Legacy tmux server `multiverse-v2`, `/tmp/mv2-native-LAUNCH/` | Older launches keep these saved addresses until stopped and resumed. Discovery still checks the old server. |
-| Codex, Claude and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`); mv2 never moves or deletes them. |
+| Codex, Claude, Antigravity CLI and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `~/.gemini/antigravity-cli`); mv2 never moves or deletes them. |

@@ -1,0 +1,6 @@
+{
+  "schema": 2,
+  "adapter": "agy",
+  "description": "Antigravity CLI; prompt-led coordination, hooks/statusLine and local bridge delivery.",
+  "settings": {}
+}

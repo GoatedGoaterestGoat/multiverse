@@ -9,7 +9,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | Python | 3.11 or newer | `uv sync` or `pip install .` adds the Python dependencies, `textual>=8.2.3,<9`, `websockets>=15,<18`, and `zstandard` below Python 3.14. Python 3.14 and newer use the built-in `compression.zstd`. |
 | tmux | 3.2 or newer | Every agent runs in a tmux pane. mv2 was tested with tmux 3.6a on macOS and 3.4 on Linux. |
 | Platform | macOS or Linux | Windows isn't supported, because mv2 needs tmux and POSIX file locks. |
-| Harness CLI | See below | Install and sign in to at least one of Codex, Claude Code or Pi. Codex is the default harness. |
+| Harness CLI | See below | Install and sign in to at least one of Codex, Claude Code, Antigravity CLI or Pi. Codex is the default harness. |
 | Git, uv | Any | Only `mv2 update` needs them. It needs a Git checkout of mv2, and it syncs its environment with `uv sync --locked` when `uv` is available. |
 
 ## Checked harness versions
@@ -18,6 +18,7 @@ mv2's requirements and the harness versions it was checked against are listed he
 | --- | --- | --- |
 | Codex CLI | 0.171.0 | Launch and resume flags, the app-server bridge and its protocol schema, shared conversations, native refusals, conversation restoration after a daemon restart, and the composer and footer the dashboard's live pane leaves out, from its panes and its renderer's snapshots. |
 | Claude Code | 2.1.330 | Launch and resume flags, the multiverse mod, and the input box the dashboard's live pane leaves out. Resuming needs 2.1.267 or newer (`--system-prompt-snapshot`). |
+| Antigravity CLI | 1.5.16 | Launch and resume flags, bootstrap and hooks through `--add-dir`, session-only `--settings` (`statusLine` and minimal sandbox write rules), shell-callback bridge handoff, `statusLine`/hooks turn state, `agentapi send-message`, `Stop`-hook follow-ups, and transcript usage and delivery confirmation (`1.5.14`–`1.5.16` supported; `1.5.16` removed `ConversationService`). |
 | Pi | 0.84.3 | The integration and its optional bridge extension. |
 
 The Codex check compared official app-server and configuration schemas, including the plugin allowlist. Private fixtures covered plain and connected launches, permissions, read-only retry, identity, refusals, steering, queues, side conversations and recovery. They used disposable homes with updates disabled and localhost scripted providers. Existing CLI flags and rollout reading remain compatible.
@@ -71,6 +72,7 @@ Other releases may behave differently. The Claude Code mod API is early access a
 | Codex bridge | No version check | Other CLI releases receive a launch notice that mv2 startup screen checks are disabled. Native side conversations separately require a supported daemon release and a client that supports them. At each launch, mv2 checks that the CLI, the shared app-server and its relay work. It falls back to plain when `inbox_bridge` is unset. The CLI and app-server versions are recorded at launch and may differ. |
 | Codex in-terminal conversation navigation | Matching CLI and daemon 0.166.0, 0.167.0, 0.167.1, 0.167.2, 0.169.0, 0.170.0 or 0.171.0 | Other releases refuse primary conversation switches through the bridge. Plain and fallback launches are not upgraded into navigation support. |
 | Codex waiting prompts | Matching CLI and daemon 0.166.0, 0.167.0, 0.167.1, 0.167.2, 0.169.0, 0.170.0 or 0.171.0, with a current verified prompt relay | Other versions and older launches require a checked bridge resume. Plain and fallback launches cannot publish or answer prompts. |
+| Antigravity CLI bridge (`statusLine`, hooks, message delivery, receipts) | Antigravity CLI 1.5.0 | `mv2 capabilities --harness agy --probe` reports an older version. Set `inbox_bridge` to `false` to launch plain without hooks, `statusLine` or live delivery. |
 | Pi bridge | No version check | The bridge is off unless `inbox_bridge` is `true`. |
 
 See [harnesses](../use/harnesses.md) for `inbox_bridge` and launch-only agents.

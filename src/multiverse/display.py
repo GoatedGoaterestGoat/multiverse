@@ -187,7 +187,7 @@ def phase_label(row):
     return f"{phase} ({age})" if phase and age else phase
 
 
-HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
+HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi", "agy": "Antigravity"}
 
 
 def mode(record):

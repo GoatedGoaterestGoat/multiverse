@@ -28,7 +28,8 @@ class AdapterContractTest(BaseTest):
     def values(self):
         values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                     bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
-                    agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', session_file=str(self.work / 'agent/session.jsonl'),
+                    agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', launch_dir='/launch',
+                    session_file=str(self.work / 'agent/session.jsonl'),
                     bootstrap_file='/launch/bootstrap.md', task_file='/launch/task.md', workspace=str(self.work), model='chosen', control_socket='/tmp/owned/rpc.sock')
         session_file = Path(values['session_file'])
         session_file.parent.mkdir(exist_ok=True)
@@ -40,6 +41,10 @@ class AdapterContractTest(BaseTest):
             saved = self.claude_storage / 'projects' / '-workspace' / f"{values['session_id']}.jsonl"
             saved.parent.mkdir(parents=True, exist_ok=True)
             saved.write_text('{"type": "user"}\n')
+        elif name == 'agy':
+            saved = Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'conversations' / f"{values['session_id']}.db"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_bytes(b'SQLite format 3\x00')
         return SessionHandle(values['agent_id'], name, values['workspace'],
                              native_id=values['session_id'], session_file=values['session_file'])
 
@@ -49,6 +54,7 @@ class AdapterContractTest(BaseTest):
         starting with - becomes a flag, so the wake fails as a startup error."""
         self.enterContext(patch('multiverse.harnesses.codex.plugins.codex_version', return_value=CHECKED_VERSION))
         self.enterContext(patch('multiverse.harnesses.claude.claude_version', return_value=None))
+        self.enterContext(patch('multiverse.harnesses.agy.agy_version', return_value=None))
         self.enterContext(patch('subprocess.Popen', side_effect=AssertionError(
             'An argv-only adapter contract must not launch an installed native binary')))
         for name in harnesses.BUILTINS:
@@ -88,6 +94,24 @@ class AdapterContractTest(BaseTest):
                                 self.assertLess(argv.index('--session-id'), argv.index('--'))
                                 self.assertEqual(argv.count('--resume'), 1 if prompt == '--resume' else 0)
                             self.assertEqual(adapter.capabilities(session)['wake'].state, 'supported')
+        for bridge in (False, True):
+            path = self.root / 'harnesses' / 'agy' / 'harness.json'
+            spec = read(path)
+            spec['settings']['inbox_bridge'] = bridge
+            write(path, spec)
+            adapter = harnesses.load(self.root, 'agy')
+            for prompt in ('Message from reviewer:\n--literal $(false) `false` {text}', '--conversation', '--help'):
+                with self.subTest(name='agy', bridge=bridge, prompt=prompt):
+                    values = self.values()
+                    session = self.session('agy', values)
+                    command = adapter.resume(session, LaunchContext('resume', values, 'chosen', resume_prompt=prompt))
+                    argv = command.argv
+                    self.assertEqual(argv[-1], f'--prompt-interactive={prompt}')
+                    self.assertNotIn('-p', argv)
+                    self.assertNotIn('--print', argv)
+                    self.assertNotIn(values['task'], argv)
+                    self.assertIn(session.native_id, argv)
+                    self.assertEqual(adapter.capabilities(session)['wake'].state, 'supported')
         legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom'], 'resume': ['custom', '{session_id}']})
         self.assertEqual(legacy.capabilities(SessionHandle('agent', 'custom', '/tmp'))['wake'].state, 'unavailable')
 

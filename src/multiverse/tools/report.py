@@ -23,6 +23,9 @@ def run(root=None, *, agent=None, phase=None, summary=None, blocked_on=None, blo
     if blocked_on_universe is not None and blocked_on is None:
         raise ValueError('--blocked-on-universe requires --blocked-on')
     root, directory, launch_id = callback(root, agent, agent_scoped=True)
+    if launch_id:
+        from ..runtime import native
+        native.try_shell_callback(root, directory, launch_id)
     dependency = blocked.select(root, directory, blocked_on, blocked_on_universe) if blocked_on is not None else None
     # Serialize the phase/dependency change with send's upgrade decision. Same order as focus and send.
     with lock(directory / '.send.lock', create_parent=False), lock(directory / '.launch.lock', create_parent=False):

@@ -66,6 +66,15 @@ class ListenTest(BaseTest):
     def message(self, delivery='inbox-only'):
         return mailbox.append_message(self.directory, 'quiet work', {'name': 'sender'}, delivery=delivery)
 
+    def test_listen_hands_off_an_opted_in_shell_before_waiting(self):
+        """A turn that only listens must still make its tool shell available to the adapter."""
+        with patch.dict(os.environ, {'MV2_SHELL_CALLBACK': '1'}), \
+                patch.object(native, 'shell_callback', side_effect=OSError('callback unavailable')) as callback, \
+                patch.object(listen, '_wait', side_effect=lambda *_: callback.call_count):
+            self.assertEqual(listen.run(self.root), 1)
+        root, directory, launch, environment = callback.call_args.args
+        self.assertEqual((root, directory, launch), (self.root, self.directory, self.launch))
+        self.assertEqual(environment['MV2_LAUNCH_ID'], self.launch)
     def note(self, directory):
         """The real turn-end note, saved and committed, with only its native submission left out."""
         with patch.object(native, 'send_or_wake', return_value={'state': 'native_queued', 'ok': True}) as submitted:

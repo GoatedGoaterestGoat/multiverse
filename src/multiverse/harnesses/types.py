@@ -25,7 +25,7 @@ EFFECTS: Mapping[str, Effect] = {
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
-    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash', 'answer_prompt'), 'act'),
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash', 'answer_prompt', 'shell_callback'), 'act'),
 }
 
 
@@ -195,6 +195,20 @@ class CommandSpec:
     # Presentation for this selected candidate, including a late plain fallback.
     notices: tuple[str, ...] = ()
     startup_retry: StartupRetrySpec | None = None
+    # Relative paths and UTF-8 contents core writes into launches/<launch_id>/ (0600); never outside it.
+    launch_files: Mapping[str, str] = field(default_factory=dict)
+    # Relative paths inside launches/<launch_id>/ that core unlinks when this launch ends or fails before release.
+    cleanup_files: tuple[str, ...] = ()
+    # Opt in to core's in-session tool-shell callback (`shell_callback` hook) for this launch.
+    shell_callback: bool = False
+
+
+@dataclass(frozen=True)
+class ShellCallbackResult:
+    """Adapter-prepared launch handoff from an in-session tool shell; core owns locks, binding and writes."""
+    native_id: str | None = None
+    bridge: str | None = None
+    launch_files: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

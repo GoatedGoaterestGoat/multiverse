@@ -54,6 +54,14 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     # host, have none.
     from ..runtime.agent_identity import runs_in_agent
     in_agent = runs_in_agent(root=root)
+    if (in_agent and os.environ.get('MV2_SHELL_CALLBACK') == '1'
+            and os.environ.get('MV2_LAUNCH_ID') and os.environ.get('MV2_AGENT_ID')):
+        try:
+            own_root = universe.resolve(os.environ.get('MV2_UNIVERSE') or root)
+            own_directory = agents.directory(own_root, os.environ['MV2_AGENT_ID'], allow_damaged=True)
+            native.try_shell_callback(own_root, own_directory, os.environ['MV2_LAUNCH_ID'])
+        except Exception:
+            pass
     sender = _normalized(sender, in_agent)  # saved as it will be shown, live and in the inbox
     from ..plugins import manifest
     from ..runtime.native import _plugin_as_user

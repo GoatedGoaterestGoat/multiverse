@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from ..store import retry_missing
+from .agy import AgyAdapter
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .legacy import LegacyAdapter, arguments
@@ -10,7 +11,7 @@ from .pi import PiAdapter
 from .types import HarnessAdapter
 
 PACKAGES = Path(__file__).parent
-BUILTINS = {'codex': CodexAdapter, 'claude': ClaudeAdapter, 'pi': PiAdapter}
+BUILTINS = {'codex': CodexAdapter, 'claude': ClaudeAdapter, 'pi': PiAdapter, 'agy': AgyAdapter}
 
 
 def load(root: Path, name: str) -> HarnessAdapter:

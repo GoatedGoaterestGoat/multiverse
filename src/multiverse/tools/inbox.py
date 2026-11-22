@@ -50,6 +50,9 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
     seconds = timeout_seconds(timeout)
     deadline = time.monotonic() + seconds if seconds is not None else None
     root, directory, launch_id = callback(root, agent, agent_scoped=True)
+    if launch_id:
+        from ..runtime import native
+        native.try_shell_callback(root, directory, launch_id)
     def public_result(result):
         if all_messages:
             return result

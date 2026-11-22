@@ -2,6 +2,7 @@
 
 Durable message storage never depends on these best-effort operations.
 """
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from datetime import datetime
 import json
@@ -19,11 +20,12 @@ from uuid import uuid4
 
 from .. import harnesses
 from ..plugins.access import Denied
-from . import effects
+from . import effects, launch_files
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
-                               BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
+                               BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec,
+                               ShellCallbackResult)
 from ..harnesses.types import ObservedBinding, normalize_session_id
-from ..store import exists_replaced, lock, now, read
+from ..store import exists_replaced, lock, now, read, retry_missing, write
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
 from ..universe import agents, records
@@ -35,7 +37,7 @@ def environment(command):
 
 
 def execute(command: CommandSpec, workspace, timeout=10):
-    env = environment(command)
+    env = {**environment(command), **{k: v for k, v in command.environment.items() if not k.startswith('MV2_')}}
     # Never use a shell: message text and native IDs remain literal argv values.
     return subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
                           text=True, capture_output=True, timeout=timeout)
@@ -1321,3 +1323,148 @@ def _wake_failure(directory, message_id, error):
     if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
         update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
     return receipt
+
+
+def _same_path(left, right) -> bool:
+    if not isinstance(left, str) or not left or '\0' in left:
+        return False
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+def _shell_callback_allowed(root, directory, canonical_launch, properties, facts, request, env):
+    """Return the validated cleanup_files allowlist if this callback is authorized, else None."""
+    if (not isinstance(properties, dict) or not isinstance(facts, dict) or not isinstance(request, dict)
+            or facts.get('launch_id') != canonical_launch
+            or facts.get('state') not in ('starting', 'running')
+            or facts.get('ending_at')
+            or facts.get('cleanup_retired')
+            or (facts.get('native_mode') or {}).get('mode') != 'bridge'
+            or request.get('shell_callback') is not True
+            or env.get('MV2_SHELL_CALLBACK') != '1'):
+        return None
+    agent_id = properties.get('id')
+    req_env = request.get('env') if isinstance(request.get('env'), dict) else {}
+    if (not isinstance(agent_id, str) or not agent_id
+            or req_env.get('MV2_AGENT_ID') != agent_id
+            or env.get('MV2_AGENT_ID') != agent_id
+            or req_env.get('MV2_LAUNCH_ID') != canonical_launch
+            or env.get('MV2_LAUNCH_ID') != canonical_launch
+            or not _same_path(req_env.get('MV2_UNIVERSE'), root)
+            or not _same_path(env.get('MV2_UNIVERSE'), root)):
+        return None
+    if 'MV2_AGENT_DIR' in req_env and not _same_path(req_env.get('MV2_AGENT_DIR'), directory):
+        return None
+    if 'MV2_AGENT_DIR' in env and not _same_path(env.get('MV2_AGENT_DIR'), directory):
+        return None
+    raw_allowed = request.get('cleanup_files')
+    if raw_allowed is None:
+        return ()
+    if isinstance(raw_allowed, (str, bytes)) or not isinstance(raw_allowed, (list, tuple)):
+        return None
+    allowed = tuple(raw_allowed)
+    launch_files.validate_paths(allowed)
+    return allowed
+
+
+def shell_callback(root, directory, launch_id, environment=None) -> bool:
+    """Run an adapter's optional in-session tool-shell callback under core launch and runtime fences."""
+    env = os.environ if environment is None else environment
+    if not launch_id or env.get('MV2_SHELL_CALLBACK') != '1':
+        return False
+    try:
+        canonical_launch = normalize_session_id(launch_id)
+    except ValueError:
+        return False
+    root, directory = Path(root), Path(directory)
+    launch_dir = directory / 'launches' / canonical_launch
+    try:
+        properties = retry_missing(lambda: read(directory / 'properties.json'))
+        facts = retry_missing(lambda: read(directory / 'runtime.json'))
+        request = launch_files.read_request(directory, canonical_launch)
+        allowed_files = _shell_callback_allowed(root, directory, canonical_launch, properties, facts, request, env)
+    except (OSError, ValueError):
+        return False
+    if allowed_files is None:
+        return False
+    adapter = harnesses.load(root, properties['harness'])
+    hook = adapter_hook(adapter, 'shell_callback')
+    if hook is None:
+        return False
+    session = SessionHandle.from_records(properties, facts, directory)
+    result = effects.call(adapter, 'shell_callback', session, dict(env))
+    if result is None:
+        return False
+    if not isinstance(result, ShellCallbackResult):
+        raise ValueError('shell_callback must return a ShellCallbackResult or None')
+    target_id = normalize_session_id(result.native_id) if result.native_id is not None else None
+    bridge_name = None
+    if result.bridge is not None:
+        from ..tools.runtime_update import bridge_id
+        bridge_name = bridge_id(result.bridge)
+    if result.launch_files:
+        if not isinstance(result.launch_files, Mapping):
+            raise ValueError('shell_callback launch_files must map relative paths to text content')
+        allowed_set = set(allowed_files)
+        for key, value in result.launch_files.items():
+            if not isinstance(value, str):
+                raise ValueError(f'shell_callback launch file content must be text: {key!r}')
+            try:
+                value.encode('utf-8')
+            except UnicodeEncodeError as error:
+                raise ValueError(f'shell_callback launch file content must be valid UTF-8 text: {key!r}') from error
+            launch_files.validate_path(key)
+            if key not in allowed_set:
+                raise ValueError(f'shell_callback launch file is not declared in cleanup_files: {key!r}')
+        launch_files.validate_paths(result.launch_files.keys())
+    # Same lock order as session_properties and _rebind_session: launch -> runtime -> namespace -> properties.
+    with lock(directory / '.launch.lock', create_parent=False), lock(directory / '.runtime.lock', create_parent=False):
+        try:
+            current_props = retry_missing(lambda: read(directory / 'properties.json'))
+            current_facts = agents.runtime(directory)
+            current_request = launch_files.read_request(directory, canonical_launch)
+            current_allowed = _shell_callback_allowed(
+                root, directory, canonical_launch, current_props, current_facts, current_request, env,
+            )
+        except (OSError, ValueError):
+            return False
+        if current_allowed is None:
+            return False
+        if result.launch_files and not set(result.launch_files).issubset(set(current_allowed)):
+            return False
+        if target_id is not None:
+            effective_props, _ = agents.sessions.effective(directory, current_props)
+            current_id = effective_props.get('native_session_id')
+            if current_id is None or (current_id == target_id and current_props.get('native_session_id') != target_id):
+                current_props = agents._bind_session_locked(root, directory, target_id, canonical_launch)
+            elif current_id != target_id:
+                # A tool shell must never silently rebind an already bound agent to another conversation.
+                return False
+            if current_props.get('native_session_id') != target_id:
+                return False
+        if result.launch_files:
+            launch_files.write_files(launch_dir, result.launch_files, allowed=current_allowed, agent_dir=directory)
+        if bridge_name is not None and (
+            current_facts.get('native_bridge') != bridge_name
+            or current_facts.get('startup_prompt') is not None
+        ):
+            current_facts['native_bridge'] = bridge_name
+            current_facts['startup_prompt'] = None
+            current_facts['observed_at'] = now()
+            write(directory / 'runtime.json', current_facts)
+    from .lifecycle import note_ready
+    note_ready(root, directory, canonical_launch)
+    return True
+
+
+def try_shell_callback(root, directory, launch_id, environment=None) -> bool:
+    """Run a best-effort adapter callback from a tool shell."""
+    env = os.environ if environment is None else environment
+    if not launch_id or env.get('MV2_SHELL_CALLBACK') != '1':
+        return False
+    try:
+        return shell_callback(root, directory, launch_id, env)
+    except Exception:
+        return False

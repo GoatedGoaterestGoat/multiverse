@@ -35,9 +35,14 @@ class BaseTemplateTest(unittest.TestCase):
             self.assertEqual(list((clone / "state" / "agents").iterdir()), [])
             self.assertFalse((clone / "state" / "private-session.json").exists())
             self.assertEqual(universe.workspace(clone), work)
-            for harness in ("claude", "codex", "pi"):
+            for harness in ("claude", "codex", "pi", "agy"):
                 self.assertEqual(read(clone / "harnesses" / harness / "harness.json"),
                                  read(templates.TEMPLATES / "base" / "harnesses" / harness / "harness.json"))
+            s23 = templates.create(work / "s23", "s23", "Silicon23", work)
+            self.assertEqual(read(s23 / "harnesses" / "agy" / "harness.json"),
+                             read(templates.TEMPLATES / "Silicon23" / "harnesses" / "agy" / "harness.json"))
+            self.assertIn("--dangerously-skip-permissions",
+                          read(s23 / "harnesses" / "agy" / "harness.json")["settings"]["args"])
             self.assertFalse(any(path.is_symlink() for path in clone.rglob("*")))
         with self.subTest("a recursive clone, its subverses included"):
             child = templates.create(root / "subverses" / "review", "review", workdir=work)

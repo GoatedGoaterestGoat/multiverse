@@ -9,11 +9,12 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-cba6f7?labelColor=1e1e2e" alt="MIT license"></a>
   <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.330-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.330"></a>
   <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.171.0-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.171.0"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Antigravity%20CLI-1.5.16-cba6f7?labelColor=1e1e2e" alt="Checked against Antigravity CLI 1.5.16"></a>
 </p>
 
 **A harness-agnostic, extensible manager for agent teams.**
 
-Multiverse (`mv2`) runs Claude Code, Codex and Pi side by side in tmux and shows them in one terminal dashboard. Open any agent's terminal from the dashboard to work with it, and return when you're done.
+Multiverse (`mv2`) runs Claude Code, Codex, Antigravity CLI and Pi side by side in tmux and shows them in one terminal dashboard. Open any agent's terminal from the dashboard to work with it, and return when you're done.
 
 - **Universes and subverses.** Each project gets a `.multiverse/` folder holding its agents' instructions, harness settings and records. Subverses are universes nested inside it, so separate teams keep their own setup.
 - **Agents coordinate through the CLI.** An agent uses the same `mv2` command you do to start helpers, message them and report progress. There are no extra model tools, no MCP server and no mv2 daemon.
@@ -27,11 +28,11 @@ https://github.com/user-attachments/assets/24084193-fc3d-48a6-a9a6-c3e7415220a5
 
 ## Status
 
-mv2 is in early development. It runs Claude Code, Codex and Pi on Linux and macOS, and its commands, files and plugin API can still change between versions.
+mv2 is in early development. It runs Claude Code, Codex, Antigravity CLI and Pi on Linux and macOS, and its commands, files and plugin API can still change between versions.
 
 ## Install
 
-You need Linux or macOS, Python 3.11 or newer, tmux 3.2 or newer, and at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex) or [Pi](https://github.com/earendil-works/pi), installed and logged in.
+You need Linux or macOS, Python 3.11 or newer, tmux 3.2 or newer, and at least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), Antigravity CLI or [Pi](https://github.com/earendil-works/pi), installed and logged in.
 
 ```sh
 git clone https://github.com/GoatedGoaterestGoat/multiverse.git

@@ -79,6 +79,8 @@ def run(root=None, *, timeout=None, _present=None):
     launch_id = agents.runtime(directory).get('launch_id')
     if not launch_id:
         raise ValueError('No running launch to listen for')
+    from ..runtime import native
+    native.try_shell_callback(caller.root, directory, launch_id)
     with ExitStack() as listeners:
         registrations = [listeners.enter_context(focus.listening(directory))]
         try:

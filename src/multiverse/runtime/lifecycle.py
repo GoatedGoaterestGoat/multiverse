@@ -21,7 +21,7 @@ from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import effects, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
+from . import effects, launch_files, native, paths, attachments, agent_identity, registration, missing_runtime, storage_adoption
 from . import model_choices as model_policy
 
 TEARDOWN_TIMEOUT = 10
@@ -687,6 +687,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if _recovery:
             native.validate_recovery_command(command, session)
             command = replace(command, fallback=None)
+        _validate_launch_files(command)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
@@ -699,66 +700,77 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Resume creates a fresh pane; remove only the old owned wrapper.
             old_backend, old_pane = owned(properties, previous, states=('stopped',))
             old_backend.run('kill-pane', '-t', old_pane)
-        launch.mkdir(parents=True)
+        launch_files.ensure_launch_dir(agent_dir, launch_id)
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(values['task'])
-        env = {key: value for key, value in target.items() if key != "PATH"}
-        if resume:
-            env.update(saved)
-        env = {key: value for key, value in env.items() if key not in storage}
-        env.update({key: value for key, value in storage.items() if value is not None})
-        env["HOME"] = context.environment.get("HOME") or str(Path.home())
-        # Persist adapter-selected storage so resume cannot accidentally switch
-        # accounts/history when launched by a different monitor environment.
-        if command.shared_service:
-            env.update(command.shared_service.environment)
-            properties['native_environment'] = dict(command.shared_service.environment)
-        properties.update(model=model, updated_at=now())
-        if start_fresh:
-            properties, retirement = agents.sessions.retire(root, agent_dir, retired_id, properties, launch_id,
-                                                            previous_launch=previous.get('launch_id'))
-            agents._session_event(agent_dir, retirement)
-        elif resume:
-            with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
-                current = read(agent_dir / 'properties.json')
-                current.update({key: properties[key] for key in ('model', 'effort', 'workspace', 'native_environment',
-                               'native_storage_environment', 'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
-                                if key in properties})
-                properties = current
-                write(agent_dir / "properties.json", properties)
-        else:
-            # Publish a name atomically across spawns, before starting any
-            # native service or terminal. Resume keeps its existing record.
-            with agents.sessions.namespace(root), lock(root / "state" / ".agents.lock"):
-                if read(root / 'universe.json')['id'] != properties['universe_id']:
-                    raise ValueError('Universe changed before the agent could be published')
-                check_available_name(root, name, locked=True, exclude=agent_dir)
-                if properties.get('native_session_id'):
-                    agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
-                write(agent_dir / "properties.json", properties)
-            _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
-        if resume and not _recovery and resume_message_id is None:
-            # Settle before replacing the old runtime, so an interrupted resume
-            # cannot lose the switch fence while leaving its input unaccounted for.
-            from .navigation import end_waiting
-            reason = ('Conversation switch ended before delivery; run mv2 deliver '
-                      + properties['name'] + ' --retry')
-            waiting = end_waiting(agent_dir, reason)
-            if waiting:
-                notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
-        with lock(agent_dir / '.runtime.lock', create_parent=False):
-            latest = agents.runtime(agent_dir)
-            initial = {**previous, **{key: latest.get(key) for key in _ORDERED_RUNTIME_FIELDS}}
-            write(agent_dir / "runtime.json",
-                  {**_initial_runtime(launch_id, command, adapter, session, initial, resume and not fresh, _recovery),
-                   'run_directory': str(run_root)})
-        if fresh:
-            # The replacement launch has now been published. If retirement
-            # crashed earlier, its next resume used spawn preparation above.
-            with lock(agent_dir / '.properties.lock'):
-                properties = read(agent_dir / 'properties.json')
-                properties['native_fresh_pending'] = False
-                write(agent_dir / 'properties.json', properties)
+        staged_files = {}
+        staged_cleanup = list(command.cleanup_files or ())
+        try:
+            if command.launch_files:
+                _write_launch_files(launch, command.launch_files, agent_dir=agent_dir)
+                staged_files = dict(command.launch_files)
+            env = {key: value for key, value in target.items() if key != "PATH"}
+            if resume:
+                env.update(saved)
+            env = {key: value for key, value in env.items() if key not in storage}
+            env.update({key: value for key, value in storage.items() if value is not None})
+            env["HOME"] = context.environment.get("HOME") or str(Path.home())
+            # Persist adapter-selected storage so resume cannot accidentally switch
+            # accounts/history when launched by a different monitor environment.
+            if command.shared_service:
+                env.update(command.shared_service.environment)
+                properties['native_environment'] = dict(command.shared_service.environment)
+            properties.update(model=model, updated_at=now())
+            if start_fresh:
+                properties, retirement = agents.sessions.retire(root, agent_dir, retired_id, properties, launch_id,
+                                                                previous_launch=previous.get('launch_id'))
+                agents._session_event(agent_dir, retirement)
+            elif resume:
+                with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
+                    current = read(agent_dir / 'properties.json')
+                    current.update({key: properties[key] for key in ('model', 'effort', 'workspace', 'native_environment',
+                                   'native_storage_environment', 'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
+                                    if key in properties})
+                    properties = current
+                    write(agent_dir / "properties.json", properties)
+            else:
+                # Publish a name atomically across spawns, before starting any
+                # native service or terminal. Resume keeps its existing record.
+                with agents.sessions.namespace(root), lock(root / "state" / ".agents.lock"):
+                    if read(root / 'universe.json')['id'] != properties['universe_id']:
+                        raise ValueError('Universe changed before the agent could be published')
+                    check_available_name(root, name, locked=True, exclude=agent_dir)
+                    if properties.get('native_session_id'):
+                        agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
+                    write(agent_dir / "properties.json", properties)
+                _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
+            if resume and not _recovery and resume_message_id is None:
+                # Settle before replacing the old runtime, so an interrupted resume
+                # cannot lose the switch fence while leaving its input unaccounted for.
+                from .navigation import end_waiting
+                reason = ('Conversation switch ended before delivery; run mv2 deliver '
+                          + properties['name'] + ' --retry')
+                waiting = end_waiting(agent_dir, reason)
+                if waiting:
+                    notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
+            with lock(agent_dir / '.runtime.lock', create_parent=False):
+                latest = agents.runtime(agent_dir)
+                initial = {**previous, **{key: latest.get(key) for key in _ORDERED_RUNTIME_FIELDS}}
+                write(agent_dir / "runtime.json",
+                      {**_initial_runtime(launch_id, command, adapter, session, initial, resume and not fresh, _recovery),
+                       'run_directory': str(run_root)})
+            if fresh:
+                # The replacement launch has now been published. If retirement
+                # crashed earlier, its next resume used spawn preparation above.
+                with lock(agent_dir / '.properties.lock'):
+                    properties = read(agent_dir / 'properties.json')
+                    properties['native_fresh_pending'] = False
+                    write(agent_dir / 'properties.json', properties)
+        except Exception:
+            to_clean = tuple(dict.fromkeys((*staged_cleanup, *command.cleanup_files)))
+            if to_clean:
+                launch_files.unlink_files(launch, to_clean, agent_dir=agent_dir)
+            raise
         backend = Tmux(socket_path)
         terminal = None
         progress = None
@@ -825,8 +837,29 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
+            _validate_launch_files(command)
             model_policy.require_command(root, adapter, model, properties.get('effort'),
                                          {**environment, **context.environment}, command)
+            final_files = dict(command.launch_files or {})
+            final_cleanup = tuple(command.cleanup_files or ())
+            obsolete_files = [path for path in dict.fromkeys((*staged_cleanup, *staged_files))
+                              if path not in final_files]
+            if obsolete_files:
+                unlink_errors = launch_files.unlink_files(launch, obsolete_files, agent_dir=agent_dir)
+                if unlink_errors:
+                    raise RuntimeError('Failed to clean discarded launch files: ' + '; '.join(unlink_errors))
+                obsolete_set = set(obsolete_files)
+                staged_cleanup = [path for path in staged_cleanup if path not in obsolete_set]
+                for path in obsolete_files:
+                    staged_files.pop(path, None)
+            to_write = {path: content for path, content in final_files.items() if staged_files.get(path) != content}
+            if final_cleanup:
+                staged_cleanup = list(dict.fromkeys((*staged_cleanup, *final_cleanup)))
+            if to_write:
+                _write_launch_files(launch, to_write, agent_dir=agent_dir)
+                staged_files.update(to_write)
+            if tuple(staged_cleanup) != tuple(command.cleanup_files or ()):
+                command = replace(command, cleanup_files=tuple(staged_cleanup))
             service = native.service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
             if service and asdict(service.identity) != properties.get('native_service_identity'):
                 raise ValueError('Native service scope changed during launch preparation')
@@ -872,8 +905,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
-            write(launch / "request.json", {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
+            if command.shell_callback:
+                env['MV2_SHELL_CALLBACK'] = '1'
+            else:
+                env.pop('MV2_SHELL_CALLBACK', None)
+            launch_files.write_request(agent_dir, launch_id, {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
                                            'task_launch': not resume and bool(values['task'].strip()),
+                                           'expected_native_id': properties.get('native_session_id') if resume and not fresh else None,
                                            'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
@@ -901,6 +939,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         except Exception as error:
             if progress is not None:
                 progress.fail()
+            to_clean = tuple(dict.fromkeys((*staged_cleanup, *command.cleanup_files)))
+            if to_clean:
+                launch_files.unlink_files(launch, to_clean, agent_dir=agent_dir)
             if resume_message_id is not None and not (launch / 'ready').exists():
                 mailbox.finish_wake(agent_dir, launch_id, resume_message_id, False,
                             f'Resume failed before native process startup: {error}')
@@ -1035,12 +1076,43 @@ def _wake_prompt(root, agent_dir, properties, message_id):
     return native.framed_text(root, message), tracking
 
 
+def _validate_launch_files(command):
+    if command.launch_files:
+        if not hasattr(command.launch_files, 'items'):
+            raise ValueError('Launch files must map relative paths to text content')
+        for relative, content in command.launch_files.items():
+            if not isinstance(content, str):
+                raise ValueError(f'Launch file content must be text: {relative!r}')
+            try:
+                content.encode('utf-8')
+            except UnicodeEncodeError as error:
+                raise ValueError(f'Launch file content must be valid UTF-8 text: {relative!r}') from error
+        launch_files.validate_paths(command.launch_files.keys())
+    if command.cleanup_files:
+        if isinstance(command.cleanup_files, (str, bytes)) or not isinstance(command.cleanup_files, (tuple, list)):
+            raise ValueError('cleanup_files must be a sequence of relative paths')
+        launch_files.validate_paths(command.cleanup_files)
+    if command.fallback is not None:
+        _validate_launch_files(command.fallback)
+        if command.rpc_proxy is not None and command.fallback.launch_files:
+            primary_files = command.launch_files or {}
+            for relative, content in command.fallback.launch_files.items():
+                if relative not in primary_files or primary_files[relative] != content:
+                    raise ValueError(
+                        f'Runner fallback launch file {relative!r} must match a primary launch_files entry'
+                    )
+
+
+_write_launch_files = launch_files.write_files
+
+
 def _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir):
     """The placeholders a harness definition's argv can use."""
     return {"name": properties["name"], "agent_id": properties["id"],
             "session_id": properties.get("native_session_id", ""),
             "bootstrap": bootstrap, "bootstrap_json": json.dumps(bootstrap, ensure_ascii=False),
             "task": properties["task"], "agent_dir": str(agent_dir), "harness_dir": str(harness_dir),
+            "launch_dir": str(launch),
             "session_file": str(agent_dir / "session.jsonl"), "bootstrap_file": str(launch / "bootstrap.md"),
             "task_file": str(launch / "task.md"), "workspace": str(workdir), "model": model or "",
             "adapter_dir": str(harnesses.PACKAGES / harness), "control_socket": str(service_dir / 'rpc.sock')}
@@ -1207,6 +1279,18 @@ def _storage_command(command, storage):
                    fallback=_storage_command(command.fallback, storage) if command.fallback else None)
 
 
+def _serialize_fallback(fallback):
+    """Serialize a fallback CommandSpec for request.json without raw launch_files payload bytes."""
+    if fallback is None:
+        return None
+    data = asdict(fallback)
+    data.pop('launch_files', None)
+    data['launch_file_names'] = list((fallback.launch_files or {}).keys())
+    if data.get('fallback') is not None:
+        data['fallback'] = _serialize_fallback(fallback.fallback)
+    return data
+
+
 def _request(argv, env, command, endpoint, resume_message_id):
     """What the pane runner reads before it starts the native process."""
     return {"argv": argv, "env": env, "unset_env": list(command.unset_env),
@@ -1214,9 +1298,11 @@ def _request(argv, env, command, endpoint, resume_message_id):
             "shared_service": bool(command.shared_service),
             "attachment": asdict(command.attachment) if command.attachment else None,
             "native_mode": command.native_mode,
-            "fallback": asdict(command.fallback) if command.fallback else None,
+            "fallback": _serialize_fallback(command.fallback),
             "startup_retry": asdict(command.startup_retry) if command.startup_retry else None,
             "resume_message_id": resume_message_id,
+            "cleanup_files": list(command.cleanup_files),
+            "shell_callback": bool(command.shell_callback),
             "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None}
 
 

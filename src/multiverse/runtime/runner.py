@@ -478,6 +478,9 @@ def launch_environment(request):
     env.pop('MV2_FIRST_TASK', None)
     if request.get('task_launch') is True:
         env['MV2_FIRST_TASK'] = '1'
+    env.pop('MV2_SHELL_CALLBACK', None)
+    if request.get('shell_callback') is True:
+        env['MV2_SHELL_CALLBACK'] = '1'
     cli_prefix = str(Path(env['MV2_CLI']).parent) + os.pathsep
     if not env.get('PATH', '').startswith(cli_prefix):
         env['PATH'] = cli_prefix + env.get('PATH', '')
@@ -782,13 +785,25 @@ def main():
                 notices = notice_lines(request.get('resume_notices', request.get('notices')),
                                        fallback.get('notices'))
                 selection = {**(fallback.get('native_mode') or {}), 'fallback_reason': f'Native launch relay unavailable: {error}'}
-                request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
-                           'env': {**fallback.get('environment', {}), **request['env']},
-                           'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
-                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
-                           'notices': notices, 'startup_retry': fallback.get('startup_retry')}
-                write(launch / 'request.json', request)
-                env = launch_environment(request)
+                old_cleanup = tuple(request.get('cleanup_files') or ())
+                fallback_cleanup = tuple(fallback.get('cleanup_files') or ())
+                fallback_retained = set(fallback.get('launch_file_names') or ())
+                kept_cleanup = [path for path in old_cleanup if path in fallback_retained]
+                removed_cleanup = [path for path in old_cleanup
+                                   if path not in fallback_cleanup and path not in fallback_retained]
+                next_cleanup = list(dict.fromkeys((*fallback_cleanup, *kept_cleanup)))
+                next_env = {**fallback.get('environment', {}), **request['env']}
+                if fallback.get('shell_callback'):
+                    next_env['MV2_SHELL_CALLBACK'] = '1'
+                else:
+                    next_env.pop('MV2_SHELL_CALLBACK', None)
+                next_request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
+                                'env': next_env,
+                                'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
+                                'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
+                                'cleanup_files': next_cleanup,
+                                'shell_callback': bool(fallback.get('shell_callback')),
+                                'notices': notices, 'startup_retry': fallback.get('startup_retry')}
                 # A sender may have queued input while relay startup was still
                 # pending. Plain mode cannot deliver it; retain a retryable failure
                 # atomically with disabling the startup queue for future senders.
@@ -805,8 +820,20 @@ def main():
                         else:
                             # Restore inherited behavior after our launch override.
                             backend.run('set-option', '-u', '-t', pane, 'mouse')
+                    from multiverse.runtime import launch_files
+                    with lock(agent_dir / '.runtime.lock', create_parent=False):
+                        if removed_cleanup:
+                            unlink_errors = launch_files.unlink_files(launch, removed_cleanup, agent_dir=agent_dir)
+                            if unlink_errors:
+                                raise RuntimeError(
+                                    'Failed to clean primary launch files before fallback: ' + '; '.join(unlink_errors)
+                                )
+                        launch_files.write_request(agent_dir, launch.name, next_request)
+                    request = next_request
+                    env = launch_environment(request)
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
-                                   startup_delivery=None, native_mode=selection, native_relay=None, error=None,
+                                   startup_delivery=None, native_mode=selection, native_relay=None,
+                                   native_bridge=None, error=None,
                                    native_service=None, attachment=fallback.get('attachment'),
                                    launch_notices=notices,
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
@@ -986,6 +1013,24 @@ def main():
                     diagnostic.get('reason') or 'Runner ended before launch readiness')
             except Exception as error:
                 cleanup_errors.append('startup bookkeeping: ' + str(error))
+        cleanup_paths = request.get('cleanup_files') or ()
+        if cleanup_paths or request.get('shell_callback'):
+            from multiverse.runtime import launch_files
+            try:
+                if (agent_dir / 'runtime.json').exists():
+                    with lock(agent_dir / '.runtime.lock', create_parent=False):
+                        facts = runtime(agent_dir)
+                        if facts.get('launch_id') == launch.name:
+                            facts['cleanup_retired'] = True
+                            write(agent_dir / 'runtime.json', facts)
+                        if cleanup_paths:
+                            errors = launch_files.unlink_files(launch, cleanup_paths, agent_dir=agent_dir)
+                            cleanup_errors.extend(f'launch file cleanup: {item}' for item in errors)
+                elif cleanup_paths:
+                    errors = launch_files.unlink_files(launch, cleanup_paths, agent_dir=agent_dir)
+                    cleanup_errors.extend(f'launch file cleanup: {item}' for item in errors)
+            except Exception as error:
+                cleanup_errors.append(f'launch file cleanup: {error}')
         # Shared services deliberately outlive terminal clients and monitors.
         if service_dir:
             shutil.rmtree(service_dir, ignore_errors=True)

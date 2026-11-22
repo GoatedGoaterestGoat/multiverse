@@ -98,7 +98,8 @@ class RunsTest(BaseTest):
                 '"pgid":os.getpgrp(),"pid":os.getpid(),"env":dict(os.environ),'
                 '"journal":json.loads((p/"run.json").read_text())}))\n')
         dirty = {'MV2_AGENT_ID': 'other', 'CLAUDE_CODE_SESSION_ID': 'other', 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': 'yes',
-                 'CODEX_THREAD_ID': 'other', 'KEEP': 'value'}
+                 'CODEX_THREAD_ID': 'other', 'ANTIGRAVITY_CSRF_TOKEN': 'other',
+                 'ANTIGRAVITY_LS_ADDRESS': '127.0.0.1:1', 'KEEP': 'value'}
         self.environment.update(dirty)
         adapter = Provider(code, overlay=dirty)
         with ThreadPoolExecutor(max_workers=2) as pool:
