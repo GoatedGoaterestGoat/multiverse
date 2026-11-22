@@ -1104,6 +1104,8 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(usage.value['output_tokens'], 300)
         self.assertEqual(usage.value['total_tokens'], 3300)
         self.assertEqual(usage.value['cost_usd'], 0.05)
+        self.assertEqual(usage.value['model'], 'gemini-3.8-flash')
+        self.assertEqual(usage.value['effort'], 'low')
 
         # Storage evidence & startup screen detection.
         self.assertEqual(adapter.session_storage_evidence(session, str(home)).value, {'present': True})
@@ -2303,6 +2305,97 @@ class AgyAdapterUnitTest(BaseTest):
             agy_bridge._sync_runtime_queue_state_locked(agent_dir, launch3, stale_old_conv, stale_entries)
             self.assertEqual(read(agent_dir / 'runtime.json').get('queue_state'), live_pause)
 
+    def test_model_catalog_launch_effort_and_display_names(self):
+        """Antigravity's offline model table, --effort argv placement, suffixed transcript splitting and Silicon23
+        short display names keep the dashboard from showing raw IDs like gemini-4-neon-xhigh and reject invalid
+        or conflicting efforts before launching."""
+        from multiverse import display
+        from multiverse.runtime import model_choices
+        from multiverse.universe import templates
+
+        adapter = AgyAdapter.configured('agy', {})
+        self.assertTrue(adapter.supports_launch_effort)
+        catalog = adapter.models(environment={})
+        self.assertEqual(catalog.source, 'table')
+        self.assertTrue(catalog.free_form)
+        by_id = {item.id: item for item in catalog.models}
+        self.assertEqual(by_id['gemini-4-neon'].name, 'Gemini 4 Neon')
+        self.assertEqual(by_id['gemini-4-neon'].efforts, ('low', 'medium', 'high', 'xhigh'))
+        self.assertEqual(by_id['gemini-3.8-flash'].name, 'Gemini 3.8 Flash')
+        self.assertEqual(by_id['gemini-3.8-flash'].efforts, ('low', 'medium', 'high'))
+        self.assertEqual(by_id['gemini-pro-orchestrator-neon'].efforts, ())
+
+        # Base IDs validate efforts; suffixed IDs stay usable unrestricted without --effort but reject conflicts.
+        self.assertTrue(adapter.check_model('gemini-4-neon', effort='xhigh', environment={}).ok)
+        self.assertTrue(adapter.check_model('gemini-4-neon', effort='xhigh', environment={}).verified)
+        self.assertFalse(adapter.check_model('gemini-4-neon', effort='max', environment={}).ok)
+        self.assertFalse(adapter.check_model('gemini-pro-orchestrator-neon', effort='low', environment={}).ok)
+        suffixed_ok = adapter.check_model('gemini-4-neon-xhigh', environment={})
+        self.assertTrue(suffixed_ok.ok)
+        self.assertFalse(suffixed_ok.verified)
+        self.assertEqual(suffixed_ok.effort, 'xhigh')
+        self.assertFalse(adapter.check_model('gemini-4-neon-xhigh', effort='low', environment={}).ok)
+        self.assertFalse(adapter.check_model('gemini-4-neon-xhigh', effort='xhigh', environment={}).ok)
+        unknown = adapter.check_model('gemini-future-preview', effort='high', environment={})
+        self.assertTrue(unknown.ok)
+        self.assertFalse(unknown.verified)
+
+        # Spawn and resume place single-token --effort=LEVEL before --prompt-interactive=... in both bridge and plain modes,
+        # so an unchecked effort starting with '-' on an unlisted model can never be parsed as another CLI flag.
+        conv_resume = str(uuid4())
+        home_resume = self._create_saved_conversation(conv_resume)
+        resume_session = SessionHandle('a1', 'agy', str(self.work), 'l1', conv_resume, home=os.path.realpath(home_resume))
+        for bridge_flag in (True, False):
+            configured = AgyAdapter.configured('agy', {'inbox_bridge': bridge_flag})
+            values = self._values(task='do task')
+            cmd = configured.spawn(LaunchContext('spawn', values, 'gemini-4-neon', {'HOME': str(self.work)}, effort='xhigh'))
+            self.assertEqual(cmd.argv[-1], '--prompt-interactive=do task')
+            idx = cmd.argv.index('--effort=xhigh')
+            self.assertLess(idx, len(cmd.argv) - 1)
+            rcmd = configured.resume(
+                resume_session,
+                LaunchContext('resume', self._values(task='wake now'), 'gemini-4-neon', {'HOME': str(self.work)},
+                              resume_prompt='wake now', effort='high'),
+            )
+            self.assertEqual(rcmd.argv[-1], '--prompt-interactive=wake now')
+            ridx = rcmd.argv.index('--effort=high')
+            self.assertLess(ridx, len(rcmd.argv) - 1)
+        dash_cmd = AgyAdapter.configured('agy', {}).spawn(
+            LaunchContext('spawn', self._values(task='hi'), 'gemini-future-preview', {'HOME': str(self.work)}, effort='-weird'),
+        )
+        self.assertIn('--effort=-weird', dash_cmd.argv)
+        self.assertNotIn('-weird', dash_cmd.argv)
+        # 1.5.16 catalog version and additions are present.
+        self.assertEqual(catalog.version, '1.5.16')
+        self.assertIn('gemini-4-carbon', by_id)
+        self.assertIn('gemini-pro-orchestrator', by_id)
+        self.assertIn('gemini-pro-orchestrator-argon', by_id)
+
+        # Running transcript with suffixed model splits into (model, effort) so base shows "Gemini 4 Neon (xhigh)"
+        # and Silicon23 shows "Neon (xhigh)".
+        for template_name, expected_label in (('base', 'Gemini 4 Neon (xhigh)'), ('Silicon23', 'Neon (xhigh)')):
+            with self.subTest(template=template_name):
+                scope = templates.create(self.work / f'tpl-{template_name}', template_name, template_name, self.work)
+                conv_id = str(uuid4())
+                home = self._create_saved_conversation(conv_id)
+                transcript = home / 'brain' / conv_id / '.system_generated' / 'logs' / 'transcript.jsonl'
+                transcript.parent.mkdir(parents=True, exist_ok=True)
+                transcript.write_text(
+                    json.dumps({'type': 'PLANNER_RESPONSE', 'model': 'gemini-4-neon-xhigh',
+                                'input_tokens': 100, 'output_tokens': 20, 'created_at': now()}) + '\n'
+                )
+                measured, _ = agy_storage.measured_usage(conv_id, home)
+                self.assertEqual((measured.model, measured.effort), ('gemini-4-neon', 'xhigh'))
+                row = {
+                    'harness': 'agy', 'live': 'alive',
+                    'model': 'gemini-4-neon-xhigh', 'effort': None,
+                    'model_name': model_choices.model_name(scope, {'harness': 'agy'}, 'gemini-4-neon-xhigh', {}),
+                    'observed_model_name': model_choices.model_name(scope, {'harness': 'agy'}, measured.model, {}),
+                    'usage': {'state': 'ok', 'value': {'model': measured.model, 'effort': measured.effort}},
+                }
+                self.assertEqual(display.model_label(row), expected_label)
+
+
     def test_stop_hook_pins_launch_id_and_yields_to_idle_before_continuation_cap(self):
         """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's
         follow-up queue, and Stop must yield to idle after MAX_STOP_CONTINUATIONS so Antigravity's 10-block
@@ -2483,7 +2576,6 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env), {})
         delivered = [json.loads(line)['text'] for line in flush_log.read_text().splitlines() if line.strip()]
         self.assertEqual(delivered, ['queued until agentapi'])
-
 
 class AgyTmuxLaunchTest(TerminalBase):
     def setUp(self):

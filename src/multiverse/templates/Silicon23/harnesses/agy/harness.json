@@ -5,6 +5,21 @@
   "settings": {
     "args": [
       "--dangerously-skip-permissions"
-    ]
+    ],
+    "model": "gemini-4-neon",
+    "models": {
+      "gemini-4-neon": {},
+      "gemini-4-carbon": {},
+      "gemini-4-argon": {},
+      "gemini-4-hydrogen": {},
+      "gemini-3.8-flash": {}
+    },
+    "model_names": {
+      "gemini-4-neon": "Neon",
+      "gemini-4-carbon": "Carbon",
+      "gemini-4-argon": "Argon",
+      "gemini-4-hydrogen": "Hydrogen",
+      "gemini-3.8-flash": "Flash"
+    }
   }
 }

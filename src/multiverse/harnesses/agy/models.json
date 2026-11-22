@@ -1,0 +1,206 @@
+{
+  "schema": 1,
+  "agy": "1.5.16",
+  "models": [
+    {
+      "id": "gemini-4-neon",
+      "name": "Gemini 4 Neon",
+      "family": "neon",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": 1048576,
+      "default": true,
+      "hidden": false
+    },
+    {
+      "id": "gemini-4-carbon",
+      "name": "Gemini 4 Carbon",
+      "family": "carbon",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-4-argon",
+      "name": "Gemini 4 Argon",
+      "family": "argon",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "name": "Gemini 4 Hydrogen",
+      "family": "hydrogen",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash",
+      "family": "flash",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-pro-orchestrator-neon",
+      "name": "Orchestrator (Neon)",
+      "family": "orchestrator",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-pro-orchestrator",
+      "name": "Orchestrator (Carbon)",
+      "family": "orchestrator",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-pro-orchestrator-argon",
+      "name": "Orchestrator (Argon)",
+      "family": "orchestrator",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gemini-pro-orchestrator-g1-pro",
+      "name": "Orchestrator (Argon)",
+      "family": "orchestrator",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": true
+    },
+    {
+      "id": "claude-opus-5-5",
+      "name": "Claude Opus 5.5",
+      "family": "opus",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "family": "sonnet",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "GPT-OSS 120B",
+      "family": "gpt-oss",
+      "efforts": [
+        "medium"
+      ],
+      "default_effort": "medium",
+      "inputs": [
+        "text",
+        "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    }
+  ]
+}

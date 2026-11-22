@@ -30,6 +30,7 @@ from ..base import ConfiguredAdapter, PARENT_AGY
 from ..types import (AttachmentSpec, Capability, CommandSpec, NativeEndpoint, NativeResult,
                      ShellCallbackResult, normalize_session_id)
 from . import bridge as agy_bridge
+from . import models as agy_models
 from . import storage
 
 
@@ -1185,7 +1186,8 @@ class AgyAdapter(ConfiguredAdapter):
     family = 'agy'
     bridge_policy = 'auto'
     storage_env = ()
-    supports_launch_effort = False
+    # `--effort LEVEL`: Antigravity's own flag for the current session only; never edits settings.json.
+    supports_launch_effort = True
 
     @classmethod
     def configured(cls, name, settings):
@@ -1230,6 +1232,9 @@ class AgyAdapter(ConfiguredAdapter):
         launch_dir = context.values.get('launch_dir') or (
             str(Path(context.values['bootstrap_file']).parent) if context.values.get('bootstrap_file') else ''
         )
+        effort = getattr(context, 'effort', None)
+        if effort:
+            argv.append(f'--effort={effort}')
         launch_files = {'AGENTS.md': context.values.get('bootstrap', '')}
         policy = self.bridge_policy
         raw_path = (context.environment or {}).get('PATH')
@@ -1422,6 +1427,18 @@ class AgyAdapter(ConfiguredAdapter):
 
     def session_home(self, environment) -> str:
         return os.path.realpath(storage.agy_home(environment))
+
+    def models(self, *, environment):
+        """Checked Antigravity CLI model catalog (models.py), offline and independent of account state."""
+        return agy_models.catalog(environment)
+
+    def model_names(self, *, environment):
+        """Human labels for Antigravity base IDs and effort-suffixed spellings (models.py)."""
+        return agy_models.names(environment)
+
+    def check_model(self, model, *, effort=None, environment):
+        """Validate a requested model and optional session effort against the checked Antigravity table."""
+        return agy_models.check(model, effort, environment)
 
     def session_storage_evidence(self, session, home) -> NativeResult:
         return storage.session_storage_evidence(session, home)

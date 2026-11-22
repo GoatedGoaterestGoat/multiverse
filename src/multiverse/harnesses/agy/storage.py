@@ -308,6 +308,8 @@ def measured_usage(native_id: str, home) -> tuple[Usage | None, dict]:
                 latest_observed_at = created_at
     if not saw_usage:
         return None, {}
+    from . import models as agy_models
+    model_id, effort = agy_models.split_model_effort(latest_model)
     usage = Usage(
         native_session_id=canonical,
         input_tokens=total_input,
@@ -318,7 +320,8 @@ def measured_usage(native_id: str, home) -> tuple[Usage | None, dict]:
         cached_input_tokens=total_cached if saw_cached else None,
         cache_write_tokens=total_cache_write if saw_cache_write else None,
         complete=complete,
-        model=latest_model,
+        model=model_id,
+        effort=effort,
         observed_at=latest_observed_at,
     )
     meta = {}

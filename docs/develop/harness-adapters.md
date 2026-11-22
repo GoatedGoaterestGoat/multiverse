@@ -92,7 +92,9 @@ One-shot runs also recheck the exact prepared payload environment, after command
 
 The dashboard projection's `default_model` is the verified canonical configured model in the offered list, or `None`; it is never the table's default. Model omission is independent of effort omission: an allowed configured model permits `unset`, while its `effort_unset` can still require an explicit effort.
 
-An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude and Codex support it; Pi refuses it.
+An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude, Codex and Antigravity support it; Pi refuses it.
+
+Antigravity passes `--effort=LEVEL` before `--prompt-interactive=...` on spawn and resume, keeps `harnesses/agy/models.json` as an offline checked table, and splits known effort-suffixed `PLANNER_RESPONSE.model` transcript spellings into observed `(model, effort)` pairs.
 
 Codex encodes the validated effort as `-c` and `model_reasoning_effort="LEVEL"`, before the literal argument separator and before plain/bridge selection. The same per-launch value wins over configured and plugin defaults in the bridge request merge. Core pairs a nonempty effort with a requested, recorded or configured model; it never infers that model from the release table's default. An omitted effort adds no override. These are requested settings: a loaded native thread can retain its existing settings, and only its owning `thread/start` or `thread/resume` reply reports the observed `model` and `reasoningEffort`. Launch success alone does not verify that they changed.
 
