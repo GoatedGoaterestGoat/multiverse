@@ -19,7 +19,7 @@ typeahead   on           bundled   1.0.0     Suggests /multiverse subcommands, c
 | Kind | Example |
 | --- | --- |
 | `mv2` commands | `mv2 compaction AGENT` sets an agent's compaction; `mv2 remote` shows the remote control's address and token |
-| Launch additions for Claude Code, Codex and Pi | typeahead loads a Claude Code plugin into every connected Claude session; compaction adds its hooks |
+| Launch additions for Claude Code, Codex, Antigravity CLI and Pi | typeahead loads a Claude Code plugin into every connected Claude session; compaction adds its hooks |
 | Status-line items, on Claude's line and the tmux bar | compaction's `compaction` (`trees 51/52 · building`), cost-item's `cost` (`$0.42`) |
 | Dashboard columns, panels, inspector lines, palette actions and settings screens (under `P`) | hello-column's `uptime` column; compaction's settings screen |
 | Background work in the [plugin host](#the-plugin-host) | notifier's desktop notifications; the remote control's endpoint |

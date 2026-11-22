@@ -97,7 +97,8 @@ class InheritedIdentityTest(unittest.TestCase):
         planted = {"MV2_IDENTITY_MODE": "codex-agent-v1", "CODEX_THREAD_ID": "parent-thread",
                    "MV2_AGENT_ID": "parent", "MV2_EFFECTS": "observe", "MV2_SOURCE": "/elsewhere/src",
                    "CODEX_SANDBOX": "seatbelt", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDECODE": "1",
-                   "CLAUDE_PID": "1", "TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%1"}
+                   "CLAUDE_PID": "1", "ANTIGRAVITY_CSRF_TOKEN": "tok", "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:1",
+                   "AGY_ACCOUNT": "a", "TMUX": "/tmp/tmux-1/default,1,0", "TMUX_PANE": "%1"}
         with mock.patch.dict(os.environ, planted):
             probe = Probe("test_nothing")
             probe.setUp()

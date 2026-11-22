@@ -25,6 +25,7 @@ import subprocess
 import sys
 from uuid import uuid4
 
+from ...plugins import harness as plugin_harness
 from ...store import now, read, retry_missing
 from ..base import ConfiguredAdapter, PARENT_AGY
 from ..types import (AttachmentSpec, Capability, CommandSpec, NativeEndpoint, NativeResult,
@@ -1322,7 +1323,26 @@ class AgyAdapter(ConfiguredAdapter):
             else:
                 argv = bridge_argv
 
+        plan = plugin_harness.plan_for(
+            context, 'agy', self.name,
+            version=lambda: agy_version(argv[0], path=exe_path),
+            bridge=bridge,
+            base_environment=command.environment,
+        )
         extra_sensitive = _extra_sensitive_paths(sandbox_env)
+        if plan is not None:
+            for directory in plan.agy_add_dirs:
+                expanded_add = _expand_tilde_path(directory, home_dir) if isinstance(directory, str) else None
+                if expanded_add is None or not os.path.isabs(expanded_add):
+                    continue
+                try:
+                    resolved_add = Path(expanded_add).resolve()
+                except (OSError, RuntimeError):
+                    continue
+                if _is_sensitive_path(resolved_add, home_dir, extra_sensitive=extra_sensitive) or resolved_add in _BROAD_READ_ROOTS:
+                    continue
+                argv.extend(['--add-dir', expanded_add])
+            command = replace(command, environment=plan.environment, plugins=plan.record())
 
         if not bridge:
             if prompt_arg is not None:

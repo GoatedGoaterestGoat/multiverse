@@ -31,7 +31,7 @@ import os
 from pathlib import Path
 import time
 
-from . import access as levels, agent_files, harness, loader, run_records, settings as settings_files
+from . import access as levels, agent_files, harness, loader, manifest, run_records, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
 from ..store import exists_replaced, retry_missing, is_file_replaced
 
@@ -344,13 +344,13 @@ class Capability:
 class Launch(_Points):
     def contribute(self, family, function=None):
         """function(LaunchInfo) -> Contribution or None, for every launch of a `family` harness
-        (claude, codex or pi) in universes where the plugin is on. It runs in the process that
+        (claude, codex, pi or agy) in universes where the plugin is on. It runs in the process that
         launches, within 2 s; it may not set MV2_* variables. Usable as a decorator factory."""
         if function is None:
             return lambda decorated: self.contribute(family, decorated)
         registrations = self._allow("launch")
-        if family not in ("claude", "codex", "pi") or not callable(function):
-            raise Error("contribute(family, function): family is claude, codex or pi")
+        if family not in manifest.FAMILIES or not callable(function):
+            raise Error(f"contribute(family, function): family is {', '.join(manifest.FAMILIES)}")
         registrations.launch.setdefault(family, []).append(function)
         return function
 
@@ -751,6 +751,9 @@ def _harness_home(family, environment=None):
         return Path(source.get("CODEX_HOME") or "~/.codex").expanduser()
     if family == "pi" and source.get("PI_CODING_AGENT_DIR"):
         return Path(source["PI_CODING_AGENT_DIR"]).expanduser()
+    if family == "agy":
+        from ..harnesses.agy import storage as agy_storage
+        return agy_storage.agy_home(source)
     return None
 
 

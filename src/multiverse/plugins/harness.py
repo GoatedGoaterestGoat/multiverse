@@ -29,9 +29,13 @@ CORE_ENVIRONMENT = frozenset({"MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "
                               # Where a session's account, history and executables come from: core and the
                               # user decide these, never a plugin.
                               "HOME", "PATH", "CODEX_HOME", "CODEX_SQLITE_HOME", "CLAUDE_CONFIG_DIR",
-                              "PI_CODING_AGENT_DIR",
-                              # Markers of the session that started mv2, which adapters unset on purpose.
-                              "CODEX_THREAD_ID", "CLAUDECODE"})
+                              "PI_CODING_AGENT_DIR", "ANTIGRAVITY_APP_DATA_DIR", "ANTIGRAVITY_GEMINI_DIR",
+                              "ANTIGRAVITY_AGENTAPI_EXE",
+                              # Markers and session credentials of the session that started mv2, which adapters unset on purpose.
+                              "CODEX_THREAD_ID", "CLAUDECODE",
+                              "ANTIGRAVITY_AGENT", "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_CSRF_TOKEN",
+                              "ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_LS_VERSION", "ANTIGRAVITY_PROJECT_ID",
+                              "ANTIGRAVITY_SOURCE_METADATA", "ANTIGRAVITY_TRAJECTORY_ID"})
 
 
 def may_set(plugin, key):
@@ -53,7 +57,7 @@ class LaunchInfo:
     agent_id: str
     agent_name: str
     mode: str          # spawn or resume (a wake is a resume with a prompt)
-    family: str        # claude, codex or pi
+    family: str        # claude, codex, pi or agy
     harness: str       # the harness's name in this universe
     # The harness executable's (major, minor, patch), when it could be read. An adapter may pass a function
     # instead: launch_plan calls it only when a plugin here has an entry or contribution for this harness.
@@ -79,6 +83,7 @@ class LaunchPlan:
     claude_plugin_dirs: list = field(default_factory=list)
     claude_settings: dict = field(default_factory=dict)
     pi_extensions: list = field(default_factory=list)
+    agy_add_dirs: list = field(default_factory=list)
     codex: list = field(default_factory=list)  # (plugin name, plugin directory, HarnessEntry)
     problems: list = field(default_factory=list)
     modes: list = field(default_factory=list)  # {"plugin", "mode"}: each plugin's mode outcome
@@ -205,6 +210,8 @@ def _launch_plan(info, plan):
                     added.append(("claude_plugin_dirs", str(Path(manifest.directory, entry.path).resolve())))
                 elif info.family == "pi":
                     added.append(("pi_extensions", str(Path(manifest.directory, entry.path).resolve())))
+                elif info.family == "agy":
+                    added.append(("agy_add_dirs", str(Path(manifest.directory, entry.path).resolve())))
                 else:
                     added.append(("codex", (loaded.name, Path(manifest.directory), entry)))
             if unfit and not added:

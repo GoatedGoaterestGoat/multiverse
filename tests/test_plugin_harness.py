@@ -9,6 +9,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import harnesses
+from multiverse.harnesses.base import PARENT_AGY
 from multiverse.harnesses.types import LaunchContext, NativeResult
 from multiverse.plugins import harness, loader, manifest
 from multiverse.plugins.testing import PluginTestCase
@@ -95,6 +96,8 @@ class LaunchPlanTest(PluginTestCase):
                                 ("agent", "MV2_AGENT_ID"), ("plugins", "MV2_PLUGINS"), ("x", "BAD-NAME"), ("x", ""),
                                 ("x", "HOME"), ("x", "PATH"), ("x", "CODEX_HOME"), ("x", "CODEX_SQLITE_HOME"),
                                 ("x", "CLAUDE_CONFIG_DIR"), ("source", "MV2_SOURCE"), ("run", "MV2_RUN_DIR"),
+                                ("x", "ANTIGRAVITY_GEMINI_DIR"),
+                                *(("x", key) for key in PARENT_AGY),
                                 # The adapter's declared shared-agent authority: never a plugin's, even one named so.
                                 ("identity", "MV2_IDENTITY_MODE"), ("x", "MV2_IDENTITY_MODE")):
                 with self.subTest(plugin=plugin, key=key):
