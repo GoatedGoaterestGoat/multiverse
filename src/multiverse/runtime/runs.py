@@ -380,6 +380,29 @@ def _execute(executor, plan, payload):
     return value
 
 
+IDENTITY_SECONDS = 5
+
+
+def _own_start(executor):
+    """This process's start token, its observation retried for up to IDENTITY_SECONDS within the run's deadline:
+    one ps can take seconds on a loaded machine, and a live process's start never changes, so a retry reads the
+    same identity. None at the bound (the run then refuses)."""
+    deadline = min(executor.deadline, time.monotonic() + IDENTITY_SECONDS)
+    while True:
+        executor.check()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        token = process_started(os.getpid(), timeout=min(2, remaining))
+        executor.check()  # a cancel, or the run's deadline, during the read refuses, as the supervisor's does
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:  # a token read past the identity bound is not accepted either
+            return None
+        if token:
+            return token
+        time.sleep(min(.05, remaining))
+
+
 def run_once(adapter, request, *, root, plugin, environment, agent_directory=None, timeout=600, cancel=None, scope=None,
              before_start=None):
     started = time.monotonic()
@@ -436,7 +459,7 @@ def run_once(adapter, request, *, root, plugin, environment, agent_directory=Non
         # Bounded, metadata-only; never restores process authority or deletes an uncertain target.
         run_files.leftovers(run_base, sweep=True, deadline=min(executor.deadline, time.monotonic() + 1))
         executor.check()
-        owner_start = process_started(os.getpid())
+        owner_start = _own_start(executor)
         if not owner_start:
             raise RunFailure('unavailable', 'Cannot record the calling process identity')
         payload.update(directory=str(directory.path), universe=str(root.resolve()), deadline=executor.deadline,

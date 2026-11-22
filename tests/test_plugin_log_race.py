@@ -1,14 +1,16 @@
 """Plugin logs rotate at their limit, and two processes writing one log at once rotate it once and lose no line."""
+from contextlib import contextmanager, nullcontext
 import os
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse.plugins import api, events, host, loader
+from multiverse.plugins import agent_files, api, events, host, loader
 from multiverse.plugins.testing import PluginTestCase
 
 SOURCE = Path(__file__).resolve().parents[1] / "src"
@@ -47,6 +49,60 @@ def hold_lock(path, seconds):
 
 
 class LogRaceTest(PluginTestCase):
+    def test_a_workers_last_line_waits_out_its_siblings_and_no_other_line_waits(self):
+        """A worker's 'supervisor gone' line waits briefly for a sibling's write while every other host or event
+        line skips at once; else workers stopping together lose a line, or recovery waits on a diagnostic lock."""
+        log = host.host_directory(self.root) / "host.log"
+        host._log(self.root, "first")
+        lock = loader.log_lock_path(log)
+        with self.subTest("a worker's last line waits out a sibling's write"):
+            holder = hold_lock(lock, 0.05)
+            host._stopping(self.root, "holder")
+            holder.wait(10)
+            self.assertIn("holder: supervisor gone; stopping", log.read_text())
+        with self.subTest("with a lock held on, other lines skip at once and the last line waits only its bound"):
+            events_log = self.root / "state" / "plugins" / "events.log"
+            events._log(self.root, "events first")
+            holders = [hold_lock(lock, 3.0), hold_lock(loader.log_lock_path(events_log), 3.0)]
+            for holder in holders:
+                self.addCleanup(holder.wait, 10)
+            start = time.monotonic()
+            host._log(self.root, "skipped host line")
+            events._log(self.root, "skipped events line")
+            self.assertLess(time.monotonic() - start, 0.1)  # recovery logs this way: it never waits
+            start = time.monotonic()
+            host._stopping(self.root, "late")
+            self.assertGreaterEqual(time.monotonic() - start, host.STOPPING_LOG_WAIT * 0.9)
+            self.assertLess(time.monotonic() - start, 2.0)
+            self.assertNotIn("skipped", log.read_text() + events_log.read_text())
+            self.assertNotIn("late:", log.read_text())
+        with self.subTest("no try for the lock starts past the wait, and a write is never tried twice"):
+            clock, attempts, writes = [0.0], [], []
+
+            @contextmanager
+            def busy_once(_path, _root, *, blocking):
+                attempts.append(clock[0])
+                if len(attempts) == 1:
+                    clock[0] = host.STOPPING_LOG_WAIT - 0.001  # 1 ms left: a 5 ms nap would end past it
+                    raise BlockingIOError
+                yield
+
+            def failing_write(text):
+                writes.append(text)
+                raise BlockingIOError  # after the append began
+
+            fake = SimpleNamespace(monotonic=lambda: clock[0],
+                                   sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+            path = self.work / "late.log"
+            with mock.patch.object(loader, "time", fake), mock.patch.object(agent_files, "lock", busy_once):
+                loader.append_log(path, "late", blocking=False, wait=host.STOPPING_LOG_WAIT)
+            self.assertEqual((attempts, path.exists()), ([0.0], False))
+            opened = nullcontext(SimpleNamespace(write=failing_write))
+            with mock.patch.object(agent_files, "lock", return_value=nullcontext()), \
+                    mock.patch.object(loader, "open_regular", return_value=opened):
+                loader.append_log(path, "one line", blocking=False, wait=host.STOPPING_LOG_WAIT)
+            self.assertEqual(writes, ["one line\n"])
+
     def test_two_processes_rotating_one_log_lose_no_line(self):
         """Plugin, errors, events and host logs rotate at their limit, errors.log keeping one traceback per call site
         a minute, a write waits for another process's rotation, and two processes rotating one log at once rotate it

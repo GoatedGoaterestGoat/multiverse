@@ -35,12 +35,47 @@ When two sources have a plugin with the same name, the first in this order wins:
 | --- | --- | --- |
 | `path` | Each directory in `MV2_PLUGIN_PATH`: a plugin, or a folder of plugins | Yes |
 | `universe` | The universe's own `plugins/NAME/`, such as a repository's `.multiverse/plugins/` | Only once you [trust it](#trust-a-universes-own-plugins) |
-| `personal` | `~/.multiverse/plugins/NAME/` | Yes |
+| `personal` | `~/.multiverse/plugins/NAME/` | Yes; one that [`mv2 plugins install`](#install-a-plugin) placed only at the content it installed |
 | `installed` | Python packages that name a plugin in the `multiverse.plugins` entry point group | Yes |
 | `checkout` | `plugins/NAME/` in the mv2 checkout you run: optional Git submodules | Yes |
 | `bundled` | Inside mv2 itself | Yes |
 
+A plugin that's on behaves the same in every process of the universe, however you found it. Listing the plugins (`mv2 plugins`, `P`) records what events each one follows, so agents' processes record them too. A plugin gets an event type it newly follows as soon as the files that run say so, without waiting for a listing: at once for one that runs as it is (edited, updated, or come with an mv2 upgrade), and when you approve the edit for one that runs at approved content (`mv2 plugins trust`). That includes a package installed in the Python that runs mv2 (`pip install`, editable or not): it isn't pinned, so after `pip install -U` each process runs the new version once it restarts. Turning a plugin on, or listing the plugins in your own shell while it's on, also records, for one only your own environment finds (`MV2_PLUGIN_PATH`, or a package found only through your `PYTHONPATH`, such as another Python's), its folder, pinned at the files it has then, the ones your shell already runs. From then on every process, your own included, runs exactly those files and records the events they follow: after you edit it, `mv2 plugins` and `P` show it as changed until you run `mv2 plugins trust NAME`, and from then on every process records the events the approved files follow. Only you record a folder: turning a plugin on from an agent, or an agent's listing, records just its events, and no listing ever moves a recorded folder or approves an edit. After moving a plugin, turn it off, then on again where your environment finds its new place (a plugin that's on is never moved from one folder to another while on).
+
 An untrusted universe copy never hides a plugin of the same name from another source. A trusted copy does, and `mv2 plugins` and the `P` screen say what it overrides. Installing a plugin doesn't turn it on in any universe.
+
+## Install a plugin
+
+```sh
+mv2 plugins install https://github.com/me/notes.git           # its default branch
+mv2 plugins install https://github.com/me/notes.git@v1.2      # a tag, branch or commit
+mv2 plugins install git@github.com:me/tools.git@v2#plugins/notes   # a folder inside the repository
+mv2 plugins install ~/src/notes                               # a folder on this machine
+mv2 plugins enable notes
+```
+
+`install` takes a git URL (`https://`, `ssh://`, `git@host:path`, `git://` or `file://`), optionally followed by `@REF` and `#PATH`, or a plugin's folder on this machine. It fetches the plugin into a staging folder and shows what it is before anything is placed: its version, where it comes from and at which commit, the access and permissions it asks for, the Python packages it needs, and the files that run when it loads. It installs only when you say yes. Without a terminal to ask on, it shows the same and installs nothing, unless you add `--yes`.
+
+- **Where it goes.** Your personal plugins, `~/.multiverse/plugins/NAME/`, so any universe can turn it on. With `--here`, the current universe's own `plugins/NAME/` instead. Installing turns it on nowhere: `mv2 plugins enable NAME` does that, and asks to install its Python packages.
+- **What runs.** Exactly the files you saw. Nothing from the repository runs while it is fetched, and nothing is checked out. mv2 records the source, the commit and a SHA-256 of the files, adds `.mv2-installed.json` to the plugin, and runs it from a copy of exactly those bytes. If its installed files change later, it's listed as changed and doesn't run, until you run `mv2 plugins trust NAME` after reviewing them, or `mv2 plugins update NAME` to put back what the source has.
+- **Name clashes.** A plugin of that name from another source, or a folder already at the target that `install` didn't place, refuses the install, naming where the other one is.
+- **Who.** Only you: an agent can't install, update or remove a plugin.
+- **When it fails** (no network, a ref or folder that isn't there, a folder that isn't a plugin, a symbolic link or a submodule inside it), nothing is installed and nothing is left behind.
+
+`mv2 plugins info NAME` shows where an installed plugin came from and at which commit.
+
+### Update and remove
+
+```sh
+mv2 plugins update notes            # a tag install: the newest tag; a branch install: that branch's tip
+mv2 plugins update notes@v2.0       # a given tag, branch or commit
+mv2 plugins remove notes
+```
+
+- **Update** fetches the new version and says what changed: the commits since the installed one, and anything in what it can do. When only its code changes, it updates without asking and shows the commits. When its access, permissions, extension points, what it adds to harness launches, or Python packages change, it asks first, as `install` does. It also asks when the installed files were changed since the install, since what runs then may not be what was installed. A plugin installed at a commit updates only to a ref you name. One installed from a folder updates from that folder.
+- **Remove** removes only what `install` placed: the plugin's folder, its record and its pin. It refuses a plugin you placed by hand. It turns the plugin off nowhere and keeps its settings, grants, secrets and Python packages, then lists what's left with the command that clears each. `mv2 plugins disable NAME` on a plugin a universe no longer has forgets it there: `plugins.json` then neither turns it on nor grants it anything.
+
+In the dashboard, press `P`, then `i` to install: type a git URL or a folder, and the screen shows the same words as `mv2 plugins install` before anything is placed, with Install or Cancel (`PgUp`/`PgDn` scroll a long one). It installs into your personal plugins; use `--here` on the command line for a universe's own. `u` updates the selected plugin and `d` removes it, as `update` and `remove` do: an update asks only when what the plugin can do changes, and otherwise shows what changed afterwards; a removal lists what it left with how to clear each. Both work only on a plugin `install` placed. While a fetch, install or removal is under way, `Esc` waits, so nothing fetched is left behind and what a removal left is still listed. A universe that still has a plugin of that name turned on from before loads it as soon as it's installed, and the screen says so for the universe you're in.
 
 ## Install a checkout plugin
 
@@ -170,6 +205,7 @@ There is one host per top-level universe, in a tmux session on mv2's server. It 
 - If a plugin needs the host and it isn't running, the dashboard starts it. It does this when it opens, and again after you change plugins on `P`. The header shows `host off` while the host is needed but not running. On `P`, press `h` to start or stop it.
 - Quitting the dashboard doesn't stop the host. The host stops by itself once no plugin needs it.
 - A worker that exits is restarted at most 3 times in 5 minutes. After that it stays stopped, and `mv2 plugins host` and `P` show the reason. Turn the plugin off and on again to give it a fresh start.
+- When a plugin changes, its worker starts again on the new version before it handles any later event, so nothing the new version follows is skipped. That happens when you approve its edit (`mv2 plugins trust`) for one that runs at approved content, when the event types its `plugin.json` names change for one that runs as it is, or when another copy of it appears, changes or is approved elsewhere, so mv2 chooses again which copy runs. One case is noticed only within 5 seconds, and events in that time still go to the copy that was running: a competing copy that was passed over, whose files are put back as they were approved without a new trust. A competing copy whose `plugin.json` can't be read counts as absent, as everywhere in mv2; if the running copy's own `plugin.json` can't be read, its worker waits and handles nothing until it can. This restart doesn't count toward that limit.
 - A plugin whose event handlers keep hanging is also left stopped, after 3 such restarts within a day, however long each run takes. `mv2 plugins` and `mv2 doctor` say so too.
 - `mv2 update` restarts the host when it still runs the code from before the update, which its plugins would otherwise fail on. It first lets everything in flight finish, however long that takes (the remote control answers new requests 503 meanwhile), so the update may say the host restarts once that is done. A handler that never returns keeps it waiting; `mv2 plugins host stop` then stops it. A host started by an mv2 from before this restart check is stopped and started instead, which can end a call in flight.
 - `mv2 plugins host stop` gives each plugin 10 seconds, so it can end work in flight.

@@ -160,9 +160,16 @@ commit publishes the selected thread's permission metadata.
 Incomplete or unmappable grants disable navigation without rejecting ordinary
 startup or `/btw`. An observed current-thread permission change or malformed
 settings update also disables navigation until an ordinary `mv2 resume` verifies
-the current grants. Native settings notifications omit top-level runtime workspace roots.
-Codex 0.169.0 and 0.170.0 also require an ordinary root conversation: parent, attached and
-fork relations must be explicitly null, with no feature thread source. Each
+the current grants. An outgoing primary settings or turn request with an explicit
+working directory that cannot be verified against the saved workspace invalidates
+the cached grants before forwarding. On releases that require one local
+environment, the owning terminal's ordinary turn-start request carries that
+verified selection when its explicit cwd, roots and any grant settings match
+the cached grants. Codex would otherwise rebuild the selection from daemon
+defaults. Other requests that reselect an unverified environment invalidate the
+cached grants before forwarding. Native settings notifications omit top-level runtime workspace roots.
+Codex 0.169.0, 0.170.0 and 0.171.0 require an ordinary root conversation with
+explicitly null parent, attachment and fork relations and no feature thread source. Each
 initial, selected or reselected reply must expose exactly one built-in `local`
 environment. Its native cwd and complete runtime root set must match the known
 workspace and validated five-field grant envelope. Missing/null, empty, multiple,

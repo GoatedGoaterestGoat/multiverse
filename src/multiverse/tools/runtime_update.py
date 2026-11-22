@@ -7,6 +7,7 @@ session (Claude's /clear), and core rebinds the agent to it.
 """
 import argparse
 import json
+import logging
 import os
 import re
 
@@ -47,6 +48,10 @@ def configure(parser):
     parser.add_argument("--status", "--activity", dest="status", choices=("idle", "working", "waiting", "unknown"),
                         help="idle, working, waiting or unknown")
     parser.add_argument("--usage-json", help="JSON context/cost/rate-limit usage from the harness")
+    parser.add_argument("--prompt-events-json", help="ordered prompt transition metadata from the harness")
+    parser.add_argument("--prompt-session-id", metavar="ID", help="native session that reported the prompt transitions")
+    parser.add_argument("--turn-events-json", help="ordered turn transition metadata from the harness")
+    parser.add_argument("--turn-session-id", metavar="ID", help="native session that reported the turn transitions")
 
     parser.add_argument("--bridge", type=bridge_argument, metavar="ID",
                         help="the integration's own bridge id, for example claude-mod-v1, or none")
@@ -81,13 +86,35 @@ def usage(text):
     return value
 
 
+def _event_batch(kind, raw, session_id, parse, status):
+    if (raw is None) != (session_id is None):
+        if status is None:
+            raise ValueError(f"--{kind}-events-json and --{kind}-session-id go together")
+        logging.getLogger(__name__).warning('Ignored incomplete %s-event metadata', kind)
+    elif raw is not None:
+        try:
+            return session_id, parse(raw)
+        except ValueError:
+            if status is None:
+                raise
+            logging.getLogger(__name__).warning('Ignored invalid %s-event metadata', kind)
+    return None
+
+
 def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
-        native_session_id=None, previous_session_id=None, session_reason=None):
+        native_session_id=None, previous_session_id=None, session_reason=None,
+        prompt_events_json=None, prompt_session_id=None, turn_events_json=None, turn_session_id=None):
+    from ..runtime import prompt_events, turn_events
+
     session = (native_session_id, previous_session_id, session_reason)
     if any(session) and not all(session):
         raise ValueError("--native-session-id, --previous-session-id and --session-reason go together")
-    if status is None and usage_json is None and native_session_id is None:
-        raise ValueError("Specify --status, --usage-json or --native-session-id")
+    prompt_batch = _event_batch('prompt', prompt_events_json, prompt_session_id, prompt_events.parse, status)
+    turn_batch = _event_batch('turn', turn_events_json, turn_session_id, turn_events.parse, status)
+    if native_session_id is not None and (prompt_batch or turn_batch):
+        raise ValueError("Report transitions separately from a native session switch")
+    if status is None and usage_json is None and native_session_id is None and not (prompt_batch or turn_batch):
+        raise ValueError("Specify --status, --usage-json, --native-session-id or event metadata")
     root, directory, launch_id = callback(root, agent)
     if native_session_id is not None:
         return rebind(root, directory, launch_id, previous_session_id, native_session_id, session_reason)
@@ -98,7 +125,14 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None,
         changes["usage"] = usage(usage_json)
     if bridge:
         changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
-    return agents.update_runtime(directory, launch_id, **changes)
+        if changes["native_bridge"]:
+            changes["startup_prompt"] = None  # a plugin reports only from a started session
+    if turn_batch is not None:
+        turn_batch = (root, *turn_batch)
+    if prompt_batch is not None or turn_batch is not None:
+        return agents.mutate_runtime(directory, launch_id, lambda _: changes or None, prompt_batch=prompt_batch,
+                                     turn_batch=turn_batch, status_observed=status is not None)
+    return agents.update_runtime(directory, launch_id, status_observed=status is not None, **changes) if changes else None
 
 
 def rebind(root, directory, launch_id, previous, session_id, reason):

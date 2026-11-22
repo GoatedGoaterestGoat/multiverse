@@ -150,6 +150,32 @@ def set_enabled(root, name, value, grant=None, *, no_raise_from=None):
     return load(root)
 
 
+class GrantHeld(ValueError):
+    """An agent asked to forget a plugin that still has a grant here."""
+
+
+def forget(root, name, *, keep_grant=False):
+    """Remove plugin `name`'s switch and grant from this universe's plugins.json (a plugin it no longer has),
+    changing nothing else; True when there was either. With `keep_grant` (an agent asking), a grant found in the
+    file as it is under the lock refuses it (GrantHeld), since only the person removes a grant."""
+    check_name(name)
+    with lock(Path(root) / "state" / ".plugins.lock"):
+        data = _raw(root)
+        if data is None:
+            return False
+        parse(data, str(path(root)))  # refuse to rewrite a file that cannot be used
+        if keep_grant and isinstance(data.get("access"), dict) and name in data["access"]:
+            raise GrantHeld(name)
+        found = False
+        for key in ("enabled", "access"):
+            if isinstance(data.get(key), dict) and name in data[key]:
+                del data[key][name]
+                found = True
+        if found:
+            write(path(root), data)
+    return found
+
+
 def set_grant(root, name, level, *, no_raise_from=None):
     """Record the access level granted to a plugin here, changing nothing else in the file. With `no_raise_from`
     (the plugin's request, its grant where none is recorded), a level above the grant recorded now is refused

@@ -33,9 +33,13 @@ class Proxy:
  def __init__(self, spec, protocol, bind, *args, **kwargs): self.bind=bind; self.protocol=protocol
  def start(self):
   self.connection=socket.socket(socket.AF_UNIX); self.connection.connect(str(base/'provider.sock')); self.bind(native)
+ def stage_prompt_transitions(self): pass  # This fixture has no native event batches to drain.
+ def stage_status_events(self, status): self.stage_prompt_transitions()
+ stage_adapter_events = stage_prompt_transitions
+ stage_boundary_events = stage_prompt_transitions
  def close(self): self.connection.close(); (base/'relay-closed').touch()
 class Watcher:
- def __init__(self,*args): pass
+ def __init__(self, directory, launch_id, root, *, before_status_event=None): pass
  def start(self): pass
  def close(self):
   (base/'closing').touch()

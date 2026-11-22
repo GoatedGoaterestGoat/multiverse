@@ -8,7 +8,7 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean, phase_label
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH, MARKS, MODEL_WIDE, PHASE_WIDE, PluginColumn, lookup
+from .columns import COLUMNS, COMPACT_WIDTH, MARKS, MODEL_WIDE, PHASE_WIDE, STATUS_WIDE, PluginColumn, lookup
 from .drafts import HINT, ModelDraft
 from .tree import group_key, hierarchy
 from .widgets import DraftMenu
@@ -62,7 +62,8 @@ class FleetView:
         # agent's report age or a long model name and its effort, but only into the room the other columns leave,
         # the flexible one keeping its least width; what still doesn't fit is shortened by the column itself.
         # Model also shrinks to its widest label (never narrower than its header), so short models leave no gap.
-        growing = ((COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or ""), False),
+        growing = ((COLUMNS["status"], STATUS_WIDE, lambda row: clean(row.get("status_label") or ""), False),
+                   (COLUMNS["phase"], PHASE_WIDE, lambda row: clean(phase_label(row) or ""), False),
                    (COLUMNS["model"], MODEL_WIDE, COLUMNS["model"].label, True))
         for column, bound, shown, fits in growing:
             for key in [key for key in widths if lookup(key) is column]:
@@ -101,7 +102,7 @@ class FleetView:
             if field == "name":  # its marks stay in view: a long name is shortened to the column's width instead
                 return COLUMNS["name"].render(row, widths["name"], extras(row))
             column = lookup(field)
-            if column is COLUMNS["phase"] or column is COLUMNS["model"] or isinstance(column, PluginColumn):
+            if column in (COLUMNS["status"], COLUMNS["phase"], COLUMNS["model"]) or isinstance(column, PluginColumn):
                 return column.render(row, widths[field])
             return column.render(row)
 

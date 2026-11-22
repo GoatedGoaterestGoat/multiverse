@@ -80,6 +80,9 @@ Form, ChoiceScreen, Details, ArtifactPreview, PluginsScreen { align: center midd
 .multiline { height: 7; border: round $mv-surface1; margin-bottom: 1; }
 .multiline:focus { border: round $mv-teal; }
 #form-error { height: auto; color: $mv-red; }
+ChoiceScreen #dialog-about { height: auto; max-height: 40vh; scrollbar-size: 1 1; }
+ChoiceScreen #dialog-about #dialog-description { margin-bottom: 0; }
+ChoiceScreen #dialog-about { margin-bottom: 1; }
 ChoiceScreen #choices { height: auto; max-height: 12; border: none; background: $mv-base; padding: 0; }
 ChoiceScreen #choices > .option-list--option-highlighted { background: $mv-cursor-focus; color: $mv-teal; text-style: bold; }
 .short #dialog { padding: 0 1; }

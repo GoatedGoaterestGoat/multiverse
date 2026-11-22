@@ -29,8 +29,8 @@ def session_home(environment):
         return None
 
 
-def _unknown(path, reason):
-    return NativeResult('unknown', f'Cannot verify Codex rollout storage at {path}: {reason}')
+def _unknown(path, reason, *, value=None):
+    return NativeResult('unknown', f'Cannot verify Codex rollout storage at {path}: {reason}', value)
 
 
 def _metadata_object(pairs):
@@ -46,10 +46,12 @@ def _header(path, native_id, *, budget=None):
     try:
         with open_rollout(path, check=budget) as handle:
             line = handle.readline(HEADER_BYTES + 1)
+            plain = not getattr(handle, 'compressed', False)
     except OSError as error:
         return _unknown(path, str(error))
     if len(line) > HEADER_BYTES or not line.endswith(b'\n'):
-        return _unknown(path, 'the metadata header is oversized or incomplete')
+        pending = {'header_pending': True} if plain and len(line) <= HEADER_BYTES else None
+        return _unknown(path, 'the metadata header is oversized or incomplete', value=pending)
     try:
         row = json.loads(line, object_pairs_hook=_metadata_object)
         payload = row.get('payload') if isinstance(row, dict) and row.get('type') == 'session_meta' else None

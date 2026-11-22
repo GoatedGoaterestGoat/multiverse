@@ -29,7 +29,9 @@ const SCOPES: Record<string, string> = {
   projectSettings: 'saved to your project settings', userSettings: 'saved to your user settings',
 }
 
-type Choice = { id: string; label: string; saves_rule: boolean; takes_message: boolean }
+// `meaning`: what the choice does, from core's set (harnesses/types.py PromptChoiceMeaning); 'other' brings its own
+// `short` label (core fills the rest). Left out where no meaning fits without misleading.
+type Choice = { id: string; label: string; saves_rule: boolean; takes_message: boolean; meaning?: string; short?: string }
 type Question = { id: string; header: string; question: string; options: [string, string][]; multiple: boolean;
   free_text: boolean }
 type Decision = Record<string, unknown>
@@ -51,10 +53,42 @@ type Open = {
   choices: Choice[]                  // as published: the end record keeps them, so a person-first outcome can say
                                      // which offered labels the person picked (never the call's input)
   ended?: Promise<void>
+  opened?: boolean                   // its open went to core, so its end goes too
+  closing?: Record<string, unknown>  // its end, kept for an open queued after it (it ended while being published)
 }
 
 const open = new Map<string, Open>()
 let endsSincePrune = 0
+
+// Each prompt's open and end, for core's event journal, in the order the mod saw them, until a status report carries
+// them (index.ts reports them: after a publish, a hold, a close or a sweep). The open is queued once the prompt is
+// published, so it can be listed; the end as it is decided, before the caller drops its wait, so the end goes in or
+// before the report that ends it. Metadata only, and only for this launch's prompts.
+export type Transition = { session: string; event: Record<string, unknown> }
+export const transitions: Transition[] = []
+
+function transition(session: string | undefined, event: Record<string, unknown>) {
+  if (session === undefined) return  // core takes no edge without its conversation; its own reads still list the prompt
+  transitions.push({ session, event })
+}
+
+// Its open, once its file is written; and its end at once if something ended it while the write was under way (a
+// turn end, an Esc), which queued no end for an open not yet sent.
+function opened(prompt: Open) {
+  prompt.opened = true
+  transition(prompt.session, { type: 'opened', id: prompt.id, kind: prompt.kind, requires_waiting: true })
+  if (prompt.closing !== undefined) transition(prompt.session, prompt.closing)
+}
+
+// The state and cause prompt_result gives from the end record alone, as the adapter's prompt_settled maps it without
+// what Claude stored: closing never reads a transcript, and core puts its own record's state on an answer it sent.
+export function closedOutcome(record: { how?: unknown; cause?: unknown }): { state: string; cause: string | null } {
+  if (record.how === 'sent') return { state: 'submitted', cause: null }
+  if (record.how === 'refused') return { state: 'refused', cause: 'invalid_answer' }
+  if (record.cause === 'person') return { state: 'person', cause: 'person' }
+  if (record.cause === 'interrupted' || record.cause === 'turn_ended' || record.cause === 'stopped') return { state: 'gone', cause: record.cause }
+  return { state: 'gone', cause: 'closed' }
+}
 const instance = newId()
 let version: string | undefined
 
@@ -96,17 +130,32 @@ function describe(s: Record<string, unknown>): string {
   return `Allow, and ${String(s.type)} ${rules || dirs}, ${scope}`.replace(/ +,/, ',')
 }
 
+// A suggestion choice allows this call and applies one of Claude's suggestions. An allow rule or a directory allows
+// the same again (for the session, or always when saved); a mode switch (acceptEdits, say) or another change of the
+// rules does more than that, so it is 'other' with its own short label, saved or not ('other' may save; only the named
+// meanings are tied to saves_rule).
+const MODES: Record<string, string> = { acceptEdits: 'Allow, accept edits', bypassPermissions: 'Allow, bypass all',
+  plan: 'Allow, plan mode', default: 'Allow, default mode', dontAsk: "Allow, don't ask" }
+
+export function suggestionMeaning(s: Record<string, unknown>, saved: boolean): { meaning?: string; short?: string } {
+  if ((s.type === 'addRules' && s.behavior === 'allow') || s.type === 'addDirectories') return { meaning: saved ? 'allow_always' : 'allow_session' }
+  if (s.type === 'setMode') return { meaning: 'other', short: MODES[String(s.mode)] ?? 'Allow, set mode' }
+  return { meaning: 'other', short: 'Allow, change rules' }
+}
+
 function permission(suggestions: unknown, plan: boolean) {
   const choices: Choice[] = []
   const decisions = new Map<string, Decision>()
   const saves = new Set<string>()
   const add = (choice: Choice, decision: Decision) => { choices.push(choice); decisions.set(choice.id, decision); if (choice.saves_rule) saves.add(choice.id) }
   if (plan) {
-    add({ id: 'allow', label: 'Approve the plan; edits are then asked for', saves_rule: false, takes_message: false }, { behavior: 'allow' })
-    add({ id: 'deny', label: 'Keep planning, with your feedback', saves_rule: false, takes_message: true }, { behavior: 'deny' })
+    add({ id: 'allow', label: 'Approve the plan; edits are then asked for', saves_rule: false, takes_message: false, meaning: 'approve_plan' },
+      { behavior: 'allow' })
+    add({ id: 'deny', label: 'Keep planning, with your feedback', saves_rule: false, takes_message: true, meaning: 'keep_planning' },
+      { behavior: 'deny' })
     return { choices, decisions, saves }
   }
-  add({ id: 'allow', label: 'Allow once', saves_rule: false, takes_message: false }, { behavior: 'allow' })
+  add({ id: 'allow', label: 'Allow once', saves_rule: false, takes_message: false, meaning: 'allow' }, { behavior: 'allow' })
   const seen = new Map<string, number>()
   for (const s of Array.isArray(suggestions) ? suggestions : []) {
     if (s === null || typeof s !== 'object') continue
@@ -114,12 +163,12 @@ function permission(suggestions: unknown, plan: boolean) {
     const base = saved ? 'allow_always' : 'allow_session'
     const n = (seen.get(base) ?? 0) + 1
     seen.set(base, n)
-    add({ id: n === 1 ? base : `${base}_${n}`, label: describe(s as Record<string, unknown>), saves_rule: saved, takes_message: false },
-      { behavior: 'allow', updatedPermissions: [s] })
+    add({ id: n === 1 ? base : `${base}_${n}`, label: describe(s as Record<string, unknown>), saves_rule: saved, takes_message: false,
+      ...suggestionMeaning(s as Record<string, unknown>, saved) }, { behavior: 'allow', updatedPermissions: [s] })
   }
   // No "deny and stop the turn" (interrupt): Claude stores it exactly as the person's No or Esc, with no decision
   // row, so mv2 could never tell whose answer took.
-  add({ id: 'deny', label: 'Deny; the agent carries on', saves_rule: false, takes_message: true }, { behavior: 'deny' })
+  add({ id: 'deny', label: 'Deny; the agent carries on', saves_rule: false, takes_message: true, meaning: 'deny' }, { behavior: 'deny' })
   return { choices, decisions, saves }
 }
 
@@ -148,12 +197,16 @@ async function remove($: EngineInterface, paths: string[]) {
 function end($: EngineInterface, prompt: Open, record: Record<string, unknown>): Promise<void> {
   if (prompt.ended !== undefined) return prompt.ended
   if (open.get(prompt.id) === prompt) open.delete(prompt.id)
+  // Now, before the caller drops its wait: the end goes in or before the status report that ends it.
+  prompt.closing = { type: 'closed', id: prompt.id, kind: prompt.kind, ...closedOutcome(record) }
+  if (prompt.opened) transition(prompt.session, prompt.closing)
   const base = `${prompt.folder}/${prompt.id}`
   prompt.ended = (async () => {
     try {
       // The call and where its rows go: how mv2 reads from Claude's own record whose answer took.
+      // Its launch and conversation: core proves a prompt closed from this record alone (metadata only), for these.
       await $.fs.write(`${base}.end.json`, JSON.stringify({ schema: SCHEMA, id: prompt.id, kind: prompt.kind,
-        launch: prompt.launch ?? null, tool_use_id: prompt.toolUseId ?? null, transcript: prompt.transcript ?? null, choices: prompt.choices,
+        launch: prompt.launch ?? null, session: prompt.session ?? null, tool_use_id: prompt.toolUseId ?? null, transcript: prompt.transcript ?? null, choices: prompt.choices,
         questions: prompt.questions, ...record, at: await now($) }))
     } catch { /* the prompt's own file still goes: its absence is the end */ }
     await remove($, [`${base}.json`])
@@ -291,7 +344,7 @@ type Link = { toolUseId?: string; key: string; reason?: string }
 // classic.PermissionRequest: publish the prompt and hold it until mv2 answers or it closes.
 export async function hold<R extends object>($: EngineInterface, e: { tool_name: string; tool_input: unknown;
   permission_suggestions?: unknown; permission_mode?: string; agent_id?: string; session_id?: string; transcript_path?: string },
-  below: R, link: Link, signal: AbortSignal | undefined): Promise<R> {
+  below: R, link: Link, signal: AbortSignal | undefined, published: () => void): Promise<R> {
   const agentFolder = await $.env.get('MV2_AGENT_DIR')
   if (!agentFolder) return below
   const input = e.tool_input !== null && typeof e.tool_input === 'object' ? e.tool_input as Record<string, unknown> : {}
@@ -326,6 +379,8 @@ export async function hold<R extends object>($: EngineInterface, e: { tool_name:
     open.delete(prompt.id)
     return below
   }
+  opened(prompt)
+  published()
   // Listed but never held: a subagent's ask may have no dialog, and holding it would block the subagent.
   if (reason !== undefined) return below
   const decided = await wait($, prompt, signal)
@@ -339,7 +394,7 @@ export async function form($: EngineInterface, key: string, e: { mcp_server_name
   if (!agentFolder) return
   const id = newId()
   const prompt: Open = { id, folder: `${agentFolder}/${FOLDER}`, answer: `${agentFolder}/prompts/${id}.answer.json`, key,
-    kind: 'form', input: {}, decisions: new Map(), saves: new Set(), questions: [], choices: [] }
+    launch: (await $.env.get('MV2_LAUNCH_ID')) || undefined, session: e.session_id, kind: 'form', input: {}, decisions: new Map(), saves: new Set(), questions: [], choices: [] }
   open.set(prompt.id, prompt)
   try {
     await $.fs.write(`${prompt.folder}/${prompt.id}.json`, JSON.stringify({
@@ -354,7 +409,9 @@ export async function form($: EngineInterface, key: string, e: { mcp_server_name
     }))
   } catch {
     open.delete(prompt.id)
+    return
   }
+  opened(prompt)
 }
 
 // A session start (or a reload) owns no prompt yet: what an earlier load of the mod published is closed.
@@ -364,6 +421,7 @@ export async function sweep($: EngineInterface) {
   const folder = `${agentFolder}/${FOLDER}`
   let names: string[]
   try { names = (await $.fs.list(folder)).map((entry) => entry.name) } catch { return }
+  const launch = (await $.env.get('MV2_LAUNCH_ID')) || undefined
   for (const name of names) {
     const id = /^([0-9a-f-]{36})\.json$/.exec(name)?.[1]
     if (id === undefined || [...open.values()].some((p) => p.id === id)) continue
@@ -372,8 +430,12 @@ export async function sweep($: EngineInterface) {
       try { old = JSON.parse(await $.fs.read(`${folder}/${name}`)) } catch { /* its call stays unknown */ }
       try {
         await $.fs.write(`${folder}/${id}.end.json`, JSON.stringify({ schema: SCHEMA, id, kind: old.kind ?? null,
-          launch: old.launch ?? null, tool_use_id: old.tool_use_id ?? null, transcript: old.transcript ?? null, how: 'closed', cause: 'stopped', at: await now($) }))
+          launch: old.launch ?? null, session: old.session ?? null, tool_use_id: old.tool_use_id ?? null, transcript: old.transcript ?? null, how: 'closed', cause: 'stopped', at: await now($) }))
       } catch { continue }
+      // A reload's: this launch's earlier load opened it. An earlier launch's prompts core closed at that launch's end.
+      if (launch !== undefined && old.launch === launch && typeof old.session === 'string' && typeof old.kind === 'string') {
+        transition(old.session, { type: 'closed', id, kind: old.kind, ...closedOutcome({ how: 'closed', cause: 'stopped' }) })
+      }
     }
     await remove($, [`${folder}/${id}.json`])
   }

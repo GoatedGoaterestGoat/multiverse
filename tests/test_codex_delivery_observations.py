@@ -47,7 +47,7 @@ class ReceiptObservationTest(unittest.TestCase):
         """Queue receipts or child events must never become confirmation of another input."""
         expected = {'kind': 'user_message', 'native_session_id': 'primary', 'turn_id': 'old-turn',
                     'item_id': 'native-item', 'client_message_id': 'wire-attempt'}
-        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0'):
+        for version in ('0.166.0', '0.167.0', '0.167.1', '0.167.2', '0.169.0', '0.170.0', '0.171.0'):
             connection = self.connection(tuple(map(int, version.split('.'))), 'codex/' + version)
             for method in ('item/started', 'item/completed'):
                 with self.subTest(version=version, method=method):
@@ -59,7 +59,8 @@ class ReceiptObservationTest(unittest.TestCase):
         connection = self.connection()
         for cli, greeting in (((0, 170, 0), 'codex/0.169.0'), ((0, 169, 0), 'codex/0.170.0'),
                               ((0, 168, 0), 'codex/0.168.0'), ((0, 170, 1), 'codex/0.170.1'),
-                              ((0, 171, 0), 'codex/0.171.0'), (None, 'codex/0.170.0'),
+                              ((0, 171, 0), 'codex/0.170.0'), ((0, 170, 0), 'codex/0.171.0'),
+                              ((0, 171, 1), 'codex/0.171.1'), (None, 'codex/0.170.0'),
                               ((False, 170, 0), 'codex/0.170.0'), ((0, 170, 0), 'unverified')):
             with self.subTest(cli=cli, greeting=greeting):
                 self.assertIsNone(self.connection(cli, greeting).delivery_observation(item_event()))

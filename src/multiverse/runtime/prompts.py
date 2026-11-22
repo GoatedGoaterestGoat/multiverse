@@ -6,17 +6,20 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
+from types import SimpleNamespace
 import time
 from uuid import uuid4
 
 from .. import harnesses, universe
 from ..harnesses.types import (AttachmentSpec, Message, NativeEndpoint, NativeResult, NativeServiceHandle,
-                              PromptAnswer, PromptChoice, PromptInput, PromptList, PromptQuestion, PromptResult,
-                              SessionHandle, WaitingPrompt)
+                              PROMPT_CHOICE_LABELS, PROMPT_CHOICE_SAVES, PromptAnswer, PromptChoice,
+                              PromptClosed, PromptDisplay, PromptInput, PromptList, PromptOpened,
+                              PromptQuestion, PromptResult, SessionHandle, WaitingPrompt)
 from ..plugins import access, agent_files
 from ..store import lock, now, retry_missing
 from ..universe import agents, records
-from . import delivery_evidence, effects, native
+from . import delivery_evidence, effects, native, prompt_events
 
 LIMIT = 64 * 1024
 INPUT_LIMIT = 128 * 1024
@@ -82,6 +85,37 @@ def _text(value, *, empty=True):
     return isinstance(value, str) and (empty or bool(value)) and '\0' not in value and len(value.encode()) <= LIMIT
 
 
+def _choice_meaning(choice):
+    meaning = choice.meaning
+    if meaning is None and choice.short is None:
+        return choice  # An older provider still supplies its long label and its original rule-saving policy.
+    if meaning == 'other':
+        label = choice.short
+        if not isinstance(label, str) or not label.strip() or len(label) > 24 or not label.isprintable():
+            raise ValueError('Invalid short prompt choice label')
+        return choice
+    if (not isinstance(meaning, str) or meaning not in PROMPT_CHOICE_LABELS
+            or choice.saves_rule != (meaning in PROMPT_CHOICE_SAVES)):
+        raise ValueError('Invalid prompt choice meaning')
+    return replace(choice, short=PROMPT_CHOICE_LABELS[meaning])
+
+
+def _prompt_display(value):
+    if value is None:
+        return None
+    display = value if isinstance(value, PromptDisplay) else PromptDisplay(**value)
+    if not isinstance(display.lines, (tuple, list)) or len(display.lines) > 8:
+        raise ValueError('Invalid waiting prompt display lines')
+    fields = [(display.title, 80), *((line, 200) for line in display.lines)]
+    if display.subject is not None:
+        fields.append((display.subject, 500))
+    if any(not isinstance(text, str) or len(text) > limit or (text and not text.isprintable()) for text, limit in fields):
+        raise ValueError('Invalid waiting prompt display text')
+    if not display.title.strip():
+        raise ValueError('Missing waiting prompt display title')
+    return replace(display, lines=tuple(display.lines))
+
+
 def _prompt(value):
     if isinstance(value, WaitingPrompt):
         value = asdict(value)
@@ -99,7 +133,7 @@ def _prompt(value):
                 or type(choice.saves_rule) is not bool or type(choice.takes_message) is not bool):
             raise ValueError('Invalid prompt choice')
         ids.add(choice.id)
-        choices.append(choice)
+        choices.append(_choice_meaning(choice))
     ids = set()
     for value in item.questions:
         question = value if isinstance(value, PromptQuestion) else PromptQuestion(**value)
@@ -120,7 +154,8 @@ def _prompt(value):
     encoded = json.dumps(item.detail, ensure_ascii=False, allow_nan=False).encode()
     detail = (dict(item.detail) if len(encoded) <= LIMIT else
               {'truncated': True, 'text': encoded[:(LIMIT - 128) // 2].decode('utf-8', errors='ignore')})
-    return replace(item, choices=tuple(choices), questions=tuple(questions), detail=detail)
+    return replace(item, choices=tuple(choices), questions=tuple(questions), detail=detail,
+                   display=_prompt_display(item.display))
 
 
 def _catalog(adapter, session, executor):
@@ -162,11 +197,18 @@ def waiting(root, agent, *, caller=None):
         with lock(directory / '.launch.lock', create_parent=False, blocking=False):
             connected = _connect(root, directory)
             if connected is None:
+                launch = agents.runtime(directory).get('launch_id')
+                prompt_events.finish(directory, launch, previous=True)
+                prompt_events.finish(directory, launch)
+                prompt_events.publish(directory)
                 return PromptList(state='unavailable', reason='The agent is not running')
             adapter, session, executor = connected
             found = _catalog(adapter, session, executor)
             found = replace(found, prompts=tuple(p for p in found.prompts
                                                 if session.status == 'waiting' or not p.requires_waiting))
+            prompt_events.record(directory, session.launch_id, session.native_id, tuple(
+                PromptOpened(id=p.id, kind=p.kind, requires_waiting=p.requires_waiting)
+                for p in found.prompts))
             found = replace(found, prompts=tuple(
                 replace(p, answerable=False, reason='An answer was already recorded; read --result. Do not answer again.')
                 if not p.requires_waiting and _record_present(directory / 'prompts' / (p.id + '.json')) else p
@@ -301,30 +343,61 @@ def _session(record):
 
 
 def _safe_person(value, record):
+    """A terminal answer as the harness reports it, in the shape mv2's own answers take: choice {id, label, short},
+    the message (only for a choice the prompt shows takes one), answers {question: [offered labels]}, typed
+    {question: [text]}, notes {question: text}. A withheld question's entry is {"secret": true}, added first and
+    kept whatever text is cut to stay within LIMIT."""
     if not isinstance(value, dict):
         return None
+    room = LIMIT - 32
     safe = {'truncated': True} if value.get('truncated') is True else {}
-    choice = value.get('choice')
-    if (choice in record.get('choices', ()) or 'choices' not in record and isinstance(choice, str)
-            and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
-        safe['choice'] = value['choice']
-    if len(json.dumps(safe, ensure_ascii=False).encode()) > LIMIT - 32:
-        safe = {'truncated': True}
+    answers, notes = value.get('answers'), value.get('notes')
+    for category, given in (('answers', answers), ('notes', notes)):
+        for key in record.get('withheld_ids', ()):
+            if isinstance(given, dict) and key in given:
+                safe.setdefault(category, {})[key] = {'secret': True}
 
-    def keep(category, key, text):
-        items = safe.setdefault(category, {}).setdefault(key, [])
-        items.append(text)
-        if len(json.dumps(safe, ensure_ascii=False).encode()) <= LIMIT - 32:
+    def size():
+        return len(json.dumps(safe, ensure_ascii=False).encode())
+    if size() > room:
+        return {'truncated': True}
+    choice, meaning = value.get('choice'), value.get('meaning')
+    own = _terminal_choice(choice, value.get('label'),
+                           PROMPT_CHOICE_LABELS.get(meaning) if isinstance(meaning, str) else None, _offered(record))
+    if own is not None or (choice in record.get('choices', ()) or 'choices' not in record and isinstance(choice, str)
+                           and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
+        labels = record.get('choice_labels', {}).get(choice, {})
+        safe['choice'] = own or {'id': choice, 'label': labels.get('label'), 'short': labels.get('short')}
+        message = value.get('message')
+        if own is None and choice in record.get('message_choices', ()) and _text(message, empty=False):
+            safe['message'] = message
+            while size() > room and safe['message']:
+                safe['message'] = safe['message'][:len(safe['message']) // 2]
+                safe['truncated'] = True
+            if not safe['message']:
+                del safe['message']
+        if size() > room:
+            return {key: value for key, value in safe.items() if key in ('answers', 'notes')} | {'truncated': True}
+
+    def keep(category, key, text, single=False):
+        group = safe.setdefault(category, {})
+        if single:
+            group[key] = text
+        else:
+            group.setdefault(key, []).append(text)
+        if size() <= room:
             return True
-        items.pop()
-        if not items:
-            del safe[category][key]
-        if not safe[category]:
+        if single:
+            del group[key]
+        else:
+            group[key].pop()
+            if not group[key]:
+                del group[key]
+        if not group:
             del safe[category]
         safe['truncated'] = True
         return False
 
-    answers = value.get('answers')
     if isinstance(answers, dict):
         for key, labels in record.get('public_options', {}).items():
             selected = answers.get(key)
@@ -342,13 +415,405 @@ def _safe_person(value, record):
                     return safe
             if len(selected) > 128:
                 safe['truncated'] = True
-    notes = value.get('notes')
     if isinstance(notes, dict):
         for key in record.get('public_notes', ()):
             text = notes.get(key)
-            if _text(text, empty=False) and not keep('typed', key, text):
+            if _text(text, empty=False) and not keep('notes', key, text, single=True):
                 return safe
     return safe or None
+
+
+def _kept_answer(prompt, request, schema, budget):
+    """The answer mv2 sends, as its record keeps it before anything is sent: the choice (its id, label and short),
+    the message sent with it, offered labels, typed text and notes. A withheld question's answer is left out and
+    marked {"secret": true}; long text is cut to fit `budget` encoded bytes (what the record has room for), marked
+    truncated."""
+    withheld = set(schema['withheld_ids'])
+    answer = {}
+    if request.choice is not None:
+        labels = schema['choice_labels'].get(request.choice, {})
+        answer['choice'] = {'id': request.choice, 'label': labels.get('label'), 'short': labels.get('short')}
+    if _text(request.message, empty=False):
+        answer['message'] = request.message
+    for key, values in request.answers.items():
+        if key in withheld:
+            answer.setdefault('answers', {})[key] = {'secret': True}
+            continue
+        offered = schema['public_options'].get(key, ())
+        chosen = [value for value in values if value in offered]
+        typed = [value for value in values if value not in offered]
+        if chosen:
+            answer.setdefault('answers', {})[key] = chosen
+        if typed:
+            answer.setdefault('typed', {})[key] = typed
+    for key, text in request.notes.items():
+        answer.setdefault('notes', {})[key] = {'secret': True} if key in withheld else text
+    return _fitted(answer, budget)
+
+
+def _fitted(answer, budget, person=False):
+    """`answer` cut to `budget` encoded bytes: its longest text halved until it fits, marked truncated. A person's
+    answer cut to its minimal form keeps its choice's short label too, when it is core's own text, so a choice of the
+    harness's own (which the prompt didn't offer, so no record names it) still reads back."""
+    def size():
+        return len(json.dumps(answer, ensure_ascii=False).encode())
+
+    def texts():  # (container, key) of every text that may be cut
+        if isinstance(answer.get('message'), str):
+            yield answer, 'message'
+        for category in ('typed', 'notes'):
+            for key, value in (answer.get(category) or {}).items():
+                if isinstance(value, str):
+                    yield answer[category], key
+                elif isinstance(value, list):
+                    for index in range(len(value)):
+                        yield value, index
+    while size() > budget:
+        place = max(texts(), key=lambda item: len(item[0][item[1]]), default=None)
+        if place is None or not place[0][place[1]]:
+            # Nothing left to cut: the choice's ID (what was sent) and the secret markers stay, the rest goes.
+            kept = {category: {key: value for key, value in (answer.get(category) or {}).items()
+                               if value == {'secret': True}} for category in ('answers', 'notes')}
+            choice = answer.get('choice')
+            short = choice.get('short') if person and isinstance(choice, dict) else None
+            short = short if short in PROMPT_CHOICE_LABELS.values() else None
+            return {**({'choice': {'id': choice['id'], 'label': None, 'short': short}}
+                       if isinstance(choice, dict) and isinstance(choice.get('id'), str) else {}),
+                    **{category: values for category, values in kept.items() if values}, 'truncated': True}
+        container, key = place
+        container[key] = container[key][:len(container[key]) // 2]
+        answer['truncated'] = True
+    return answer
+
+
+def _record_size(record):
+    """A prompt record's size on disk, as agent_files.write_json writes it."""
+    return len(json.dumps(record, indent=2, ensure_ascii=False).encode()) + 1
+
+
+def _fit_in(record, place, value, margin=0, person=False):
+    """`value` cut (as _fitted cuts) until `record` with `value` set at `place` (a key path) stays `margin` bytes
+    under LIMIT on disk; returns the value that fits."""
+    target = record
+    for key in place[:-1]:
+        target = target[key]
+    budget = len(json.dumps(value, ensure_ascii=False).encode())
+    while True:
+        fitted = _fitted(json.loads(json.dumps(value)), budget, person)
+        target[place[-1]] = fitted
+        over = _record_size(record) - (LIMIT - margin)
+        if over <= 0 or budget <= 0:
+            return fitted
+        budget = max(budget - over - 64, 0)
+
+
+def _handed_over(record, directory, scope):
+    """Whether this attempt's answer file was published (or taken by the native reader): proof it was handed over,
+    which an attempt cut off before its record said so still leaves. It is read only from `directory`, the agent
+    folder the record was read from, in its own prompts folder (never through a link), and only when the record's
+    saved session file is in that folder too. Only a regular file within LIMIT naming this attempt (its id, caller,
+    launch and conversation) counts; its content is never passed on. An acknowledgement alone proves nothing."""
+    if directory is None or scope is None:
+        return False  # proof only from the folder the record itself was read through
+    try:
+        session = record['session']
+        agent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            # The folder as it is opened now, and the saved session's, must be one: proof is read through this
+            # descriptor, so a folder put in its place meanwhile supplies nothing.
+            own, saved = os.fstat(agent), os.stat(Path(session['session_file']).parent)
+            if (saved.st_dev, saved.st_ino) != (own.st_dev, own.st_ino):
+                return False  # the saved session names some other folder: no proof from there
+            folder = os.open('prompts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=agent)
+        finally:
+            os.close(agent)
+        found = os.fstat(folder)
+        if ((own.st_dev, own.st_ino), (found.st_dev, found.st_ino)) != scope:
+            os.close(folder)
+            return False  # not the prompts folder, in the agent folder, the record was read from
+        try:
+            for suffix in ('.answer.json', '.answer.taken.json'):
+                payload = _answer_file(folder, record['id'] + suffix)
+                if (isinstance(payload, dict) and type(payload.get('schema')) is int and payload['schema'] == 1
+                        and WIRE_KEYS == set(payload) and _wire_matches(payload, record)
+                        and payload.get('id') == record['id']
+                        and payload.get('caller') == record.get('caller')
+                        and payload.get('launch_id') == session.get('launch_id')
+                        and payload.get('native_id') == session.get('native_id')):
+                    return True
+        finally:
+            os.close(folder)
+    except (KeyError, TypeError, OSError, ValueError):
+        pass
+    return False
+
+
+WIRE_KEYS = frozenset(('schema', 'id', 'choice', 'message', 'answers', 'notes', 'allow_rule', 'launch_id',
+                       'native_id', 'caller'))  # what _encode_answer writes: an answer file names all of them
+
+
+def _witness(payload, withheld):
+    """A SHA-256 over an answer envelope as mv2 sends it, with every withheld question's value left out but its key
+    kept: it binds each public value and both key sets exactly, whatever the kept answer cut for display, and holds
+    no secret."""
+    import hashlib
+
+    def public(values):
+        return {key: (None if key in withheld else value) for key, value in values.items()}
+    bound = {key: payload.get(key) for key in ('schema', 'id', 'choice', 'message', 'allow_rule', 'launch_id',
+                                               'native_id', 'caller')}
+    bound.update(answers=public(payload.get('answers') or {}), notes=public(payload.get('notes') or {}))
+    text = json.dumps(bound, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+KEPT_KEYS = frozenset(('choice', 'message', 'answers', 'typed', 'notes', 'truncated'))
+
+
+def _kept_shape(kept, payload):
+    """Whether a kept answer has exactly the shape core writes, for the choice `payload` sent; a damaged one proves
+    no handoff."""
+    if not isinstance(kept, dict) or not set(kept) <= KEPT_KEYS or kept.get('truncated', True) is not True:
+        return False
+    choice = kept.get('choice')
+    if 'choice' in kept and choice is None:
+        return False  # core leaves the key out when no choice was sent
+    if choice is None:
+        if payload.get('choice') is not None:
+            return False
+    elif not (isinstance(choice, dict) and set(choice) == {'id', 'label', 'short'}
+              and choice['id'] == payload.get('choice') and isinstance(choice['id'], str)
+              and all(choice[key] is None or isinstance(choice[key], str) for key in ('label', 'short'))):
+        return False
+    if 'message' in kept and not isinstance(kept['message'], str):
+        return False
+    def secret(value):  # exactly as core writes it: {"secret": true}
+        return type(value) is dict and set(value) == {'secret'} and value['secret'] is True
+
+    def strings(value):
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    for field, valid in (('answers', lambda value: secret(value) or strings(value)), ('typed', strings),
+                         ('notes', lambda value: secret(value) or isinstance(value, str))):
+        group = kept.get(field, {})
+        if not isinstance(group, dict) or not all(isinstance(key, str) and valid(value) for key, value in group.items()):
+            return False
+    return True
+
+
+def _wire_matches(payload, record):
+    """Whether an answer file is the envelope this reservation sent: the wire's types, its witness (every public
+    value and both key sets, exactly) and a kept answer of the shape core writes."""
+    answers, notes = payload.get('answers'), payload.get('notes')
+    if not (isinstance(answers, dict) and isinstance(notes, dict) and type(payload.get('allow_rule')) is bool
+            and (payload.get('choice') is None or isinstance(payload.get('choice'), str))
+            and (payload.get('message') is None or isinstance(payload.get('message'), str))
+            and all(isinstance(key, str) and isinstance(value, list) and all(isinstance(item, str) for item in value)
+                    for key, value in answers.items())
+            and all(isinstance(key, str) and isinstance(value, str) for key, value in notes.items())):
+        return False
+    withheld = record.get('withheld_ids')
+    witness = record.get('witness')
+    if not (isinstance(witness, str) and isinstance(withheld, list) and all(isinstance(key, str) for key in withheld)):
+        return False
+    if 'answer' not in record or not _kept_shape(record['answer'], payload):  # a witnessed record always keeps one
+        return False
+    if not _kept_matches(record['answer'], payload, record):
+        return False
+    return _witness(payload, set(withheld)) == witness
+
+
+def _kept_matches(kept, payload, record):
+    """Whether the kept answer shows what this envelope sent, as core keeps it: its public values projected through
+    the record's schema (secrets as markers), and cut only as fitting cuts. Normal fitting keeps every field, the
+    choice, offered labels and markers exactly, and shortens only the message, typed answers and public note text,
+    each to a prefix of itself; when nothing else could be cut, it keeps exactly core's minimal form: the choice's
+    id, every marker, and truncated. Nothing the wire didn't send is shown."""
+    try:
+        schema = {'withheld_ids': record['withheld_ids'],
+                  'choice_labels': record.get('choice_labels') if isinstance(record.get('choice_labels'), dict) else {},
+                  'public_options': record.get('public_options') if isinstance(record.get('public_options'), dict)
+                  else {}}
+        request = SimpleNamespace(choice=payload.get('choice'), message=payload.get('message'),
+                                  answers=payload['answers'], notes=payload['notes'])
+        expected = _kept_answer(None, request, schema, float('inf'))
+    except (KeyError, TypeError, AttributeError):
+        return False
+    if kept == expected:
+        return True
+    if kept.get('truncated') is not True:
+        return False
+    marker = {'secret': True}
+    minimal = {**({'choice': {'id': expected['choice']['id'], 'label': None, 'short': None}}
+                  if 'choice' in expected else {}),
+               **{field: markers for field, markers in (
+                   (field, {key: value for key, value in (expected.get(field) or {}).items() if value == marker})
+                   for field in ('answers', 'notes')) if markers},
+               'truncated': True}
+    if kept == minimal:
+        return True
+
+    def prefix(value, sent):
+        return isinstance(value, str) and isinstance(sent, str) and sent.startswith(value)
+    if set(kept) != set(expected) | {'truncated'}:
+        return False
+    if kept.get('choice') != expected.get('choice') or kept.get('answers') != expected.get('answers'):
+        return False  # offered labels and markers are never cut
+    if 'message' in expected and not prefix(kept['message'], expected['message']):
+        return False
+    typed, sent_typed = kept.get('typed', {}), expected.get('typed', {})
+    if set(typed) != set(sent_typed) or not all(
+            isinstance(typed[key], list) and len(typed[key]) == len(sent_typed[key])
+            and all(prefix(item, wanted) for item, wanted in zip(typed[key], sent_typed[key])) for key in typed):
+        return False
+    notes, sent_notes = kept.get('notes', {}), expected.get('notes', {})
+    return set(notes) == set(sent_notes) and all(
+        notes[key] == marker if sent_notes[key] == marker else prefix(notes[key], sent_notes[key]) for key in notes)
+
+
+def _unique(pairs):
+    names = [name for name, _ in pairs]
+    if len(set(names)) != len(names):
+        raise ValueError('a name appears twice')  # JSON would keep only the last: what was sent can't be told
+    return dict(pairs)
+
+
+def _answer_file(folder, name):
+    """An answer file's JSON when it is a regular file within LIMIT in `folder` (a descriptor) and no object in it
+    repeats a name, else None; never follows a link or blocks."""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+    except OSError:
+        return None
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > LIMIT:
+            return None
+        data = os.read(descriptor, LIMIT + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > LIMIT:  # grew since it was looked at
+        return None
+    try:
+        return json.loads(data.decode('utf-8'), object_pairs_hook=_unique)  # the wire is UTF-8, and only that
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+
+
+def _caller_of(record):
+    """Who answered, from a record's caller, as core writes it: the person through mv2, or a named plugin. A
+    damaged caller names nobody."""
+    caller = record.get('caller')
+    if caller == {'kind': 'person'}:
+        return {'kind': 'mv2'}
+    from ..plugins.manifest import NAME
+    if (isinstance(caller, dict) and set(caller) == {'kind', 'name'} and caller['kind'] == 'plugin'
+            and isinstance(caller['name'], str) and NAME.fullmatch(caller['name'])):
+        return {'kind': 'plugin', 'name': caller['name']}
+    return None
+
+
+def _rebuilt(answer, record, person=False):
+    """A kept answer as its record's schema allows it: the choice it offered (its label from the schema), a message
+    only with a choice that takes one, offered labels, typed text where the question takes it, notes where it takes
+    one; a withheld question's entry {"secret": true} whatever was stored. Whatever else a damaged record holds is
+    left out; None when nothing is left."""
+    def texts(value):
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+    def names(key):  # a stored list of names, as core writes it; a damaged one counts as empty
+        value = record.get(key)
+        return set(value) if texts(value) else set()
+    if not isinstance(answer, dict) or 'withheld_ids' in record and not texts(record['withheld_ids']):
+        return None  # which questions are secret can't be told: nothing is shown
+    withheld = names('withheld_ids')
+    raw = record.get('public_options')
+    options = ({key: value for key, value in raw.items() if isinstance(key, str) and texts(value)}
+               if isinstance(raw, dict) else {})
+    free, noted = names('public_free_text'), names('public_notes')
+    labels = record.get('choice_labels') if isinstance(record.get('choice_labels'), dict) else {}
+    rebuilt = {}
+    stored = answer.get('choice') if isinstance(answer.get('choice'), dict) else {}
+    choice = stored.get('id')
+    allowed = record.get('choices')
+    own = (_terminal_choice(choice, stored.get('label'), stored.get('short'), _offered(record),
+                            cut=answer.get('truncated') is True) if person else None)
+    if own is not None:
+        rebuilt['choice'] = own
+    elif isinstance(choice, str) and (choice in allowed if texts(allowed) else 'choices' not in record
+                                      and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)):
+        named = labels.get(choice) if isinstance(labels.get(choice), dict) else {}
+        rebuilt['choice'] = {'id': choice, 'label': named.get('label') if isinstance(named.get('label'), str) else None,
+                             'short': named.get('short') if isinstance(named.get('short'), str) else None}
+        if _text(answer.get('message'), empty=False) and choice in names('message_choices'):
+            rebuilt['message'] = answer['message']
+    for key, value in (answer.get('answers') or {}).items() if isinstance(answer.get('answers'), dict) else ():
+        if key in withheld:
+            rebuilt.setdefault('answers', {})[key] = {'secret': True}
+        elif texts(value) and value and all(item in options.get(key, ()) for item in value):
+            rebuilt.setdefault('answers', {})[key] = list(value)
+    for key, value in (answer.get('typed') or {}).items() if isinstance(answer.get('typed'), dict) else ():
+        if key not in withheld and key in free and texts(value) and value:
+            rebuilt.setdefault('typed', {})[key] = list(value)
+    for key, value in (answer.get('notes') or {}).items() if isinstance(answer.get('notes'), dict) else ():
+        if key in withheld:
+            rebuilt.setdefault('notes', {})[key] = {'secret': True}
+        elif key in noted and isinstance(value, str):
+            rebuilt.setdefault('notes', {})[key] = value
+    if answer.get('truncated') is True:
+        rebuilt['truncated'] = True
+    return rebuilt or None
+
+
+def _offered(record):
+    """The ids of the choices the prompt offered, as its record holds them, or None when it holds no valid list."""
+    listed = record.get('choices')
+    return listed if isinstance(listed, list) and all(isinstance(item, str) for item in listed) else None
+
+
+def _terminal_choice(choice, label, short, listed, cut=False):
+    """A person's terminal answer whose choice no choice the prompt offered describes (Claude's plain No stops the
+    turn, where mv2's deny lets it carry on): the harness's own id and long label, with core's short label for its
+    canonical meaning ('other' has none), never with a message. Only for state person, and only against the valid
+    list of offered ids (`listed`, None when there is none): without one, an id is kept bare as before. An answer cut
+    to its minimal form (`cut`) has lost the long label, and keeps the choice without it."""
+    if (listed is not None and isinstance(choice, str) and re.fullmatch(r'[A-Za-z0-9_:-]{1,128}', choice)
+            and choice not in listed and short in PROMPT_CHOICE_LABELS.values()
+            and (label is None and cut or isinstance(label, str) and label.strip() and len(label) <= 512
+                 and label.isprintable())):
+        return {'id': choice, 'label': label, 'short': short}
+    return None
+
+
+def _common(answer):
+    """A terminal answer kept before 1.21 in today's shape: a bare choice id becomes {id, label, short}."""
+    if isinstance(answer, dict) and isinstance(answer.get('choice'), str):
+        return {**answer, 'choice': {'id': answer['choice'], 'label': None, 'short': None}}
+    return answer
+
+
+def _attributed(outcome, record, directory=None, scope=None):
+    """`outcome` with whose answer its state describes and that answer: the person's (answered in the terminal),
+    or mv2's, kept in `record` (from mv2 answer or the dashboard: {"kind": "mv2"}; from a plugin: its name). None
+    for a state where no answer is known to have taken."""
+    if outcome.state == 'person':
+        answer = _common(outcome.person_answer)
+        if isinstance(record, dict):  # as stored: read again through its schema, never as it stands
+            answer = _rebuilt(answer, record, person=True)
+        return replace(outcome, by={'kind': 'person'}, answer=answer, person_answer=answer)
+    # answered and sent_first are the harness's word that it took; submitted counts only once mv2 recorded that it
+    # handed the answer over (a record read mid-attempt, or left by an interrupted one, is a candidate, not an answer).
+    if (isinstance(record, dict) and (outcome.state in ('answered', 'sent_first')
+                                      or outcome.state == 'submitted' and (record.get('dispatched') is True
+                                                                           or _handed_over(record, directory, scope)))):
+        by = _caller_of(record)
+        kept = record.get('answer')
+        if not isinstance(kept, dict):  # a record from before 1.21: its choice, and the labels it proved public
+            kept = {**({'choice': {'id': record['choice'], 'label': None, 'short': None}}
+                       if isinstance(record.get('choice'), str) else {}),
+                    **({'answers': record['answers']} if isinstance(record.get('answers'), dict) and record['answers']
+                       else {})} or None
+        return replace(outcome, by=by, answer=_rebuilt(kept, record) if by is not None else None, person_answer=None)
+    return replace(outcome, by=None, answer=None, person_answer=None)  # a person's answer belongs to state person
 
 
 def _public_schema(prompt):
@@ -361,6 +826,10 @@ def _public_schema(prompt):
                                if not q.secret and counts[q.id] == 1},
             'public_free_text': [q.id for q in prompt.questions if q.free_text and not q.secret and counts[q.id] == 1],
             'public_notes': [q.id for q in prompt.questions if q.takes_note and not q.secret and counts[q.id] == 1],
+            # A secret question's answer, or one a duplicate ID can't attribute, is never kept; a kept answer says so.
+            'withheld_ids': list(dict.fromkeys(q.id for q in prompt.questions if q.secret or counts[q.id] > 1)),
+            'choice_labels': {c.id: {'label': c.label, 'short': getattr(c, 'short', None)} for c in prompt.choices},
+            'message_choices': [c.id for c in prompt.choices if c.takes_message],
             'has_secret': any(q.secret for q in prompt.questions)}
 
 
@@ -415,15 +884,50 @@ def _outcome(id, reply, record):
                         person_answer=_safe_person(value.get('person_answer'), record) if state == 'person' else None)
 
 
+REASON_LIMIT = 2048  # the most of an outcome's reason a record keeps, in characters
+
+
 def _save(directory, record, outcome):
-    changed = record.get('result') != asdict(outcome)
-    record['result'] = asdict(outcome)
+    previous = record.get('result')  # what changed is judged against this, before fitting writes into the record
+    as_it_was = json.loads(json.dumps(record))
+    if isinstance(outcome.reason, str) and len(outcome.reason) > REASON_LIMIT:
+        outcome = replace(outcome, reason=outcome.reason[:REASON_LIMIT - 1] + '…')
+    if isinstance(outcome.person_answer, dict):
+        # The record's LIMIT holds mv2's kept answer and the person's together: the person's gets the room left.
+        record['result'] = {key: value for key, value in asdict(outcome).items() if key not in ('by', 'answer')}
+        outcome = replace(outcome, person_answer=_fit_in(record, ('result', 'person_answer'), outcome.person_answer,
+                                                          person=True))
+    stored = {key: value for key, value in asdict(outcome).items() if key not in ('by', 'answer')}
+    record['result'] = stored
+    while _record_size(record) > LIMIT and stored.get('reason'):  # the whole record stays within LIMIT
+        stored['reason'] = stored['reason'][:len(stored['reason']) // 2]
+        outcome = replace(outcome, reason=stored['reason'])
+    if _record_size(record) > LIMIT and stored.get('person_answer'):  # its markers alone don't fit: say it's cut
+        stored['person_answer'] = {'truncated': True}
+        outcome = replace(outcome, person_answer=stored['person_answer'])
+    if _record_size(record) > LIMIT and isinstance(record.get('answer'), dict):  # a record kept too full before
+        _fit_in(record, ('answer',), record['answer'])
+        if _record_size(record) > LIMIT:
+            record['answer'] = {'truncated': True}
+    if _record_size(record) > LIMIT:  # what can't be cut still won't fit: the reservation stays as it was
+        record.clear()
+        record.update(as_it_was)
+        return outcome
+    changed = previous != stored
     agent_files.write_json(directory / 'prompts' / (record['id'] + '.json'), record)
     if outcome.state in FINAL or outcome.cause in ('stopped', 'switched'):
         _discard_answer(directory, record['id'])
     if changed:
-        agents._event(directory, 'agent.prompt', record['session']['launch_id'],
-                      {'kind': record['kind'], 'tool': record['tool'], 'caller': record['caller'], 'outcome': outcome.state})
+        launch = record['session']['launch_id']
+        if (record.get('requires_waiting') is False
+                and (record.get('input_reserved') is True or outcome.state in ('person', 'gone'))):
+            prompt_events.stage(directory, launch, record['session']['native_id'], (
+                PromptClosed(id=record['id'], kind=record['kind'], state=outcome.state, cause=outcome.cause,
+                             requires_waiting=False),))
+        data = {'id': record['id'], 'kind': record['kind'], 'tool': record['tool'], 'caller': record['caller'],
+                'state': outcome.state, 'outcome': outcome.state, 'cause': outcome.cause}
+        if not prompt_events.publish_ordered(directory, 'agent.prompt', launch, data):
+            agents._event(directory, 'agent.prompt', launch, data)
     return outcome
 
 
@@ -521,6 +1025,9 @@ def _submit_input(directory, adapter, session, executor, record, recipe):
         valid = False
     if not valid:
         return _refused(record['id'], 'The harness returned an invalid answer input; nothing was sent.', 'invalid_input')
+    # The adapter has committed this question to one input; delivery may still fail or remain uncertain.
+    record['input_reserved'] = True
+    agent_files.write_json(directory / 'prompts' / (record['id'] + '.json'), record)
     try:
         executor.check_session()
     except access.Denied:
@@ -556,6 +1063,8 @@ def _settle_input(root, directory, record):
         executor.check_session()
         reply = effects.call(adapter, 'get_delivery', session, record['input_id'], executor)
         outcome = _input_outcome(record['id'], reply)
+        if outcome.state == 'answered':
+            record['input_reserved'] = True  # An exact transcript receipt also proves a legacy input went through.
     except access.Denied:
         raise
     except Exception:
@@ -586,16 +1095,18 @@ def result(root, agent, id, *, caller=None):
     try:
         with lock(directory / '.launch.lock', create_parent=False, blocking=False), \
                 lock(directory / '.prompts.lock', create_parent=False, blocking=False):
-            record = _record(directory, id, missing_ok=True)
-            return _settle(root, directory, record) if record is not None else _unanswered(root, directory, id)
+            record, scope = _record(directory, id, missing_ok=True, scope=True)
+            return _attributed(_settle(root, directory, record) if record is not None else
+                               _unanswered(root, directory, id), record, directory, scope)
     except BlockingIOError:
         # Atomic records can still be read. Contention is not evidence that an unknown ID was submitted.
-        record = _record(directory, id, missing_ok=True)
+        record, scope = _record(directory, id, missing_ok=True, scope=True)
         if record is None:
             return _refused(id, 'The agent is busy changing state; read --result again. Nothing was sent by this check.', 'busy')
         current = PromptResult(**record['result'])
-        return current if current.state in FINAL else replace(current, cause='busy',
-                     reason='The agent is busy changing state; read --result again. Nothing was resent.')
+        busy = 'The agent is busy changing state; read --result again. Nothing was resent.'
+        return _attributed(current if current.state in FINAL else replace(current, cause='busy', reason=busy),
+                           record, directory, scope)
 
 
 def _record_present(path):
@@ -606,16 +1117,85 @@ def _record_present(path):
     return True
 
 
-def _record(directory, id, *, missing_ok=False):
+def _record_at(folder, path, *, missing_ok):
+    """A prompt record read through `folder`, a descriptor of its prompts folder: never through a link, within
+    records.MAX_BYTES, a JSON object with no name repeated. None when it isn't there and `missing_ok`."""
+    try:  # a record replaced as it's opened is briefly missing: retried as every record read is
+        descriptor = retry_missing(lambda: os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                                   dir_fd=folder), path=path)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise records.RecordError(path, 'is missing') from None
+    except OSError as error:
+        raise records.RecordError(path, f'cannot be read: {error.strerror or type(error).__name__}') from None
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > records.MAX_BYTES:
+            raise records.RecordError(path, 'is not a record file')
+        raw = os.read(descriptor, records.MAX_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    try:
+        data = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique)
+    except (ValueError, UnicodeError, RecursionError):
+        raise records.RecordError(path, 'is not a prompt record') from None
+    if len(raw) > records.MAX_BYTES or not isinstance(data, dict):
+        raise records.RecordError(path, 'is not a prompt record')
+    return data
+
+
+def _record(directory, id, *, missing_ok=False, scope=False):
+    """The prompt record `id` of the agent at `directory`, checked. With `scope`, (record, the prompts folder's
+    identity, with its agent folder's): read through one descriptor of each, so a proof read later counts only from
+    that same prompts folder, still in that same agent folder."""
     path = directory / 'prompts' / (id + '.json')
+    if scope:
+        try:
+            agent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as error:
+            raise records.RecordError(path, f'cannot be read: {error.strerror or type(error).__name__}') from None
+        try:  # the record, and whose it is, both read through this one folder
+            try:
+                folder = os.open('prompts', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=agent)
+            except FileNotFoundError:
+                if missing_ok:
+                    return None, None
+                raise records.RecordError(path, 'is missing') from None
+            except OSError as error:
+                raise records.RecordError(path, f'cannot be read: {error.strerror or type(error).__name__}') from None
+            try:
+                mine, found = os.fstat(agent), os.fstat(folder)
+                identity = ((mine.st_dev, mine.st_ino), (found.st_dev, found.st_ino))  # the agent's and its prompts'
+                record = _record_at(folder, path, missing_ok=missing_ok)
+            finally:
+                os.close(folder)
+            if record is None:
+                return None, None
+            owner = _record_at(agent, directory / 'properties.json', missing_ok=False).get('id')
+            if not isinstance(owner, str) or not owner:  # read through this folder, and says no owner: damage
+                raise records.RecordError(directory / 'properties.json', 'names no agent id')
+        finally:
+            os.close(agent)
+        return _checked(directory, id, record, owner), identity
     if missing_ok and not _record_present(path):
         return None
-    record = records._object(path)
+    return _checked(directory, id, records._object(path))
+
+
+_UNREAD = object()
+
+
+def _checked(directory, id, record, owner=_UNREAD):
+    """`record`, checked: a prompt record of this agent (`owner`, its properties' id, read by path here only when
+    the caller didn't read it through the record's own folder)."""
+    if owner is _UNREAD:
+        owner = records.properties(directory / 'properties.json')['id']
     try:
         value = PromptResult(**record['result'])
         session = _session(record)
         if (record.get('schema') != 1 or record.get('id') != id or value.id != id or value.state not in STATES
-                or record.get('agent') != records.properties(directory / 'properties.json')['id']
+                or record.get('agent') != owner
                 or session.agent_id != record['agent'] or not session.native_id or not session.launch_id):
             raise ValueError('Invalid prompt record')
         if ('input_id' in record or record.get('requires_waiting') is False) and (record.get('input_id') != 'prompt-' + id
@@ -735,7 +1315,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             except (OSError, ValueError, RuntimeError):
                 return _refused(id, 'The current launch cannot be verified; nothing was sent. Read its prompts again.', 'unconfirmed')
             if connected is None:
-                return _stopped(root, directory, id)
+                return _attributed(_stopped(root, directory, id), None)
             adapter, session, executor = connected
             if not session.native_id or not session.launch_id or not session.session_file:
                 return _refused(id, 'The current conversation is not bound; nothing was sent.', 'unconfirmed')
@@ -749,13 +1329,13 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
                 return _refused(id, found.reason or 'Waiting prompts are unavailable', 'unavailable')
             prompt = next((p for p in found.prompts if p.id == id), None)
             if prompt is None:
-                return _closed(adapter, session, executor, id, found)
+                return _attributed(_closed(adapter, session, executor, id, found), None)
             if prompt.requires_waiting and session.status != 'waiting':
                 return _refused(id, 'The agent is not waiting on this prompt; nothing was sent.', 'not_waiting')
             request = _validate(prompt, id, choice, message, answers, notes, who)
             if isinstance(request, PromptResult):
                 return request
-            _, encoded = _encode_answer(session, request, who)
+            sent, encoded = _encode_answer(session, request, who)
             if len(encoded.encode('utf-8')) > LIMIT:
                 return _refused(id, 'The complete answer file exceeds 64 KiB; shorten the answer. Nothing was sent.')
             executor.check_session()
@@ -777,7 +1357,17 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
                       **schema, 'saves_rule': bool(selected and selected.saves_rule),
                       'answers': {key: list(values) for key, values in request.answers.items()
                                   if key in public_options and all(v in public_options[key] for v in values)},
-                      'result': asdict(initial)}
+                      'answer': {}, 'witness': _witness(sent, set(schema['withheld_ids'])),
+                      'result': {key: value for key, value in asdict(initial).items() if key not in ('by', 'answer')}}
+            # The whole nonsecret answer, kept before anything is sent, for prompt_result's answer: in the room the
+            # rest of the record leaves under LIMIT on disk, less a margin for the outcome it records later.
+            if _record_size(record) > LIMIT - 8192:  # the prompt's schema alone leaves no safe room
+                return _refused(id, "The prompt's choices and questions are too large to keep a safe record of the "
+                                    "answer; nothing was sent.", 'too_large')
+            _fit_in(record, ('answer',), _kept_answer(prompt, request, schema, LIMIT), margin=4096)
+            if _record_size(record) > LIMIT - 4096:  # what can't be cut (secret markers, the schema) still won't fit
+                return _refused(id, "The prompt's choices and questions are too large to keep a safe record of the "
+                                    "answer; nothing was sent.", 'too_large')
             try:
                 _exclusive(path, record)
             except FileExistsError:
@@ -788,6 +1378,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
             executor._prompt_payload = encoded if prompt.requires_waiting else None
             executor._prompt_written = False
             executor._prompt_input_started = False
+            dispatched = False
             try:
                 reply = effects.call(adapter, 'answer_prompt', session, request, executor)
                 recipe = reply.value if isinstance(reply, NativeResult) and reply.state == 'ok' else None
@@ -807,6 +1398,8 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
                     outcome = _refused(id, 'The harness refused this answer before submission; nothing was sent.', 'unavailable')
                 outcome = outcome or (initial if isinstance(reply, NativeResult) and reply.state in ('pending', 'ok') else
                                       replace(initial, state='unknown', reason=UNKNOWN_REASON))
+                # Handed over: the answer file published, or the input started; an acknowledgement alone isn't proof.
+                dispatched = bool(executor._prompt_written or executor._prompt_input_started)
             except access.Denied:
                 uncertain = executor._prompt_written or executor._prompt_input_started
                 reason = INPUT_UNKNOWN_REASON if 'input_id' in record else UNKNOWN_REASON
@@ -822,7 +1415,8 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
                 del executor._prompt_caller
             # Publish the first outcome event even if the adapter only acknowledges submission.
             record.pop('result')
-            outcome = _save(directory, record, outcome)
+            record['dispatched'] = dispatched
+            outcome = _attributed(_save(directory, record, outcome), record, directory)
     except BlockingIOError:
         return _refused(id, 'The agent is changing state or another answer is in progress; nothing was sent.', 'busy')
     if outcome.state in FINAL or not wait:
@@ -833,7 +1427,7 @@ def answer(root, agent, id, *, choice=None, message=None, answers=None, notes=No
         except access.Denied:
             raise
         except (OSError, ValueError, RuntimeError):
-            return replace(outcome, state='unknown', cause='unreadable', reason=UNKNOWN_REASON)
+            return replace(outcome, state='unknown', cause='unreadable', reason=UNKNOWN_REASON, by=None, answer=None)
         if outcome.state in FINAL:
             return outcome
         time.sleep(min(POLL, max(0, deadline - time.monotonic())))

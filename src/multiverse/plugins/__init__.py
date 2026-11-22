@@ -6,8 +6,8 @@ counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
 answer goes on without it. See docs/develop/plugins.md.
 """
-from contextlib import contextmanager
-from dataclasses import asdict
+from contextlib import contextmanager, nullcontext
+from dataclasses import asdict, replace
 import json
 import os
 import sys
@@ -130,6 +130,13 @@ def bootstrap_lines(root):
     for loaded in loader.active(root):
         lines.extend(loaded.registrations.bootstrap)
     return lines
+
+
+def _record(root, current):
+    """Record what this process finds in the universe's registry (registry.record), before it loads anything, so it
+    loads what every other process here will: True when the record changed."""
+    from . import registry
+    return registry.record(root, current, person=not from_agent(root))
 
 
 def problems(root, reserved=(), wait=None):
@@ -309,10 +316,31 @@ def listing(root, wait=loader.REFRESH_WAIT):
     and has settings is loaded first, waiting at most `wait` (None: until it has loaded), so what its own settings
     check refuses reads `unusable` here as it does in doctor. A plugin that is off is never imported here; its
     own settings screen or fields (settings `own_view`) come from settings_view(), on request."""
-    from . import host
-    current = entries(root)
+    from . import host, installer, registry
+    current, started = entries(root), set()
+    if _record(root, current):  # before anything loads: a path plugin first pinned here runs from its pinned copy
+        current = entries(root)
+        # One this process already ran, or was loading, from its own folder now runs from its pinned copy, loaded
+        # on its own (what ran from the folder isn't proved to be those bytes). One that had loaded is loaded again
+        # here, waiting as for a settings check; one still loading or failed starts in the background. Either way
+        # it reads as it did: loaded, loading, or failed.
+        moved = [found for found in current if found.on and found.state == "on" and found.manifest is not None
+                 and loader.ran_from(found.directory)]
+        for found in moved:
+            if loader.ran_from(found.directory, loaded=True):
+                try:
+                    loader.load(found, wait=wait)
+                except PluginError:
+                    pass  # its entry says why
+            else:
+                loader.start(found)
+                started.add(found.name)  # loading: never waited out here, as any load under way isn't
+        if moved:
+            current = entries(root)
+    placed = installer.pinned(root)
     checks = [found for found in current if found.manifest is not None and found.manifest.settings is not None
-              and found.on and found.state in ("on", "unusable") and found.loaded is None]
+              and found.on and found.state in ("on", "unusable") and found.loaded is None
+              and found.name not in started]
     for found in checks:
         try:
             loader.load(found, wait=wait)
@@ -354,7 +382,10 @@ def listing(root, wait=loader.REFRESH_WAIT):
                 # A trusted universe copy that takes the place of another source's plugin says so: a cloned
                 # repository's plugin never replaces a built-in one silently.
                 "overrides": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed
-                              if found.source == "universe" and source != "universe"]}
+                              if found.source == "universe" and source != "universe"],
+                # What mv2 plugins install placed: where from and at which commit; None for a plugin placed by hand.
+                "install": _install_view(placed.get(str(Path(found.directory).resolve())) if found.directory
+                                         else None)}
         if manifest is not None and manifest.settings is not None:
             current = loader.settings(root, found)
             try:
@@ -979,6 +1010,79 @@ def clear_secret(root, name, key):
     return cleared
 
 
+def _install_view(record):
+    if record is None:
+        return None
+    return {key: record.get(key) for key in ("install", "source", "kind", "ref", "path", "commit", "follows",
+                                              "branch", "version", "placement", "installed_at", "updated_at")}
+
+
+def _person_only(root, what, command):
+    if from_agent(root):
+        raise PluginError(f"Only the person {what} plugins: ask them to run {command}")
+
+
+def install_preview(source, root=None, here=False):
+    """Fetch the plugin `source` names (`URL[@REF][#PATH]` or a folder) into a staging folder and say what it is;
+    nothing is installed. Personal unless `here` (into universe `root`'s plugins/). The person only.
+
+    {key, name, version, description, source, ref, path, commit, follows, fingerprint, placement, target,
+     powers: {access, permissions, extends, harnesses, packages}, runs: {python, claude, compiled}}: pass `key`
+    to install_confirm() to install exactly these files, or to install_cancel()."""
+    from . import installer
+    _person_only(root, "installs", f"mv2 plugins install {source}")
+    try:
+        return installer.preview(source, root, here)
+    except installer.InstallError as error:
+        raise PluginError(f"Nothing was installed: {error}") from None
+
+
+def install_confirm(key, root=None):
+    """Install, or update to, exactly what preview `key` showed (the person's yes): {name, version, commit,
+    target, placement, updated, packages}."""
+    from . import installer
+    _person_only(root, "installs", "mv2 plugins install")
+    try:
+        result = installer.confirm(key, root)
+    except installer.InstallError as error:
+        raise PluginError(str(error)) from None
+    loader._entries.clear()
+    return result
+
+
+def install_cancel(key, root=None):
+    """Drop preview `key`'s fetched files; True when there was one."""
+    from . import installer
+    return installer.cancel(key, root)
+
+
+def update_preview(name, ref=None, root=None, here=False, placement=None):
+    """Fetch what installed plugin `name` would update to (`ref`, else its newest tag or its branch's tip) and say
+    what changes; install_preview()'s fields plus `update`: {from, changes, same, edited, powers_changed} and
+    `ask`: whether the person must say yes (its powers change). `placement` ('personal' or 'universe', from a
+    listing row's install) updates exactly that one, refusing when it has none. The person only."""
+    from . import installer
+    _person_only(root, "updates", f"mv2 plugins update {name}")
+    try:
+        return installer.update_preview(name, ref, root, here, placement)
+    except installer.InstallError as error:
+        raise PluginError(f"{name} was not updated: {error}") from None
+
+
+def remove_installed(name, root=None, here=False, placement=None, expected=None):
+    """Remove what mv2 plugins install placed for `name` (the person only): {name, removed, placement, left}, where
+    `left` lists what stays elsewhere ({what, clear}): its settings, grants, secrets, packages. `placement` removes
+    exactly that one; `expected` (the listing row's install) refuses when the install changed since it was shown."""
+    from . import installer
+    _person_only(root, "removes", f"mv2 plugins remove {name}")
+    try:
+        result = installer.remove(name, root, here, placement, expected)
+    except installer.InstallError as error:
+        raise PluginError(f"{name} was not removed: {error}") from None
+    loader._entries.clear()
+    return result
+
+
 def from_agent(root=None):
     """Whether this process runs for an agent (agent_identity.runs_in_agent): mv2's launch markers, or, given the
     universe `root`, a tmux pane one of its tree's agents records. A guard against mistakes."""
@@ -1103,26 +1207,106 @@ def set_enabled(root, name, on, grant=None):
     """
     root = Path(root)
     installed = []
+    admitted = None
+    if not on and all(found.name != name or found.state == "missing" for found in entries(root)):
+        # A plugin this universe no longer has (removed, or never here): turning it off forgets it here, its
+        # grant too, so what a removal left can be cleared.
+        try:
+            forgotten = config.forget(root, name, keep_grant=from_agent(root))
+        except config.GrantHeld:
+            raise PluginError(f"Only the person forgets a plugin's grant: ask them to run mv2 plugins disable "
+                              f"{name}") from None
+        return {"name": name, "on": False, "installed": [], "granted": None, "forgotten": forgotten}
     was_on = entry(root, name).on
     if on:
-        found = entry(root, name)
+        found = _own_choice(root, entry(root, name))
         if found.state in ("invalid", "untrusted", "changed", "incompatible"):
             raise PluginError(found.problem)
+        from . import registry
+        if found.directory is not None and (found.source == "recorded"
+                                            or not registry.shared(found.source, found.directory)):
+            # One admitted state: its fingerprint, and the manifest read from exactly those bytes, which the grant
+            # is checked against and the record publishes; an edit at any point after can't be pinned in its place.
+            try:
+                admitted = registry.snapshot(found.directory) + (found.source,)
+            except (OSError, ValueError) as error:
+                raise PluginError(f"{name} changed while it was being turned on; try again ({error})") from None
+            # What is admitted is checked as it is: its name, and whether this mv2 can load it.
+            if admitted[2].name != name:
+                raise PluginError(f"{name} changed while it was being turned on (it now names {admitted[2].name})")
+            problem = loader.compatible(admitted[2])
+            if problem:
+                raise PluginError(f"{name} {problem}")
+            found = replace(found, manifest=admitted[2])
         grant = _grant_for(root, found, grant)
-        if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
-            installed.append(str(settings_files.path(root, name)))
     elif grant is not None:
         raise PluginError("A grant is recorded when a plugin is turned on, or with mv2 plugins grant")
-    try:
-        config.set_enabled(root, name, bool(on), grant=grant if on else None,
-                           no_raise_from=found.manifest.access.request if on and from_agent(root) and found.manifest
-                           else None)
-    except config.WouldRaise as error:
-        raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
-                          f"mv2 plugins grant {name} {grant}") from None
+    from . import registry
+    preparing = on and admitted is not None and not from_agent(root)
+    with (registry.writing(root, name) if preparing else nullcontext()):
+        if preparing:
+            # Checked here, under the writer lock, against the switch and record as they are now, before anything
+            # is written: another enable may have turned it on from elsewhere since this one looked.
+            recorded = (registry.known(root) or {}).get(name, {}).get("directory")
+            if (config.load(root).enabled.get(name) is True and recorded is not None
+                    and recorded != str(admitted[0])):
+                # On from one folder, asked to be on from another: the folder (registry) and the grant (plugins.json)
+                # can't change together, so a move goes through off, which drops the record, and on again.
+                raise PluginError(f"{name} is on here from {recorded}; to turn it on from {admitted[0]}, turn it off "
+                                  f"first: mv2 plugins disable {name}, then mv2 plugins enable {name}")
+        if on and found.manifest is not None and settings_files.install_defaults(root, found.manifest):
+            installed.append(str(settings_files.path(root, name)))
+        if preparing:
+            # Recorded and pinned at what was admitted before the switch is published, under the registry's writer
+            # lock until it is, so no reader ever sees it on as an ordinary folder and no listing in between forgets
+            # what was prepared: a plugin whose record or pin didn't take as admitted isn't turned on.
+            registry.record(root, entries(root), person=True, approved=name, admitted=admitted)
+            if ((registry.known(root) or {}).get(name, {}).get("directory") != str(admitted[0])
+                    or not registry._pinned_at(admitted[0], admitted[1])):
+                raise PluginError(f"{name} couldn't be recorded and pinned as it was admitted, so it was left off; "
+                                  f"try again")
+        try:
+            config.set_enabled(root, name, bool(on), grant=grant if on else None,
+                               no_raise_from=found.manifest.access.request if on and from_agent(root)
+                               and found.manifest else None)
+        except config.WouldRaise as error:
+            raise PluginError(f"An agent can't raise a plugin's access ({error}). A person runs: "
+                              f"mv2 plugins grant {name} {grant}") from None
     if on and not was_on:
         anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
+    from . import registry
+    # Every process here records its events, and finds it, however this one did.
+    # Patterns and the rest brought up to date; a plugin this enable prepared and published under the writer lock
+    # carries no approval here, so a later enable's choice is never undone by this one finishing.
+    registry.record(root, entries(root), person=not from_agent(root),
+                    approved=name if on and not preparing else None,
+                    admitted=admitted if on and not preparing else None)
     return {"name": name, "on": bool(on), "installed": installed, "granted": grant if on else None}
+
+
+def _own_choice(root, found):
+    """The plugin the person turning it on chooses: when discovery chose the folder the registry records for it,
+    where this, the person's own process, finds it by a source another process may lack (a folder in their
+    MV2_PLUGIN_PATH, say), if that is another folder (turning it on there is how it moves); otherwise what discovery
+    chose, by its ordinary precedence."""
+    from . import registry
+    if from_agent(root) or found.manifest is None:
+        return found
+    recorded = (registry.known(root) or {}).get(found.name, {}).get("directory")
+    if recorded is None or not (found.source == "recorded" or str(Path(found.directory).resolve()) == recorded):
+        return found  # no recorded folder discovery chose for it: ordinary precedence stands
+    for source, directory in loader._source_directories(root):
+        if registry.shared(source, directory) or source == found.source and directory == found.directory:
+            continue
+        try:
+            manifest = manifests.load(directory)
+        except manifests.ManifestError:
+            continue
+        if manifest.name == found.name:
+            if Path(directory).resolve() == Path(found.directory).resolve():
+                return found
+            return replace(found, source=source, directory=directory, manifest=manifest, state="on", problem=None)
+    return found
 
 
 def anchor_events(root, name, again=False):

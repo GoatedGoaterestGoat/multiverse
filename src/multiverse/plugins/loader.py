@@ -21,8 +21,10 @@ from that universe's plugins.json, every time.
 from dataclasses import dataclass, field
 import hashlib
 import importlib
+import json
 import importlib.machinery
 import importlib.util
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import sys
@@ -31,10 +33,10 @@ import time
 import traceback
 import types
 
-from ..store import now, retry_missing, is_file_replaced
+from ..store import now, open_regular, retry_missing, is_file_replaced
 from . import access as levels, config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 20)
+API_VERSION = (1, 21)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -242,7 +244,88 @@ def _source_directories(root):
         # An uninitialized submodule is an empty directory: no plugin.json, so nothing is found there.
         found.extend(("checkout", directory) for directory in _plugin_directories(CHECKOUT))
     found.extend(("bundled", directory) for directory in _plugin_directories(BUNDLED))
+    if root is not None:
+        found = _with_recorded(root, found)
     return found
+
+
+def _recorded(root, directory, name=None, source=None, pinned=None):
+    """Whether `directory` must run at its pinned content, however this process found it: a folder the universe's
+    registry records. For a plugin found by a source another process may lack (MV2_PLUGIN_PATH, a package), also
+    when the registry can't be read (nothing proves it isn't recorded), when the registry records a folder for its
+    name (a folder put in place of the recorded one isn't it), or when its folder is pinned (`pinned`: the paths
+    trusted-plugins.json pins, None when that can't be read): then a replacement reads as untrusted, never as an
+    ordinary plugin."""
+    if root is None:
+        return False
+    from . import registry
+    try:
+        folder = str(Path(directory).resolve())
+    except (OSError, RuntimeError):
+        return source is not None and not registry.shared(source, directory)
+    known = registry.known(root)
+    # The recorded entry itself, as well as where it leads now: an entry relinked to a plugin of another name is
+    # still the recorded one, verified against what was pinned there, never an ordinary plugin of that name.
+    from .installer import entry_path
+    try:  # where it leads, the entry as given, and the entry under its parent's real folder (an alias of it)
+        spellings = {folder, os.path.abspath(directory), str(entry_path(directory))}
+    except (OSError, RuntimeError):
+        spellings = {folder, os.path.abspath(directory)}
+    if known is not None and any(value["directory"] in spellings for value in known.values()):
+        return True
+    if source is None or registry.shared(source, directory):
+        return False
+    if known is None and os.path.lexists(registry.path(root)):  # a dangling link there is unreadable, not absent
+        return True  # a registry there that can't be read proves nothing either way
+    if name is not None and (known or {}).get(name, {}).get("directory") is not None:
+        return True
+    paths = pinned() if callable(pinned) else pinned
+    return paths is None or folder in paths
+
+
+def _pinned_paths():
+    """A reader of the paths trusted-plugins.json pins: read the first time it's asked, once (no wait when it was
+    never written), None when it can't be read (then every plugin of a source another process may lack is
+    verified)."""
+    found = []
+
+    def paths():
+        if not found:
+            from . import installer
+            try:
+                found.append(set(installer._pins()))
+            except installer.InstallError:
+                found.append(None)
+        return found[0]
+    return paths
+
+
+def _with_recorded(root, found):
+    """`found` plus the folders the universe's registry records for plugins that are on there, each right after the
+    source that found it in the person's process: a plugin in their MV2_PLUGIN_PATH, or a package of another
+    Python, is then a candidate in every process here. A candidate only: it runs at the content pinned for it, as
+    a universe plugin does (_entries_uncached)."""
+    from . import registry
+    recorded = registry.candidates(root)
+    if not recorded:
+        return found
+    seen = set()
+    for _, directory in found:
+        try:
+            seen.add(directory.resolve())
+        except (OSError, RuntimeError):
+            continue
+    order = ("path", "universe", "personal", "installed", "checkout", "bundled")
+    rank = lambda source: order.index(source) if source in order else 0  # noqa: E731
+    result = [(source, directory, rank(source)) for source, directory in found]
+    for source, directory in recorded:
+        if directory in seen or not (directory / manifests.FILE).is_file():
+            continue
+        seen.add(directory)
+        # Where its own source's plugins would be, whether or not this process finds any of them.
+        position = sum(1 for _, _, other in result if other <= rank(source))
+        result.insert(position, ("recorded", directory, rank(source)))
+    return [(source, directory) for source, directory, _ in result]
 
 
 _installed = None
@@ -259,6 +342,17 @@ def installed_directories():
     if _installed is None:
         _installed = _installed_remembered()
     return list(_installed)
+
+
+_origins = {}  # str(directory): {"entry": where its distribution was found, "editable": its project, or None}
+
+
+def installed_origin(directory):
+    """Where the distribution whose entry point names `directory` was registered: {"entry": the sys.path entry
+    its dist-info is in, "editable": the project folder an editable install maps it to, or None}; None when that
+    isn't known."""
+    installed_directories()
+    return _origins.get(str(directory))
 
 
 INSTALLED = "installed-plugins.json"  # in ~/.multiverse: the last scan, per Python environment
@@ -296,15 +390,23 @@ def _installed_remembered():
         data, entry = {}, None
     entries = _installed_entries(entry)
     for item in entries:
-        directories = item.get("directories")
-        if item.get("signature") == signature and isinstance(directories, list) and all(
+        directories, origins = item.get("directories"), item.get("origins")
+        if item.get("signature") == signature and isinstance(directories, list) and isinstance(origins, dict) and all(
                 isinstance(found, str) and (Path(found) / manifests.FILE).is_file() for found in directories):
             if time.time() - item.get("used", 0) > USED_EVERY:  # noted now and then, not on every command
                 item["used"] = time.time()
                 _write_installed(path, data, key, entries)
+            _origins.clear()
+            _origins.update({name: value for name, value in origins.items()
+                             if isinstance(value, dict) and isinstance(value.get("entry"), str)})
             return [Path(found) for found in directories]
+    _scanned_origins.clear()
     found = _scan_installed()
-    fresh = {"signature": signature, "directories": [str(item) for item in found], "used": time.time()}
+    _origins.clear()
+    _origins.update({str(directory): _scanned_origins[str(directory)] for directory in found
+                     if str(directory) in _scanned_origins})
+    fresh = {"signature": signature, "directories": [str(item) for item in found], "origins": dict(_origins),
+             "used": time.time()}
     kept = sorted([item for item in entries if item.get("signature") != signature],
                   key=lambda item: item.get("used", 0), reverse=True)[:INSTALLED_KEPT - 1]
     _write_installed(path, data, key, [fresh, *kept])
@@ -316,7 +418,7 @@ def _installed_entries(entry):
     if not isinstance(entry, dict):
         return []
     recent = entry.get("recent") if isinstance(entry.get("recent"), list) else []
-    first = {name: entry[name] for name in ("signature", "directories", "used") if name in entry}
+    first = {name: entry[name] for name in ("signature", "directories", "origins", "used") if name in entry}
     return [item for item in [first, *recent] if isinstance(item, dict) and "signature" in item]
 
 
@@ -332,7 +434,11 @@ def _write_installed(path, data, key, entries):
         pass  # unremembered: scanned again next time
 
 
+_scanned_origins = {}  # filled by _scan_installed: str(directory): {"entry": ..., "editable": ...}
+
+
 def _scan_installed():
+    """The plugin directories installed packages' entry points name, noting each one's origin in _scanned_origins."""
     found = []
     try:
         from importlib.metadata import entry_points
@@ -344,10 +450,31 @@ def _scan_installed():
             locations = list(spec.submodule_search_locations or []) if spec else []
             directory = Path(locations[0]) if locations else (Path(spec.origin).parent if spec and spec.origin else None)
             if directory is not None and (directory / manifests.FILE).is_file():
+                try:
+                    if getattr(point, "dist", None) is not None:
+                        _scanned_origins[str(directory)] = {"entry": str(point.dist.locate_file("")),
+                                                            "editable": _editable_project(point.dist)}
+                except Exception:
+                    pass
                 found.append(directory)
     except Exception:
         found = []
     return found
+
+
+def _editable_project(distribution):
+    """The project folder an editable install of `distribution` maps its packages to (its direct_url.json, PEP
+    610), or None."""
+    import urllib.parse
+    reader = getattr(distribution, "read_text", None)
+    try:
+        data = json.loads((reader("direct_url.json") if callable(reader) else None) or "null")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not (data.get("dir_info") or {}).get("editable"):
+        return None
+    url = urllib.parse.urlparse(str(data.get("url", "")))
+    return urllib.parse.unquote(url.path) if url.scheme == "file" and url.path else None
 
 
 def compatible(manifest):
@@ -368,8 +495,9 @@ def _stat(path):
         return None
 
 
-def _signature(root):
-    """Everything entries() depends on, by file times and sizes: cheap enough for every refresh."""
+def _signature(root, pins=None, sources=None):
+    """Everything entries() depends on, by file times and sizes: cheap enough for every refresh. `pins`, the
+    installer's classification entries() read for this call (_pinned)."""
     parts = [os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(), _generation, _stat(trust.user_directory() / trust.FILE)]
     if root is not None:
         parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
@@ -382,13 +510,27 @@ def _signature(root):
         # whether the plugin can be used. The index is rewritten on each, whatever store holds the value.
         from . import secrets as secret_store
         parts.append(_stat(secret_store.directory() / secret_store.INDEX))
+    # What the installer placed (personal, and this universe's): pinned at its content, as trusted plugins are.
+    from . import installer
+    parts.append(_stat(trust.user_directory() / installer.RECORD))
+    if root is not None:
+        parts.append(_stat(Path(root) / "state" / installer.RECORD))
+    # Each folder classed as installed adds its trust signature below, so the classification is part of the
+    # signature. An uncertain read only ever widens it (every personal folder verified): a listing kept from one
+    # differs from any certain one, and is read again.
+    pins, _ = pins if pins is not None else _pinned(root)
+    from . import registry
+    if root is not None:
+        parts.append(_stat(registry.path(root)))  # whether a plugin is recorded decides how it is verified
     with _lock:
         failed = {directory: known for directory, known in _loaded.items() if isinstance(known, Failed)}
-    for source, directory in _source_directories(root):
+    for source, directory in (_source_directories(root) if sources is None else sources):
         parts.append((source, str(directory), _stat(directory / manifests.FILE)))
         if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
             parts.append(_still_failed(failed[directory.resolve()], _files(directory.resolve())))
-        if source == "universe":  # trust covers every file but .git, compiled bytecode included
+        if (source in ("universe", "recorded") or _managed(directory, pins) or _recorded(root, directory)
+                or not registry.shared(source, directory)):  # one another process may not find: verified if pinned
+            # trust covers every file but .git
             try:
                 parts.append(trust.signature(directory))
             except OSError:
@@ -415,9 +557,16 @@ _declared = {}  # root -> (signature, [Declared])
 
 def manifest_records(root):
     """Readable manifests from every copy, without importing code or reading enablement/grants."""
-    for _, directory in _source_directories(root):
+    for _, _, manifest in manifest_sources(root):
+        yield manifest
+
+
+def manifest_sources(root):
+    """(source, directory, manifest) of every copy with a readable manifest, in precedence order: no code imported,
+    nothing read about enablement or grants."""
+    for source, directory in _source_directories(root):
         try:
-            yield manifests.load(directory)
+            yield source, directory, manifests.load(directory)
         except manifests.ManifestError:
             continue
 
@@ -466,9 +615,14 @@ def entries(root):
 
     Kept while nothing it depends on changes (see _signature)."""
     root = Path(root) if root is not None else None
-    signature = _signature(root)
+    # One look at the plugin folders and the installer's maps, for this call: its signature and its entries use
+    # the same answer, so a folder arriving meanwhile can't skip the checks.
+    sources = _source_directories(root)
+    pins = _pinned(root, sources)
+    certain = pins[1]
+    signature = _signature(root, pins, sources)
     with _lock:
-        cached = _entries.get(root)
+        cached = _entries.get(root) if certain else None  # an uncertain read neither uses nor leaves a listing
     if cached and cached[0] == signature:
         return list(cached[1])
     discovering = _discovering.__dict__.setdefault("roots", set())
@@ -476,27 +630,50 @@ def entries(root):
         # Asked again while this thread finds this universe's plugins: a loaded plugin's settings check calling the
         # API, whose access check asks which plugins are on. Answered without running settings checks again, which
         # would ask again, without end; on/off, the source and the grant come out the same.
-        return list(_entries_uncached(root, checks=False))
+        return list(_entries_uncached(root, checks=False, pins=pins, sources=sources))
     discovering.add(root)
     try:
-        found = _entries_uncached(root)
+        found = _entries_uncached(root, pins=pins, sources=sources)
     finally:
         discovering.discard(root)
-    with _lock:
-        _entries[root] = (signature, found)
+    if certain:
+        with _lock:
+            _entries[root] = (signature, found)
     return list(found)
 
 
-def _entries_uncached(root, checks=True):
+def _pinned(root, sources=None):
+    """(directories, certain): the personal plugin directories the installer placed (by its record, its pin or
+    its marker), verified at their pinned content as universe plugins are at what was trusted. Read only when a
+    listing finds a folder in the personal plugins; entries() reads it once and shares it with its signature and
+    its construction."""
+    from . import installer
+    sources = _source_directories(root) if sources is None else sources
+    return installer.managed_personal([directory for _, directory in sources])
+
+
+def _managed(directory, pins):
+    """Whether a plugin directory the loader just found, by whichever source (personal, or MV2_PLUGIN_PATH naming
+    the same folder), is one the installer placed: in what was read of its records and pins, or a folder in the
+    personal plugins carrying the marker that arrives with it. Decided by the folder itself, never its label."""
+    from . import installer
+    return (str(installer.entry_path(directory)) in pins or str(Path(directory).resolve()) in pins
+            or (installer.in_personal(directory) and installer.marked(directory)))
+
+
+def _entries_uncached(root, checks=True, pins=None, sources=None):
     settings = config.load(root, observed=True) if root is not None else config.Config()
     chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
-    for source, directory in _source_directories(root):
+    pins = (pins if pins is not None else _pinned(root))[0]
+    pinned = _pinned_paths()
+    for source, directory in (_source_directories(root) if sources is None else sources):
         try:
             found = manifests.load(directory)
         except manifests.ManifestError as error:
             invalid.setdefault(directory.name, (source, directory, str(error)))
             continue
-        if source == "universe" and found.name not in chosen:
+        if (source in ("universe", "recorded") or _managed(directory, pins)
+                or _recorded(root, directory, found.name, source, pinned)) and found.name not in chosen:
             state, value = trust.verify(directory)
             if state != "trusted":
                 # An untrusted copy in a universe never hides the plugin another source provides (a repository's
@@ -523,7 +700,8 @@ def _entries_uncached(root, checks=True):
         on = settings.is_on(name, default)
         try:
             result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name),
-                                  checks=checks)
+                                  checks=checks, pinned=source != "universe" and _managed(directory, pins),
+                                  recorded=_recorded(root, directory, name, source, pinned))
         except Exception as error:  # whatever happens with one plugin, every other one is still listed
             text = str(error).strip().splitlines()
             result[name] = Entry(name, "failed", on, source, directory, found, problem=(
@@ -540,10 +718,26 @@ def _entries_uncached(root, checks=True):
     return [result[name] for name in sorted(result)]
 
 
-def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True):
+def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None, checks=True, pinned=False,
+           recorded=False):
     entry = Entry(name, "on" if on else "off", on, source, directory, found, shadowed=shadowed)
-    if source == "universe":
+    recorded = recorded or source == "recorded"
+    if source == "universe" or recorded or pinned:
         trusted = "trusted" if fingerprint else trust.state(directory)
+        if trusted != "trusted" and pinned:
+            entry.state = "changed" if trusted == "changed" else "untrusted"
+            entry.problem = (f"{name}'s files changed since mv2 plugins install put them in {directory}; review "
+                             f"them, then run mv2 plugins trust {name}, or put back what was installed with mv2 "
+                             f"plugins update {name}" if trusted == "changed" else
+                             f"{name} was installed by mv2 plugins install but is no longer trusted; review it, then "
+                             f"run mv2 plugins trust {name}")
+            return entry
+        if trusted != "trusted" and recorded and not pinned:
+            entry.state = trusted
+            entry.problem = (f"{name} is on here from {directory}, which changed since it was trusted" if
+                             trusted == "changed" else f"{name} is on here from {directory}, which isn't trusted") + (
+                f"; review it, then run mv2 plugins trust {name}")
+            return entry
         if trusted != "trusted":
             entry.state = trusted
             entry.problem = (f"{name} is in this universe's plugins/ and is not trusted; review it, then run "
@@ -734,6 +928,23 @@ def load(found, off=False, wait=None):
     if isinstance(known, Loaded):
         return known
     raise PluginError(known.problem if isinstance(known, Failed) else f"{found.name} did not load")
+
+
+def ran_from(directory, loaded=False):
+    """Whether this process loaded a plugin from `directory`, or is loading one from there (`loaded`: loaded it)."""
+    directory = Path(directory).resolve()
+    with _lock:
+        if loaded:
+            return isinstance(_loaded.get(directory), Loaded)
+        return directory in _loaded or directory in _loading
+
+
+def start(found):
+    """Start loading `found` in the background, from where it runs, unless it is loaded or loading already."""
+    directory = Path(found.manifest.directory).resolve()
+    with _lock:
+        known = _loaded.get(directory)
+    _start_loading(found, directory, _files(directory) if isinstance(known, Failed) else None)
 
 
 def _start_loading(found, directory, files):
@@ -1008,23 +1219,45 @@ def log_lock_path(path):
     return path.with_name(f".{path.name}.lock")
 
 
-def append_log(path, line, limit=None, root=None):
+def append_log(path, line, limit=None, root=None, *, blocking=True, wait=0.0):
     """Append text to a log, rotating it to NAME.1 (one old file kept) once it is past `limit` (LOG_BYTES).
 
     The size check, the rotation and the append happen under a file lock, so two processes writing one log never
     both rotate it (which would overwrite NAME.1, or rename a file that is already gone). A log in a universe's
     plugin state (or under `root`) that is gone is not written: a log line never brings a removed universe or
-    agent back (agent_files)."""
+    agent back (agent_files). With blocking=False, skip a line when either log lock is busy, after waiting at most
+    `wait` seconds for them (none by default: recovery and the dashboard log this way and never wait)."""
     from . import agent_files
     path = Path(path)
     guarded = agent_files.required_folder(path, root)[0] is not None
     try:
         agent_files.ensure_dir(path.parent, root)
-        with _log_lock, agent_files.lock(log_lock_path(path), root):
-            if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
-                path.replace(path.with_name(path.name + ".1"))
-            with path.open("a") as handle:
-                handle.write(line.rstrip("\n") + "\n")
+        deadline = None if blocking else time.monotonic() + wait
+        if not (_log_lock.acquire() if deadline is None else
+                _log_lock.acquire(timeout=max(deadline - time.monotonic(), 0.0))):
+            return
+        try:
+            with ExitStack() as held:
+                while True:  # only taking the lock is tried again, never the write
+                    try:
+                        held.enter_context(agent_files.lock(log_lock_path(path), root, blocking=deadline is None))
+                        break
+                    except BlockingIOError:
+                        left = None if deadline is None else deadline - time.monotonic()
+                        if left is None or left <= 0:
+                            raise
+                        time.sleep(min(0.005, left))
+                        if time.monotonic() >= deadline:  # never a try past the deadline
+                            raise
+                if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
+                    path.replace(path.with_name(path.name + ".1"))
+                with open_regular(path, "a") as handle:
+                    handle.write(line.rstrip("\n") + "\n")
+        finally:
+            _log_lock.release()
+    except BlockingIOError:
+        if blocking:
+            raise
     except FileNotFoundError:
         if not guarded:
             raise  # removed meanwhile, with the folder it must find

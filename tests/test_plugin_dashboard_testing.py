@@ -15,10 +15,17 @@ def register(mv):
     mv.dashboard.action("Say hello", lambda context: f"hello {context.row['name'] if context.row else '-'}")
 '''
 SLOW = '''
+import os
 import time
+from pathlib import Path
 
 def register(mv):
-    time.sleep(1.2)  # longer than the dashboard waits for a plugin to load
+    # Still loading until the test lets it go, however long the dashboard took to start: a fixed sleep was outlasted
+    # on a loaded machine, so the case under test (an action not offered yet) didn't happen.
+    gate = Path(os.environ["SLOWPOKE_GATE"])
+    deadline = time.monotonic() + 60
+    while not gate.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
     mv.dashboard.action("Say hello", lambda context: "hello from slowpoke")
 '''
 SCREENS = '''
@@ -76,10 +83,13 @@ class DashboardTestingTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         self.write_plugin("slowpoke", {"module": "plugin", "api": "1.9", "extends": ["dashboard.action"]},
                           {"plugin.py": SLOW})
         self.enable("slowpoke")
-        async with self.dashboard() as d:
-            self.assertNotIn("slowpoke: Say hello", d.palette())  # still loading: the case this test is about
-            await d.run_action("slowpoke: Say hello")  # as the flaky tests did: right after the first refresh
-            self.assertIn("hello from slowpoke", d.status)
+        gate = self.work / "slowpoke-gate"
+        with mock.patch.dict("os.environ", {"SLOWPOKE_GATE": str(gate)}):
+            async with self.dashboard() as d:
+                self.assertNotIn("slowpoke: Say hello", d.palette())  # still loading: the case this test is about
+                gate.touch()  # it finishes loading only now, after the first refresh was drawn
+                await d.run_action("slowpoke: Say hello")  # as the flaky tests did: right after the first refresh
+                self.assertIn("hello from slowpoke", d.status)
 
     async def test_the_plugin_host_is_never_started_by_a_test(self):
         """The published dashboard test helper enters on the universe's agents, offers the plugins' palette

@@ -20,7 +20,15 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 
 A harness can [narrow its model and effort choices](../use/harnesses.md#narrow-the-available-choices). Those choices apply to both spawn and resume. Without a subset or a recorded or requested effort, spawn, resume and wake pass the model spelling unchanged to the harness, including choices saved by older mv2 versions. The harness decides whether it can use that model. A subset or effort choice still requires model validation.
 
-Without `--wait`, `spawn` returns as soon as the launch is registered. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
+Without `--wait`, `spawn` returns as soon as the launch is registered. For a harness that can read its own launch screen (Claude Code), it first waits up to 10 seconds, until the screen shows the harness started or a prompt you must answer before the session starts, such as Claude's folder-trust question. A normal start takes a few seconds. Use `--wait` in scripts that send a message right after starting an agent. A timeout leaves the launch running, so check it with `mv2 inspect` before you retry.
+
+A launch that stops at such a prompt is neither ready nor failed. `spawn`, `resume` and `--wait` say it's waiting there and name the prompt, `mv2 list` and `mv2 inspect` show it under the agent, and its status is `waiting`:
+
+```text
+Started tester (Claude, bridge). It's waiting at Claude's prompt "Accessing workspace" (/home/me/project): answer it in its pane with mv2 attach tester.
+```
+
+mv2 never answers these prompts for you: each asks whether to trust a folder or a mode. Once you answer, the session starts and the agent's status comes from its plugin again.
 
 To start an agent in a subverse, select the subverse with `-u`:
 
@@ -43,6 +51,8 @@ Each line shows the agent's name, status, reported phase and summary. A `working
 `--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `model`, `universe` and `id`. `model` shows the agent's model by its display name with its effort, such as `Opus 5.5 (xhigh)`: for a running agent, what its session last reported, otherwise its launch choice or its harness's default ([the dashboard's Model column](../reference/dashboard.md) explains which). It reads running agents' usage, so it takes longer than the other columns. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
 
 `--json` gives every field of each agent. With `--columns`, it gives only the fields named, in that order, such as `mv2 list --json --columns id,name,live,status`. Their values are the same as in the full `--json` output, and a field an agent doesn't have is left out of its entry. Reading each agent's token usage is the slow part of a listing, so mv2 reads it only for plain `--json`, or when `--columns` names `usage`, `tokens`, `usage_detail` or `observed_model_name`. The text listing reads it only for `--columns model`, and only for running agents.
+
+The `active_now` field is true while a live agent is working. `status_changed_at` gives the UTC time of the last change to a known harness-reported status. An idle, waiting or dormant agent keeps that time until the harness reports another change. The value is `null` while the current launch has no readable timestamp. A report, usage update or internal status reset leaves the time alone, including when the harness repeats its previous status afterward.
 
 Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require an exact recovery address. Distinct damaged IDs do not make a healthy agent's prefix ambiguous, but a collision in the full address does: if a recovered agent's stored ID also names a leftover folder, shortening that ID cannot select either one. Duplicate names and ambiguous IDs or prefixes are refused with the matching folders listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
@@ -234,10 +244,10 @@ are published with complete minimal properties and a starting runtime record,
 including during concurrent spawns. While the publishing process holds its launch
 lock, list shows `starting`; it is not a damaged record. Doctor also accepts the
 full starting record while that same launch is still preparing its terminal
-under the lock. If a newer launch request appears after a listing read the
-runtime record, list re-reads that same launch and observes its current terminal
-before reporting missing authority. Unchanged or still-damaged records remain
-errors; listing never repairs them. Once the lock is released, unexplained unknown state is reported. If preparation is
+under the lock. If registration or the launch request appears after a listing
+reads an earlier runtime record, list re-reads the same launch. It can recheck
+both publication steps in one listing. Unchanged or still-damaged records
+remain errors. Once the lock is released, unexplained unknown state is reported. If preparation is
 interrupted before any native startup, doctor reports the failed preparation and
 the record can be resumed or removed. Unknown child evidence still requires
 repair of the runtime record rather than assuming the process stopped.

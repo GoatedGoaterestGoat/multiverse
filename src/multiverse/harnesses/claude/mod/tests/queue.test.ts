@@ -1,7 +1,7 @@
 // Offline tests of the queue file the mod keeps for mv2 (hooks/queue.ts): `claude plugin test`. The test's hooks stand
 // in for Claude's core and the host: a file system the mod's files land in, and Claude taking, storing or refusing.
 import type { EngineInterface, On } from 'claude-code'
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from './kit'
 import { reloaded } from '../hooks/queue'
 
 const FILE = '/agent/claude-queue.json'

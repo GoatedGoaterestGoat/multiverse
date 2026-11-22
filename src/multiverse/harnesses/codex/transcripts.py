@@ -4,16 +4,20 @@ Only the exact recorded thread and home are searched. Recovery's stronger
 absence proof in storage.py is independent of this display reader.
 """
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import time
 
 from ..types import (RowFact, TranscriptSource, TranscriptView,
-                     TranscriptRowsChanged, normalize_session_id)
+                     TranscriptRowsChanged, TurnEnded, TurnProjection, normalize_session_id)
+from . import transcript_index
+from .receipt_events import identifier
+from .turn_events import end_ref
 from .storage import session_home, _header, _metadata_object, MAX_ENTRIES
 from .rollout import open_rollout, preferred, decoder, CompressionUnavailable, MAX_ROWS
 
@@ -26,8 +30,19 @@ class Unreadable(ValueError):
     pass
 
 
+class _UnwrittenHeader(Unreadable):
+    """An exact rollout has no complete first row yet."""
+
+
 def check(reader):
     if reader is not None:
+        reader.check()
+
+
+def deadline(reader):
+    # The provider checks identity before and after each phase. In its local
+    # scan loops the deadline needs checking without reopening agent records.
+    if reader is not None and time.monotonic() >= getattr(reader, 'deadline', 0):
         reader.check()
 
 
@@ -56,6 +71,7 @@ def copies(home, native_id, reader=None):
                       + r'(?:_' + uuid + r')?\.jsonl(?:\.zst)?')
     roots = [Path(home) / part for part in ('sessions', 'archived_sessions')]
     pending, found, scanned = list(roots), set(), 0
+    header_pending = False
     while pending:
         check(reader)
         directory = pending.pop()
@@ -74,8 +90,11 @@ def copies(home, native_id, reader=None):
                         path = preferred(path)
                         if path.suffix == '.zst':
                             decoder()  # Preserve missing-module advice rather than hiding it as bad metadata.
-                        evidence = _header(path, native_id, budget=lambda: check(reader))
+                        evidence = _header(path, native_id, budget=lambda: deadline(reader))
                         if evidence.state != 'ok':
+                            if evidence.value == {'header_pending': True}:
+                                header_pending = True
+                                continue
                             raise Unreadable('The Codex rollout header cannot verify this thread')
                         found.add(path)
                     elif entry.name.startswith('rollout-') and native_id in entry.name:
@@ -91,6 +110,8 @@ def copies(home, native_id, reader=None):
             raise
         except OSError:
             raise Unreadable('Codex rollout storage cannot be read') from None
+    if header_pending:
+        raise _UnwrittenHeader('The Codex rollout header cannot verify this thread')
     return sorted(found, key=lambda path: (path.stat().st_mtime_ns, str(path)))
 
 
@@ -139,6 +160,63 @@ class Entry:
     effort: str | None = None
     review: bool | None = None
     primary: bool | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexFact(RowFact):
+    native_turn: str | None
+    user_item_id: str | None
+    user_item_thread: str | None
+    end_identity: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexView(TranscriptView):
+    native_id: str
+
+
+_INDEX_FACT = tuple(field.name for field in fields(CodexFact)
+                    if field.name not in ('position', 'command', 'args', 'stop', 'ends_turn', 'native_turn'))
+_INDEX_ENTRY = tuple(field.name for field in fields(Entry)
+                     if field.name not in ('fact', 'offset', 'digest', 'chain', 'model', 'effort', 'review', 'primary'))
+
+
+def encode_entry(item):
+    fact = [getattr(item.fact, name) for name in _INDEX_FACT]
+    extra = [getattr(item, name) for name in _INDEX_ENTRY]
+    if any(isinstance(value, str) and len(value) > transcript_index.MAX_FIELD for value in (*fact, *extra)):
+        raise transcript_index.InvalidIndex('Oversized indexed metadata')
+    return [item.digest, fact, extra]
+
+
+def decode_entry(row, previous):
+    if not isinstance(row, list) or len(row) != 3:
+        raise transcript_index.InvalidIndex('Invalid index row shape')
+    digest, fact, extra = row
+    if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise transcript_index.InvalidIndex('Invalid row digest')
+    if (not isinstance(fact, list) or len(fact) != len(_INDEX_FACT)
+            or not isinstance(extra, list) or len(extra) != len(_INDEX_ENTRY)):
+        raise transcript_index.InvalidIndex('Invalid row metadata shape')
+    if any(isinstance(value, str) and len(value) > transcript_index.MAX_FIELD for value in (*fact, *extra)):
+        raise transcript_index.InvalidIndex('Oversized indexed metadata')
+    fact, extra = dict(zip(_INDEX_FACT, fact)), dict(zip(_INDEX_ENTRY, extra))
+    if (type(fact['size']) is not int or fact['size'] <= 0
+            or not all(isinstance(fact[key], str) for key in ('kind', 'label', 'preview'))
+            or len(fact['preview']) > 200 or type(extra['rollback']) is not int or extra['rollback'] < 0
+            or any(value is not None and not isinstance(value, str)
+                   for key, value in fact.items() if key != 'size')
+            or any(value is not None and not isinstance(value, str)
+                   for key, value in extra.items() if key in
+                   ('role', 'text_hash', 'turn', 'version', 'input_kind', 'native_id'))
+            or any(value is not None and type(value) is not bool
+                   for key, value in extra.items() if key in
+                   ('trigger', 'echo', 'history_base', 'rollback_boundary', 'trim_context', 'rollback_echo', 'model_member'))):
+        raise transcript_index.InvalidIndex('Invalid row metadata')
+    offset = previous.offset + previous.fact.size if previous else 0
+    chain = hashlib.sha256(((previous.chain if previous else '') + ':' + digest).encode()).hexdigest()
+    return Entry(fact=CodexFact(position=f"{offset + fact['size']}:{chain}", native_turn=extra['turn'], **fact),
+                 offset=offset, chain=chain, digest=digest, **extra)
 
 
 # Codex 0.164.0 core/src/event_mapping.rs and context/contextual_user_message.rs.
@@ -396,11 +474,21 @@ def entry(line, offset, previous):
     if outer == 'session_meta':
         primary = (payload.get('source') in (None, 'cli', 'vscode', 'exec', 'mcp')
                    and payload.get('thread_source') in (None, 'user'))
-    fact = RowFact(position=f'{offset + len(line)}:{chain}', ref=string(payload.get('id'))
-                   if outer in ('response_item', 'inter_agent_communication') else None,
-                   kind=kind, label=label, source='peer' if outer == 'inter_agent_communication' else None,
-                   call_id=call, at=string(row.get('timestamp')), size=len(line),
-                   preview=text[:200] if label == 'prompt' or role == 'user' else '')
+    native_turn = string(payload.get('turn_id')) or string(passthrough.get('turn_id'))
+    user_item = echo and inner == 'item_completed'
+    user_item_id, user_item_thread = completed_item.get('id'), payload.get('thread_id')
+    terminal = outer == 'event_msg' and inner in ('task_complete', 'turn_complete', 'turn_aborted')
+    fact = CodexFact(position=f'{offset + len(line)}:{chain}', ref=string(payload.get('id'))
+                     if outer in ('response_item', 'inter_agent_communication') else None,
+                     kind=kind, label=label, source='peer' if outer == 'inter_agent_communication' else None,
+                     call_id=call, at=string(row.get('timestamp')), size=len(line),
+                     preview=text[:200] if label == 'prompt' or (
+                         outer == 'response_item' and inner == 'message' and role == 'user'
+                         and input_kind != 'injected' and label != 'compaction') else '',
+                     native_turn=native_turn,
+                     user_item_id=user_item_id if user_item and identifier(user_item_id) else None,
+                     user_item_thread=user_item_thread if user_item and identifier(user_item_thread) else None,
+                     end_identity=end_ref(payload.get('completed_at'), payload.get('duration_ms')) if terminal else None)
     rollback = payload.get('num_turns') if outer == 'event_msg' and inner == 'thread_rolled_back' else 0
     plain_text = (isinstance(content, list) and bool(content) and all(
         isinstance(block, dict) and block.get('type') in ('input_text', 'text', 'output_text')
@@ -411,7 +499,7 @@ def entry(line, offset, previous):
     # plain text can be paired exactly; current provenance covers media inputs.
     text_hash = hashlib.sha256(text.encode()).hexdigest() if text and plain_text else None
     return Entry(fact, offset, digest, chain, role, text_hash,
-                 string(payload.get('turn_id')) or string(passthrough.get('turn_id')), rollback if type(rollback) is int and rollback > 0 else 0,
+                 native_turn, rollback if type(rollback) is int and rollback > 0 else 0,
                  string(payload.get('cli_version')) if outer == 'session_meta' else None,
                  payload.get('trigger_turn') is True, input_kind, echo,
                  outer == 'session_meta' and payload.get('history_base') is not None,
@@ -455,49 +543,70 @@ def validate_scan(handle, entries, before, reader=None):
     return after
 
 
-def read_copy(path, reader=None):
-    # Verify the whole prefix on a changed file. Reuse parsed metadata only for
-    # byte-identical lines, so a cold scan parses once and an append parses its tail.
+def read_copy(path, reader=None, *, index_dir=None, native_id=None):
+    check(reader)
     old_signature, old = _indexes.get(path, (None, ()))
     with open_regular(path) as handle:
-        if getattr(handle, 'compressed', False):
-            handle.set_check(lambda: check(reader))
+        compressed = getattr(handle, 'compressed', False)
+        if compressed:
+            handle.set_check(lambda: deadline(reader))
         status = os.fstat(handle.fileno())
         stamp = signature(status)
         if stamp == old_signature:
             return old, old_signature
+        disk = index_dir is not None
+        restored = ()
+        remaining = getattr(reader, 'deadline', float('inf')) - time.monotonic()
+        if disk and not old and remaining > 1:
+            budget = time.monotonic() + min(5, remaining / 4)
+
+            def check_index():
+                if time.monotonic() >= budget:
+                    raise transcript_index.InvalidIndex('Index read budget expired')
+
+            restored = transcript_index.load(index_dir, path, decode_entry, check_index)
+            old = restored
         scan_stamp = stamp
         out, offset, previous = [], 0, ''
         for number, line in enumerate(handle):
-            check(reader)
-            if getattr(handle, 'compressed', False) and number >= MAX_ROWS:
+            deadline(reader)
+            if compressed and number >= MAX_ROWS:
                 raise Unreadable('The compressed Codex rollout exceeds its row limit')
             if not line.endswith(b'\n'):
                 break
-            digest = hashlib.sha256(line).hexdigest()
-            if (number < len(old) and old[number].digest == digest
-                    and old[number].offset == offset and (number == 0 or old[number - 1].chain == previous)):
+            if (number < len(old) and old[number].offset == offset
+                    and old[number].digest == hashlib.sha256(line).hexdigest()):
                 item = old[number]
             else:
+                old = ()  # Every later position depends on the changed prefix.
                 item = entry(line, offset, previous)
             out.append(item)
             previous, offset = item.chain, offset + len(line)
         stamp = validate_scan(handle, out, stamp, reader)
-    # A tail appended after iterator EOF may not be in `out`: keep the initial
-    # cache stamp so the next read indexes that tail even if the writer stops.
-    _indexes[path] = (scan_stamp, tuple(out))
+    check(reader)
+    # A tail appended after iterator EOF may be missing. Keep the initial
+    # stamp so the next read indexes it even if the writer stops.
+    entries = tuple(out)
+    # Keep optional writes out of short turn-edge reads and leave time for
+    # the caller to validate and use the resulting view.
+    write_deadline = getattr(reader, 'deadline', float('inf')) - 1
+    if disk and entries != restored and time.monotonic() < write_deadline:
+        verify_thread(entries, native_id)
+        if not any(item.history_base for item in entries):
+            transcript_index.save(index_dir, path, entries, encode_entry, deadline=write_deadline)
+    _indexes[path] = (scan_stamp, entries)
     _indexes.move_to_end(path)
     while len(_indexes) > 32:
         _indexes.popitem(last=False)
-    return tuple(out), stamp
+    return entries, stamp
 
 
-def newest(home, native_id, reader=None):
+def newest(home, native_id, reader=None, *, index_dir=None):
     paths = copies(home, native_id, reader)
     if not paths:
         return None, [], None
     path = paths[-1]
-    entries, stamp = read_copy(path, reader)
+    entries, stamp = read_copy(path, reader, index_dir=index_dir, native_id=native_id)
     verify_thread(entries, native_id)
     if any(item.history_base for item in entries):
         raise Unreadable('Referenced Codex rollout history is not supported')
@@ -537,7 +646,7 @@ def analyse(entries, tip=None, reader=None):
     segments, segment, active = [], [], None
     # Segment by native turn ID, including repeated starts for a recovered turn.
     for number, item in enumerate(entries):
-        check(reader)
+        deadline(reader)
         if item.fact.kind in ('event_msg/task_started', 'event_msg/turn_started'):
             if item.turn != active and segment:
                 segments.append(segment)
@@ -559,7 +668,7 @@ def analyse(entries, tip=None, reader=None):
             if entries[i].text_hash:
                 by_text[entries[i].text_hash].append(i)
         for number in group:
-            check(reader)
+            deadline(reader)
             item = entries[number]
             if item.echo and item.text_hash:
                 echoes[item.text_hash][item.fact.kind] += 1
@@ -608,7 +717,7 @@ def analyse(entries, tip=None, reader=None):
                 cutoff += 1
     history, starts, version = [], [], 0
     for number, item in enumerate(entries[:cutoff]):
-        check(reader)
+        deadline(reader)
         if number in native_inputs:
             starts.append(len(history))
         if item.rollback:
@@ -626,8 +735,40 @@ def analyse(entries, tip=None, reader=None):
     return tuple(facts), tuple(history), context, latest, None, version
 
 
-def empty(state, reason):
-    return TranscriptView(source=TranscriptSource(state=state, reason=reason), rows=(), history=(),
+def project_turn_event(session, view, transition, *, reader=None):
+    if (not isinstance(view, CodexView) or view.source.state != 'supported'
+            or view.native_id != session.native_id or view.source.home != session.home):
+        return TurnProjection()
+    active = anchor = row = None
+    anchors = matches = 0
+    ending = isinstance(transition, TurnEnded)
+    # Check the whole validated history for duplicate identities, with no second
+    # rollout read or truncated per-view index that could hide an older match.
+    for index in view.history:
+        check(reader)
+        fact = view.rows[index]
+        if fact.kind in ('event_msg/task_started', 'event_msg/turn_started'):
+            active = fact.native_turn
+        if (active == transition.turn and fact.native_turn in (None, active)
+                and fact.label in ('prompt', 'command')):
+            anchor, anchors = fact.position, anchors + 1
+        if transition.ref is None or fact.native_turn != transition.turn:
+            continue  # A recovered end cannot borrow the previous occurrence.
+        if ending:
+            aborted = fact.kind == 'event_msg/turn_aborted'
+            if (fact.end_identity == transition.ref
+                    and (transition.state == 'unknown' or aborted == (transition.state == 'interrupted'))):
+                matches += 1
+                if fact.ends_turn:
+                    row = fact.position
+        elif fact.user_item_thread == session.native_id and fact.user_item_id == transition.ref:
+            row, matches = fact.position, matches + 1
+    return TurnProjection(turn_position=anchor if anchors == 1 else None,
+                          row_position=row if matches == 1 else None)
+
+
+def empty(state, reason, *, retry=False):
+    return TranscriptView(source=TranscriptSource(state=state, reason=reason, retry=retry), rows=(), history=(),
                           context_from=0, tip=None, gap=None, history_version=0)
 
 
@@ -639,19 +780,23 @@ def view(session, *, tip=None, reader=None):
     if home is None:
         return empty('unavailable', NO_STORAGE)
     try:
-        path, entries, _ = newest(home, session.native_id, reader)
+        path, entries, _ = newest(home, session.native_id, reader,
+                                  index_dir=transcript_index.location(session))
     except CompressionUnavailable as error:
         return empty('error', str(error))
+    except _UnwrittenHeader:
+        return empty('error', 'Codex rollout storage cannot be read consistently', retry=True)
     except (Unreadable, OSError):
         return empty('error', 'Codex rollout storage cannot be read consistently')
     if path is None:
-        return empty('unavailable', 'Codex has not written a rollout for this session yet')
+        return empty('unavailable', 'Codex has not written a rollout for this session yet', retry=True)
     check(reader)
     try:
         facts, history, context, latest, gap, version = analyse(entries, tip, reader)
     except Unreadable:
         return empty('error', 'Codex rollback input boundaries cannot be established')
-    return TranscriptView(source=TranscriptSource(state='supported', home=home, format='codex-jsonl',
+    check(reader)
+    return CodexView(native_id=session.native_id, source=TranscriptSource(state='supported', home=home, format='codex-jsonl',
                           version=next((item.version for item in reversed(entries) if item.version), None),
                           size=sum(item.fact.size for item in entries),
                           updated_at=next((item.fact.at for item in reversed(entries) if item.fact.at), None)),
@@ -667,10 +812,11 @@ def same_file_prefix(before, after):
 def prove_prefix(handle, entries, last, reader=None):
     """Re-prove indexed bytes on this open file when a concurrent write grew it."""
     handle.seek(0)
-    for item in entries[:last + 1]:
+    for number in range(last + 1):
+        item = entries[number]
         digest, remaining = hashlib.sha256(), item.fact.size
         while remaining:
-            check(reader)
+            deadline(reader)
             chunk = handle.read(min(65536, remaining))
             if not chunk:
                 raise TranscriptRowsChanged()
@@ -694,7 +840,7 @@ def bodies(session, view, indexes, *, max_bytes, reader=None):
         last = max(indexes, default=-1)
         with open_regular(path) as handle:
             if getattr(handle, 'compressed', False):
-                handle.set_check(lambda: check(reader))
+                handle.set_check(lambda: deadline(reader))
             stamp = signature(os.fstat(handle.fileno()))
             if (not same_file_prefix(expected, stamp)
                     or getattr(handle, 'compressed', False) and stamp != expected):

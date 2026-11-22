@@ -25,7 +25,7 @@ from contextlib import contextmanager, ExitStack
 import copy
 import functools
 import inspect
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 import math
 import os
 from pathlib import Path
@@ -915,6 +915,24 @@ class Plugin:
             raise Error(f"{directory} is not an agent's directory")
         return self.universe(root).agent(directory.name)
 
+    def in_agent_session(self, universe=None):
+        """Whether this process runs inside an agent's session (1.21): mv2's launch markers, or an agent's own tmux
+        pane in that universe's tree (by default the universe this process is in), as core tells an agent from the
+        person. For a command that only the person should run, such as one that shows a credential. A guard against
+        mistakes, not a sandbox."""
+        from ..runtime import agent_identity
+        if agent_identity.runs_in_agent():  # a launch marker: no universe needed
+            return True
+        if universe is None:
+            from .. import universe as universes
+            try:
+                root = universes.resolve()
+            except Exception:
+                return False  # no universe here: no agent's pane to be in
+        else:
+            root = _root(universe)
+        return agent_identity.runs_in_agent(root=root)
+
     def current_agent(self):
         """The agent this process runs for (MV2_AGENT_DIR, else MV2_AGENT_ID), or None outside an agent."""
         if os.environ.get("MV2_AGENT_DIR"):
@@ -1590,11 +1608,14 @@ def _from_core(kind, value):
         values["detail"] = copy.deepcopy(dict(values.get("detail") or {}))
         values["choices"] = tuple(_from_core(PromptChoice, item) for item in values.get("choices") or ())
         values["questions"] = tuple(_from_core(PromptQuestion, item) for item in values.get("questions") or ())
+        values["display"] = _from_core(PromptDisplay, values["display"]) if values.get("display") else None
+    elif kind is PromptDisplay:
+        values["lines"] = tuple(str(line) for line in values.get("lines") or ())
     elif kind is PromptQuestion:
         values["options"] = tuple((str(label), str(description)) for label, description in values.get("options") or ())
     elif kind is PromptResult:
-        values["person_answer"] = (copy.deepcopy(dict(values["person_answer"])) if values.get("person_answer")
-                                   else None)
+        for key in ("person_answer", "by", "answer"):
+            values[key] = copy.deepcopy(dict(values[key])) if values.get(key) else None
     elif kind is RunOptions:
         values["reason"] = values.get("reason") or None
         values["formats"] = tuple(values.get("formats") or ())
@@ -1648,13 +1669,27 @@ class CommandResult:
 
 @dataclass(frozen=True, kw_only=True)
 class PromptChoice:
-    """One decision a permission prompt offers (1.17), in the harness's order: allow, allow_session, allow_always,
-    deny, stop, accept, decline, cancel (treat one you don't know like the label says). `label` is mv2's wording,
-    not the terminal's."""
+    """One decision a prompt offers (1.17), in the harness's order. `label` is mv2's wording, not the terminal's.
+    `meaning` (1.21) is what it does, the same for every harness: allow, allow_session, allow_always, deny,
+    deny_always, stop, dismiss, approve_plan, keep_planning, or other; `short` is its short label ("Allow for
+    session"). Both are None from a harness that doesn't map its choices yet: then go by `label`. Two choices may
+    share a meaning; `id` is what an answer names."""
     id: str
     label: str
     saves_rule: bool = False      # it also saves a rule to the person's settings: only the person can choose it
     takes_message: bool = False   # it can carry a message (a refusal's reason, say)
+    meaning: str | None = None
+    short: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptDisplay:
+    """A prompt as any harness's can be shown (1.21): `title`, one short line saying what is asked ("Run a
+    command"); `subject`, its main argument or None (the command line, the file, the server and tool); `lines`, up
+    to 8 more lines. Plain text, bounded; never a secret or an answer."""
+    title: str
+    subject: str | None = None
+    lines: tuple = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1683,7 +1718,7 @@ class WaitingPrompt:
     id: str
     kind: str
     summary: str                  # one line: the command, the file, the first question, the server
-    detail: dict = field(default_factory=dict)  # kind-specific, at most 64 KiB; a fresh copy
+    detail: dict = field(default_factory=dict)  # the harness's own (1.21: no stable keys), at most 64 KiB; a copy
     asked_at: str | None = None
     tool: str | None = None
     choices: tuple = ()           # PromptChoice
@@ -1692,6 +1727,7 @@ class WaitingPrompt:
     reason: str | None = None     # why not answerable, and where to answer it
     subagent: str | None = None
     requires_waiting: bool = True
+    display: PromptDisplay | None = None  # (1.21) the same shape for every harness; `detail` is the harness's own
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1727,11 +1763,18 @@ class PromptResult:
     state: str
     reason: str | None = None
     saved_rule: bool = False
-    # {choice?, answers?: {question id: [offered labels]}, typed?: {question id: [typed text, a note included]},
-    # truncated?: True},
-    # at most 64 KiB; never a message or a secret answer
+    # The person's answer, in `answer`'s shape (from 1.21: choice {id, label, short}, notes in notes, a message only
+    # with a choice that takes one), at most 64 KiB, never a secret answer. Only with transcripts.read (1.21).
     person_answer: dict | None = None
     cause: str | None = None
+    # Who answered (1.21; agents.read): {"kind": "person"} in the terminal, {"kind": "mv2"} (mv2 answer or the
+    # dashboard: a person through mv2) or {"kind": "plugin", "name": NAME}; None when no answer is known to have
+    # taken (gone, refused, unknown).
+    by: dict | None = None
+    # That answer in full (1.21; also needs transcripts.read, else None): choice {id, label, short}, message,
+    # answers {question id: [labels]}, typed {question id: [text]}, notes {question id: text}, truncated. A secret
+    # question's entry is {"secret": True} in place of its answer, which mv2 never keeps.
+    answer: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -1902,10 +1945,11 @@ class Agent:
             raise Error("answer_prompt() takes a number of seconds (0 or more) as timeout and True or False as wait")
         from ..runtime import prompts
         with _acting(self._plugin._loaded, "act", self.universe, "answering what it waits on"):
-            return _from_core(PromptResult, _call(prompts.answer, self.universe.path, self.id, id, choice=choice,
-                                                  message=message, answers=None if answers is None else dict(answers),
-                                                  notes=None if notes is None else dict(notes),
-                                                  timeout=timeout, wait=wait, caller=self._prompt_caller()))
+            found = _call(prompts.answer, self.universe.path, self.id, id, choice=choice,
+                          message=message, answers=None if answers is None else dict(answers),
+                          notes=None if notes is None else dict(notes),
+                          timeout=timeout, wait=wait, caller=self._prompt_caller())
+        return self._readable(_from_core(PromptResult, found))
 
     def prompt_result(self, id):
         """The outcome of an earlier answer_prompt() on this agent, by the prompt's id, as it stands now (1.17;
@@ -1915,23 +1959,37 @@ class Agent:
             raise Error("prompt_result() takes a prompt's id")
         from ..runtime import prompts
         with _acting(self._plugin._loaded, "observe", self.universe, "reading an answer's outcome"):
-            return _from_core(PromptResult, _call(prompts.result, self.universe.path, self.id, id,
-                                                  caller=self._prompt_caller()))
+            return self._readable(_from_core(PromptResult, _call(prompts.result, self.universe.path, self.id, id,
+                                                                 caller=self._prompt_caller())))
+
+    def _readable(self, result):
+        """Who answered (`by`) needs agents.read; what was answered is conversation content: `answer` and
+        `person_answer` need transcripts.read too (1.21). The same on every route a result comes back by."""
+        if not self._plugin.can("agents.read"):
+            result = replace(result, by=None)
+        if not (self._plugin.can("agents.read") and self._plugin.can("transcripts.read")):
+            result = replace(result, answer=None, person_answer=None)
+        return result
 
     def _prompt_caller(self):
         return {"kind": "plugin", "name": self._plugin.name}  # never a person: no rule-saving choice
 
-    def send(self, text, delivery="steer"):
-        """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
+    def send(self, text, delivery="steer", *, as_user=False):
+        """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send). With `as_user`
+        (1.21), it reads the text as the person's own, bare, as if typed, and its inbox lists it as the user's; mv2's
+        record and events still name this plugin. For relaying what the person wrote, never your own words.
 
         steer and follow-up wake a stopped or dormant agent; inbox-only never does. They reach a focused agent too,
         as the person's do (1.20): a focus holds only agents' messages, so one sent inside an agent's session (a
-        command of this plugin's that an agent runs) is held as that agent's."""
+        command of this plugin's that an agent runs) is held as that agent's, and as_user does nothing there."""
         self._plugin._need("messages.send")
+        if type(as_user) is not bool:
+            raise Error("send(..., as_user=True or False)")
         from ..tools import send
         sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
         with _acting(self._plugin._loaded, "act", self.universe, "send"):
-            record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery)
+            record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery,
+                           as_user=as_user)
         native = record.get("native_delivery") or {}
         return SendResult(bool(record.get("ok", True)), record.get("delivery", delivery), str(record.get("state", "")),
                           str(record.get("reason") or native.get("reason") or ""), record)
@@ -1945,6 +2003,27 @@ class Agent:
         if result.get("state") != "ok":
             raise Error(result.get("reason") or "The agent did not answer")
         return (result.get("value") or {}).get("answer", "")
+
+    def message(self, id):
+        """One message this agent received, by its mv2 ID, as a turn event's `message` names it (1.21; needs
+        messages.read): {at, from, delivery, as_user}. `from` is the sender as mv2 records it ({name, agent_id,
+        plugin}), so a message a plugin sent as the person's names that plugin; never the text."""
+        self._plugin._need("messages.read")
+        if not isinstance(id, str) or not id:
+            raise Error("message(id) takes a message's ID, as a turn event's data names it")
+        from ..universe import mailbox
+        with _acting(self._plugin._loaded, "observe", self.universe, "reading a message"):
+            if not self.directory.is_dir():
+                raise AgentGone(f"{self.name} is gone")
+            try:
+                found, _ = _call(mailbox.message_record, self.directory, id)
+            except Error:
+                if not self.directory.is_dir():  # removed meanwhile: gone, and never made again by this read
+                    raise AgentGone(f"{self.name} is gone") from None
+                raise
+        sender = found.get("from") if isinstance(found.get("from"), dict) else {}
+        return {"at": found.get("at"), "delivery": found.get("delivery"), "as_user": found.get("as_user") is True,
+                "from": {key: sender.get(key) for key in ("name", "agent_id", "plugin") if key in sender}}
 
     def inbox(self):
         """Unread inbox-only messages, left unread (needs messages.read): [{at, from, text, delivery}]."""

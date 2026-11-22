@@ -1,5 +1,6 @@
 """An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from contextlib import contextmanager
 import inspect
 import json
@@ -117,6 +118,7 @@ def damaged_row(scope, error, properties=None):
         pass  # Unreadable authority is not an orphan-removal hint.
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
             "live": "unknown", "status": "unknown", "phase": text("phase") or "unknown",
+            "status_changed_at": None, "active_now": False,
             "summary": summary, "damaged": {"file": shown, "reason": reason, **recover}}
 
 
@@ -151,17 +153,19 @@ def _listing_observation(properties, facts, snapshots, refreshed):
 def _listing_runtime(directory, facts, *, prepare=False):
     """A newer launch sidecar cannot condemn an older runtime snapshot.
 
-    Re-read once on damage, only for the same launch, then validate again.
-    Control paths keep their original authority checks; this never repairs disk.
+    Registration can overtake the minimal record, then the launch request
+    can overtake the full record that still lacks a terminal. Allow one
+    recheck per boundary, keeping the same launch and validating each read.
     """
-    for retry in (True, False):
+    max_rechecks = 2 if prepare and agents.preparing(facts) else 1
+    for attempt in range(max_rechecks + 1):
         try:
             checked = agents.preparation_snapshot(directory, facts) if prepare else facts
             if error := missing_runtime.damage(directory, checked):
                 raise error
             return checked
         except records.RecordError:
-            if not retry:
+            if attempt == max_rechecks:
                 raise
             current = records.runtime(directory / 'runtime.json')
             if (not facts.get('launch_id') or current.get('launch_id') != facts['launch_id']
@@ -181,10 +185,18 @@ ROW_FIELDS = frozenset((
     'native_session_homes', 'native_session_provider', 'native_session_transition',
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
-    'universe', 'live', 'status', 'reason', 'launch_error', 'connection_error', 'identity_error',
+    'universe', 'live', 'status', 'status_changed_at', 'active_now', 'reason', 'launch_error', 'connection_error', 'identity_error',
     'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
     *USAGE_FIELDS, 'default_model', 'default_model_name',
 ))
+
+
+def _status_changed_at(facts):
+    try:
+        at = datetime.fromisoformat(facts.get('status_changed_at'))
+        return at.astimezone(timezone.utc).isoformat() if at.utcoffset() is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def row_usage(row, *, model_names=None):
@@ -276,6 +288,8 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                     scope, properties, before_edit.get('model'), model_names)}} if isinstance(before_edit, dict) else {})
                 relay = facts.get('native_relay') or {}
                 relay_problem = relay.get('reason') if relay.get('state') == 'lost' else None
+                status = (('disconnected' if relay.get('state') == 'lost' else facts.get('status', 'unknown'))
+                          if observation['live'] == 'alive' else '-')
                 if relay_problem and observation['live'] == 'alive':
                     relay_problem = native.missing_socket_problem(scope, properties, facts) or relay_problem
                 recovery = facts.get('auto_recovery') or {}
@@ -289,8 +303,8 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                     delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, **model_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
-                             "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
-                                       if observation["live"] == "alive" else "-",
+                             "status": status, "active_now": status == 'working',
+                             "status_changed_at": _status_changed_at(facts),
                              "connection_error": (facts.get('native_refusal') or {}).get('message')
                                  or relay_problem
                                  or facts.get('binding_conflict') or identity_problem
@@ -387,7 +401,9 @@ def _effort_problem(reason, properties, requested):
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
           wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None,
-          _queue_wake=False, _restart_queue=False, start_fresh=False, effort=None):
+          _queue_wake=False, _restart_queue=False, start_fresh=False, effort=None, screen=False):
+    """`screen`: without `wait`, wait briefly (SCREEN_WAIT_SECONDS) to say what the launch's screen shows, for an
+    adapter that reads it; `mv2 spawn` and `mv2 resume` ask for it."""
     effects.require('resume' if resume else 'spawn', resume or name or harness)
     requested_model = model
     if start_fresh and (not resume or _recovery or resume_message_id is not None or resume_prompt is not None):
@@ -730,9 +746,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             waiting = end_waiting(agent_dir, reason)
             if waiting:
                 notices.append(f'{waiting} saved {"message was" if waiting == 1 else "messages were"} not submitted. {reason}.')
-        write(agent_dir / "runtime.json",
-              {**_initial_runtime(launch_id, command, adapter, session, previous, resume and not fresh, _recovery),
-               'run_directory': str(run_root)})
+        with lock(agent_dir / '.runtime.lock', create_parent=False):
+            latest = agents.runtime(agent_dir)
+            initial = {**previous, **{key: latest.get(key) for key in _ORDERED_RUNTIME_FIELDS}}
+            write(agent_dir / "runtime.json",
+                  {**_initial_runtime(launch_id, command, adapter, session, initial, resume and not fresh, _recovery),
+                   'run_directory': str(run_root)})
         if fresh:
             # The replacement launch has now been published. If retirement
             # crashed earlier, its next resume used spawn preparation above.
@@ -854,11 +873,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
+                                           'task_launch': not resume and bool(values['task'].strip()),
                                            'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,
-                                           'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None})
+                                           'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None
+                                                              or native.adapter_hook(adapter, 'launch_prompt') is not None})
             if resume_message_id is not None and _queue_wake:
                 update_message(agent_dir, resume_message_id, submission_state='pending',
                                delivery_method='native', deferred_launch_id=launch_id,
@@ -899,8 +920,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error
-    result = (wait_ready(root, agent_dir, launch_id, adapter, wait_timeout) if wait
-              else launch_result(root, agent_dir))
+    if wait:
+        result = wait_ready(root, agent_dir, launch_id, adapter, wait_timeout)
+    elif screen and native.adapter_hook(adapter, 'launch_prompt') is not None:
+        result = screen_wait(root, agent_dir, launch_id)
+    else:
+        result = launch_result(root, agent_dir)
     notices = display.notice_lines(result.get('notices'), result.get('runtime', {}).get('launch_notices'))
     return {**result, 'notices': notices} if notices else result
 
@@ -1031,9 +1056,16 @@ def _cli_path():
     return cli_path
 
 
+_ORDERED_RUNTIME_FIELDS = ('journal_status', 'journal_status_spill', 'ordered_session_transition',
+                           'ordered_binding_check', 'ordered_binding_fence')
+
+
 def _initial_runtime(launch_id, command, adapter, session, previous, resume, recovery):
     runtime_record = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
                       "started_at": now(), "native_mode": command.native_mode}
+    for key in _ORDERED_RUNTIME_FIELDS:
+        if previous.get(key) is not None:
+            runtime_record[key] = previous[key]
     if resume and previous.get('automatic_restarts'):
         runtime_record['automatic_restarts'] = previous['automatic_restarts'][-5:]
     queue = previous.get('queue_state')
@@ -1199,6 +1231,11 @@ def launch_result(root, agent_dir):
 def _event(agent_dir, kind, launch=None, data=None, properties=None):
     """Record an event for plugins that subscribe to it; best effort, never raises."""
     try:
+        if kind in ('agent.launched', 'agent.exited', 'agent.killed'):
+            from . import prompt_events
+            if prompt_events.publish_ordered(agent_dir, kind, launch, data,
+                                             close_scope={'previous': kind == 'agent.launched'}):
+                return
         from ..plugins import events
         events.for_agent(agent_dir, kind, launch, data, properties)
     except Exception:
@@ -1218,13 +1255,16 @@ def _launched(root, agent_dir, launch_id, command, mode, properties):
 
 
 def launch_ready(adapter, properties, facts, agent_dir, request, live, *, include_delivery=True):
-    """Whether a launch is ready: no launch error and no lost relay, running with its process in a live pane,
+    """Whether a launch is ready: no launch error, no lost relay and no startup prompt on its screen, running with
+    its process in a live pane,
     past its startup check, attached as its adapter requires (the bridge registered, the binding validated)
     and, with `include_delivery`, its startup messages delivered. wait_ready and the agent.ready event use
     this one predicate; wait_ready checks the first two itself first, to say why."""
     if ((facts.get('native_startup_observation') or {}).get('state') == 'pending'
             or facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost'):
         return False
+    if facts.get('startup_prompt') and not facts.get('native_bridge'):
+        return False  # its screen waits for the person: the session hasn't started, whatever else is ready
     running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                and facts.get('startup_checked', True))
     if not running:
@@ -1249,7 +1289,7 @@ def note_ready(root, agent_dir, launch_id):
         from ..plugins import events
         launch = agent_dir / 'launches' / launch_id
         marker = launch / 'ready-event'
-        if marker.exists() or not events.subscribers(root, 'agent.ready'):
+        if marker.exists() or not events.admits(root, 'agent.ready'):
             return
         properties, facts = retry_missing(lambda: read(agent_dir / 'properties.json')), runtime(agent_dir)
         if facts.get('launch_id') != launch_id:
@@ -1273,7 +1313,105 @@ def _record_ready(agent_dir, launch_id, properties):
         pass
 
 
-def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True):
+SCREEN_WAIT_SECONDS = 10
+
+
+def _ended(facts, live):
+    """Why this launch record can no longer start, or None: a launch error, a native refusal, a lost relay, a state
+    other than starting or running, or a pane that is gone. A startup prompt counts only where this is None."""
+    if facts.get('reason') or (facts.get('native_refusal') or {}).get('message'):
+        return facts.get('reason') or facts['native_refusal']['message']
+    if (facts.get('native_relay') or {}).get('state') == 'lost':
+        return facts['native_relay'].get('reason') or 'The native relay was lost'
+    if facts.get('state') not in ('starting', 'running') or live in ('ending', 'stopped', 'dormant'):
+        return facts.get('error') or f"Launch ended before it started ({facts.get('state') if live == 'alive' else live})"
+    return None
+
+
+def screen_wait(root, agent_dir, launch_id, timeout=SCREEN_WAIT_SECONDS):
+    """A launch's result once its screen shows the harness started or a prompt the person must answer first, or its
+    plugin has reported, within `timeout` seconds. Readiness stays `--wait`'s: this only says what the screen shows.
+
+    Each pass checks the pane read-only (never tmux recovery) within the time left, at most CHECK_SECONDS a check: a
+    pane gone or dead ends it as a launch that didn't start, and a prompt counts only from a record read after a check
+    found the pane alive. Polling stops CHECK_SECONDS early, to leave the last check some time."""
+    end = time.monotonic() + timeout
+    polling = end - min(CHECK_SECONDS, timeout)
+    while True:
+        result = _current(root, agent_dir, launch_id)
+        error = _ended(result['runtime'], 'alive')
+        if error:
+            return {**result, 'ok': False, 'ready': False, 'error': error}
+        left = end - time.monotonic()
+        live = _observe_within(result, result['runtime'], min(left, CHECK_SECONDS)) if left > 0 else 'unknown'
+        result = _current(root, agent_dir, launch_id)  # one record: a report can land while the pane is checked
+        facts = result['runtime']
+        error = _ended(facts, live)
+        if error:
+            return {**result, 'ok': False, 'ready': False, 'error': error}
+        if facts.get('startup_prompt') and not facts.get('native_bridge') and live == 'alive':
+            return {**result, 'startup_prompt': facts['startup_prompt']}
+        if facts.get('startup_screen') == 'started' or facts.get('native_bridge') or time.monotonic() >= polling:
+            return result
+        time.sleep(min(.1, max(0, polling - time.monotonic())))
+
+
+CHECK_SECONDS = .5
+
+
+def _current(root, agent_dir, launch_id):
+    """The launch's whole result, runtime and session from one read; ValueError when another launch replaced it."""
+    result = launch_result(root, agent_dir)
+    if result['runtime'].get('launch_id') != launch_id:
+        raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+    return result
+
+
+def _observe_within(result, facts, seconds):
+    """The pane's liveness from a read-only check (no tmux recovery), or 'unknown' when it doesn't answer within
+    `seconds`. A check left running when the wait moves on is one tmux query that changes nothing."""
+    socket = (facts.get('tmux') or {}).get('socket')
+    if not socket:
+        return observe(result, facts)['live']  # no pane recorded: decided from the record alone
+    snapshot = _read_only_snapshot(socket, facts, seconds)
+    return 'unknown' if snapshot is None else observe(result, facts, {socket: snapshot})['live']
+
+
+_snapshots = {}  # socket -> (thread, answer, scope) of the newest read-only check
+_snapshots_lock = __import__('threading').Lock()
+
+
+def _read_only_snapshot(socket, facts, seconds):
+    """One read-only check of a tmux server at a time, within `seconds`: a later pass waits on one still running
+    rather than start another, so an unanswering server holds at most one query, however many passes the wait makes.
+    Its answer counts only for the launch and pane it was asked for: one running for another (an earlier launch on the
+    same server, asked before this pane existed) is waited on and never used, and this launch then asks for itself."""
+    import threading
+    scope = (facts.get('launch_id'), (facts.get('tmux') or {}).get('pane'))
+    end = time.monotonic() + max(0, seconds)
+    while True:
+        with _snapshots_lock:
+            running = _snapshots.get(socket)
+            if running is None or not running[0].is_alive():
+                answer = {}
+
+                def check():
+                    try:
+                        answer['snapshot'] = Tmux(socket).snapshot(facts=facts, read_only=True)
+                    except Exception:
+                        pass  # an unanswered check proves nothing
+                running = (threading.Thread(target=check, name='screen-wait-liveness', daemon=True), answer, scope)
+                _snapshots[socket] = running
+                running[0].start()
+        running[0].join(max(0, end - time.monotonic()))
+        if running[2] == scope:
+            return running[1].get('snapshot')
+        if running[0].is_alive() or time.monotonic() >= end:
+            return None  # another launch's check still holds the server: unknown here
+
+
+def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True,
+               stop_at_prompt=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = retry_missing(lambda: read(agent_dir / 'launches' / launch_id / 'request.json'))
     deadline = time.monotonic() + timeout
@@ -1294,11 +1432,22 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             from . import refusal
             if screen_deadline is None:
                 screen_deadline = refusal.startup_deadline(facts)
-            if not screen_expired and time.monotonic() >= screen_deadline:
+            if not screen_expired and time.monotonic() >= screen_deadline and not facts.get('startup_prompt'):
+                # A prompt on screen keeps the observer watching; the start that ends it settles startup.
                 screen_expired = True
                 refusal.settle_startup(agent_dir, launch_id, 'unverified')
                 continue  # Re-read refusal/generation/state after atomic settlement.
         live = observe(result, facts)['live']
+        if (stop_at_prompt and facts.get('startup_prompt') and live == 'alive'
+                and facts.get('state') in ('starting', 'running')):
+            # It started and waits for the person: not ready (even a launch with nothing more to wait for), not failed.
+            # The prompt as it is now: a report can retire it while liveness is checked.
+            fresh = launch_result(root, agent_dir)  # one record, runtime and session
+            current = fresh['runtime']
+            if (current.get('launch_id') == launch_id and current.get('startup_prompt') and not current.get('native_bridge')
+                    and _ended(current, live) is None):
+                return {**fresh, 'ok': True, 'ready': False, 'startup_prompt': current['startup_prompt']}
+            continue  # re-read from the top: its failure checks see what ended it
         # A caller deadline changes only this answer. The runner keeps its own
         # observation/retry window, and a re-read catches a refusal or retry claim.
         unverified = (caller_unverified and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
@@ -1308,7 +1457,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             if screen_expired and launch_ready(adapter, result, facts, agent_dir, request, live):
                 try:
                     from ..plugins import events
-                    if events.subscribers(root, 'agent.ready'):
+                    if events.admits(root, 'agent.ready'):
                         _record_ready(agent_dir, launch_id, result)
                 except Exception:
                     pass  # Optional events never hold up readiness.
@@ -1415,7 +1564,15 @@ def kill(root, reference, *, attachment_only=False):
         # Older launches may have inherited remain-on-exit=off.
         if backend is not None:
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
-        update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
+        def begin_stop(current):
+            changes = {'state': 'ending', 'ending_at': now()}
+            # Keep the observed wait until the exit is proven. Cancellation
+            # can fail, and a live prompt must still be available in that case.
+            if current.get('status') != 'waiting':
+                changes['status'] = 'unknown'
+            return changes
+
+        agents.mutate_runtime(agent_dir, launch_id, begin_stop)
         try:
             if attachment_only:
                 attachment = facts.get('attachment')
@@ -1432,9 +1589,17 @@ def kill(root, reference, *, attachment_only=False):
                     'Terminal attachment closed before delivery; saved for explicit retry')
         except Exception as error:
             if live not in ('stopped', 'dormant'):
-                update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
-                               ending_at=facts.get('ending_at'),
-                               error=f'Native cancellation failed; remaining terminal retained: {error}')
+                def cancel_stop(current):
+                    if current.get('state') != 'ending':
+                        return None  # The runner may already have recorded its exit.
+                    changes = {'state': facts.get('state', 'running'), 'ending_at': facts.get('ending_at'),
+                               'error': f'Native cancellation failed; remaining terminal retained: {error}'}
+                    deferred = current.get('deferred_stop_status')
+                    if deferred in ('working', 'idle'):
+                        changes['status'] = deferred
+                    return changes
+
+                agents.mutate_runtime(agent_dir, launch_id, cancel_stop)
                 raise
             # A dead child has no terminal connection to preserve. Removing its
             # owned wrapper must not depend on an unreachable shared service.

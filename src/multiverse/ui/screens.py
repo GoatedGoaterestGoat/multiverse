@@ -118,8 +118,11 @@ class Form(ModalScreen[dict | None]):
 class ChoiceScreen(ModalScreen[str | None]):
     """Pick one of `options`, given as (key, label) pairs: Enter chooses, Esc cancels.
 
-    Not `Choice`: that is the settings selector widget, and app.tcss styles screens by type."""
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    Not `Choice`: that is the settings selector widget, and app.tcss styles screens by type. A long description
+    scrolls (PgUp / PgDn) above the choices, which always stay in view."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel"),  # over the choices' own paging: they are a few lines
+                Binding("pageup", "scroll(-1)", "Scroll up", show=False, priority=True),
+                Binding("pagedown", "scroll(1)", "Scroll down", show=False, priority=True)]
 
     def __init__(self, title, options, description=""):
         super().__init__()
@@ -129,7 +132,8 @@ class ChoiceScreen(ModalScreen[str | None]):
         with Vertical(id="dialog"):
             yield Label(self.choice_title, id="dialog-title", markup=False)
             if self.description:
-                yield Static(self.description, id="dialog-description", markup=False)
+                with VerticalScroll(id="dialog-about"):
+                    yield Static(self.description, id="dialog-description", markup=False)
             yield OptionList(*(Option(label, id=key) for key, label in self.options), id="choices")
         yield Footer()
 
@@ -141,6 +145,15 @@ class ChoiceScreen(ModalScreen[str | None]):
     def on_option_list_option_selected(self, event):
         event.stop()
         self.dismiss(event.option.id)
+
+    def action_scroll(self, direction):
+        """Page a description too long to show whole; otherwise the choices, as PgUp / PgDn do in any list."""
+        about = next(iter(self.query("#dialog-about")), None)
+        if about is not None and about.max_scroll_y > 0:
+            (about.scroll_page_down if direction > 0 else about.scroll_page_up)(animate=False)
+            return
+        choices = self.query_one("#choices", OptionList)
+        (choices.action_page_down if direction > 0 else choices.action_page_up)()
 
     def action_cancel(self):
         self.dismiss(None)

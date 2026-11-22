@@ -204,7 +204,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
 
     def set_status(self, message, error=False):
         status = self.query_one("#status", Static)
-        status.update(clean(message))
+        status.update(clean(message) if isinstance(message, str) else message)  # or a renderable fitting itself
         status.display = bool(message)
         status.set_class(error, "error")
 
@@ -861,16 +861,19 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
                       ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("focus_line", "FOCUS"),
                       ("launch_mode", "LAUNCH MODE"), ("fallback_reason", "FALLBACK"), ("plugin_outcomes", "PLUGINS"),
-                      ("reason", "OBSERVATION"),
+                      ("reason", "OBSERVATION"), ("last_answer", "LAST ANSWER"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
             row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
                    **({"phase": phase_label(row) or "—", "summary": summary_label(row) or "—"} if self.selected else {}),
                    "fallback_reason": (mode or {}).get("fallback_reason") or "",
-                   "plugin_outcomes": plugin_outcomes(row)[0] if self.selected else ""}
+                   "plugin_outcomes": plugin_outcomes(row)[0] if self.selected else "",
+                   # the whole outcome of the last answer sent from here, which the inspector may cut short
+                   "last_answer": (self.prompt_outcomes.get(row.get("id")) or ("",))[0] if self.selected else ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields
-                                    if key not in ("task", "launch_mode", "fallback_reason", "plugin_outcomes")
+                                    if key not in ("task", "launch_mode", "fallback_reason", "plugin_outcomes",
+                                                   "last_answer")
                                     or row.get(key))
             self.push_screen(Details(row["name"], content))
 

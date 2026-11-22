@@ -76,22 +76,29 @@ def _check(connection, payload):
     scopes(payload['scopes'])
 
 
-def _child_started(connection, payload, child):
-    # The unreaped child still waits at its gate. Retry observation, never native execution.
+def _started(connection, payload, pid, reason):
+    """A live process's start token, its observation retried for up to IDENTITY_SECONDS within the run deadline:
+    one ps can take seconds on a loaded machine, and a live process's start never changes, so a retry reads the
+    same identity. Unknown at the bound still refuses (`reason`)."""
     deadline = min(payload['deadline'], time.monotonic() + IDENTITY_SECONDS)
     while True:
         _check(connection, payload)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise Stopped('unavailable', 'Cannot record the private child identity')
-        token = process_started(child.pid, timeout=min(2, remaining))
+            raise Stopped('unavailable', reason)
+        token = process_started(pid, timeout=min(2, remaining))
         _check(connection, payload)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise Stopped('unavailable', 'Cannot record the private child identity')
+            raise Stopped('unavailable', reason)
         if token:
             return token
         time.sleep(min(POLL, remaining))
+
+
+def _child_started(connection, payload, child):
+    # The unreaped child still waits at its gate. Retry observation, never native execution.
+    return _started(connection, payload, child.pid, 'Cannot record the private child identity')
 
 
 def _exited(child):
@@ -133,7 +140,9 @@ def _stop(child):
             pass  # macOS can reject signalling a zombie-only group; still prove it empty below.
         end = min(deadline, time.monotonic() + grace)
         while time.monotonic() < end:
-            if _empty_group(child.pid, max(.05, min(.5, end - time.monotonic()))):
+            # Each listing may use the rest of this signal's grace: on a loaded machine one full listing can take
+            # over half a second, and a shorter cap would fail every one, leaving an ended run unproven.
+            if _empty_group(child.pid, max(.05, end - time.monotonic())):
                 child.wait(timeout=max(.05, deadline - time.monotonic()))
                 return True
             time.sleep(.03)
@@ -159,15 +168,14 @@ def supervise(connection, payload):
     record = {'run_id': directory.name, 'directory': str(directory), 'universe': payload['universe'],
               'store': payload.get('store'), 'declared': [{k: item[k] for k in ('root', 'path')} for item in payload['files']],
               'disposable': payload.get('disposable', []),
-              'owner': payload['owner'], 'supervisor': {'pid': os.getpid(), 'started': process_started(os.getpid())},
+              'owner': payload['owner'], 'supervisor': {'pid': os.getpid(), 'started': None},
               'child': None}
     created, child, gate = False, None, None
     response, outputs = {}, {'stdout': bytearray(), 'stderr': bytearray()}
     connection.setblocking(False)
     try:
-        _check(connection, payload)
-        if not record['supervisor']['started']:
-            raise Stopped('unavailable', 'Cannot record the run supervisor identity')
+        record['supervisor']['started'] = _started(connection, payload, os.getpid(),
+                                                   'Cannot record the run supervisor identity')
         run_files.create(directory, record)
         created = True
         for name in payload.get('disposable', []):

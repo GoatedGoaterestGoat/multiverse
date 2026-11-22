@@ -116,22 +116,22 @@ def write_json(path, value, root=None):
 
 
 @contextmanager
-def lock(path, root=None):
-    """store.lock (exclusive, waiting); below the folder a write must find, its lock file is never made while that
+def lock(path, root=None, *, blocking=True):
+    """An exclusive store.lock; below the folder a write must find, its lock file is never made while that
     folder is gone."""
     path = Path(path)
     folder, kind = required_folder(path, root)
     if folder is None:
-        with store.lock(path):
+        with store.lock(path, blocking=blocking):
             yield
         return
     ensure_dir(path.parent, root)
     try:
-        handle = path.open("a")
+        handle = store.open_regular(path, "a")
     except FileNotFoundError:
         raise _gone(folder, kind) from None
     with handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

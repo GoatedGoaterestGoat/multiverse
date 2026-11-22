@@ -108,7 +108,7 @@ class RetryHotPathsTest(BaseTest):
                 patch.object(listen, 'time', SimpleNamespace(monotonic=lambda: 0,
                     sleep=Mock(side_effect=StopIteration('one quiet poll')))):
             with self.assertRaises(StopIteration):
-                listen._wait(directory, 'fixture', None, None, Mock(), Mock())
+                listen._wait(directory, 'fixture', None, None, (Mock(), Mock()), Mock())
             self.assertEqual(sleeps, [store.MISSING_DELAY] * (store.MISSING_ATTEMPTS - 1))
         with self.clock() as sleeps:
             for _ in range(20):

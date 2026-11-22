@@ -7,12 +7,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from ..types import NativeResult, normalize_session_id
-from .launch import LaunchProtocol, navigation_environments
+from .launch import LaunchProtocol, navigation_environments, navigation_workspace, requires_local_environment
 from .protocol import object_field, result
 from .side import local_error
 
-VERSION = (0, 170, 0)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), VERSION))
+VERSION = (0, 171, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), (0, 170, 0), VERSION))
 # Pinned app-server-protocol common.rs reads. New thread-scoped methods fail
 # closed instead of accidentally granting stale-widget mutation authority.
 READ_ONLY = frozenset(('thread/goal/get', 'thread/queue/list', 'thread/attachment/list',
@@ -28,14 +28,6 @@ def _mutates_thread(method, params):
         return False
     return (method.startswith(('thread/', 'turn/'))
             or isinstance(params, dict) and any(key in params for key in ('threadId', 'conversationId')))
-
-
-def _workspace(value, expected):
-    try:
-        return (isinstance(value, str) and bool(value) and Path(value).is_absolute()
-                and Path(value).resolve() == Path(expected).resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
 
 
 class Selection:
@@ -88,7 +80,7 @@ class Selection:
         if (type(identifier) is not int or identifier < 0 or identifier > 2**63 - 1
                 or identifier <= previous_integer or self.connection._pending(identifier)):
             raise local_error('Native selection requires a new checked terminal request ID', identifier)
-        if not _workspace(params.get('cwd'), self.root.settings['workspace']):
+        if not navigation_workspace(params.get('cwd'), self.root.settings['workspace']):
             raise local_error('Conversation navigation must keep this agent workspace; another folder or worktree is not supported', identifier)
         if any(params.get(key) is not None for key in ('path', 'history', 'lastTurnId', 'beforeTurnId')):
             raise local_error('Conversation navigation cannot replace saved history or use a rollout path', identifier)
@@ -117,7 +109,7 @@ class Selection:
         if (self.root.current_grants is None or self.root.grant_ceiling is None
                 or self.root.grants_native_id != self.root.native_id):
             raise local_error(self.root.grants_error, identifier)
-        if (self.connection.version in ((0, 169, 0), (0, 170, 0)) and method == 'thread/resume'
+        if (requires_local_environment(self.connection.version) and method == 'thread/resume'
                 and params.get('environments') is not None):
             try:
                 navigation_environments(params, required=True, policy=self.root.current_grants,
@@ -164,8 +156,8 @@ class Selection:
                         or thread.get('canAcceptDirectInput') is not True
                         or not isinstance(thread.get('status'), dict)
                         or thread['status'].get('type') != 'idle'
-                        or not _workspace(thread.get('cwd'), self.root.settings['workspace'])
-                        or not _workspace(observed.get('cwd'), self.root.settings['workspace'])):
+                        or not navigation_workspace(thread.get('cwd'), self.root.settings['workspace'])
+                        or not navigation_workspace(observed.get('cwd'), self.root.settings['workspace'])):
                     raise ValueError('Native selection did not return an idle persistent primary conversation')
                 path = thread.get('path')
                 home = Path(pending['home'])

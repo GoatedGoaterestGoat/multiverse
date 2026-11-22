@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import work
 from textual.containers import Vertical, VerticalScroll
@@ -12,8 +13,11 @@ from ..display import clean, live_label, phase_label, summary_label
 from .columns import summary_text
 from . import theme
 from .plugin_service import in_daemon
-from .prompt_screen import prompt_line
+from .prompt_screen import outcome_shown, prompt_line
 from .tree import within
+
+# The most of an answer's outcome the inspector's few lines show; v shows all of it.
+LAST_ANSWER_SHOWN = 240
 
 
 PLUGIN_FACTS_TIMEOUT = 5.0
@@ -169,12 +173,18 @@ class Inspector(Vertical):
         elif self.row:
             self.inbox_if_needed()
 
+    def on_resize(self, event):
+        """Fit the last answer's outcome to the new width and rows: it was cut for the old ones."""
+        if self.row and hasattr(self, "prompts_found"):
+            self.call_after_refresh(lambda: self.row and self.show_prompts(self.prompts_found))
+
     def show_prompts(self, found):
         """The prompt the agent waits on, or the questions it has open while it works (`found`: core's listing, None
         for no line), and the outcome of the last answer sent from here, which shows until another one is sent.
 
         For an agent that isn't waiting the line shows only what core lists, with its coverage note where some are
         listed; an empty listing or a failed read says nothing there, since most agents have no open questions."""
+        self.prompts_found = found  # drawn again, as is, when the inspector's size changes (on_resize)
         widget = self.query_one("#inspect-prompt", Static)
         text = Text()
         waiting = bool(self.row) and self.row.get("status") == "waiting"
@@ -200,7 +210,15 @@ class Inspector(Vertical):
                 and hasattr(self.app, "prompt_outcomes") else None)
         if last:
             said, ok = last
-            text.append(("\n" if text.plain else "") + "Last answer: " + said,
+            # The rows left under the prompt lines (the box is capped: 8 rows beside the list, 3 under it), less
+            # some for word wrapping: what doesn't fit there is cut, led by the pointer, so no clipping hides it.
+            width = widget.content_size.width or 80
+            cap = widget.styles.max_height
+            used = sum(max(1, -(-cell_len(part) // width)) for part in text.plain.split("\n")) if text.plain else 0
+            rows = max(1, (int(cap.value) if cap is not None else 8) - used)
+            room = rows * (width - 8) - len("Last answer: ")
+            shown = said if cell_len(said) <= room else outcome_shown(said, max(1, min(LAST_ANSWER_SHOWN, room)))
+            text.append(("\n" if text.plain else "") + "Last answer: " + shown,
                         style=theme.SUBTEXT0 if ok else theme.RED)
         widget.display = bool(text.plain)
         widget.update(text)

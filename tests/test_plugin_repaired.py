@@ -50,7 +50,8 @@ class OneBadEntryTest(PluginTestCase):
         (directory / "plugin.py").write_text(PLUGIN.format(kind="int"))  # repaired on disk
         listed = {item["name"]: item for item in plugins.listing(root)}
         self.assertEqual(set(listed), {"badfield", "other"})
-        self.assertIn(listed["badfield"]["state"], ("on", "loaded"))
+        # The listing pins the repaired folder (a path plugin that's on), so its copy may still be loading.
+        self.assertIn(listed["badfield"]["state"], ("on", "loading", "loaded"))
         self.assertNotIsInstance(self.entry("badfield", root).loaded, loader.Failed)  # never the old failure
         self.assertEqual(plugins.problems(root), [])
         loaded = loader.load(self.entry("badfield", root))

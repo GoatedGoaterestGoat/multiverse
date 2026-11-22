@@ -9,8 +9,9 @@ from .. import store, universe
 from ..universe import mailbox
 from ._common import add_agent, callback
 
-# What an unread message shows; `intended` marks a steer or follow-up that a focus held.
-FIELDS = ('at', 'from', 'text', 'delivery', 'intended')
+# What an unread message shows; `intended` marks a steer or follow-up that a focus held, and `as_user` a plugin's
+# message relaying the person's words, listed as theirs.
+FIELDS = ('at', 'from', 'text', 'delivery', 'intended', 'as_user')
 
 
 def configure(parser):
@@ -164,15 +165,18 @@ def _shown_name(sender):
 
 
 def readable(root, result, empty='No unread messages.'):
-    from ..runtime.native import framed_text
+    from ..runtime.native import _plugin_as_user, framed_text
     blocks = []
     for message in result['messages']:
-        sender = message.get('from') or {}
+        original = message.get('from') or {}
+        # Whether it lists as the person's is decided from the sender as saved, before its shown name is chosen.
+        as_user = message.get('as_user') is True and _plugin_as_user(original)
+        sender = original
         # A sender with no agent of its own reads as the person, unless it is mv2's, a plugin's (its name says so),
         # or was sent from inside an agent's session (its name says whose, never the person's).
         if not sender.get('agent_id') and sender.get('core') is not True:
             sender = {**sender, 'name': _shown_name(sender)}
-        blocks.append(framed_text(root, {**message, 'from': sender}, listing=True))
+        blocks.append(framed_text(root, {**message, 'from': sender, 'as_user': as_user}, listing=True))
     return '\n\n'.join(blocks) if blocks else empty
 
 

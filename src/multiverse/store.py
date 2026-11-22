@@ -27,7 +27,11 @@ def read(path):
 
 def open_regular(path, mode='rb'):
     """Open a data or lock file without waiting on a special file; verify the descriptor, not its pathname."""
-    flags = {'rb': os.O_RDONLY, 'a': os.O_WRONLY | os.O_CREAT | os.O_APPEND}[mode]
+    flags = {
+        'rb': os.O_RDONLY,
+        'a': os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        'ab+': os.O_RDWR | os.O_CREAT | os.O_APPEND,
+    }[mode]
     descriptor = os.open(path, flags | os.O_NONBLOCK, 0o666)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

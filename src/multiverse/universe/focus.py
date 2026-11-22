@@ -30,6 +30,7 @@ decide, so no focus begins between their check and their read.
 
 The tmux status line reads this file with its own copy of `active`.
 """
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
@@ -39,7 +40,8 @@ import stat
 import subprocess
 import sys
 
-from ..store import lock, uid, write, retry_missing
+from ..harnesses.types import normalize_session_id
+from ..store import lock, open_regular, uid, write, retry_missing
 
 FILE = "focus.json"
 LAST = "focus-last.json"
@@ -266,8 +268,8 @@ class Listening:
     A shared lock on `.listen.lock`, released by the kernel even when the listener is killed. It never
     waits: `register` takes it when it is free, and the listener tries again on its next poll.
     """
-    def __init__(self, agent_dir):
-        self.handle = (agent_dir / LISTENING).open("a")
+    def __init__(self, path):
+        self.handle = open_regular(path, 'a')
         self.registered = False
 
     def register(self):
@@ -287,20 +289,46 @@ class Listening:
         self.handle.close()
 
 
-def listening(agent_dir):
-    return Listening(agent_dir)
+def _listener_lock(agent_dir, launch_id):
+    if launch_id is None:
+        return agent_dir / LISTENING
+    if normalize_session_id(launch_id) != launch_id:
+        raise ValueError('Invalid listener launch ID')
+    launch = agent_dir / 'launches' / launch_id
+    path = launch / LISTENING
+    if launch.is_symlink() or path.is_symlink():
+        raise ValueError('Invalid listener registration path')
+    return path
 
 
-def listener(agent_dir):
-    """Whether a listener runs for this agent now."""
+def listening(agent_dir, *, launch_id=None):
+    return Listening(_listener_lock(agent_dir, launch_id))
+
+
+def listener(agent_dir, *, launch_id=None):
+    """Whether a live listener is registered for this agent or the specified launch."""
     try:
-        with (agent_dir / LISTENING).open("r") as handle:
+        with ExitStack() as probe:
+            path = _listener_lock(agent_dir, launch_id)
+            if launch_id is not None:
+                # Serialize the probes so their temporary shared locks cannot establish a listener.
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                probe.callback(os.close, directory)
+                fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            handle = probe.enter_context(open_regular(path))
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                return True
+                if launch_id is None:
+                    return True
+                # A concurrent exclusive probe does not establish a shared listener.
+                fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
             fcntl.flock(handle, fcntl.LOCK_UN)
-    except OSError:
+    except (OSError, ValueError):
         pass
     return False
 

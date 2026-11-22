@@ -26,10 +26,7 @@ def quoted_title(title):
 
 class AsyncOffer(codec.Offer):
     def public(self, identifier):
-        return {'id': identifier, 'kind': 'question', 'asked_at': None, 'tool': METHOD,
-                'summary': self.summary[:500], 'detail': self.detail.copy(),
-                'choices': (), 'questions': tuple(self.questions), 'answerable': self.answerable,
-                'reason': self.reason, 'subagent': None, 'requires_waiting': False}
+        return {**super().public(identifier), 'asked_at': None, 'requires_waiting': False}
 
     def response(self, answer):
         if not self.answerable:
@@ -82,7 +79,7 @@ def describe(params):
         offer.questions = [codec.question('answer', title, options=tuple((v, '') for v in options or ()),
                                           free_text=True)]
         offer.detail = {'question': title}
-        codec.bounded(offer.public('preview'))
+        offer.check_answerable_size()
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         offer.params = {}
         offer.questions = []

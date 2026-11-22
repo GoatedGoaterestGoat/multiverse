@@ -1115,7 +1115,8 @@ class LaunchIsolationTest(unittest.TestCase):
                    # values: a tmux server first started from a Claude Code session passes them to every pane.
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
-                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
+                   "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_CODE_CHROME_MCP_ORG_DENIED",
+                   "CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
                    "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR",
                    "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_SCRATCHPAD_DIR",
                    # What Claude's background-session host gives a session: its credential, token pipes, rules.
@@ -1264,7 +1265,9 @@ class LaunchIsolationTest(unittest.TestCase):
 
         with self.subTest(action='runtime-update --bridge'):
             bridged = self.agent('bridged', harness='claude')
-            write(bridged / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
+            # A prompt read from the screen before the plugin loaded: its first report says the session started.
+            write(bridged / 'runtime.json', {'launch_id': 'current', 'state': 'running',
+                                             'startup_prompt': {'title': 'Accessing workspace', 'detail': None}})
             with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
                 runtime_update.run(self.root, agent=bridged.name, status='idle', bridge='claude-mod-v1')
                 runtime_update.run(self.root, agent=bridged.name, status='waiting')
@@ -1273,6 +1276,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 runtime_update.run(self.root, agent=bridged.name, status='working', bridge='other-bridge-v1')
             facts = read(bridged / 'runtime.json')
             self.assertEqual((facts['native_bridge'], facts['status']), ('claude-mod-v1', 'waiting'))
+            self.assertIsNone(facts.get('startup_prompt'))
 
         with self.subTest(action='bind_session'):
             bound = self.agent('bound')

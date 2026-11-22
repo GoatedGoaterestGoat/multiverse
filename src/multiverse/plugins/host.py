@@ -28,6 +28,7 @@ host still running the code from before to restart (restart.json): it drains
 its workers, then runs itself again with the new code, in the same pane.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import fcntl
 import fnmatch
@@ -35,6 +36,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import select
 import signal
 import subprocess
@@ -45,13 +47,15 @@ import time
 from .. import universe as universes
 from ..runtime import process as processes
 from ..store import now, write, lock, retry_missing, is_file_replaced
-from . import api, events, loader, trust
+from . import api, events, loader, projection_wake, trust
 
 HEARTBEAT_SECONDS = 15.0  # a supervisor whose status is older than this is not running
 RESTARTS = 3
 RESTART_WINDOW = 300
 SUPERVISE_SECONDS = 2.0
 WORKER_POLL_SECONDS = 0.5
+TURN_PROJECTION_POLL_SECONDS = 0.125
+TURN_PROJECTION_WORKERS = 2
 PRUNE_SECONDS = 3600
 HANDLER_SECONDS = 60.0
 STOP_SECONDS = 10.0  # a stopped worker has this long before its process group is ended (a restart waits, unbounded)
@@ -63,6 +67,7 @@ READ_LIMIT = 500  # events one journal read returns
 PAGES_PER_POLL = 4  # reads one poll may make, so handlers ahead of a stuck one keep going
 ABANDONED_PER_WORKER = 2  # calls left running past their deadline before the worker restarts itself
 HUNG_EXIT = 75  # a worker's exit code when it restarts itself for calls that never returned
+RELOAD_EXIT = 76  # a worker's exit code when what it should run changed: started again at once, never counted
 HUNG_RESTARTS = 3  # such restarts within HUNG_WINDOW (one run can take longer than RESTART_WINDOW): then stopped
 HUNG_WINDOW = 24 * 3600
 HANDLERS = "handlers.json"  # state/plugins/NAME/, next to the cursor: what each handler finished, in that journal
@@ -159,11 +164,20 @@ def needed(root):
     return result
 
 
-def _log(root, text):
+def _log(root, text, wait=0.0):
     try:
-        loader.append_log(host_directory(root) / "host.log", f"{now()} {text}")
+        loader.append_log(host_directory(root) / "host.log", f"{now()} {text}", blocking=False, wait=wait)
     except OSError:
         pass
+
+
+STOPPING_LOG_WAIT = 0.2  # seconds a worker's last line waits for host.log: its siblings stop, and log, at once
+
+
+def _stopping(root, name):
+    """A worker's last line when its supervisor is gone. Every worker notices at the same poll and logs at once, so
+    this one waits briefly for the others' writes rather than being skipped as other host lines are."""
+    _log(root, f"{name}: supervisor gone; stopping", wait=STOPPING_LOG_WAIT)
 
 
 def _held(root):
@@ -198,6 +212,180 @@ def running(root):
     return _age(recorded.get("updated_at", ""), unknown=float("inf")) <= HEARTBEAT_SECONDS
 
 
+def _project_agent_events(root, stopping):
+    """Service durable turn work separately from plugin handlers and the host heartbeat."""
+    from ..runtime import prompt_events
+    from ..universe import agents
+
+    with projection_wake.receiver(root) as receiver:
+        workers = ThreadPoolExecutor(max_workers=TURN_PROJECTION_WORKERS, thread_name_prefix="turn projection")
+        cold = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cold turn projection")
+        indexed = _IndexedProjectionPool(root, stopping)
+        pending = {}
+        idle = {}
+        try:
+            while not stopping.is_set():
+                try:
+                    previous_idle, idle = idle, {}
+                    for directory, (scope, keys, work) in tuple(pending.items()):
+                        if not work.done():
+                            continue
+                        del pending[directory]
+                        try:
+                            needs_cold = work.result()
+                        except Exception as error:
+                            _log(root, f"turn projection worker for {directory.name} failed ({type(error).__name__})")
+                            needs_cold = False
+                        if needs_cold:
+                            job = cold.submit(_run_turn_projection, root, scope, directory, keys, stopping)
+                            pending[directory] = (scope, keys, job)
+                            job.add_done_callback(lambda _: projection_wake.wake(root))
+                    for scope in universes.tree(root):
+                        try:
+                            records = tuple(agents.record_paths(scope))
+                        except Exception as error:
+                            _log(root, f"could not list turn projection records in {scope} ({type(error).__name__})")
+                            continue
+                        for record in records:
+                            if stopping.is_set():
+                                return
+                            directory = record.parent
+                            if directory in pending or directory.is_symlink():
+                                continue
+                            try:
+                                stamp = prompt_events.outbox_stamp(directory)
+                                runtime_stamp = agents.runtime_status_stamp(directory)
+                                if stamp is None and runtime_stamp is None:
+                                    continue
+                                scanned = stamp, runtime_stamp
+                                if scanned == previous_idle.get(directory):
+                                    idle[directory] = scanned
+                                    continue
+                                runtime_clear = runtime_stamp is None or agents.recover_status_events(directory, maximum=8)
+                                stamp = prompt_events.outbox_stamp(directory)
+                                if stamp is None:
+                                    if runtime_clear:
+                                        idle[directory] = scanned
+                                    continue
+                                prompt_events.publish(directory, recovery_stop=stopping)
+                                empty, keys = prompt_events.turn_work(directory, stamp)
+                                if empty and runtime_clear:
+                                    idle[directory] = scanned
+                                if keys:
+                                    work = workers.submit(indexed.project, scope, directory)
+                                    pending[directory] = (scope, keys, work)
+                                    work.add_done_callback(lambda _: projection_wake.wake(root))
+                            except Exception as error:
+                                _log(root, f"could not schedule turn projection for {directory.name} "
+                                           f"({type(error).__name__})")
+                except Exception as error:
+                    _log(root, f"turn projection scan failed ({type(error).__name__})")
+                projection_wake.wait(receiver, stopping, TURN_PROJECTION_POLL_SECONDS)
+        finally:
+            workers.shutdown(wait=True, cancel_futures=True)
+            cold.shutdown(wait=True, cancel_futures=True)
+            indexed.close()
+
+
+class _IndexedProjectionPool:
+    """Reuse a bounded number of processes. They never run a full transcript read."""
+
+    def __init__(self, root, stopping):
+        self.root = root
+        self.stopping = stopping
+        self.idle = SimpleQueue()
+
+    def project(self, scope, directory):
+        if self.stopping.is_set():
+            return False
+        try:
+            process = self.idle.get_nowait()
+        except Empty:
+            process = None
+        try:
+            if process is None:
+                command = loader.module_command("multiverse.plugins.host", "--indexed-turn-worker", self.root)
+                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL)
+            request = json.dumps([str(scope), directory.name]).encode() + b"\n"
+            process.stdin.write(request)
+            process.stdin.flush()
+            deadline = time.monotonic() + _projection_timeout()
+            while not self.stopping.is_set() and time.monotonic() < deadline:
+                if select.select([process.stdout], [], [], 0.025)[0]:
+                    response = os.read(process.stdout.fileno(), 1)
+                    if response in (b"d", b"c"):
+                        self.idle.put(process)
+                        process = None
+                        return response == b"c"
+                    break
+        except OSError:
+            pass
+        finally:
+            if process is not None:
+                _end_projection_process(process)
+        if self.stopping.is_set():
+            return False
+        _log(self.root, f"indexed turn projection for {directory.name} failed; trying isolated read")
+        return True
+
+    def close(self):
+        while not self.idle.empty():
+            _end_projection_process(self.idle.get_nowait())
+
+
+def _projection_timeout():
+    from ..runtime import prompt_events
+
+    return prompt_events._TURN_PROJECTION_SECONDS + 3
+
+
+def _end_projection_process(process):
+    try:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=1)
+    except ProcessLookupError:
+        process.wait()
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait()
+    finally:
+        for stream in (process.stdin, process.stdout):
+            if stream is not None:
+                stream.close()
+
+
+def _run_turn_projection(root, scope, directory, keys, stopping):
+    """Each background process owns one projection. Its cache exits with it."""
+    from ..runtime import prompt_events
+
+    if stopping.is_set():
+        return
+    command = loader.module_command("multiverse.plugins.host", "--turn-projection", scope, directory.name)
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+    except OSError as error:
+        if not stopping.is_set():
+            _log(root, f"could not start turn projection for {directory.name} ({type(error).__name__})")
+            prompt_events.abandon_turn_projection(directory, keys)
+        return
+    deadline = time.monotonic() + _projection_timeout()
+    try:
+        while process.poll() is None and not stopping.wait(0.025):
+            if time.monotonic() >= deadline:
+                break
+    finally:
+        _end_projection_process(process)
+        if process.returncode and not stopping.is_set():
+            _log(root, f"turn projection for {directory.name} exited with status {process.returncode}")
+            prompt_events.abandon_turn_projection(directory, keys)
+
+
 def supervise(root, *, exit_when_idle=True, stopping=None):
     """Run the supervisor until stopped (SIGTERM, or `stopping` when given) or no plugin needs it."""
     root = Path(root).resolve()
@@ -217,6 +405,10 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     beating = threading.Event()
     beat = threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True)
     beat.start()
+    projection_stopping = threading.Event()
+    projection = threading.Thread(target=_project_agent_events, args=(root, projection_stopping),
+                                  name="turn event projection", daemon=True)
+    projection.start()
     try:
         while not stopping.is_set():
             if _restart_requested(root, started):
@@ -225,6 +417,9 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 _log(root, "restarting with the new code: draining the workers")
                 _write_status(root, started, workers, restarts, stopped, code=running_code, restarting=True,
                               pid_started=as_started)
+                projection_stopping.set()
+                projection_wake.wake(root)
+                projection.join()
                 if _drain_workers(list(workers.values()), stopping):
                     workers.clear()
                     restart = True
@@ -268,7 +463,10 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     finally:
         # All at once, each finishing its call in flight; the heartbeat goes on meanwhile, so the host still counts
         # as running and nothing starts a second one beside it.
+        projection_stopping.set()
+        projection_wake.wake(root)
         _stop_workers(list(workers.values()))
+        projection.join()
         beating.set()
         beat.join(5)  # no status write left half way when the new code takes over the process
         if not restart:
@@ -408,6 +606,8 @@ def _may_restart(root, name, code, restarts, hung, stopped):
     the restart window, and a plugin that keeps hanging must still end up stopped, and shown so; hangs weeks
     apart never add up to a stop."""
     _log(root, f"{name}: worker exited with {code}")
+    if code == RELOAD_EXIT:
+        return True  # its plugin changed (approved, or edited where it runs as it is): the new version, at once
     if code == HUNG_EXIT:
         hung[name] = [moment for moment in hung.get(name, []) if time.monotonic() - moment < HUNG_WINDOW]
         hung[name].append(time.monotonic())
@@ -734,7 +934,7 @@ def work(root, name, supervisor=None):
         supervisor = os.getppid()
     root = Path(root).resolve()
     if os.getppid() != supervisor:
-        _log(root, f"{name}: supervisor gone; stopping")
+        _stopping(root, name)
         return 0
     loader.process = "host"
     # Before loading: a drain (SIGUSR1) that comes while the plugin loads must not end the process (its default).
@@ -747,38 +947,51 @@ def work(root, name, supervisor=None):
     if not scopes:
         return 0
     try:
-        loaded = loader.load(loader.entry(scopes[0], name))
+        observed = _observe(scopes[0], name, files=True)  # before the loader chooses: what a change is told from
+        entry = loader.entry(scopes[0], name)
+        loaded = loader.load(entry)
     except (OSError, ValueError) as error:
         _log(root, f"{name}: {error}")
         return 1
+    current_check = _still_running(entry, loaded, scopes[0], observed)
+    if current_check() == "changed":  # approved or edited while it loaded: start on that version instead
+        _log(root, f"{name}: its plugin changed as it loaded; its worker starts again on the new version")
+        return RELOAD_EXIT
     mv = api.Plugin(loaded)
     if stopping.is_set():
         return 0  # stopped or drained while it loaded: nothing started yet
     failed = threading.Event()
     services = _Services(loaded, mv, root, name, failed)
     services.start(scopes)
-    refreshed, hung_calls, orphaned = 0.0, False, False
+    refreshed, hung_calls, orphaned, reload = 0.0, False, False, False
     try:
         while not stopping.is_set() and not failed.is_set():
             if os.getppid() != supervisor:
-                _log(root, f"{name}: supervisor gone; stopping")
+                _stopping(root, name)
                 orphaned = True
                 break
             if time.monotonic() - refreshed > 5:
                 refreshed = time.monotonic()
-                current = needed(root).get(name, [])
-                if not current:
+                wanted = needed(root).get(name, [])
+                if not wanted:
                     break
-                if current != scopes:
+                if current_check(full=True) == "changed":
+                    reload = True  # with its files walked too, off the page path; or no event to tell
+                    break
+                if wanted != scopes:
                     # Turned on or off in a universe: its services start again with the new set.
-                    scopes = current
+                    scopes = wanted
                     services.stop()
                     services.start(scopes)
             if loaded.registrations.handlers:
                 for scope in scopes:
                     if stopping.is_set():
                         break
-                    _deliver(loaded, mv, scope, name, stopping)
+                    if _deliver(loaded, mv, scope, name, stopping, current_check) == "changed":
+                        reload = True
+                        break
+                if reload:
+                    break
                 _abandoned[:] = [item for item in _abandoned if loader.still_running(*item)]
                 if len(_abandoned) >= ABANDONED_PER_WORKER:
                     # Calls that never returned hold threads: a fresh worker has none (the supervisor starts it
@@ -793,13 +1006,15 @@ def work(root, name, supervisor=None):
         _finish_calls(loaded, draining, supervisor)
         services.stop(wait=None if draining.is_set() else SERVICES_STOP_SECONDS, supervisor=supervisor)
         if not orphaned and os.getppid() != supervisor:  # gone while it drained or stopped, after the loop
-            _log(root, f"{name}: supervisor gone; stopping")
+            _stopping(root, name)
             orphaned = True
         if orphaned and os.getpgrp() == os.getpid():
             # Nobody is left to end this worker's process group (the supervisor does that): end it here, with what
             # its stuck calls started (a hung subprocess.run), this worker last.
             os.killpg(os.getpgrp(), signal.SIGKILL)
-    return HUNG_EXIT if hung_calls else 1 if failed.is_set() else 0
+    if reload:
+        _log(root, f"{name}: its plugin changed; its worker starts again on the new version")
+    return HUNG_EXIT if hung_calls else RELOAD_EXIT if reload else 1 if failed.is_set() else 0
 
 
 def _finish_calls(loaded, draining, supervisor):
@@ -855,7 +1070,107 @@ class _Services:
         self.stopping, self.threads = None, []
 
 
-def _deliver(loaded, mv, scope, name, stopping=None):
+def _running_from_copy(loaded):
+    """The fingerprint of the trusted copy `loaded` runs from (its folder is named by it), or None."""
+    try:
+        cache = (trust.user_directory() / trust.CACHE).resolve()
+        running = Path(loaded.manifest.directory).resolve()
+        if running.is_relative_to(cache):
+            value = "sha256:" + running.relative_to(cache).parts[0]
+            return value if trust.valid_fingerprint(value) else None
+    except (OSError, RuntimeError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _pin_of(pins, folder):
+    """("none", None) when nothing pins `folder` (a removal, proved), ("pinned", fingerprint), or ("damaged", None)
+    for an entry there that isn't a pin as trust writes it."""
+    if folder not in pins:
+        return "none", None
+    pin = pins[folder]
+    if not isinstance(pin, dict) or not trust.valid_fingerprint(pin.get("fingerprint")):
+        return "damaged", None
+    return "pinned", pin["fingerprint"]
+
+
+def _observe(scope, name, files=False, skip=None):
+    """What could decide which copy of plugin `name` runs in `scope`, read with bounded, non-blocking reads only (no
+    trust check, hash or lock): each copy discovery finds, in precedence order, that is a copy of `name` or whose
+    plugin.json can't be read (it could be one), as (source, folder, its manifest: ("ok", event types) or
+    ("unreadable",), its pin as _pin_of, and, with `files`, for a pinned one other than `skip` its files' stat
+    signature, which an edit or its undoing moves: a walk of its tree, so only ever off the page path). None when the
+    pins or the plugin folders can't be read."""
+    from . import manifest as manifests
+    pins = trust.pins_now()
+    if pins is None:
+        return None
+    try:
+        candidates = loader._source_directories(scope)
+    except (OSError, RuntimeError):
+        return None
+    seen = []
+    for source, directory in candidates:
+        try:
+            folder = str(Path(directory).resolve())
+        except (OSError, RuntimeError):
+            return None
+        try:
+            found = manifests.load_bytes(directory, trust.read_regular(Path(directory) / manifests.FILE, raw=True))
+        except FileNotFoundError:
+            continue  # no plugin there
+        except (OSError, ValueError):
+            seen.append((source, folder, ("unreadable",), _pin_of(pins, folder), None))
+            continue
+        if found.name != name:
+            continue
+        pin = _pin_of(pins, folder)
+        stamp = None
+        if files and pin[0] != "none" and folder != skip:
+            try:
+                stamp = trust.signature(folder)
+            except OSError:
+                stamp = "unreadable"
+        seen.append((source, folder, ("ok", tuple(sorted(found.events))), pin, stamp))
+    return seen
+
+
+def _still_running(entry, loaded, scope, observed):
+    """A check whether what `loaded` runs is still what should run in `scope`: "unchanged", "changed" or "unknown"
+    (can't be told now: nothing is concluded, nothing consumed), from _observe alone: bounded before each page (pins
+    and manifests), with `full` (the worker's 5-second refresh) also the file signatures of the other pinned copies,
+    so a passed-over copy restored to its approved files is noticed there, never by a walk before a page. Which copy
+    runs is never judged here: `observed` was taken just before the loader chose, and any difference since among
+    what could decide it is a change, so the next worker's loader chooses again (and observes again, so nothing
+    restarts for ever). Its own copy is bound to what loaded: for a trusted copy, the fingerprint it is; for a
+    plugin that runs as it is, the event types of the very manifest it loaded with (so an unapproved edit of a
+    trusted copy restarts nothing). Its own copy gone is a change; its plugin.json unreadable, or its pin damaged,
+    is unknown."""
+    selected = str(Path(entry.directory).resolve()) if getattr(entry, "directory", None) is not None else None
+    copy, kinds = _running_from_copy(loaded), tuple(sorted(loaded.manifest.events))
+
+    def others(observation, full):
+        return [item if full else item[:4] for item in observation if item[1] != selected]
+
+    def check(full=False):
+        now = _observe(scope, loaded.name, files=full, skip=selected)
+        if now is None or selected is None:
+            return "unknown"  # first: what can't be read decides nothing
+        own = next((item for item in now if item[1] == selected), None)
+        if own is None:
+            return "changed"  # its folder holds no copy of it any more
+        if own[2][0] != "ok" or own[3][0] == "damaged":
+            return "unknown"
+        if observed is None or others(now, full) != others(observed, full):
+            return "changed"  # what else decides which copy runs moved since it was chosen: chosen again
+        if copy is not None:
+            state, value = own[3]
+            return "unchanged" if state == "pinned" and value == copy else "changed"
+        return "unchanged" if own[2][1] == kinds else "changed"
+    return check
+
+
+def _deliver(loaded, mv, scope, name, stopping=None, current=None):
     """Deliver what is new in `scope`'s journal, at least once to each handler.
 
     Each handler goes through the events in order on its own: one still
@@ -869,7 +1184,10 @@ def _deliver(loaded, mv, scope, name, stopping=None):
     once every matching handler finished with it, failed (recorded) or was given
     up on. A universe that was removed or moved is left alone. Once `stopping` is set, no other call starts, not
     even another handler's of the same event: the one in flight finishes and is kept, the rest wait in the journal
-    for the next worker."""
+    for the next worker. With `current` (_still_running), a page read once the plugin changed is not dispatched:
+    "changed" is returned, so the worker stops and its new version gets those events (what a change admits is
+    journaled after it, so it is never read before a check that sees the change); while that can't be told,
+    "unknown" is returned and nothing is consumed, to be tried again."""
     scope = Path(scope)
     if not is_file_replaced(scope / "universe.json"):
         return
@@ -887,12 +1205,17 @@ def _deliver(loaded, mv, scope, name, stopping=None):
     _journals[place] = journal
     held, complete, page_after = set(), True, after  # held: handlers that have not finished an earlier event
     handlers = range(len(loaded.registrations.handlers))
+    events.merge(scope)  # events spilled while the journal was busy, should no writer have come since
     for page in range(PAGES_PER_POLL):
         found, gap = events.read(scope, page_after, limit=READ_LIMIT)
         if (found or gap is not None) and events.journal_id(scope) != journal:
             # A new/replaced journal appeared after the cursor and progress reads. Never dispatch that
             # batch under the earlier generation; keep earlier pages' progress and try again next poll.
             break
+        state = current() if current is not None and (found or gap is not None) else "unchanged"
+        if state != "unchanged":
+            _save_progress(loaded, scope, name, journal)
+            return state  # changed: not this version's to skip, the next worker runs the new one from here
         if page == 0 and gap is not None:
             found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
         if not found:
@@ -1049,14 +1372,62 @@ def gave_up(scope, name):
     return found
 
 
+def _indexed_turn_worker(root):
+    from ..runtime import prompt_events, transcripts
+
+    root = Path(root).resolve()
+    # Keep adapter stdout away from the private single-byte response channel.
+    with os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0) as reply:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        while line := sys.stdin.buffer.readline(16384):
+            signal.alarm(prompt_events._TURN_PROJECTION_SECONDS + 1)
+            try:
+                scope_name, name = json.loads(line)
+                scope = Path(scope_name).resolve()
+                ancestor = scope
+                while ancestor != root and (ancestor := universes.parent(ancestor)) is not None:
+                    pass
+                if ancestor != root or not name or Path(name).name != name or name in (".", ".."):
+                    return 2
+                directory = scope / "state" / "agents" / name
+                response = b"d"
+                if not directory.is_symlink() and events.root_of(directory) == scope:
+                    try:
+                        prompt_events.publish(directory, resolve_turns=True, indexed_only=True)
+                    except transcripts.TurnIndexRequired:
+                        response = b"c"
+                reply.write(response)
+            finally:
+                signal.alarm(0)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m multiverse.plugins.host", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--worker", action="store_true", help="run one plugin's worker")
+    parser.add_argument("--turn-projection", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--indexed-turn-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--supervisor", type=int, help=argparse.SUPPRESS)
     parser.add_argument("root")
     parser.add_argument("name", nargs="?")
     args = parser.parse_args(argv)
+    if args.indexed_turn_worker:
+        return _indexed_turn_worker(args.root)
+    if args.turn_projection:
+        from ..runtime import prompt_events
+
+        if not args.name or Path(args.name).name != args.name or args.name in (".", ".."):
+            parser.error("--turn-projection needs an agent directory name")
+        signal.alarm(prompt_events._TURN_PROJECTION_SECONDS + 1)
+        try:
+            root = Path(args.root).resolve()
+            directory = root / "state" / "agents" / args.name
+            if not directory.is_symlink() and events.root_of(directory) == root:
+                prompt_events.publish(directory, resolve_turns=True)
+        finally:
+            signal.alarm(0)
+        return 0
     if args.worker:
         if not args.name:
             parser.error("--worker needs the plugin's name")

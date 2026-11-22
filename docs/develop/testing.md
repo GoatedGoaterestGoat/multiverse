@@ -109,6 +109,8 @@ claude plugin test src/multiverse/plugins/builtin/typeahead/claude
 node --experimental-strip-types tests/pi_bridge_test.mjs
 ```
 
+The mod's tests import `test` from `tests/kit.ts`, not straight from Claude's kit. It gives each test 30 seconds instead of the kit's 5, since a test that takes milliseconds alone can take several seconds on a loaded machine, and the tests' clocks are the kit's, so the budget changes no check. It also runs what a test's world registered with `onTestEnd`, every one of them, pass, fail or time out: the wrapper keeps a few seconds of each test's budget for them, so they run before the kit moves on. That matters because each test gets a fresh copy of the plugin, but the previous copy keeps running until its own work settles, and meanwhile it reads the next test's hooks. A test must not end with a prompt still held, an append still waiting, or a hook it started unawaited.
+
 ## Fixtures and fakes
 
 | Fixture | Where | Gives you |

@@ -12,7 +12,7 @@ from unittest.mock import patch
 from websockets.exceptions import ConnectionClosed
 
 from multiverse.harnesses.codex import prompt_codec as codec, prompt_files, prompts
-from multiverse.harnesses.types import PromptAnswer, PromptInput
+from multiverse.harnesses.types import PromptAnswer, PromptClosed, PromptInput, PromptOpened
 import test_codex_prompts as fixtures
 
 
@@ -45,6 +45,114 @@ class AsyncQuestionTest(unittest.TestCase):
                 'questions': questions if questions is not None else [{'title': 'Which?', 'options': ['One', 'Two']}]}}})
         self.flush()
         return prompts.catalog(self.session).value['prompts']
+
+    def test_prompt_transitions_survive_coalescing_and_use_the_durable_async_winner(self):
+        """Fast callbacks can lose an inventory edge, and reserved async input owns its own close outcome."""
+        recorded = []
+        def publish():
+            native, rows = self.relay.take_transitions()
+            self.assertEqual(native, self.native)
+            recorded.extend(rows)
+        self.relay.notify_transitions = publish
+
+        async def check():
+            callback = {'id': 55, 'method': fixtures.COMMAND, 'params': fixtures.params(threadId=self.native)}
+            self.relay.observe('incoming', callback)
+            self.relay.observe('incoming', callback)
+            id = self.relay.by_request[prompts.request_id(55)]
+            reply = {'id': 55, 'result': {'decision': 'accept'}}
+            self.assertTrue(self.relay.terminal(reply))
+            await self.relay.before_send(reply)
+            self.assertEqual(recorded, [
+                PromptOpened(id=id, kind='permission', requires_waiting=True),
+                PromptClosed(id=id, kind='permission', state='person', cause='person'),
+            ])
+            self.assertEqual(prompts.catalog(self.session).value['prompts'], [])
+            self.relay.observe('incoming', {'method': 'serverRequest/resolved',
+                                            'params': {'threadId': self.native, 'requestId': 55}})
+            await self.relay.flush()
+            self.assertEqual(len(recorded), 2)
+
+            item = {'type': 'agentMessage', 'id': 'events', 'delivery': 'async',
+                    'text': 'PRIVATE PROMPT', 'questions': [
+                        {'title': 'PRIVATE QUESTION', 'options': ['PRIVATE ANSWER']},
+                        {'title': 'Reserved', 'options': ['One']},
+                        {'title': 'Retained', 'options': ['One']},
+                    ]}
+            self.relay.observe('incoming', {'method': 'item/completed', 'params': {
+                'threadId': self.native, 'turnId': 'turn-one', 'item': item}})
+            await self.relay.flush()
+            ids = [row['id'] for row in prompts.catalog(self.session).value['prompts']]
+            self.assertEqual(len(ids), 3)
+            self.assertEqual(recorded[2:], [PromptOpened(id=id, kind='question', requires_waiting=False) for id in ids])
+
+            self.relay.observe('incoming', {'method': 'turn/completed', 'params': {
+                'threadId': self.native, 'turn': {'id': 'turn-one'}}})
+            await self.relay.flush()
+            self.assertEqual(len(recorded), 5)
+            reserved = prompts.submit(self.session, PromptAnswer(id=ids[1], answers={'answer': ('One',)}),
+                                      SimpleNamespace(check_session=lambda: None))
+            self.assertIsInstance(reserved.value, PromptInput)
+
+            for index, title, answer in ((0, 'PRIVATE QUESTION', 'PRIVATE ANSWER'), (1, 'Reserved', 'One')):
+                self.relay.observe('incoming', {'method': 'item/started', 'params': {
+                    'threadId': self.native, 'turnId': 'turn-two', 'item': {'type': 'userMessage',
+                        'content': [{'type': 'text', 'text': wrapper('events', index, title, answer)}]}}})
+            # No further native frame is needed to report either settled edge.
+            notified = asyncio.Event()
+            def worker_publication():
+                publish()
+                notified.set()
+            self.relay.notify_transitions = worker_publication
+            async def unexpected_pickup(candidate):
+                self.fail('A native reply observation must not send anything')
+            worker = asyncio.create_task(self.relay.run(unexpected_pickup))
+            try:
+                await asyncio.wait_for(notified.wait(), 3)
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            self.assertEqual(recorded[5:], [
+                PromptClosed(id=ids[0], kind='question', state='person', cause='person', requires_waiting=False)
+            ])
+            await self.relay.close()
+            self.assertEqual(recorded[6:], [
+                PromptClosed(id=ids[2], kind='question', state='gone', cause='connection_lost', requires_waiting=False)
+            ])
+            self.assertNotIn('PRIVATE', repr(recorded))
+        asyncio.run(check())
+
+    def test_prompt_transition_batches_are_bounded_and_cannot_cross_a_conversation_switch(self):
+        """A busy publisher can leave more edges than one batch or carry an old ID past a switch."""
+        self.relay.notify_transitions = lambda: None
+        ids = []
+
+        async def check():
+            for wire in range(prompts.MAX_REQUESTS + 1):
+                self.relay.observe('incoming', {
+                    'id': wire, 'method': fixtures.COMMAND, 'params': fixtures.params(threadId=self.native)})
+                ids.append(self.relay.by_request[prompts.request_id(wire)])
+                self.assertTrue(self.relay.terminal({'id': wire, 'result': {'decision': 'accept'}}))
+            await self.relay.flush()
+            first = self.relay.take_transitions()
+            self.assertIsNotNone(first)
+            native, rows = first
+            self.assertEqual(native, self.native)
+            self.assertEqual(len(rows), 2 * prompts.MAX_REQUESTS)
+            self.assertEqual([row.id for row in rows[::2]], ids[:-1])
+            self.assertEqual([row.id for row in rows[1::2]], ids[:-1])
+            self.assertTrue(all(isinstance(row, PromptOpened) for row in rows[::2]))
+            self.assertTrue(all(isinstance(row, PromptClosed) for row in rows[1::2]))
+
+            # The core's switch boundary closes the old conversation. Its
+            # queued adapter edges must stay retired even after switching back.
+            self.connection.root.native_id = 'other-conversation'
+            self.relay.synchronize()
+            self.connection.root.native_id = self.native
+            self.relay.synchronize()
+            await self.relay.flush()
+            self.assertIsNone(self.relay.take_transitions())
+        asyncio.run(check())
 
     def test_native_question_encoding_keeps_identity_options_and_the_exact_three_field_envelope(self):
         """A normal input without the exact native envelope loses the question identity or changes its answer."""

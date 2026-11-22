@@ -111,29 +111,94 @@ class ClaudeBridgeTest(BaseTest):
 
     def test_launch_mode_and_hidden_flags_per_setting_and_version(self):
         """Unset, true and false inbox_bridge settings against new, old and unreadable Claude versions pick bridge or
-        plain with the exact hidden flags (--plugin-dir, --messaging-socket-path, crossSessionInbound), and
+        plain with the exact hidden flags (--plugin-dir, --messaging-socket-path, crossSessionInbound, and the agent's
+        folder in --settings, never --add-dir, which since 2.1.330 stops a launch at a dialog), and
         capabilities --harness says the same of bridge and usage with no launch; fragile because it hinges on a version
         gate and undocumented Claude flags, and a wrong pick quietly makes every agent launch-only or has agents plan
         around abilities their launches lack (CLAUDE-2, CLAUDE-9, 7c6412f)."""
         with self.subTest('the bridge launches the mod on the launch socket'):
-            plain = self.bridge(False).spawn(LaunchContext('spawn', self.values()))
+            values = self.values()
+            folder = {'permissions': {'additionalDirectories': [values['agent_dir']]}}
+            plain = self.bridge(False).spawn(LaunchContext('spawn', values))
             self.assertNotIn('--plugin-dir', plain.argv)
             self.assertIsNone(plain.control_endpoint)
             self.assertEqual(dict(plain.environment), {})
+            self.assertEqual(list(plain.argv[1:3]), ['--settings', json.dumps(folder)])
+            self.assertNotIn('--add-dir', plain.argv)
             adapter = self.bridge()
-            values = self.values()
             saved = SessionHandle(values['agent_id'], 'claude', str(self.work), native_id=values['session_id'])
             for command in (adapter.spawn(LaunchContext('spawn', values)),
                             adapter.resume(saved, LaunchContext('resume', values))):
                 with self.subTest(argv=command.argv[:2]):
                     self.assertEqual(list(command.argv[1:7]), ['--plugin-dir', str(MOD), '--messaging-socket-path',
-                                     self.socket, '--settings', '{"crossSessionInbound": "accept"}'])
+                                     self.socket, '--settings',
+                                     json.dumps({'crossSessionInbound': 'accept', **folder})])
+                    self.assertNotIn('--add-dir', command.argv)
                     self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
                     self.assertEqual(command.environment['CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'], '1')
                     self.assertIn(values['session_id'], command.argv)
             self.assertEqual(adapter.spawn(LaunchContext('spawn', values)).argv[-1], values['task'])
             self.assertTrue((MOD / '.claude-plugin/plugin.json').is_file())
             self.assertTrue((MOD / 'hooks/index.ts').is_file())
+        with self.subTest("a harness's own --settings stays its own, and the folder then goes in --add-dir"):
+            # Claude keeps only the last --settings, so mv2's would lose to theirs, and the agent its folder.
+            own = self.work / 'own-settings.json'
+            own.write_text('{}')
+            path = self.root / 'harnesses/claude/harness.json'
+            for bridged in (False, True):
+                for mode in ('spawn', 'resume'):
+                    for field in ('args', f'{mode}_args'):
+                        with self.subTest(bridged=bridged, mode=mode, field=field):
+                            config = read(path)
+                            config['settings'].update(args=[], spawn_args=[], resume_args=[])
+                            config['settings'][field] = ['--settings', str(own)]
+                            write(path, config)
+                            adapter = self.bridge(bridged)
+                            context = LaunchContext(mode, values)
+                            command = (adapter.spawn(context) if mode == 'spawn' else
+                                       adapter.resume(saved, context))
+                            argv = list(command.argv)
+                            end = argv.index('--') if '--' in argv else len(argv)
+                            settings = [argv[n + 1] for n in range(end - 1) if argv[n] == '--settings']
+                            self.assertEqual(settings[-1], str(own))
+                            self.assertNotIn('permissions', ''.join(settings[:-1]))
+                            self.assertEqual(argv[argv.index('--add-dir') + 1], values['agent_dir'])
+            config = read(path)
+            config['settings'].update(args=[], spawn_args=[], resume_args=[])
+            write(path, config)
+            # Only the harness's own arguments count: a bootstrap that starts like the flag is a value, not settings.
+            worded = {**values, 'bootstrap': f'--settings={own} is how a catalogue entry may begin'}
+            for bridged in (False, True):
+                for mode in ('spawn', 'resume'):
+                    with self.subTest(bootstrap=True, bridged=bridged, mode=mode):
+                        adapter, context = self.bridge(bridged), LaunchContext(mode, worded)
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(saved, context)
+                        self.assertNotIn('--add-dir', command.argv)
+                        argv = list(command.argv)
+                        self.assertIn(values['agent_dir'], argv[argv.index('--settings') + 1])
+            # After a '--' it can still be the flag: Claude takes '--' as the value of --append-system-prompt. Anything
+            # shaped like it keeps --add-dir, as before; only missing a real one would lose the folder.
+            # And as launched: a placeholder such as {task} can render as the flag.
+            for bridged in (False, True):
+                with self.subTest(rendered=True, bridged=bridged):
+                    config = read(path)
+                    config['settings'].update(args=[], spawn_args=['{task}'], resume_args=[])
+                    write(path, config)
+                    command = self.bridge(bridged).spawn(LaunchContext('spawn', {**values, 'task': f'--settings={own}'}))
+                    argv = list(command.argv)
+                    self.assertEqual(argv[argv.index('--add-dir') + 1], values['agent_dir'])
+            for configured in (['--', f'--settings={own}'], ['--append-system-prompt', '--', '--settings', str(own)]):
+                for bridged in (False, True):
+                    with self.subTest(configured=configured, bridged=bridged):
+                        config = read(path)
+                        config['settings'].update(args=[], spawn_args=configured, resume_args=[])
+                        write(path, config)
+                        command = self.bridge(bridged).spawn(LaunchContext('spawn', {**values, 'task': ''}))
+                        argv = list(command.argv)
+                        self.assertEqual(argv[argv.index('--add-dir') + 1], values['agent_dir'])
+            config = read(path)
+            config['settings'].update(args=[], spawn_args=[], resume_args=[])
+            write(path, config)
         with self.subTest('unset is auto'):
             command, _ = self.launch(None, (2, 1, 289))
             self.assertEqual(list(command.argv[1:3]), ['--plugin-dir', str(MOD)])

@@ -7,12 +7,13 @@ import threading
 import time
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import cli, plugins
+from multiverse import cli, plugins, store
 from multiverse.plugins import __main__ as helper, api, config, loader, manifest, settings, trust
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.tools import doctor, plugins as tool
@@ -176,6 +177,772 @@ class DiscoveryTest(PluginTestCase):
             self.assertEqual(loader.active(self.root), [])
             self.assertEqual(plugins.bootstrap_lines(self.root), [])
         self.assertEqual(plugins.bootstrap_lines(self.root), ["hi"])
+
+
+class RegistryTest(PluginTestCase):
+    def test_a_package_of_mv2s_own_python_runs_its_upgrade_and_only_another_pythons_is_pinned(self):
+        """A pip upgrade of a plugin in mv2's own Python runs at once, a PYTHONPATH one is pinned; else it's off."""
+        from multiverse.plugins import registry
+        site, private = self.work / "site", self.work / "private"
+        agent = {"MV2_CONTROL_SOCKET": str(self.work / "s.sock")}
+        through = os.pathsep.join(filter(None, (str(private), os.environ.get("PYTHONPATH"))))
+        project = self.work / "project"
+        # (row, where its package is found, where its distribution was registered, PYTHONPATH, its state after an
+        # upgrade in place)
+        for number, (row, where, origin, path, upgraded) in enumerate((
+                ("turned on", site, site, None, "on"),
+                ("an editable install, its project elsewhere", project, site, None, "on"),
+                ("found ahead of its distribution, outside it", project, site, None, "changed"),
+                ("on by hand, as main left it", site, site, None, "on"),
+                ("pinned by an earlier listing of this branch", site, site, None, "on"),
+                ("pinned from MV2_PLUGIN_PATH, now also installed there", site, site, None, "changed"),
+                ("found only through PYTHONPATH", private, private, through, "changed"),
+                ("a link in PYTHONPATH into mv2's Python", "link", site, through, "changed"),
+                ("registered through PYTHONPATH, its files in mv2's Python", site, private, through, "changed"),
+                ("a link in mv2's Python to a folder outside it", "outlink", site, None, "changed"))):
+            name = f"fakeplug{number}"
+            with self.subTest(row):
+                def release(version):
+                    return self.write_plugin(name, {"version": version, "module": "plugin"},
+                                             {"plugin.py": f"VERSION = {version!r}\ndef register(mv):\n    pass\n"},
+                                             where={"link": site, "outlink": self.work / "outside"}.get(where, where))
+                folder = release("1.0.0")
+                if where in ("link", "outlink"):  # what the entry point's package is found at: a link to it
+                    linked = (private if where == "link" else site) / name
+                    linked.parent.mkdir(exist_ok=True)
+                    linked.symlink_to(folder)
+                    folder = linked
+                environment = {"PYTHONPATH": path} if path else {}
+                with mock.patch.object(loader, "installed_directories", return_value=[folder]), \
+                        mock.patch.object(loader, "installed_origin", return_value={
+                            "entry": str(origin), "editable": str(project) if "editable" in row else None}), \
+                        mock.patch.object(registry, "_own_entries", return_value=registry._spellings(site)), \
+                        mock.patch.dict(os.environ, environment):
+                    if row == "turned on":
+                        plugins.set_enabled(self.root, name, True)
+                    else:
+                        self.enable(name)
+                        if row.startswith("pinned"):
+                            trust.pin(folder, trust.current(folder))
+                            registry.path(self.root).parent.mkdir(parents=True, exist_ok=True)
+                            store.write(registry.path(self.root), {"schema": 1, "plugins": {name: {
+                                "events": [], "source": "path" if "PATH" in row else "installed",
+                                "directory": str(folder.resolve())}}})
+                    plugins.listing(self.root, wait=None)  # the person's
+                    self.assertEqual(registry.read(self.root)[name]["directory"],
+                                     None if upgraded == "on" else str(folder.resolve()))
+                    release("2.0.0")  # pip install -U, in place
+                    plugins.listing(self.root, wait=None)
+                    with mock.patch.dict(os.environ, agent):
+                        found = self.entry(name)
+                    self.assertEqual((found.state, found.manifest.version), (upgraded, "2.0.0"))
+                    plugins.set_enabled(self.root, name, False)
+
+    def test_a_plugin_that_comes_to_follow_an_event_type_gets_it_without_a_listing(self):
+        """A plugin's new event type is journaled once it's trusted or edited, not at a later listing; else all lost."""
+        from multiverse.plugins import events, registry
+        home = self.work / "dev"
+        person = lambda: mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(home)})  # noqa: E731
+        elsewhere = lambda: mock.patch.dict(os.environ, {  # noqa: E731
+            "MV2_PLUGIN_PATH": "", "MV2_CONTROL_SOCKET": str(self.work / "s.sock")})  # an agent's: no such path
+        # (source, where it is, whether an edit waits for mv2 plugins trust)
+        for source, where, trusted in (("universe", self.root / "plugins", True),
+                                       ("personal", trust.user_directory() / "plugins", False),
+                                       ("path", home, True)):
+            name = f"watch{source}"
+            with self.subTest(source):
+                def write(kinds):
+                    return self.write_plugin(name, {"extends": ["events"], "events": kinds}, where=where)
+                write(["agent.status"])
+                with person():
+                    if source == "universe":
+                        tool.run(self.root, plugin_action="trust", name=name)
+                    plugins.set_enabled(self.root, name, True)
+                    plugins.listing(self.root, wait=None)
+                try:
+                    self.assertEqual(registry.read(self.root)[name]["events"], ["agent.status"])
+                    write(["message.saved"])  # in place of agent.status, and no listing after this
+                    if trusted:
+                        with elsewhere():  # approved at other content: its approved type counts, the edit's waits
+                            self.assertEqual((events.subscribers(self.root, "message.saved"),
+                                              events.subscribers(self.root, "agent.status")), ([], [name]))
+                        if source == "universe":  # an approval that can't be read lends the edit nothing either
+                            from multiverse.plugins import installer
+                            with elsewhere(), mock.patch.object(installer, "_pins",
+                                                                side_effect=installer.InstallError("damaged")):
+                                self.assertEqual(events.subscribers(self.root, "message.saved"), [])
+                    if source == "path":
+                        with elsewhere():
+                            self.assertEqual(events.subscribers(self.root, "agent.status"), [name])
+                    if trusted:
+                        with person():
+                            tool.run(self.root, plugin_action="trust", name=name)
+                    if trusted:  # the approval keeps the approved types, read back without hashing anything
+                        pinned = trust._records()[str(Path(where / name).resolve())]
+                        self.assertEqual(pinned["events"], ["message.saved"])
+                    with elsewhere(), mock.patch.object(trust, "fingerprint", side_effect=AssertionError("hashed")), \
+                            mock.patch.object(trust, "_remember", side_effect=AssertionError("wrote")):
+                        with mock.patch.object(config, "load", wraps=config.load) as switches:
+                            self.assertEqual(events.subscribers(self.root, "message.saved"), [name])
+                        self.assertEqual(switches.call_count, 1)  # plugins.json read once, also past the edit
+                        self.assertEqual(events.subscribers(self.root, "agent.status"), [])
+                        self.assertIsNotNone(events.emit(self.root, "message.saved", data={}))
+                finally:
+                    with person():
+                        plugins.set_enabled(self.root, name, False)
+        with self.subTest("a pin's approved types answer; older pins are admitted, proved off the lookup"):
+            universe = self.root / "plugins"
+            kept = self.write_plugin("kept", {"extends": ["events"], "events": ["agent.status"]}, where=universe)
+            trust.trust(kept)  # kept with its types
+            self.write_plugin("kept", {"extends": ["events"], "events": ["message.saved"]}, where=universe)
+            older = self.write_plugin("older", {"extends": ["events"], "events": ["agent.ready"]}, where=universe)
+            trust.pin(older, trust.current(older))  # a pin made before types were kept with it
+            copy = trust.cached(older, trust.current(older))  # complete, then edited: only hashing would tell
+            (copy / "plugin.json").chmod(0o644)
+            (copy / "plugin.json").write_text(json.dumps({"schema": 1, "name": "older", "version": "0.1.0",
+                                                         "api": "1.0", "extends": ["events"],
+                                                         "events": ["agent.ready", "message.saved"]}))
+            legacy = self.write_plugin("legacy", {"extends": ["events"], "events": ["agent.exit"]}, where=universe)
+            trust.pin(legacy, trust.fingerprint(legacy))  # pinned by an earlier installer: no types, memo or copy
+            for name in ("kept", "older", "legacy"):
+                self.enable(name)
+
+            def lookups():  # what a status report may do: read, never hash or write
+                stack = contextlib.ExitStack()
+                stack.enter_context(elsewhere())
+                for target in ("fingerprint", "fingerprint_with", "current", "cached", "_remember", "keep_events"):
+                    stack.enter_context(mock.patch.object(trust, target, side_effect=AssertionError(target)))
+                return stack
+            locks = [trust.user_directory() / name for name in (".trusted-plugins.lock", ".plugin-fingerprints.lock")]
+            for path in locks:
+                path.unlink(missing_ok=True)  # as if the maps were written by an mv2 without these locks
+            with lookups():  # kept types decide; older pins (types never kept) subscribe to nothing proved, but are
+                # admitted to the journal by their manifest's, so none of their events is lost meanwhile
+                self.assertEqual((events.subscribers(self.root, "agent.status"),
+                                  events.subscribers(self.root, "message.saved"),
+                                  events.subscribers(self.root, "agent.ready"),
+                                  events.admits(self.root, "agent.ready"),
+                                  events.admits(self.root, "agent.exit")), (["kept"], [], [], True, True))
+                self.assertIsNotNone(events.emit(self.root, "agent.ready", data={}))  # journaled, never lost
+            self.assertEqual([path.exists() for path in locks], [False, False])  # nothing written, not even these
+            ran = self.write_plugin("ran", {"extends": ["events"], "events": ["agent.session"]}, where=universe)
+            trust.pin(ran, trust.fingerprint(ran))
+            copy = trust.cached(ran, trust.fingerprint(ran))  # the copy made when it ran
+            approved_bytes, plain_read = (copy / "plugin.json").read_bytes(), Path.read_text
+
+            def edited_while_read(path, *args, **keywords):  # a manifest read on its own, edited just then
+                if path == copy / "plugin.json":
+                    path.write_text(json.dumps({**json.loads(approved_bytes), "events": ["message.saved"]}))
+                    try:
+                        return plain_read(path, *args, **keywords)
+                    finally:
+                        path.write_bytes(approved_bytes)
+                return plain_read(path, *args, **keywords)
+            with mock.patch.object(Path, "read_text", edited_while_read):
+                self.assertEqual(trust.copy_events(trust.fingerprint(ran)), ["agent.session"])  # the bytes hashed
+            listed = copy / ".mv2-files"
+            kept_list = listed.read_bytes() if listed.exists() else None
+            outside = self.work / "outside.json"
+            outside.write_text("{}")
+            reach = os.path.relpath(outside, copy)  # the copy's folder up to self.work, then outside.json
+            listed.write_text(json.dumps(["plugin.json", reach, str(outside)]))  # damaged: naming files outside it
+            plain_bytes, read, value = Path.read_bytes, [], trust.fingerprint(ran)
+            with mock.patch.object(Path, "read_bytes", lambda path: read.append(path) or plain_bytes(path)):
+                self.assertIsNone(trust.copy_events(value))
+            self.assertEqual([path for path in read if not str(path).startswith(str(copy))], [])  # nothing outside
+            if kept_list is None:
+                listed.unlink()
+            else:
+                listed.write_bytes(kept_list)
+            self.write_plugin("ran", {"extends": ["events"], "events": ["message.edited"]}, where=universe)
+            dormant = self.write_plugin("dormant", {"extends": ["events"], "events": ["turn.started"]},
+                                        where=universe)
+            trust.pin(dormant, trust.fingerprint(dormant))
+            self.enable("ran")
+            with lookups():  # its edit admitted for now, the host delivering only what the verified copy follows
+                self.assertEqual((events.subscribers(self.root, "message.edited"),
+                                  events.admits(self.root, "message.edited"),
+                                  events.admits(self.root, "turn.started")), ([], True, False))  # dormant is off
+            with person():
+                plugins.listing(self.root, wait=None)  # the person's: proves older pins' types and keeps them
+            records = trust._records()
+            self.assertEqual((records[str(legacy.resolve())]["events"], records[str(ran.resolve())]["events"]),
+                             (["agent.exit"], ["agent.session"]))  # the folder, and the copy it ran from
+            listed = registry.read(self.root)  # and the record has the approved types, never an edit's
+            self.assertEqual((listed["kept"]["events"], listed["ran"]["events"]), (["agent.status"], ["agent.session"]))
+            with lookups():  # proved and kept now: the approved types alone
+                self.assertEqual((events.subscribers(self.root, "agent.session"),
+                                  events.admits(self.root, "message.edited"),
+                                  events.subscribers(self.root, "agent.exit")), (["ran"], False, ["legacy"]))
+            self.enable("ran", False)
+            pins = trust.user_directory() / trust.FILE
+            saved = pins.read_bytes()
+            pins.unlink()
+            os.mkfifo(pins)  # nothing writes to it: a read that opens it the ordinary way waits for ever
+            try:
+                answer = []
+                waiting = threading.Thread(target=lambda: answer.append((events.subscribers(self.root, "agent.status"),
+                                                                         events.admits(self.root, "agent.status"))),
+                                           daemon=True)
+                with elsewhere():
+                    waiting.start()
+                    waiting.join(5)
+                self.assertEqual(answer, [([], True)])  # at once; no authority while the map can't be read, but admitted
+            finally:
+                if waiting.is_alive():
+                    descriptor = os.open(pins, os.O_RDWR | os.O_NONBLOCK)
+                    os.write(descriptor, b"{}")
+                    os.close(descriptor)
+                    waiting.join(5)
+                pins.unlink()
+                pins.write_bytes(saved)
+            for name in ("kept", "older", "legacy"):
+                self.enable(name, False)
+        with self.subTest("a recorded folder pinned before types were kept: no authority, admitted by its own"):
+            far = self.write_plugin("far", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            with person():
+                plugins.set_enabled(self.root, "far", True)  # recorded, at agent.status
+            self.write_plugin("far", {"extends": ["events"], "events": ["message.saved"]}, where=home)
+            trust.forget(far)
+            trust.pin(far, trust.fingerprint(far))  # newly approved by an mv2 that kept no types with pins
+            self.write_plugin("far", {"extends": ["events"], "events": ["agent.exit"]},
+                              where=self.root / "plugins")  # a same-name copy: never this one's types
+            with elsewhere():
+                self.assertEqual((events.subscribers(self.root, "message.saved"),
+                                  events.subscribers(self.root, "agent.status"),
+                                  events.admits(self.root, "message.saved"),
+                                  events.admits(self.root, "agent.exit")), ([], [], True, False))
+            trust.forget(far)  # its pin gone (untrusted): still no authority, its record still admitted
+            with elsewhere():
+                self.assertEqual((events.subscribers(self.root, "agent.status"),
+                                  events.admits(self.root, "agent.status")), ([], True))
+            with person():
+                plugins.set_enabled(self.root, "far", False)
+        # an entry that isn't a pin, one with no fingerprint, and one whose fingerprint no hash wrote (types kept)
+        for damage in (None, {"trusted_at": "2026-11-21"},
+                       {"fingerprint": "sha256:broken", "trusted_at": "2026-11-21", "events": ["message.saved"]}):
+            with self.subTest("a damaged pin entry is no approval and keeps what was recorded", damage=damage):
+                sound = self.write_plugin("sound", {"extends": ["events"], "events": ["agent.status"]},
+                                          where=self.root / "plugins")
+                trust.trust(sound)  # kept with its types
+                self.enable("sound")
+                with person():
+                    plugins.listing(self.root, wait=None)
+                self.write_plugin("sound", {"extends": ["events"], "events": ["message.saved"]},
+                                  where=self.root / "plugins")  # an edit nobody approved
+                pins = trust.user_directory() / trust.FILE
+                saved = pins.read_bytes()
+                data = json.loads(saved)
+                data["plugins"][str(sound.resolve())] = damage
+                pins.write_text(json.dumps(data))
+                try:
+                    with elsewhere():
+                        self.assertEqual((events.subscribers(self.root, "message.saved"),
+                                          events.admits(self.root, "agent.status")), ([], True))
+                    with person():
+                        plugins.listing(self.root, wait=None)
+                    self.assertEqual(registry.read(self.root)["sound"]["events"], ["agent.status"])
+                finally:
+                    pins.write_bytes(saved)
+                    self.enable("sound", False)
+        with self.subTest("a listing while the trust map can't be read changes no recorded types"):
+            steady = self.write_plugin("steady", {"extends": ["events"], "events": ["agent.status"]},
+                                       where=self.root / "plugins")
+            trust.pin(steady, trust.fingerprint(steady))  # pinned before types were kept with pins
+            self.enable("steady")
+            with person():
+                plugins.listing(self.root, wait=None)
+            self.write_plugin("steady", {"extends": ["events"], "events": ["message.saved"]},
+                              where=self.root / "plugins")  # an edit nobody approved
+            pins = trust.user_directory() / trust.FILE
+            saved = pins.read_bytes()
+            pins.write_bytes(b"{")  # damaged for the moment
+            try:
+                with person():
+                    plugins.listing(self.root, wait=None)
+            finally:
+                pins.write_bytes(saved)
+            self.assertEqual(registry.read(self.root)["steady"]["events"], ["agent.status"])
+            self.enable("steady", False)
+        with self.subTest("trusting one plugin pins no other"):
+            loose = self.write_plugin("loose", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            self.enable("loose")  # on by hand, never listed
+            self.write_plugin("solo", where=self.root / "plugins")
+            with person():
+                tool.run(self.root, plugin_action="trust", name="solo")
+            self.assertNotIn(str(loose.resolve()), trust._records())
+            self.enable("loose", False)
+        with self.subTest("a shared plugin that's gone is gone, its switch and record left"):
+            gone = self.write_plugin("gone", {"extends": ["events"], "events": ["agent.status"]},
+                                     where=trust.user_directory() / "plugins")
+            self.enable("gone")
+            with person():
+                plugins.listing(self.root, wait=None)
+            self.assertEqual(registry.read(self.root)["gone"]["events"], ["agent.status"])
+            shutil.rmtree(gone)
+            with elsewhere():
+                self.assertNotIn("gone", events.subscribers(self.root, "agent.status"))
+
+    def test_a_recorded_folder_is_one_identity_pinned_by_the_persons_enable_alone(self):
+        """A recorded folder runs pinned everywhere, pinned as admitted, never by a listing or agent; else edits run."""
+        from multiverse.plugins import events, registry
+        home = self.work / "dev"
+        person = lambda: mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(home)})  # noqa: E731
+        agent = {"MV2_CONTROL_SOCKET": str(self.work / "s.sock")}
+
+        def plugin(event="agent.status", label="one", where=home):
+            return self.write_plugin("relay", {"extends": ["events"], "events": [event]},
+                                     {"plugin.py": f"LABEL = {label!r}\ndef register(mv):\n    pass\n"}, where=where)
+        with self.subTest("on by hand, recorded by the person's listing"):
+            by_hand = self.write_plugin("byhand", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            self.enable("byhand")  # turned on by hand: plugins.json only
+            with mock.patch.dict(os.environ, agent):  # an agent's listing records no folder
+                plugins.listing(self.root, wait=None)
+            self.assertEqual(registry.read(self.root).get("byhand", {}).get("directory"), None)
+            with person():
+                plugins.listing(self.root, wait=None)  # the person's: at what it already runs
+            self.assertEqual((registry.read(self.root)["byhand"]["directory"], trust.state(by_hand)),
+                             (str(by_hand.resolve()), "trusted"))
+            with mock.patch.dict(os.environ, agent):
+                self.assertEqual(self.entry("byhand").state, "on")  # available where it isn't found
+        folder = plugin()
+        with self.subTest("the enable pins what it admitted"):
+            real = config.set_enabled
+
+            def edited_meanwhile(*args, **keywords):
+                done = real(*args, **keywords)
+                plugin(label="edited during the enable")
+                return done
+            with person(), mock.patch.object(config, "set_enabled", side_effect=edited_meanwhile):
+                plugins.set_enabled(self.root, "relay", True)
+            self.assertEqual(trust.state(folder), "changed")  # pinned at the admitted bytes, not these
+            with person():
+                tool.run(self.root, plugin_action="trust", name="relay")
+        with self.subTest("edits while being turned on pin and publish nothing of theirs"):
+            late = self.write_plugin("late", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            for patched, target in ((plugins, "_grant_for"), (config, "set_enabled")):
+                real = getattr(patched, target)
+
+                def then_edit(*args, real=real, **keywords):
+                    done = real(*args, **keywords)
+                    self.write_plugin("late", {"extends": ["events"], "events": ["agent.ready"]},
+                                      {"plugin.py": "EDITED = 1\n"}, where=home)
+                    return done
+                with person(), mock.patch.object(patched, target, side_effect=then_edit):
+                    plugins.set_enabled(self.root, "late", True)
+                self.assertNotEqual(trust.state(late), "trusted", target)  # pinned at what was checked, not these
+                self.assertEqual(registry.read(self.root)["late"]["events"], ["agent.status"], target)
+                trust.forget(late)
+                self.write_plugin("late", {"extends": ["events"], "events": ["agent.status"]}, {"plugin.py": ""},
+                                  where=home)
+                plugins.set_enabled(self.root, "late", False)
+        with self.subTest("the choice is published as admitted, whatever discovery finds after"):
+            other = self.write_plugin("pick", {"extends": ["events"], "events": ["agent.ready"]},
+                                      where=trust.user_directory() / "plugins")
+            chosen = self.write_plugin("pick", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            real = config.set_enabled
+
+            def personal_wins_after(*args, **keywords):
+                done = real(*args, **keywords)
+                os.environ["MV2_PLUGIN_PATH"] = ""  # now discovery finds the personal copy instead
+                return done
+            with person(), mock.patch.object(config, "set_enabled", side_effect=personal_wins_after):
+                plugins.set_enabled(self.root, "pick", True)
+            self.assertEqual((registry.read(self.root)["pick"], trust.state(chosen)),
+                             ({"events": ["agent.status"], "source": "path", "directory": str(chosen.resolve())},
+                              "trusted"))
+            shutil.rmtree(other)
+            plugins.set_enabled(self.root, "pick", False)
+        with self.subTest("a first listing of a folder pinned at other content records no patterns"):
+            stale = self.write_plugin("stale", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            trust.pin(stale, "another fingerprint")
+            self.enable("stale")
+            with person():
+                plugins.listing(self.root, wait=None)
+            self.assertEqual(registry.read(self.root)["stale"]["events"], [])
+            self.enable("stale", on=False)
+        with self.subTest("an incompatible manifest admitted is refused"):
+            odd = self.write_plugin("odd", {"extends": ["events"], "events": ["agent.status"]}, where=home)
+            real_snapshot = registry.snapshot
+
+            def swapped(directory):
+                self.write_plugin("odd", {"api": "999.0", "extends": ["events"], "events": ["agent.status"]},
+                                  where=home)
+                return real_snapshot(directory)
+            with person(), mock.patch.object(registry, "snapshot", side_effect=swapped), \
+                    self.assertRaisesRegex(plugins.PluginError, "needs plugin API 999.0"):
+                plugins.set_enabled(self.root, "odd", True)
+            self.assertFalse(config.load(self.root).is_on("odd"))
+            self.assertNotEqual(trust.state(odd), "trusted")
+        with self.subTest("pinned in the person's own process too"):
+            plugin(label="edited")
+            with person():
+                self.assertEqual(self.entry("relay").state, "changed")
+        with self.subTest("an edited or shadowed folder changes no recorded subscription"):
+            plugin(event="agent.ready", label="edited again")
+            with person():
+                plugins.listing(self.root, wait=None)  # the folder, edited
+            shadow = plugin(event="agent.ready", label="shadow", where=self.work / "shadow")
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(shadow.parent)}):
+                plugins.listing(self.root, wait=None)  # another copy, found first
+            self.assertEqual(registry.read(self.root)["relay"]["events"], ["agent.status"])
+            plugin()  # back as it was
+        with self.subTest("trust reaches the recorded folder past another copy"):
+            other = plugin(label="other", where=self.work / "other")
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(other.parent)}):
+                done = tool.run(self.root, plugin_action="trust", name="relay")
+            self.assertEqual((Path(done["directory"]), trust.state(folder), trust.state(other)),
+                             (folder.resolve(), "trusted", "untrusted"))
+        with self.subTest("an agent's own copy changes nothing recorded"):
+            plugin(event="agent.ready", label="agent's", where=self.work / "agents")
+            with mock.patch.dict(os.environ, {**agent, "MV2_PLUGIN_PATH": str(self.work / "agents")}):
+                plugins.listing(self.root, wait=None)
+            recorded = registry.read(self.root)["relay"]["directory"]
+            self.assertEqual((recorded, events.subscribers(self.root, "agent.ready")), (str(folder.resolve()), []))
+        with self.subTest("an older listing never replaces the subscriptions approved since"):
+            with person():
+                earlier = plugins.entries(self.root)  # saw agent.status
+                plugin(event="agent.ready", label="approved later")
+                tool.run(self.root, plugin_action="trust", name="relay")
+                plugins.listing(self.root, wait=None)
+                registry.record(self.root, earlier, person=True)
+            self.assertEqual(events.subscribers(self.root, "agent.ready"), ["relay"])
+            self.assertNotIn("relay", events.subscribers(self.root, "agent.status"))
+        with self.subTest("a pin that moves as the record is written is what's published"):
+            from multiverse.store import write
+            stale = registry.read(self.root)
+            write(registry.path(self.root), {"schema": 1, "plugins": {}})  # so this listing writes again
+            plugin(label="approved as it's written")
+            real_load = config.load
+
+            def approving(root):  # under the writer lock, just before publishing
+                trust.trust(folder)
+                return real_load(root)
+            with person():
+                current = plugins.entries(self.root)
+                with mock.patch.object(config, "load", side_effect=approving):
+                    registry.record(self.root, current, person=True)
+            self.assertEqual(registry.read(self.root)["relay"]["events"], ["agent.status"])
+            self.assertEqual(stale["relay"]["directory"], registry.read(self.root)["relay"]["directory"])
+        with self.subTest("a first listing records nothing that changed its name or API as it was read"):
+            for name, change in (("renamed", {"name": "another"}), ("future", {"api": "999.0"})):
+                made = self.write_plugin(name, {"extends": ["events"], "events": ["agent.status"]}, where=home)
+                self.enable(name)
+                snapshot = registry.snapshot
+
+                def changing(directory, name=name, change=change):
+                    self.write_plugin(name, {"extends": ["events"], "events": ["agent.ready"], **change}, where=home)
+                    return snapshot(directory)
+                with person(), mock.patch.object(registry, "snapshot", side_effect=changing):
+                    plugins.listing(self.root, wait=None)
+                self.assertEqual((trust.state(made), name in registry.read(self.root)), ("untrusted", False), name)
+                config.set_enabled(self.root, name, False)
+        with self.subTest("a first pin never replaces one published meanwhile"):
+            fresh = plugin(label="unpinned", where=self.work / "fresh")
+            value = trust.current(fresh)
+            trust.pin(fresh, "published meanwhile")
+            self.assertFalse(trust.pin_first(fresh, value))
+            self.assertEqual(trust.state(fresh), "changed")
+        with self.subTest("a record that isn't a file doesn't stall a read"):
+            path = registry.path(self.root)
+            path.unlink()
+            os.mkfifo(path)
+            started = time.monotonic()
+            self.assertIsNone(registry.known(self.root))
+            self.assertLess(time.monotonic() - started, 2)
+            path.unlink()
+
+    def test_a_plugin_loaded_from_its_folder_runs_its_pinned_copy_once_pinned(self):
+        """Once a listing pins a folder, what this process loaded from it isn't used: the copy loads; else edits run."""
+        import builtins
+        import threading
+        self.addCleanup(lambda: [builtins.__dict__.pop(name, None) for name in ("MV2_GATE", "MV2_IN")])
+        later = "def later():\n    from .extra import value\n    return value\n"
+
+        def version(name, value, gated=False):
+            wait = ("    import builtins\n    builtins.MV2_IN.set()\n    builtins.MV2_GATE.wait(5)\n"
+                    if gated else "")
+            manifest = {"module": "plugin", **({"settings": {"version": 1}} if gated else {})}  # gated: checked
+            return self.write_plugin(name, manifest,
+                                     {"plugin.py": f"value = {value!r}\n{later}def register(mv):\n{wait}    pass\n",
+                                      "extra.py": "value = 'approved'\n"})
+        with self.subTest("loaded before the pin"):
+            folder = version("done", "approved")
+            self.enable("done")
+            first = loader.load(self.entry("done"))  # from its own folder: nothing listed it yet
+            states = {item["name"]: item["state"] for item in plugins.listing(self.root, wait=None)}  # pins it
+            self.assertEqual(states["done"], "loaded")  # its copy, loaded again here at once
+            pinned = loader.load(self.entry("done"))
+            self.assertIsNot(pinned, first)
+            self.assertNotIn(folder.resolve(), Path(pinned.module.__file__).resolve().parents)  # the copy's
+            (folder / "extra.py").write_text("value = 'edited after the pin'\n")
+            self.assertEqual(pinned.module.later(), "approved")
+        with self.subTest("still loading when pinned"):
+            builtins.MV2_GATE, builtins.MV2_IN = threading.Event(), threading.Event()
+            folder = version("busy", "approved", gated=True)
+            self.enable("busy")
+            with self.assertRaises(loader.StillLoading):
+                loader.load(self.entry("busy"), wait=0)
+            self.assertTrue(builtins.MV2_IN.wait(5))  # imported from its folder, held in register()
+            started = time.monotonic()
+            states = {item["name"]: item["state"] for item in plugins.listing(self.root, wait=None)}
+            self.assertLess(time.monotonic() - started, 2)  # its settings check never waits out that load
+            self.assertEqual(states["busy"], "loading")  # its copy's load started, never waited out
+            builtins.MV2_GATE.set()
+            pinned = loader.load(self.entry("busy"))
+            self.assertNotIn(folder.resolve(), Path(pinned.module.__file__).resolve().parents)
+
+    def test_a_recorded_plugin_never_runs_unverified_whatever_its_record_says(self):
+        """A recorded path plugin is verified if its record is damaged, gone, relinked or unpublished; else edits run."""
+        from multiverse.plugins import registry
+        home = self.work / "dev"
+        person = mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(home)})
+
+        def plugin(label, where=home):
+            return self.write_plugin("relay", {"module": "plugin"},
+                                     {"plugin.py": f"LABEL = {label!r}\ndef register(mv):\n    pass\n"}, where=where)
+        folder = plugin("approved")
+        with person:
+            seen = {}
+            real = config.set_enabled
+
+            def publishing(*args, **kwargs):  # what a reader sees as the switch is published
+                seen.update(recorded=(registry.read(self.root).get("relay") or {}).get("directory"),
+                            pinned=trust.state(folder))
+                plugins.listing(self.root, wait=0)  # a listing while it is still off
+                seen.update(kept=(registry.read(self.root).get("relay") or {}).get("directory"))
+                return real(*args, **kwargs)
+            with mock.patch.object(config, "set_enabled", side_effect=publishing):
+                plugins.set_enabled(self.root, "relay", True)
+            with self.subTest("recorded and pinned before its switch is published"):
+                self.assertEqual(seen, {"recorded": str(folder.resolve()), "pinned": "trusted",
+                                        "kept": str(folder.resolve())})
+            plugin("edited")
+            self.assertEqual(self.entry("relay").state, "changed")
+            path = registry.path(self.root)
+            kept = path.read_bytes()
+            with self.subTest("its record can't be read"):
+                path.write_text("{ damaged")
+                self.assertEqual(self.entry("relay").state, "changed")
+            with self.subTest("its record is gone, its pin isn't"):
+                path.unlink()
+                self.assertEqual(self.entry("relay").state, "changed")
+            path.write_bytes(kept)
+            with self.subTest("its recorded folder relinked to another"):
+                aside = self.work / "aside"
+                folder.rename(aside)
+                replacement = plugin("replacement", where=self.work / "elsewhere")
+                folder.symlink_to(replacement, target_is_directory=True)
+                self.assertNotIn(self.entry("relay").state, ("on", "loaded"))
+                with self.subTest("relinked to a plugin of another name"):
+                    trusted_other = self.write_plugin("namesake", {"module": "plugin"},
+                                                      {"plugin.py": "def register(mv):\n    pass\n"},
+                                                      where=self.root / "plugins")
+                    trust.pin(trusted_other, trust.current(trusted_other))
+                    config.set_enabled(self.root, "namesake", True)
+                    folder.unlink()
+                    renamed = self.write_plugin("namesake", {"module": "plugin"},
+                                                {"plugin.py": "X = 1\ndef register(mv):\n    pass\n"},
+                                                where=self.work / "renamed")
+                    folder.symlink_to(renamed, target_is_directory=True)
+                    self.assertEqual(self.entry("namesake").source, "universe")  # the relinked entry never masks it
+                    alias = self.work / "dev-alias"
+                    alias.symlink_to(home, target_is_directory=True)
+                    with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(alias)}):  # through an alias of its parent
+                        self.assertEqual(self.entry("namesake").source, "universe")
+                    alias.unlink()
+                    folder.unlink()
+                    folder.symlink_to(replacement, target_is_directory=True)
+                with self.subTest("and its record a link to nothing"):
+                    path.unlink()
+                    path.symlink_to(self.work / "nowhere")
+                    self.assertNotIn(self.entry("relay").state, ("on", "loaded"))
+                    path.unlink()
+                    path.write_bytes(kept)
+                folder.unlink()
+                aside.rename(folder)
+            with self.subTest("a pin replaced before the switch is published leaves it off"):
+                other = self.write_plugin("other", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"},
+                                          where=home)
+                real_record = registry.record
+
+                def pin_replaced(*args, **kwargs):
+                    done = real_record(*args, **kwargs)
+                    trust.pin(other, "sha256:" + "0" * 64)
+                    return done
+                with mock.patch.object(registry, "record", side_effect=pin_replaced), \
+                        self.assertRaisesRegex(plugins.PluginError, "left off"):
+                    plugins.set_enabled(self.root, "other", True)
+                self.assertNotEqual(config.load(self.root).enabled.get("other"), True)
+        with self.subTest("an enable finishing late never undoes a later one"):
+            def swap(where, event):
+                return self.write_plugin("swap", {"module": "plugin", "extends": ["events"], "events": [event]},
+                                         {"plugin.py": "def register(mv):\n    pass\n"}, where=where)
+            first, second = swap(self.work / "a", "agent.status"), swap(self.work / "b", "agent.ready")
+            real_anchor, turned = plugins.anchor_events, []
+
+            def again(root, name, again=False):  # the first enable has published; a second one, elsewhere, now
+                if not turned:
+                    turned.append(True)
+                    with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(second.parent)}):
+                        plugins.set_enabled(self.root, "swap", False)
+                        plugins.set_enabled(self.root, "swap", True)
+                return real_anchor(root, name, again=again)
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(first.parent)}), \
+                    mock.patch.object(plugins, "anchor_events", side_effect=again):
+                plugins.set_enabled(self.root, "swap", True)
+            self.assertEqual((registry.read(self.root)["swap"]["directory"], registry.read(self.root)["swap"]["events"]),
+                             (str(second.resolve()), ["agent.ready"]))
+        with self.subTest("an enable that looked before another turned it on elsewhere is refused"):
+            def race(where):
+                return self.write_plugin("race", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"},
+                                         where=where)
+            near, far = race(self.work / "near"), race(self.work / "far")
+            real_writing, raced = registry.writing, []
+
+            def first_elsewhere(root, name):  # as this enable reaches the writer lock, another publishes `far`
+                if not raced:
+                    raced.append(True)
+                    with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(far.parent)}):
+                        plugins.set_enabled(self.root, "race", True)
+                return real_writing(root, name)
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(near.parent)}), \
+                    mock.patch.object(registry, "writing", side_effect=first_elsewhere), \
+                    self.assertRaisesRegex(plugins.PluginError, "turn it off first"):
+                plugins.set_enabled(self.root, "race", True)
+            self.assertEqual(registry.read(self.root)["race"]["directory"], str(far.resolve()))
+        with self.subTest("a listing while its folder is briefly gone keeps what was prepared"):
+            brief = self.write_plugin("brief", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"},
+                                      where=home)
+            real, kept_then = config.set_enabled, []
+
+            def vanishing(*args, **kwargs):
+                brief.rename(self.work / "brief-away")
+                plugins.listing(self.root, wait=0)
+                kept_then.append((registry.read(self.root).get("brief") or {}).get("directory"))
+                (self.work / "brief-away").rename(brief)
+                return real(*args, **kwargs)
+            with person, mock.patch.object(config, "set_enabled", side_effect=vanishing):
+                plugins.set_enabled(self.root, "brief", True)
+            self.assertEqual(kept_then, [str(brief.resolve())])
+        with self.subTest("a trusted universe copy keeps its place over a lower one, a package"):
+            winner = self.write_plugin("twin", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"},
+                                       where=self.root / "plugins")
+            trust.pin(winner, trust.current(winner))
+            shadow = self.write_plugin("twin", {"module": "plugin"}, {"plugin.py": "X = 1\ndef register(mv):\n    pass\n"},
+                                       where=self.work / "site")
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": ""}), \
+                    mock.patch.object(loader, "installed_directories", return_value=[shadow]):
+                plugins.set_enabled(self.root, "twin", True)
+                self.assertEqual((self.entry("twin").source, registry.read(self.root)["twin"]["directory"]),
+                                 ("universe", None))
+
+    def test_a_plugin_on_here_acts_the_same_in_every_process_however_it_was_found(self):
+        """A plugin only the person's MV2_PLUGIN_PATH finds is journaled and run, pinned, by agents too; else events go missing."""
+        from multiverse.plugins import events, registry
+        dev = self.work / "dev"
+        directory = self.write_plugin("relay", {"module": "plugin", "extends": ["events"], "events": ["agent.*"]},
+                                      {"plugin.py": "def register(mv):\n    mv.events.on('agent.*', lambda e: None)\n"},
+                                      where=dev)
+        person = {"MV2_PLUGIN_PATH": os.pathsep.join([os.environ["MV2_PLUGIN_PATH"], str(dev)])}
+        agent = {"MV2_PLUGIN_PATH": os.environ["MV2_PLUGIN_PATH"], "MV2_CONTROL_SOCKET": str(self.work / "s.sock")}
+        with mock.patch.dict(os.environ, person):
+            plugins.set_enabled(self.root, "relay", True)
+        recorded = registry.read(self.root)["relay"]
+        self.assertEqual((recorded["events"], recorded["source"], recorded["directory"]),
+                         (["agent.*"], "path", str(directory.resolve())))
+        with self.subTest("an agent's process, without that path"), mock.patch.dict(os.environ, agent):
+            self.assertEqual(events.subscribers(self.root, "agent.status"), ["relay"])
+            found = self.entry("relay")
+            self.assertEqual((found.state, found.source), ("on", "recorded"))
+            loaded = loader.load(found)
+            self.assertNotIn(directory.resolve(), Path(loaded.module.__file__).resolve().parents)  # its pinned copy runs
+        with mock.patch.dict(os.environ, agent):
+            self.assertEqual(self.entry("relay").state, "loaded")  # listed, and kept, just before the edit
+        (directory / "plugin.py").write_text("def register(mv):\n    raise SystemExit('edited')\n")
+        with self.subTest("edited after it was recorded"), mock.patch.dict(os.environ, agent):
+            self.assertEqual(self.entry("relay").state, "changed")  # never runs what the person's process didn't see
+            self.assertEqual(events.subscribers(self.root, "agent.status"), ["relay"])  # still recorded for later
+        with mock.patch.dict(os.environ, person):
+            plugins.listing(self.root, wait=None)  # a listing approves nothing
+        with mock.patch.dict(os.environ, agent):
+            self.assertEqual(self.entry("relay").state, "changed")
+        with mock.patch.dict(os.environ, person):
+            tool.run(self.root, plugin_action="trust", name="relay")  # the person approves the edit
+        with self.subTest("trusted again by the person"), mock.patch.dict(os.environ, agent):
+            self.assertEqual(self.entry("relay").state, "on")
+        with self.subTest("an agent's process records patterns, never a folder"), mock.patch.dict(os.environ, agent):
+            own = self.write_plugin("mine", {"extends": ["events"], "events": ["agent.status"]}, where=self.work / "own")
+            here = os.pathsep.join([agent["MV2_PLUGIN_PATH"], str(own.parent)])
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": here}):
+                plugins.set_enabled(self.root, "mine", True)
+            self.assertEqual(registry.read(self.root)["mine"], {"events": ["agent.status"], "source": "path",
+                                                                "directory": None, "private": True})
+            self.assertEqual(registry.read(self.root)["relay"]["directory"], str(directory.resolve()))  # kept
+            # Another process, without that agent's path, still records its events: from the patterns alone.
+            self.assertIn("mine", events.subscribers(self.root, "agent.status"))
+        with self.subTest("decided without finding plugins"), mock.patch.dict(os.environ, agent), \
+                mock.patch.object(loader, "manifest_records", side_effect=OSError("no discovery")):
+            self.assertEqual(events.subscribers(self.root, "agent.status"), ["mine", "relay"])
+        with self.subTest("a plugin turned on by hand doesn't cost a recorded one"), mock.patch.dict(os.environ, agent):
+            config.set_enabled(self.root, "legacy", True)  # on, never recorded: found by discovery, if at all
+            with mock.patch.object(loader, "declared", side_effect=OSError("no discovery")):
+                self.assertEqual(events.subscribers(self.root, "agent.status"), ["mine", "relay"])
+            config.set_enabled(self.root, "legacy", False)
+        with self.subTest("a listing older than a plugin turned on"), mock.patch.dict(os.environ, person):
+            stale = loader.entries(self.root)
+            late = self.write_plugin("late", {"extends": ["events"], "events": ["agent.*"]}, where=self.work / "late")
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": os.pathsep.join([person["MV2_PLUGIN_PATH"],
+                                                                                   str(late.parent)])}):
+                plugins.set_enabled(self.root, "late", True)
+            registry.record(self.root, stale, person=True)  # written after, from what it saw before
+            self.assertEqual(registry.read(self.root)["late"]["directory"], str(late.resolve()))
+        with self.subTest("a listing older than a move"), mock.patch.dict(os.environ, person):
+            stale = loader.entries(self.root)  # sees relay where it was
+            moved = self.write_plugin("relay", {"module": "plugin", "extends": ["events"], "events": ["agent.*"]},
+                                      {"plugin.py": "def register(mv):\n    pass\n"}, where=self.work / "relay-new")
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": os.pathsep.join([agent["MV2_PLUGIN_PATH"],
+                                                                                   str(moved.parent)])}):
+                with self.assertRaisesRegex(plugins.PluginError, "turn it off first"):
+                    plugins.set_enabled(self.root, "relay", True)  # on from one folder: never moved while on
+                self.assertEqual(registry.read(self.root)["relay"]["directory"], str(directory.resolve()))
+                plugins.set_enabled(self.root, "relay", False)
+                plugins.set_enabled(self.root, "relay", True)  # off, then on again where it is now
+            registry.record(self.root, stale, person=True)
+            self.assertEqual(registry.read(self.root)["relay"]["directory"], str(moved.resolve()))
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": os.pathsep.join([agent["MV2_PLUGIN_PATH"],
+                                                                                   str(directory.parent)])}):
+                plugins.set_enabled(self.root, "relay", False)
+                plugins.set_enabled(self.root, "relay", True)  # and back, for the cases below
+        with self.subTest("an agent turning it on can't move the person's record"), mock.patch.dict(os.environ, agent):
+            mine = self.write_plugin("relay", {"module": "plugin", "extends": ["events"], "events": ["agent.*"]},
+                                     {"plugin.py": "def register(mv):\n    pass\n"},
+                                     where=trust.user_directory() / "plugins")
+            directory.rename(directory.with_name("relay-away"))  # the person's folder, gone for a moment
+            plugins.set_enabled(self.root, "relay", True)  # an agent's enable, finding the personal one
+            self.assertEqual(registry.read(self.root)["relay"]["directory"], str(directory.resolve()))
+            directory.with_name("relay-away").rename(directory)
+            shutil.rmtree(mine)
+        with self.subTest("a listing that can't find it keeps its record"), mock.patch.dict(os.environ, agent):
+            moved = directory.with_name("relay-away")
+            directory.rename(moved)
+            self.addCleanup(lambda: moved.exists() and moved.rename(directory))
+            plugins.listing(self.root, wait=None)
+            self.assertEqual(registry.read(self.root)["relay"]["directory"], str(directory.resolve()))
+            moved.rename(directory)
+        with self.subTest("turned off from a shell that finds it only by its record"):
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": ""}):
+                done = tool.run(self.root, plugin_action="disable", name="relay")  # its record is dropped as it goes
+            self.assertEqual((done["on"], done["state"]), (False, "off"))
+            self.assertNotIn("relay", registry.read(self.root))
+            self.assertIs(config.load(self.root).enabled.get("relay"), False)
+            with mock.patch.dict(os.environ, person):
+                plugins.set_enabled(self.root, "relay", True)  # back on, for the case below
+        with self.subTest("turned off"), mock.patch.dict(os.environ, person):
+            plugins.set_enabled(self.root, "relay", False)
+            self.assertNotIn("relay", registry.read(self.root))
+            with mock.patch.dict(os.environ, agent):
+                self.assertNotIn("relay", events.subscribers(self.root, "agent.status"))
 
 
 class ConfigTest(PluginTestCase):
@@ -492,6 +1259,7 @@ class LoadingTest(PluginTestCase):
             self.write_plugin(name, {"api": "1.13", "module": "plugin", "extends": ["dashboard.column"]},
                               {"plugin.py": "def register(mv):\n" + lines})
             self.enable(name)
+        plugins.listing(self.root)  # recorded and pinned first: from then on they run from their pinned copies
         problems = plugins.problems(self.root)  # loads them; listing() itself never imports a plugin
         found = {item["name"]: item for item in plugins.listing(self.root)}
         self.assertEqual((found["estimate"]["provides"]["replaces"], found["rival"]["provides"]["replaces"],
@@ -589,6 +1357,64 @@ class ApiTest(PluginTestCase):
         with self.assertRaises(api.Error):
             worker.history()
         self.assertFalse(directory.exists())  # a removed agent's folder isn't made again
+
+    def test_a_plugin_sends_as_the_user_only_when_it_asks(self):
+        """agent.send(as_user=True) marks the message as the person's while mv2 records the plugin (1.21); a lost mark sends the person's relayed words as a plugin's, and a lost sender hides who sent it."""
+        from multiverse.universe import mailbox
+        self.write_plugin("relay", {"module": "plugin", "permissions": ["agents.read", "messages.send"],
+                                    "access": {"request": "act", "minimum": "act"}},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.enable("relay")
+        directory = self.agent("worker")
+        worker = api.Plugin(loader.load(self.entry("relay"))).universe(self.root).agent("worker")
+        worker.send("plain", delivery="inbox-only")
+        worker.send("typed by the person", delivery="inbox-only", as_user=True)
+        sent = mailbox.inbox(directory, all_messages=True, limit=None)["messages"][-2:]
+        self.assertEqual([(message["from"]["plugin"], message.get("as_user")) for message in sent],
+                         [("relay", None), ("relay", True)])
+        with self.assertRaisesRegex(api.Error, "as_user"):
+            worker.send("x", delivery="inbox-only", as_user="yes")
+        relay = api.Plugin(loader.load(self.entry("relay")))
+        self.assertFalse(relay.in_agent_session(self.root))  # the person's shell (1.21)
+        with mock.patch.dict(os.environ, {"MV2_CONTROL_SOCKET": str(self.work / "s.sock")}):  # an agent's mark
+            self.assertTrue(relay.in_agent_session(self.root))
+        from multiverse.runtime import agent_identity
+        with mock.patch.dict(os.environ, {"MV2_UNIVERSE": str(self.root)}), \
+                mock.patch.object(agent_identity, "runs_in_agent", return_value=False) as checked:
+            relay.in_agent_session()  # no universe given: the pane check still runs, in the current one
+        self.assertEqual(checked.call_args_list[-1], mock.call(root=self.root))
+
+    def test_a_plugin_reads_one_messages_sender_by_its_id_never_its_text(self):
+        """agent.message(id) gives a turn event's message's sender as mv2 records it, without its text (1.21); else a plugin matches 'Message from' text, or reads what it may not."""
+        from multiverse.universe import mailbox
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read", "messages.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.write_plugin("blind", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        for name in ("reader", "blind"):
+            self.enable(name)
+        directory = self.agent("worker")
+        sent = mailbox.append_message(directory, "the secret plan", {"name": "plugin relay", "plugin": "relay",
+                                                                     "agent_id": None}, "steer")
+        worker = api.Plugin(loader.load(self.entry("reader"))).universe(self.root).agent("worker")
+        found = worker.message(sent["id"])
+        self.assertEqual(found, {"at": sent["at"], "delivery": "steer", "as_user": False,
+                                 "from": {"name": "plugin relay", "plugin": "relay", "agent_id": None}})
+        self.assertNotIn("the secret plan", repr(found))
+        with self.assertRaises(api.Error):
+            worker.message("not-a-message")
+        with self.assertRaisesRegex(api.Error, "messages.read"):
+            api.Plugin(loader.load(self.entry("blind"))).universe(self.root).agent("worker").message(sent["id"])
+        real, moved = mailbox.lock, self.work / "worker-moved"
+
+        def removed_meanwhile(path, **keywords):  # the agent's folder goes after the check, before the read's lock
+            if not moved.exists():
+                directory.rename(moved)
+            return real(path, **keywords)
+        with mock.patch.object(mailbox, "lock", side_effect=removed_meanwhile):
+            with self.assertRaises(api.AgentGone):
+                worker.message(sent["id"])
+        self.assertFalse(directory.exists())  # and the read never made it again
 
     def test_an_agents_harness_home_is_its_recorded_storage(self):
         """mv.harness_info(..., agent=) gives the home the agent's launches use, from its records (session home,

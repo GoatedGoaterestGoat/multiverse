@@ -28,7 +28,8 @@ class NetworkPluginRecordsTest(PluginTestCase):
     @contextmanager
     def missing(self, path, *, method="read_text", count=1, code=errno.ENOENT, after=0):
         """Inject errors at one pathname, keeping every write and unrelated read real."""
-        original = getattr(Path, method)
+        owner, attribute = (os, "open") if method == "os.open" else (Path, method)
+        original = getattr(owner, attribute)
         calls = []
         def read(current, *args, **kwargs):
             if current == path:
@@ -36,7 +37,7 @@ class NetworkPluginRecordsTest(PluginTestCase):
                 if len(calls) > after and (count is None or len(calls) <= after + count):
                     raise OSError(code, os.strerror(code), str(current))
             return original(current, *args, **kwargs)
-        with mock.patch.object(Path, method, read):
+        with mock.patch.object(owner, attribute, read):
             yield calls
 
     def settings_manifest(self):
@@ -67,23 +68,25 @@ class NetworkPluginRecordsTest(PluginTestCase):
             (journal / events.ID, "a" * 32 + "\n", lambda: events.journal_id(self.root), "a" * 32, None),
             (journal / "seq", "10\n", lambda: events._counter(journal), 10, None),
         ]
+        descriptor_reads = {directory / "properties.json", journal / events.ID, journal / "seq"}
         for path, value, read, recovered, absent in cases:
             with self.subTest(path=path.name):
+                method = "os.open" if path in descriptor_reads else "read_text"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(value) if isinstance(value, str) else store.write(path, value)
-                with self.missing(path) as calls:
+                with self.missing(path, method=method) as calls:
                     self.assertEqual(read(), recovered)
                 self.assertEqual(len(calls), 2)
-                with self.missing(path, count=None) as calls:
+                with self.missing(path, method=method, count=None) as calls:
                     self.assertEqual(read(), absent)
                 self.assertEqual(len(calls), store.MISSING_ATTEMPTS)
         (journal / events.ID).unlink()
         backup = journal / events.ID_COPY
         backup.write_text("a" * 32 + "\n")
-        with self.missing(backup) as calls:
+        with self.missing(backup, method="os.open") as calls:
             self.assertEqual(events.journal_id(self.root), "a" * 32)
         self.assertEqual(len(calls), 2)
-        with self.missing(backup, count=None):
+        with self.missing(backup, method="os.open", count=None):
             self.assertIsNone(events.journal_id(self.root))
 
     def test_configuration_edits_preserve_other_switches_and_access(self):
@@ -321,7 +324,7 @@ class NetworkPluginRecordsTest(PluginTestCase):
         self.assertEqual(set(store.read(path)["plugins"]), {str(directory)})
         path = trust.user_directory() / loader.INSTALLED
         signature = [["site", 1]]
-        saved = {"signature": signature, "directories": [str(directory)], "used": 0}
+        saved = {"signature": signature, "directories": [str(directory)], "origins": {}, "used": 0}
         with mock.patch.object(loader, "_environment_signature", return_value=signature), \
                 mock.patch.object(loader, "_scan_installed", return_value=[]) as scan:
             store.write(path, {"environments": {sys.executable: saved, "other-python": saved}})

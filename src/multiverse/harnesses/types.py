@@ -15,10 +15,11 @@ EFFECTS: Mapping[str, Effect] = {
         'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
         'attachment_ready', 'attachment_recovery', 'retained_usage', 'navigation_target',
         'connection_problem', 'status_watch', 'supports_launch_refusal',
-        'launch_started', 'launch_refusal', 'startup_retryable',
+        'launch_started', 'launch_refusal', 'launch_prompt', 'startup_retryable',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
-        'transcript_view', 'transcript_bodies', 'transcript_readable',
+        'transcript_view', 'transcript_bodies', 'transcript_readable', 'transcript_index',
+        'project_turn_event', 'turn_cursor_projection',
         'models', 'model_names', 'check_model', 'run_options', 'display_pane', 'slash_commands', 'slash_result',
         'waiting_prompts', 'prompt_outcome', 'queued_prompts',
     ), 'observe'),
@@ -390,12 +391,26 @@ class SlashProvider(Protocol):
     def slash_result(self, session: SessionHandle, request: SlashRequest, executor: Executor) -> NativeResult: ...
 
 
+PromptChoiceMeaning = Literal[
+    'allow', 'allow_session', 'allow_always', 'deny', 'deny_always', 'stop', 'dismiss',
+    'approve_plan', 'keep_planning', 'other',
+]
+PROMPT_CHOICE_LABELS: Mapping[PromptChoiceMeaning, str] = {
+    'allow': 'Allow once', 'allow_session': 'Allow for session', 'allow_always': 'Allow always',
+    'deny': 'Deny', 'deny_always': 'Deny always', 'stop': 'Stop', 'dismiss': 'Dismiss',
+    'approve_plan': 'Approve plan', 'keep_planning': 'Keep planning',
+}
+PROMPT_CHOICE_SAVES = frozenset(('allow_always', 'deny_always'))
+
+
 @dataclass(frozen=True, kw_only=True)
 class PromptChoice:
     id: str
     label: str
     saves_rule: bool = False
     takes_message: bool = False
+    meaning: PromptChoiceMeaning | None = None
+    short: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -412,6 +427,15 @@ class PromptQuestion:
 
 
 @dataclass(frozen=True, kw_only=True)
+class PromptDisplay:
+    """Bounded plain text for displaying a waiting prompt across harnesses."""
+
+    title: str
+    subject: str | None = None
+    lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
 class WaitingPrompt:
     id: str
     kind: str
@@ -425,6 +449,7 @@ class WaitingPrompt:
     reason: str | None = None
     subagent: str | None = None
     requires_waiting: bool = True  # Only retained questions may be answerable outside waiting.
+    display: PromptDisplay | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -445,11 +470,19 @@ class PromptAnswer:
     notes: Mapping[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class PromptOutcomeQuery(PromptAnswer):
+    """Read exact closure metadata without opening native history."""
+    metadata_only: Literal[True] = True
+
+
 @dataclass(frozen=True)
 class PromptInput:
-    """Transient native input recipe; core reserves and submits it through ordinary delivery.
+    """Transient native input recipe for a retained question committed to one input.
 
-    id must be 'prompt-' + PromptAnswer.id. Text is never an audit or receipt field.
+    The adapter reserves the question before returning this recipe. Core submits it through
+    ordinary delivery; its outcome can remain uncertain. The id is 'prompt-' + PromptAnswer.id.
+    Text is never an audit or receipt field.
     """
     id: str
     text: str
@@ -463,6 +496,31 @@ class PromptResult:
     saved_rule: bool = False
     person_answer: Mapping[str, Any] | None = None
     cause: str | None = None
+    # Whose answer the state describes ({"kind": "person" | "mv2" | "plugin", "name"?}) and that answer in full, as
+    # core kept it; both None when no answer is known to have taken. Never stored in the result record or the journal.
+    by: Mapping[str, Any] | None = None
+    answer: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptOpened:
+    """A named native prompt can now be listed for this conversation."""
+    id: str
+    kind: str
+    requires_waiting: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class PromptClosed:
+    """A prompt ended with the outcome known when it closed."""
+    id: str
+    kind: str
+    state: str
+    cause: str | None = None
+    requires_waiting: bool = True  # Describes the opening edge if core has not seen it.
+
+
+PromptTransition = PromptOpened | PromptClosed
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -493,6 +551,8 @@ class PromptProvider(Protocol):
     """Native prompts and retained questions, one mv2 submission, and read-only outcomes.
 
     Core reads input receipts through get_delivery; callback prompt_outcome remains read-only.
+    Report PromptOpened and PromptClosed for the exact native conversation. A status
+    callback can carry the edges, in order, before reporting the status change.
     """
     def waiting_prompts(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def answer_prompt(self, session: SessionHandle, answer: PromptAnswer, executor: Executor) -> NativeResult: ...
@@ -544,6 +604,7 @@ class TranscriptSource:
     size: int | None = None
     updated_at: str | None = None
     stable_rows: bool = True
+    retry: bool = False  # a transient absence, such as a native transcript that has not been written yet
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -597,6 +658,73 @@ class TranscriptProvider(Protocol):
                           indexes: Sequence[int], *, max_bytes: int,
                           reader: TranscriptReader | None = None) -> list[dict | None]: ...
     def transcript_readable(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnCursorProjection:
+    """Metadata from a proved transcript index, using the public reader's stored-order positions.
+
+    Give the turn anchor's native row ref if it has one, otherwise core forms the turn ID from its cursor.
+    Each nearest ref is the last native row ref at or before that position, as the transcript view
+    would supply it. The reported row must belong to the anchor's turn.
+    """
+    turn_position: str | None = None
+    turn_ref: str | None = None
+    turn_nearest: str | None = None
+    row_position: str | None = None
+    row_nearest: str | None = None
+    kind: str | None = None
+    pending: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnStarted:
+    """The first input of a native turn, observed by its owning conversation."""
+    turn: str
+    kind: Literal['prompt', 'command']
+    ref: str | None
+    source: Literal['person', 'harness']
+    attempt: str | None = None
+    first_task: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnJoined:
+    """Additional input whose native turn and origin are known."""
+    turn: str
+    ref: str | None
+    source: Literal['person', 'harness']
+    attempt: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnEnded:
+    """A native turn ended, with its last known stored row."""
+    turn: str
+    kind: Literal['prompt', 'command']
+    ref: str | None
+    state: Literal['finished', 'interrupted', 'error', 'unknown']
+
+
+TurnTransition = TurnStarted | TurnJoined | TurnEnded
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnProjection:
+    """Exact row positions in the validated TranscriptView passed to the adapter."""
+    turn_position: str | None = None
+    row_position: str | None = None
+
+
+class TurnEventProvider(Protocol):
+    """Optionally project native turn observations within one immutable transcript view."""
+    def project_turn_event(self, session: SessionHandle, view: TranscriptView, transition: TurnTransition, *,
+                           reader: TranscriptReader | None = None) -> TurnProjection: ...
+
+    def turn_cursor_projection(self, session: SessionHandle, transitions: tuple[TurnTransition, ...], *,
+                               reader: TranscriptReader | None = None) -> tuple[TurnCursorProjection, ...] | None: ...
+
+    def transcript_index(self, session: SessionHandle, *, reader: TranscriptReader | None = None) -> bool | None: ...
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -1,7 +1,9 @@
 """Caller authority, exact prompt admission, private answers and outcomes that never resend."""
 from dataclasses import asdict, replace
+import errno
 import json
 import os
+import shutil
 from pathlib import Path
 import stat
 from types import SimpleNamespace
@@ -138,20 +140,26 @@ class PromptTest(BaseTest):
         answer = store.read(wire)
         self.assertEqual(answer['answers']['secret'], ['PRIVATE SECRET'])
         self.assertEqual((answer['launch_id'], answer['native_id']), (self.launch, self.thread))
-        self.assertNotIn('PRIVATE', record.read_text())
+        self.assertNotIn('PRIVATE SECRET', record.read_text())  # a secret answer is never kept
         self.assertEqual(store.read(record)['answers'], {'one': ['A'], 'many': ['C', 'D']})
+        self.assertEqual(store.read(record)['answer'], {  # the rest is, for prompt_result (1.21)
+            'answers': {'one': ['A'], 'many': ['C', 'D'], 'secret': {'secret': True}},
+            'typed': {'text': ['PRIVATE FREE TEXT']}})
         self.receipts[self.prompt_id] = NativeResult('ok', 'PRIVATE SECRET', {'state': 'person', 'reason': 'PRIVATE SECRET',
                              'person_answer': {'answers': {'one': ['B'], 'secret': ['PRIVATE SECRET'], 'text': ['PERSON TYPED TEXT']},
                                                'message': 'PRIVATE REFUSAL MESSAGE'}})
         result = prompts.result(self.root, self.agent, self.prompt_id)
-        self.assertEqual(result.person_answer, {'answers': {'one': ['B']}, 'typed': {'text': ['PERSON TYPED TEXT']}})
+        self.assertEqual(result.person_answer, {'answers': {'one': ['B'], 'secret': {'secret': True}},
+                                                'typed': {'text': ['PERSON TYPED TEXT']}})
         self.assertEqual((result.state, result.cause), ('person', 'person'))
         self.assertEqual(result.reason, 'This prompt was answered in its terminal first; mv2 did not send its answer.')
         self.assertEqual(store.read(record)['result']['reason'], result.reason)
         self.assertNotIn('PRIVATE', str(result))
-        self.assertNotIn('PRIVATE', record.read_text())
+        for kept_out in ('PRIVATE SECRET', 'PRIVATE REFUSAL MESSAGE'):  # the free text mv2 sent is kept (1.21)
+            self.assertNotIn(kept_out, record.read_text())
         for call in self.events.call_args_list:
-            self.assertEqual(set(call.args[3]), {'kind', 'tool', 'caller', 'outcome'})
+            self.assertEqual(set(call.args[3]), {'id', 'kind', 'tool', 'caller', 'state', 'cause', 'outcome'})
+            self.assertEqual(call.args[3]['state'], call.args[3]['outcome'])
             self.assertNotIn('PRIVATE', json.dumps(call.args[3]))
         self.assertFalse(wire.exists())
         for given in ({'answers': {'pick': 'A'}}, {'choice': 'cancel'},
@@ -346,18 +354,22 @@ class PromptTest(BaseTest):
         self.assertEqual(store.read(wire)['notes']['secret'], 'PRIVATE NOTE')
         record = self.directory / 'prompts' / (self.prompt_id + '.json')
         self.assertEqual(set(store.read(record)['question_ids']), {'fixed', 'secret', 'free', 'other'})
-        for text in ('NONSECRET NOTE', 'PRIVATE NOTE', 'FREE NOTE', 'another idea'):
-            self.assertNotIn(text, record.read_text())
+        self.assertNotIn('PRIVATE NOTE', record.read_text())  # a secret note is never kept; the others are (1.21)
+        kept = store.read(record)['answer']['notes']
+        self.assertEqual((kept['fixed'], kept['other'], kept['secret']),
+                         ('NONSECRET NOTE', 'another idea', {'secret': True}))
         self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'person_answer': {
             'answers': {'fixed': ['B']}, 'notes': {'fixed': 'B', 'free': 'PERSON TYPED', 'secret': 'PRIVATE PERSON NOTE',
                                                  'plain': 'UNOFFered NOTE'}, 'message': 'PRIVATE MESSAGE'}})
         result = prompts.result(self.root, self.agent, self.prompt_id)
-        self.assertEqual(result.person_answer, {'answers': {'fixed': ['B']},
-                                              'typed': {'fixed': ['B'], 'free': ['PERSON TYPED']}})
+        self.assertEqual(result.person_answer, {'answers': {'fixed': ['B']},  # notes as notes (1.21)
+                                              'notes': {'fixed': 'B', 'free': 'PERSON TYPED',
+                                                        'secret': {'secret': True}}})
         self.assertNotIn('PRIVATE', record.read_text())
         self.assertFalse(wire.exists())
         for call in self.events.call_args_list:
-            self.assertEqual(set(call.args[3]), {'kind', 'tool', 'caller', 'outcome'})
+            self.assertEqual(set(call.args[3]), {'id', 'kind', 'tool', 'caller', 'state', 'cause', 'outcome'})
+            self.assertEqual(call.args[3]['state'], call.args[3]['outcome'])
         old = self.prompt_id
         schema = {'choices': [], 'questions': [asdict(q) for q in self.prompt.questions]}
         self.fresh()
@@ -367,7 +379,8 @@ class PromptTest(BaseTest):
         unattempted = str(uuid4())
         self.receipts[unattempted] = self.receipts[old]
         result = prompts.answer(self.root, self.agent, unattempted, answers=answers, notes=notes, wait=False)
-        self.assertEqual(result.person_answer, {'answers': {'fixed': ['A']}, 'truncated': True})
+        self.assertEqual(result.person_answer, {'answers': {'fixed': ['A']}, 'notes': {'secret': {'secret': True}},
+                                                'truncated': True})
         self.fresh(choices=(PromptChoice(id='cancel', label='Cancel'),))
         self.assertEqual(self.answer(choice='cancel', notes={'fixed': 'text'}).state, 'refused')
         self.fresh()
@@ -416,7 +429,8 @@ class PromptTest(BaseTest):
             self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', **schema,
                 'person_answer': {'answers': {'pick': ['A'], 'secret': ['PRIVATE SECRET']}}})
             found = result()
-            self.assertEqual((found.state, found.person_answer), ('person', {'answers': {'pick': ['A']}}))
+            self.assertEqual((found.state, found.person_answer),
+                             ('person', {'answers': {'pick': ['A'], 'secret': {'secret': True}}}))
             self.assertIn('Nothing was sent', found.reason)
             self.assertNotIn('PRIVATE', str(found))
             for state, cause in (('gone', 'interrupted'), ('refused', 'person')):
@@ -493,6 +507,468 @@ class PromptTest(BaseTest):
         with self.assertRaises(ValueError):
             prompts.result(self.root, self.agent, self.prompt_id)
 
+    def test_a_result_names_only_an_answer_that_was_given_in_one_shape_within_its_bound(self):
+        """by/answer name only an answer proven sent, in one shape, within its bound; else a result misleads."""
+        with self.subTest('read while mv2 is still sending it'):
+            original, seen = self.adapter.answer_prompt, []
+
+            def read_first(*args):
+                seen.append(prompts.result(self.root, self.agent, self.prompt_id))
+                return original(*args)
+            with patch.object(self.adapter, 'answer_prompt', side_effect=read_first):
+                done = self.answer(choice='deny', message='a draft')
+            self.assertEqual(((seen[0].by, seen[0].answer), done.by), ((None, None), {'kind': 'mv2'}))
+        with self.subTest('cut off right after handing it over'):
+            self.fresh()
+            original = self.adapter.answer_prompt
+
+            def handed_then_cut_off(*args):
+                original(*args)
+                raise KeyboardInterrupt
+            with patch.object(self.adapter, 'answer_prompt', side_effect=handed_then_cut_off), \
+                    self.assertRaises(KeyboardInterrupt):
+                self.answer(choice='deny', message='sent')
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'submitted'})
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertEqual((found.state, found.by, found.answer['message']), ('submitted', {'kind': 'mv2'}, 'sent'))
+        with self.subTest('acknowledged but never handed over'):
+            self.fresh()
+            with patch.object(self.adapter, 'answer_prompt', return_value=NativeResult('pending')):
+                found = self.answer(choice='deny', message='never sent')
+            self.assertEqual((found.state, found.by, found.answer), ('submitted', None, None))
+        with self.subTest('a terminal answer kept before 1.21'):
+            self.fresh()
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            record['result'].update(state='person', person_answer={'choice': 'deny'})
+            store.write(path, record)
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertEqual((found.answer, found.person_answer == found.answer),  # its label from the record
+                             ({'choice': {'id': 'deny', 'label': 'Deny', 'short': None}}, True))
+        with self.subTest('answered in the terminal'):
+            self.fresh(questions=(PromptQuestion(id='q', question='Which?', required=False, takes_note=True),))
+            self.catalog = []
+            self.receipts[self.prompt_id] = NativeResult('ok', value={
+                'state': 'person', 'choices': [asdict(c) for c in self.prompt.choices],
+                'questions': [asdict(q) for q in self.prompt.questions],
+                'person_answer': {'choice': 'deny', 'message': 'not that', 'notes': {'q': 'why'}}})
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertEqual((found.by, found.answer, found.person_answer == found.answer), ({'kind': 'person'}, {
+                'choice': {'id': 'deny', 'label': 'Deny', 'short': None}, 'message': 'not that',
+                'notes': {'q': 'why'}}, True))
+        with self.subTest("a terminal answer no offered choice describes"):
+            # Claude's plain No stops the turn, where the offered deny lets the agent carry on: the harness names the
+            # person's choice itself, and core's short label for its meaning goes with it, read first and read back.
+            own = {'choice': 'stop', 'label': 'No (the turn stopped)', 'meaning': 'stop'}
+            expected = {'choice': {'id': 'stop', 'label': 'No (the turn stopped)', 'short': 'Stop'}}
+            for given, shown, answered_first in ((own, expected, False), (own, expected, True),
+                                                 ({**own, 'meaning': 'other'}, None, False)):  # 'other' has no short
+                self.fresh()
+                if answered_first:
+                    self.answer(choice='allow')  # a record to keep the person's answer in
+                self.catalog = []
+                self.receipts[self.prompt_id] = NativeResult('ok', value={
+                    'state': 'person', 'choices': [asdict(c) for c in self.prompt.choices],
+                    'questions': [asdict(q) for q in self.prompt.questions], 'person_answer': given})
+                found = prompts.result(self.root, self.agent, self.prompt_id)
+                self.assertEqual((found.state, found.answer), ('person', shown))
+            self.fresh()
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            for stored, shown in ((expected['choice'], expected), ({**expected['choice'], 'short': 'Whatever'}, None)):
+                record = store.read(path)
+                record['result'] = {**record.get('result', {}), 'state': 'person', 'person_answer': {'choice': stored}}
+                store.write(path, record)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer, shown)  # the record alone
+            # Only a person's answer, never a message, and only against a valid list of offered choices.
+            self.fresh()
+            self.answer(choice='allow')
+            record = store.read(path := self.directory / 'prompts' / (self.prompt_id + '.json'))
+            store.write(path, {**record, 'answer': {'choice': expected['choice']}})
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'answered'})
+            self.assertIsNone(prompts.result(self.root, self.agent, self.prompt_id).answer)  # mv2's kept answer
+            self.fresh()
+            self.answer(choice='allow')
+            record = store.read(path := self.directory / 'prompts' / (self.prompt_id + '.json'))
+            store.write(path, {**record, 'message_choices': ['stop']})
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'person_answer': {**own, 'message': 'x'}})
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer, expected)
+            self.assertNotIn('message', store.read(path)['result']['person_answer'])  # nor kept in the record
+            self.fresh()
+            self.catalog = []
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'choices': None, 'questions': [],
+                                                                       'person_answer': own})
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer,
+                             {'choice': {'id': 'stop', 'label': None, 'short': None}})  # bare, as before
+            # A record so full that the person's answer keeps only its minimal form: the choice and its short label.
+            fitted = prompts._fitted({'choice': expected['choice']}, 1, person=True)
+            self.assertEqual(prompts._rebuilt(fitted, {'choices': ['allow', 'deny']}, person=True),
+                             {'choice': {'id': 'stop', 'label': None, 'short': 'Stop'}, 'truncated': True})
+        with self.subTest('a record from before answers were kept'):
+            self.fresh(choices=(), questions=(PromptQuestion(id='q', question='Which?', options=(('A', ''), ('B', '')),
+                                                             free_text=False),))
+            self.answer(answers={'q': ['B']})
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            for key in ('answer', 'choice_labels', 'withheld_ids', 'message_choices', 'dispatched'):
+                record.pop(key, None)
+            store.write(path, record)
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'answered'})
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertEqual((found.by, found.answer), ({'kind': 'mv2'}, {'answers': {'q': ['B']}}))
+        with self.subTest("a person's answer after mv2's, in one record's bound"):
+            self.fresh(choices=(PromptChoice(id='deny', label='Deny', takes_message=True),),
+                       questions=(PromptQuestion(id='public', question='How?', required=False, takes_note=True),
+                                  PromptQuestion(id='hidden', question='Key?', required=False, secret=True,
+                                                 takes_note=True)))
+            first = self.answer(choice='deny', message='a' * 40_000)
+            self.assertEqual(first.state, 'submitted', (first.cause, first.reason))
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person', 'person_answer': {
+                'choice': 'deny', 'message': 'b' * 40_000, 'notes': {'public': 'c' * 40_000, 'hidden': 'SECRET'}}})
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            self.assertLessEqual(path.stat().st_size, prompts.LIMIT)  # as written on disk
+            self.assertEqual(prompts._record_size(store.read(path)), path.stat().st_size)  # measured as written
+            self.assertEqual(store.read(path)['result']['person_answer'], found.person_answer)  # as returned
+            self.assertEqual((found.answer['notes']['hidden'], found.answer['truncated']), ({'secret': True}, True))
+        with self.subTest("a person's answer after mv2's still reaches the journal"):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'), PromptChoice(id='deny', label='Deny')),
+                       questions=())
+            self.assertEqual(self.answer(choice='allow').state, 'submitted')
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'person',
+                                                                       'person_answer': {'choice': 'deny'}})
+            with patch.object(prompts.prompt_events, 'publish_ordered', return_value=True) as published:
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).state, 'person')
+            self.assertEqual([call.args[3]['state'] for call in published.call_args_list], ['person'])
+        with self.subTest('a file at the answer path that is not this attempt'):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            self.answer(choice='allow')
+            folder = self.directory / 'prompts'
+            record = store.read(folder / (self.prompt_id + '.json'))
+            record['dispatched'] = False
+            store.write(folder / (self.prompt_id + '.json'), record)
+            wire = folder / (self.prompt_id + '.answer.json')
+            payload = store.read(wire)
+            with store.lock(self.directory / '.launch.lock'):  # read as stored, no adapter receipt
+                real = prompts.result(self.root, self.agent, self.prompt_id)
+                self.assertEqual(real.by, {'kind': 'mv2'})  # the real answer file proves it
+                for fake in ({}, *({key: payload[key] for key in ('id', 'caller', 'launch_id', 'native_id')}
+                                   | {'schema': schema} for schema in (None, True, 2))):
+                    store.write(wire, fake)
+                    self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)
+        with self.subTest('a damaged record names nobody and shows no withheld value'):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=(
+                PromptQuestion(id='key', question='Key?', secret=True, required=False),))
+            self.answer(choice='allow', answers={'key': 'K'})
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            record['answer']['typed'] = {'key': ['RAW']}
+            record['answer']['answers'] = {'key': ['RAW']}
+            store.write(path, record)
+            self.receipts[self.prompt_id] = NativeResult('ok', value={'state': 'answered'})
+            found = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertNotIn('RAW', repr(found))
+            self.assertEqual(found.answer['answers']['key'], {'secret': True})
+            record = store.read(path)
+            record['public_options'] = {'other': None}  # a damaged schema: nothing from it, and no crash
+            record['answer']['answers']['other'] = ['x']
+            store.write(path, record)
+            self.assertNotIn('other', prompts.result(self.root, self.agent, self.prompt_id).answer['answers'])
+            record['withheld_ids'] = 'key'  # which questions are secret can't be told: nothing at all
+            store.write(path, record)
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).answer, None)
+            record['caller'] = {'kind': 'plugin', 'name': ''}
+            store.write(path, record)
+            self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)
+        with self.subTest('a schema too large to record, and a long reason'):
+            self.fresh(choices=(PromptChoice(id='allow', label='a' * 40_000),
+                                PromptChoice(id='deny', label='b' * 40_000)), questions=())
+            sent = len(self.sent)
+            self.assertEqual((self.answer(choice='allow').cause, len(self.sent)), ('too_large', sent))  # nothing sent
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            self.immediate = NativeResult('ok', value={'state': 'answered', 'reason': 'r' * prompts.LIMIT})
+            self.answer(choice='allow')
+            self.immediate = None
+            self.assertLessEqual((self.directory / 'prompts' / (self.prompt_id + '.json')).stat().st_size, prompts.LIMIT)
+        with self.subTest("a result that can't be read again names nobody"):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            with patch.object(prompts, 'result', side_effect=OSError('unreadable')):
+                found = prompts.answer(self.root, self.agent, self.prompt_id, choice='allow', timeout=1)
+            self.assertEqual((found.state, found.by, found.answer), ('unknown', None, None))
+        with self.subTest("a person's answer kept only with state person"):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            record['result'].update(state='answered', person_answer={'answers': {'x': ['RAW']}})
+            store.write(path, record)
+            with store.lock(self.directory / '.launch.lock'):
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).person_answer, None)
+        with self.subTest('an answer file that differs from what mv2 reserved'):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),
+                                PromptChoice(id='deny', label='Deny', takes_message=True)), questions=())
+            self.answer(choice='deny', message='as sent')
+            folder = self.directory / 'prompts'
+            record = store.read(folder / (self.prompt_id + '.json'))
+            record['dispatched'] = False
+            store.write(folder / (self.prompt_id + '.json'), record)
+            wire = folder / (self.prompt_id + '.answer.json')
+            valid = store.read(wire)
+            with store.lock(self.directory / '.launch.lock'):
+                for field, damaged in (('choice', 'allow'), ('message', {}), ('answers', {'q': 1}), ('notes', {'q': 1}),
+                                       ('message', 'another'), ('allow_rule', not valid['allow_rule'])):
+                    store.write(wire, {**valid, field: damaged})
+                    self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None, field)
+        with self.subTest("an answer file whose public typed text or note isn't what mv2 kept"):
+            self.fresh(choices=(), questions=(PromptQuestion(id='t', question='Text'),
+                                              PromptQuestion(id='n', question='Pick', options=(('A', ''),),
+                                                             takes_note=True)))
+            self.answer(answers={'t': 'kept text', 'n': 'A'}, notes={'n': 'kept note'})
+            folder = self.directory / 'prompts'
+            record = store.read(folder / (self.prompt_id + '.json'))
+            record['dispatched'] = False
+            store.write(folder / (self.prompt_id + '.json'), record)
+            wire = folder / (self.prompt_id + '.answer.json')
+            valid = store.read(wire)
+            with store.lock(self.directory / '.launch.lock'):
+                for change in ({'answers': {**valid['answers'], 't': ['other text']}}, {'notes': {'n': 'other note'}}):
+                    store.write(wire, {**valid, **change})
+                    self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None, change)
+        with self.subTest('an answer file proves its handoff only as the exact envelope sent'):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow', takes_message=True),), questions=(
+                PromptQuestion(id='q', question='Pick', options=(('A', ''),), takes_note=True),
+                PromptQuestion(id='k', question='Key?', secret=True, required=False)))
+            self.answer(choice='allow', message='m' * 61_000, answers={'q': 'A', 'k': 'S1'}, notes={'q': 'whole'})
+            folder = self.directory / 'prompts'
+            path = folder / (self.prompt_id + '.json')
+            record = store.read(path)
+            self.assertTrue(record['answer']['truncated'])  # the message was cut for display: the proof isn't
+            record['dispatched'] = False
+            store.write(path, record)
+            wire = folder / (self.prompt_id + '.answer.json')
+            valid = store.read(wire)
+            self.assertEqual(prompts._witness(valid, {'k'}),
+                             prompts._witness({**valid, 'answers': {**valid['answers'], 'k': ['S2']}}, {'k'}))
+            with store.lock(self.directory / '.launch.lock'):
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+                for change in ({'notes': {'q': 'whole, and more'}}, {'notes': {'q': 'whole', 'new': 'x'}},
+                               {'extra': 'a field mv2 never writes'}):
+                    store.write(wire, {**valid, **change})
+                    self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None, change)
+                store.write(wire, valid)
+                store.write(path, {**record, 'answer': {**record['answer'], 'notes': ['damaged']}})
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)
+                kept, choice = record['answer'], record['answer']['choice']
+                for damaged in ({key: value for key, value in record.items() if key != 'answer'},
+                                {**record, 'answer': {**kept, 'choice': {**choice, 'label': 7}}},
+                                {**record, 'answer': {**kept, 'choice': {**choice, 'id': 'deny'}}},
+                                {**record, 'answer': {**kept, 'extra': 1}},
+                                {**record, 'answer': {**kept, 'truncated': 'yes'}},
+                                {**record, 'answer': {**kept, 'message': 'different text'}},  # not what was sent
+                                {**record, 'answer': {**kept, 'notes': {**kept['notes'], 'q': 'another note'}}}):
+                    store.write(path, damaged)
+                    by = prompts.result(self.root, self.agent, self.prompt_id).by
+                    self.assertEqual(by, None, damaged.get('answer'))
+                store.write(path, record)
+                wire.write_text('{"schema": 2, ' + json.dumps(valid)[1:])  # a name twice: JSON keeps the last
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)
+                store.write(wire, valid)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+                elsewhere = self.work / 'elsewhere'
+                (elsewhere / 'prompts').mkdir(parents=True)
+                wire.rename(elsewhere / 'prompts' / wire.name)
+                session = {**record['session'],
+                           'session_file': str(elsewhere / Path(record['session']['session_file']).name)}
+                store.write(path, {**record, 'session': session})
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)  # proof from elsewhere
+                store.write(wire, valid)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)  # it names elsewhere
+                store.write(path, record)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+        with self.subTest('a choice is kept by its ID when nothing else can be cut'):
+            label = 'o' * 24_000
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=(
+                PromptQuestion(id='q', question='Choose one', options=((label, ''),), free_text=False),))
+            self.answer(choice='allow', answers={'q': label})
+            folder = self.directory / 'prompts'
+            path = folder / (self.prompt_id + '.json')
+            record = store.read(path)
+            self.assertEqual(record['answer'], {'choice': {'id': 'allow', 'label': None, 'short': None},
+                                                'truncated': True})
+            record['dispatched'] = False
+            store.write(path, record)
+            with store.lock(self.directory / '.launch.lock'):
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+        with self.subTest("a folder put in the agent's place while proof is read supplies nothing"):
+            wire = self.directory / 'prompts' / (self.prompt_id + '.answer.json')
+            valid = store.read(wire)
+            wire.unlink()
+            replacement, retired, real_open = self.work / 'replacement', self.work / 'retired', os.open
+            store.write(replacement / 'prompts' / wire.name, valid)
+
+            def swapping(name, *args, **kwargs):
+                opening = name == self.directory / 'prompts' or name == 'prompts' and 'dir_fd' in kwargs
+                if opening and not retired.exists():  # either way the prompts folder is opened
+                    self.directory.rename(retired)
+                    replacement.rename(self.directory)
+                return real_open(name, *args, **kwargs)
+            try:
+                with store.lock(self.directory / '.launch.lock'), patch.object(prompts.os, 'open', side_effect=swapping):
+                    by = prompts.result(self.root, self.agent, self.prompt_id).by
+            finally:
+                if retired.exists():
+                    self.directory.rename(replacement)
+                    retired.rename(self.directory)
+            self.assertEqual((by, retired.exists()), (None, False))
+        with self.subTest("a folder put in the agent's place after its record was read supplies nothing"):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            store.write(path, {**record, 'dispatched': False})
+            replacement, retired = self.work / 'replacement2', self.work / 'retired2'
+            shutil.copytree(self.directory, replacement)  # a copy: the same record, the same answer file
+            real_record = prompts._record
+
+            def swapped_after(*args, **kwargs):
+                found = real_record(*args, **kwargs)
+                self.directory.rename(retired)
+                replacement.rename(self.directory)
+                return found
+            try:
+                with store.lock(self.directory / '.launch.lock'), \
+                        patch.object(prompts, '_record', side_effect=swapped_after):
+                    by = prompts.result(self.root, self.agent, self.prompt_id).by
+            finally:
+                shutil.rmtree(self.directory)
+                retired.rename(self.directory)
+            self.assertIsNone(by)
+            with store.lock(self.directory / '.launch.lock'):
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+        with self.subTest("its prompts folder moved, whole, into a replacement agent folder supplies nothing"):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=())
+            self.answer(choice='allow')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            store.write(path, {**store.read(path), 'dispatched': False})
+            replacement, retired = self.work / 'replacement3', self.work / 'retired3'
+            shutil.copytree(self.directory, replacement, ignore=shutil.ignore_patterns('prompts'))
+
+            def moved_after(*args, **kwargs):
+                found = real_record(*args, **kwargs)
+                self.directory.rename(retired)
+                (retired / 'prompts').rename(replacement / 'prompts')  # the same folder, under another agent's
+                replacement.rename(self.directory)
+                return found
+            real_record = prompts._record
+            try:
+                with store.lock(self.directory / '.launch.lock'), \
+                        patch.object(prompts, '_record', side_effect=moved_after):
+                    by = prompts.result(self.root, self.agent, self.prompt_id).by
+            finally:
+                (self.directory / 'prompts').rename(retired / 'prompts')
+                shutil.rmtree(self.directory)
+                retired.rename(self.directory)
+            self.assertIsNone(by)
+            with store.lock(self.directory / '.launch.lock'):
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+        with self.subTest('a record caught being replaced as a result reads it is read again'):
+            missed, real_open = [], os.open
+
+            def miss_once(name, *args, **kwargs):
+                if name == self.prompt_id + '.json' and 'dir_fd' in kwargs and not missed:
+                    missed.append(True)
+                    raise FileNotFoundError(errno.ENOENT, 'replaced as it was opened', name)
+                return real_open(name, *args, **kwargs)
+            with store.lock(self.directory / '.launch.lock'), patch.object(prompts.os, 'open', side_effect=miss_once):
+                outcome = prompts.result(self.root, self.agent, self.prompt_id)
+            self.assertEqual((missed, outcome.state, outcome.by), ([True], 'submitted', {'kind': 'mv2'}))
+        with self.subTest("an owner the record's own folder doesn't name is never looked up elsewhere"):
+            real_at = prompts._record_at
+
+            def no_owner(folder, path, **kwargs):
+                found = real_at(folder, path, **kwargs)
+                return {key: value for key, value in found.items() if key != 'id'} if path.name == 'properties.json' \
+                    else found
+            with patch.object(prompts, '_record_at', side_effect=no_owner), self.assertRaises(ValueError):
+                prompts.result(self.root, self.agent, self.prompt_id)  # damage, never the owner a path would give
+        with self.subTest('a kept answer proves nothing unless written exactly as core writes it'):
+            self.fresh(choices=(PromptChoice(id='allow', label='Allow'),), questions=(
+                PromptQuestion(id='q', question='Pick', options=(('A', ''),)),
+                PromptQuestion(id='k', question='Key?', secret=True, required=False)))
+            self.answer(answers={'q': 'A', 'k': 'S1'})
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = {**store.read(path), 'dispatched': False}
+            self.assertNotIn('choice', record['answer'])
+            with store.lock(self.directory / '.launch.lock'):
+                store.write(path, record)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+                kept = record['answer']
+                for damaged in ({**kept, 'choice': None}, {**kept, 'answers': {**kept['answers'], 'k': {'secret': 1}}},
+                                {**kept, 'answers': {**kept['answers'], 'q': ['']}, 'truncated': True},  # labels never cut
+                                {**kept, 'answers': {'q': ['A']}, 'truncated': True}):  # nor a marker left out
+                    store.write(path, {**record, 'answer': damaged})
+                    self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None, damaged)
+                store.write(path, record)
+                wire = self.directory / 'prompts' / (self.prompt_id + '.answer.json')
+                valid = store.read(wire)
+                wire.write_bytes(json.dumps(valid).encode('utf-16'))  # JSON reads it; the wire is UTF-8 only
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, None)
+                store.write(wire, valid)
+                self.assertEqual(prompts.result(self.root, self.agent, self.prompt_id).by, {'kind': 'mv2'})
+        with self.subTest('an older record whose schema alone fills it'):
+            self.fresh(choices=(PromptChoice(id='deny', label='Deny'),), questions=())
+            self.answer(choice='deny')
+            folder = self.directory / 'prompts'
+            path = folder / (self.prompt_id + '.json')
+            record = store.read(path)
+            record.pop('answer')
+            record['result'].update(state='unknown', reason='', cause=None)
+            record['public_options'] = {'unused': ['']}
+            record['public_options']['unused'][0] = 'x' * (prompts.LIMIT - prompts._record_size(record))
+            store.write(path, record)
+            (folder / (self.prompt_id + '.answer.json')).rename(folder / (self.prompt_id + '.answer.taken.json'))
+            self.ended.return_value = True
+            prompts.result(self.root, self.agent, self.prompt_id)
+            self.ended.return_value = False
+            self.assertEqual((path.stat().st_size, store.read(path)), (prompts.LIMIT, record))  # left as it was
+        with self.subTest('an older record too full to settle in place'):
+            self.fresh(choices=(PromptChoice(id='deny', label='Deny', takes_message=True),), questions=())
+            self.answer(choice='deny', message='a')
+            path = self.directory / 'prompts' / (self.prompt_id + '.json')
+            record = store.read(path)
+            record['result'].update(state='unknown', reason='', cause=None)
+            record['answer']['message'] += 'a' * (prompts.LIMIT - prompts._record_size(record))
+            store.write(path, record)
+            folder = self.directory / 'prompts'
+            (folder / (self.prompt_id + '.answer.json')).rename(folder / (self.prompt_id + '.answer.taken.json'))
+            self.ended.return_value = True
+            prompts.result(self.root, self.agent, self.prompt_id)
+            self.ended.return_value = False
+            self.assertLessEqual(path.stat().st_size, prompts.LIMIT)
+        with self.subTest("secret markers that can't fit are refused before sending"):
+            many = tuple(PromptQuestion(id=f'f{i:03}', question='S', secret=True, options=(('L', ''),), takes_note=True)
+                         for i in range(128))
+            self.fresh(choices=(PromptChoice(id='other', label='x' * 49_500),), questions=many)
+            sent = len(self.sent)
+            found = self.answer(answers={q.id: 'L' for q in many}, notes={q.id: 'n' for q in many})
+            self.assertEqual((found.cause, len(self.sent)), ('too_large', sent))
+        with self.subTest('secret markers inside the bound'):
+            self.fresh(choices=(), questions=(PromptQuestion(id='public', question='Public'), *(
+                PromptQuestion(id=f'secret-{i}', question='Secret', secret=True) for i in range(16))))
+            self.catalog = []
+            self.receipts[self.prompt_id] = NativeResult('ok', value={
+                'state': 'person', 'choices': [], 'questions': [asdict(q) for q in self.prompt.questions],
+                'person_answer': {'answers': {'public': ['x' * 65300], **{
+                    q.id: ['SECRET'] for q in self.prompt.questions if q.secret}}}})
+            answer = prompts.result(self.root, self.agent, self.prompt_id).answer
+            encoded = json.dumps(answer, ensure_ascii=False).encode()
+            self.assertLessEqual(len(encoded), prompts.LIMIT)
+            self.assertNotIn(b'SECRET', encoded)
+            self.assertEqual(len(answer['answers']), 16)  # every marker kept, though the text was cut
+            no_room = prompts._fitted({'answers': {'s': {'secret': True}}, 'typed': {'t': ['x' * 99]}}, 8)
+            self.assertEqual(no_room, {'answers': {'s': {'secret': True}}, 'truncated': True})  # markers outlast text
+
     def test_closed_a_cannot_become_an_answer_to_b_even_when_waiting_again(self):
         """A fresh waiting status cannot retarget a delayed answer from the person's closed prompt A to prompt B."""
         old = prompts.waiting(self.root, self.agent).prompts[0]
@@ -501,10 +977,11 @@ class PromptTest(BaseTest):
         self.assertEqual((outcome.state, outcome.cause), ('gone', 'replaced'))
         self.assertIn(self.prompt_id, outcome.reason)
         self.assertFalse(self.sent)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
         self.receipts[old.id] = NativeResult('ok', value={'state': 'person', 'person_answer': {'choice': 'deny'}})
         outcome = prompts.answer(self.root, self.agent, old.id, choice='allow', wait=False)
-        self.assertEqual((outcome.state, outcome.person_answer), ('person', {'choice': 'deny'}))
+        self.assertEqual((outcome.state, outcome.person_answer),
+                         ('person', {'choice': {'id': 'deny', 'label': None, 'short': None}}))
         self.assertFalse(self.sent)
         self.receipts[old.id] = NativeResult('ok', value={'state': 'person', 'choices': [], 'questions': [
             asdict(PromptQuestion(id='pick', question='Pick one', options=(('A', ''), ('B', '')))),
@@ -512,15 +989,16 @@ class PromptTest(BaseTest):
             asdict(PromptQuestion(id='text', question='Type text'))],
             'person_answer': {'answers': {'pick': ['B'], 'secret': ['PRIVATE SECRET'], 'text': ['PERSON TYPED TEXT']}}})
         outcome = prompts.answer(self.root, self.agent, old.id, answers={'pick': 'A'}, wait=False)
-        self.assertEqual(outcome.person_answer, {'answers': {'pick': ['B']}, 'typed': {'text': ['PERSON TYPED TEXT']}})
+        self.assertEqual(outcome.person_answer, {'answers': {'pick': ['B'], 'secret': {'secret': True}},
+                                                 'typed': {'text': ['PERSON TYPED TEXT']}})
         self.assertNotIn('PRIVATE', str(outcome))
         self.assertFalse(self.sent)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
         self.receipts[old.id].value['person_answer']['answers']['text'] = ['x' * prompts.LIMIT]
         outcome = prompts.answer(self.root, self.agent, old.id, answers={'pick': 'A'}, wait=False)
         self.assertTrue(outcome.person_answer['truncated'])
         self.assertLessEqual(len(json.dumps(outcome.person_answer).encode()), prompts.LIMIT)
-        self.assertEqual(outcome.person_answer.get('answers'), {'pick': ['B']})
+        self.assertEqual(outcome.person_answer.get('answers'), {'pick': ['B'], 'secret': {'secret': True}})
         # An incomplete or malformed closed schema cannot authorize exposing a person's answers.
         for fields in ({'questions': self.receipts[old.id].value['questions']},
                        {'choices': [], 'questions': [{'id': 'pick'}]}):

@@ -1,5 +1,5 @@
 """Focus: a focused agent refuses steer and follow-up messages and takes inbox-only ones."""
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import io
@@ -238,11 +238,16 @@ class FocusRecordTest(BaseTest):
         the new focus at once, before the turn it was meant for."""
         self.status('working')
         started = []
-        def focus_in_the_gap(*arguments, **options):
-            # Runs where the turn end used to be counted: after the status is saved and the runtime lock released.
-            if not started:
+        runtime_lock = agents.lock
+
+        @contextmanager
+        def focus_after_commit(path, *args, **kwargs):
+            with runtime_lock(path, *args, **kwargs):
+                yield
+            if path == self.directory / '.runtime.lock' and not started:
                 started.append(focus.start(self.directory, turn=True))
-        with patch.object(agents, '_event', side_effect=focus_in_the_gap):
+
+        with patch.object(agents, 'lock', side_effect=focus_after_commit):
             self.status('idle')
         self.assertEqual(started[0]['turns'], 1)
         self.assertEqual(focus.current(self.directory), started[0])
@@ -498,6 +503,65 @@ class FocusCommandTest(BaseTest):
                 record = send.run(self.root, agent='asker', text='slip past', sender=named, delivery='steer')
                 self.assertEqual((record['state'], self.calls), ('held', []))
         self.assertEqual(focus.current(self.directories['asker']), held)
+
+    def test_a_plugins_message_as_the_user_reads_as_typed_but_names_the_plugin(self):
+        """A plugin's as_user message reaches the agent as bare text and lists as the user's, while mv2 records the plugin; from an agent's session it is held as that session's, else an agent passes itself off as the person."""
+        from multiverse.tools import inbox
+        self.output('focus', 'asker')
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        sent = []
+        real = native.framed_text
+
+        def framed(root, message, **keywords):  # what the agent reads, on delivery and in its inbox
+            sent.append(real(root, message, **keywords))
+            return sent[-1]
+        with patch.object(native, 'framed_text', side_effect=framed):
+            record = send.run(self.root, agent='asker', text='go ahead', sender=plugin, as_user=True)
+        self.assertNotEqual(record['state'], 'held')  # the person's words: a focus doesn't hold them
+        saved = self.history('asker')[-1]
+        self.assertEqual((saved['from']['name'], saved['from']['plugin'], saved['as_user']),
+                         ('plugin remote', 'remote', True))  # mv2's record names the plugin
+        self.assertEqual(native.framed_text(self.root, saved), 'go ahead')  # bare, as if typed
+        self.assertIn('go ahead', sent)
+        self.assertRegex(inbox.readable(self.root, {'messages': [saved]}), '^Message from user[ :]')
+        self.output('unfocus', 'asker')
+        send.run(self.root, agent='asker', text='later', sender=plugin, as_user=True, delivery='inbox-only')
+        self.assertTrue(self.output('inbox', '--peek', agent='asker').startswith('Message from user'))  # unread too
+        self.output('focus', 'asker')
+        with patch.dict(os.environ, self.agent_environment('helper')):  # a plugin command an agent runs
+            record = send.run(self.root, agent='asker', text='go ahead', sender=plugin, as_user=True)
+        self.assertEqual(record['state'], 'held')
+        saved = self.history('asker')[-1]
+        self.assertNotIn('as_user', saved)
+        self.assertRegex(inbox.readable(self.root, {'messages': [saved]}),
+                         '^Message from plugin remote, run by agent helper')
+        self.output('unfocus', 'asker')  # not held: still never the person's
+        with patch.dict(os.environ, self.agent_environment('helper')):
+            send.run(self.root, agent='asker', text='go ahead', sender=plugin, as_user=True, delivery='inbox-only')
+        self.assertNotIn('as_user', self.history('asker')[-1])
+        for sender in ({'name': 'user', 'agent_id': None},  # the person's own: it is bare already
+                       {'name': 'plugin Bad Name', 'plugin': 'Bad Name', 'agent_id': None},  # not a plugin's name
+                       {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': self.directories['helper'].name}):
+            with self.subTest(sender=sender), self.assertRaisesRegex(ValueError, "Only a plugin's message"):
+                send.run(self.root, agent='asker', text='hi', sender=sender, as_user=True)
+        # Only a sender saved as the person's is: a missing or nameless one keeps a header.
+        for unproven in ({'text': 'x'}, {'text': 'x', 'from': {}}, {'text': 'x', 'from': {'name': None}}):
+            with self.subTest(unproven=unproven):
+                self.assertEqual(native.framed_text(self.root, unproven), 'Message from user:\nx')
+        # Listed as the person's only when the saved sender may carry the mark, whatever name the inbox shows.
+        mismatched = {'text': 'x', 'as_user': True, 'from': {'name': 'someone', 'plugin': 'remote', 'agent_id': None}}
+        self.assertRegex(inbox.readable(self.root, {'messages': [mismatched]}), '^Message from plugin remote')
+        # A record carrying the mark but no valid plugin's own sender (written by hand) keeps its header.
+        for forged in ({'name': 'plugin Bad Name', 'plugin': 'Bad Name'}, {'name': 'plugin remote', 'plugin': 'remote',
+                                                                             'agent_id': self.directories['helper'].name}):
+            with self.subTest(forged=forged):
+                self.assertTrue(native.framed_text(self.root, {'text': 'x', 'as_user': True, 'from': forged})
+                                .startswith('Message from'))
+        # Controls: the person's own send is bare too (the user, 2026-11-20), and a plugin's ordinary one isn't.
+        send.run(self.root, agent='asker', text='typed', sender={'name': 'user', 'agent_id': None}, delivery='inbox-only')
+        self.assertEqual(native.framed_text(self.root, self.history('asker')[-1]), 'typed')
+        send.run(self.root, agent='asker', text='mine', sender=plugin, delivery='inbox-only')
+        self.assertEqual(native.framed_text(self.root, self.history('asker')[-1]), 'Message from plugin remote:\nmine')
 
     def test_a_held_message_names_its_plugin_and_whose_session_sent_it_never_the_person(self):
         """A message sent from a plugin or an agent's session never reads as the person's; a break makes an agent take it as the user's word."""
@@ -886,17 +950,17 @@ class FocusCommandTest(BaseTest):
         noun = {1: 'message', 2: 'messages'}
         self.assertEqual([focus.note(count).split(' during')[0] for count in (1, 2)],
                          [f'You received {count} steer or follow-up {noun[count]}' for count in (1, 2)])
-        # Real messages keep their sender line: the person's, a plugin's, mv2's own without focus_note, and an
-        # agent's message carrying the same text.
-        senders = [({'name': 'user', 'agent_id': None}, 'Message from user:'),
-                   ({'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}, 'Message from plugin remote:'),
-                   (core, 'Message from mv2:')]
+        # Real messages keep their sender line: a plugin's, mv2's own without focus_note, and an agent's message
+        # carrying the same text. The person's own words reach it bare, as typed (the user, 2026-11-20).
+        senders = [({'name': 'user', 'agent_id': None}, ''),
+                   ({'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}, 'Message from plugin remote:\n'),
+                   (core, 'Message from mv2:\n')]
         for sender, header in senders:
             message = mailbox.append_message(directory, focus.note(1), sender, 'follow-up')
-            self.assertEqual(framed_text(self.root, message), header + '\n' + focus.note(1))
-        forged = mailbox.append_message(directory, focus.note(1), {'name': 'user', 'agent_id': None}, 'follow-up',
-                                        focus_note=str(uuid4()))
-        self.assertTrue(framed_text(self.root, forged).startswith('Message from user:\n'))
+            self.assertEqual(framed_text(self.root, message), header + focus.note(1))
+        plugin = {'name': 'plugin remote', 'plugin': 'remote', 'agent_id': None}
+        forged = mailbox.append_message(directory, focus.note(1), plugin, 'follow-up', focus_note=str(uuid4()))
+        self.assertTrue(framed_text(self.root, forged).startswith('Message from plugin remote:\n'))
         self.output('send', 'asker', '--text', 'hello', '--delivery', 'inbox-only', agent='helper')
         self.assertTrue(self.output('inbox', '--all', '--last', '1', agent='asker').startswith('Message from helper'))
 

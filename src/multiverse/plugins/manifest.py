@@ -37,7 +37,8 @@ EXTENSION_POINTS = frozenset({
 # Event types core records; a plugin's own events are PLUGIN.*.
 CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status", "agent.exited", "agent.killed",
                "agent.reported", "agent.session", "agent.command", "agent.moved", "agent.removed", "message.saved", "message.delivered",
-               "message.failed", "message.read", "universe.created", "refresh.applied")
+               "message.failed", "message.read", "universe.created", "refresh.applied", "prompt.opened",
+               "prompt.closed", "agent.prompt", "turn.started", "turn.joined", "turn.ended")
 EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
@@ -247,6 +248,21 @@ def load(directory):
         raise ManifestError(f"{path}: not valid JSON: {error}") from None
     try:
         return _parse(directory, data)
+    except ValueError as error:
+        raise ManifestError(f"{path}: {error}") from None
+
+
+def load_bytes(directory, raw):
+    """The manifest whose plugin.json bytes are `raw` (as hashed by trust.fingerprint_with), or ManifestError."""
+    path = Path(directory) / FILE
+    if raw is None:
+        raise ManifestError(f"{path}: missing")
+    try:
+        data = json.loads(raw)
+    except ValueError as error:
+        raise ManifestError(f"{path}: not valid JSON: {error}") from None
+    try:
+        return _parse(Path(directory), data)
     except ValueError as error:
         raise ManifestError(f"{path}: {error}") from None
 

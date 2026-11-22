@@ -8,9 +8,12 @@ from uuid import uuid4
 from multiverse import harnesses, store
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.types import NativeResult, PromptInput, PromptQuestion, WaitingPrompt
-from multiverse.runtime import native, navigation, prompts, recovery
+from multiverse.runtime import native, navigation, prompt_events, prompts, recovery
 from multiverse.universe import agents
 from test_multiverse import BaseTest
+
+
+TYPED_ANSWER = 'PRIVATE_ANSWER'
 
 
 class PromptInputTest(BaseTest):
@@ -48,7 +51,7 @@ class PromptInputTest(BaseTest):
         self.catalog = [self.prompt]
 
     def answer(self):
-        return prompts.answer(self.root, self.agent, self.prompt.id, answers={'q': 'PRIVATE_ANSWER'}, wait=False)
+        return prompts.answer(self.root, self.agent, self.prompt.id, answers={'q': TYPED_ANSWER}, wait=False)
 
     def result(self):
         return prompts.result(self.root, self.agent, self.prompt.id)
@@ -96,6 +99,7 @@ class PromptInputTest(BaseTest):
         """The real registry and core must agree on input identity before an echo races the send receipt."""
         from multiverse.harnesses.codex import async_questions, prompt_codec, prompts as registry
 
+        self.enterContext(patch.object(prompt_events, '_journal_event', return_value='retry'))
         version = '.'.join(map(str, prompt_codec.VERSION))
         agents.update_runtime(self.directory, self.launch, native_versions={'cli': version, 'daemon': version})
         connection = SimpleNamespace(
@@ -112,10 +116,19 @@ class PromptInputTest(BaseTest):
 
         self.adapter.waiting_prompts.side_effect = lambda *args: CodexAdapter.waiting_prompts(self.adapter, *args)
         self.prepare.side_effect = lambda *args: CodexAdapter.answer_prompt(self.adapter, *args)
-        for index, state in enumerate(('idle', 'paused', 'lost-receipt')):
+        submit = native.submit_input
+
+        def interrupt(*args, **kwargs):
+            try:
+                submit(*args, **kwargs)
+            finally:
+                raise KeyboardInterrupt
+
+        for index, state in enumerate(('idle', 'paused', 'lost-receipt', 'interrupted')):
             with self.subTest(queue=state):
                 generation = index + 1
-                self.status = 'active' if state == 'lost-receipt' else 'idle'
+                uncertain = state in ('lost-receipt', 'interrupted')
+                self.status = 'active' if uncertain else 'idle'
                 self.queue = [{'id': 'older', 'clientUserMessageId': 'older-native-input'}] if state == 'paused' else []
                 agents.update_runtime(self.directory, self.launch, session_generation=generation,
                     queue_state={'native_session_id': self.thread, 'state': state if state == 'paused' else 'idle'})
@@ -145,14 +158,26 @@ class PromptInputTest(BaseTest):
                         'clientId': input_id, 'content': [{'type': 'text', 'text': wire}]}}})
                     flush()
                     self.assertNotEqual(relay.records[self.prompt.id].get('result', {}).get('state'), 'person')
-                    if state == 'lost-receipt':
+                    if uncertain:
                         raise OSError('PRIVATE accepted input lost its receipt')
 
                 self.input_echo = echo
-                outcome = prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
-                self.assertEqual(outcome.state, 'unknown' if state == 'lost-receipt' else 'submitted', outcome)
+                if state == 'interrupted':
+                    with patch.object(native, 'submit_input', side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+                        prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
+                    record = store.read(self.directory / 'prompts' / (self.prompt.id + '.json'))
+                    self.assertIs(record.get('input_reserved'), True)
+                    outcome = self.result()
+                else:
+                    outcome = prompts.answer(self.root, self.agent, self.prompt.id, answers={'answer': text}, wait=False)
+                self.assertEqual(outcome.state, 'unknown' if uncertain else 'submitted', outcome)
+                journal = store.read(self.directory / 'prompts' / 'journal' / 'events.json')
+                closes = [row['data'] for row in journal['pending']
+                          if row['kind'] == 'prompt.closed' and row['data']['id'] == self.prompt.id]
+                self.assertEqual([item['state'] for item in closes], [outcome.state])
+                self.assertNotIn(text, str(journal))
                 self.assertNotEqual(relay.records[self.prompt.id].get('result', {}).get('state'), 'person')
-                if state != 'lost-receipt':
+                if not uncertain:
                     self.assertEqual(self.started[-1:], ['older-native-input' if state == 'paused' else input_id])
                 pending = prompts.pending_inputs(self.directory, self.launch, self.thread, generation)
                 self.assertEqual(pending, self.prompt.id)
@@ -170,14 +195,48 @@ class PromptInputTest(BaseTest):
                 self.assertEqual(after, before)
                 self.queue.clear()
                 self.confirmed.add(input_id)
-                self.assertEqual(self.result().state, 'answered')
+                confirmed = self.result()
+                typed = {'typed': {'answer': [text]}}
+                self.assertEqual((confirmed.state, confirmed.answer), ('answered', typed))
                 self.assertIsNone(prompts.pending_inputs(self.directory, self.launch, self.thread, generation))
+                record_path = self.directory / 'prompts' / (self.prompt.id + '.json')
+                saved = store.read(record_path)
+                self.assertEqual(saved.pop('answer'), typed)
+                self.assertNotIn(text, str(saved))
                 for path in (self.directory / 'prompts').glob('*.json'):
-                    self.assertNotIn(text, path.read_text())
+                    if path != record_path:
+                        self.assertNotIn(text, path.read_text())
                 self.assertNotIn(text, str(self.events.call_args_list))
                 self.assertFalse((self.directory / 'inbox.jsonl').exists())
                 self.assertFalse((self.directory / 'prompts' / (self.prompt.id + '.answer.json')).exists())
         self.callback.assert_not_called()
+
+    def test_a_claim_closes_the_prompt_even_when_delivery_refuses(self):
+        """A refused delivery after a valid claim closes the card; refusing before a claim leaves it open."""
+        self.enterContext(patch.object(prompt_events, '_journal_event', return_value='retry'))
+        for claimed in (False, True):
+            with self.subTest(claimed=claimed):
+                self.fresh()
+                self.assertTrue(prompts.waiting(self.root, self.agent).prompts)
+                self.prepare.side_effect = lambda session, answer, executor: NativeResult('ok', value=(
+                    PromptInput('prompt-' + answer.id, 'input') if claimed else {'state': 'refused'}))
+                with patch.object(native, 'submit_input', return_value=NativeResult(
+                        'error', value={'definite_failure': True})) as sent:
+                    self.assertEqual(self.answer().state, 'refused')
+                self.assertEqual(sent.call_count, int(claimed))
+                ledger = store.read(self.directory / 'prompts' / 'journal' / 'events.json')
+                self.assertEqual(self.prompt.id in ledger['open'], not claimed)
+                closed = [row['data']['state'] for row in ledger['pending']
+                          if row['kind'] == 'prompt.closed' and row['data']['id'] == self.prompt.id]
+                self.assertEqual(closed, ['refused'] if claimed else [])
+        self.fresh()
+        self.assertTrue(prompts.waiting(self.root, self.agent).prompts)
+        self.prepare.side_effect = KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.answer()
+        with patch.object(self.adapter, 'get_delivery', return_value=NativeResult('pending')):
+            self.assertEqual(self.result().state, 'submitted')
+        self.assertIn(self.prompt.id, store.read(self.directory / 'prompts' / 'journal' / 'events.json')['open'])
 
     def test_policy_recipe_and_reservation_do_not_widen_callback_authority(self):
         """A nonwaiting question must not bypass caller, callback policy, payload bounds or permanent admission."""
@@ -197,7 +256,7 @@ class PromptInputTest(BaseTest):
         self.catalog = [replace(self.prompt, kind='permission')]
         self.assertEqual(prompts.waiting(self.root, self.agent).state, 'unavailable')
         self.assertFalse(self.calls)
-        self.assertFalse((self.directory / 'prompts').exists())
+        self.assertEqual(list((self.directory / 'prompts').glob('*.json')), [])
 
         for facts in (None, [], {'session_generation': None}, {'session_generation': True},
                       {'session_generation': -1}, {'session_generation': '1'}):
@@ -266,7 +325,9 @@ class PromptInputTest(BaseTest):
                 saved = store.read(record)
                 self.assertEqual((saved['input_id'], saved['session_generation'], saved['requires_waiting']),
                                  (input_id, 1, False))
-                self.assertNotIn('PRIVATE', record.read_text())
+                self.assertEqual(saved.pop('answer'), {'typed': {'q': [TYPED_ANSWER]}})
+                self.assertNotIn(TYPED_ANSWER, str(saved))
+                self.assertNotIn('PRIVATE_INPUT:', record.read_text())
                 self.assertFalse((self.directory / 'inbox.jsonl').exists())
                 self.assertFalse(record.with_name(self.prompt.id + '.answer.json').exists())
                 listed = prompts.waiting(self.root, self.agent)
@@ -281,9 +342,33 @@ class PromptInputTest(BaseTest):
                 self.confirmed.add(input_id)
                 confirmed = self.result()
                 self.assertEqual((confirmed.state, confirmed.reason), ('answered', prompts.INPUT_ANSWERED_REASON))
+                self.assertNotIn('PRIVATE_INPUT:', str(confirmed))
                 self.assertTrue((self.directory / 'focus.json').exists())
         self.callback.assert_not_called()
         self.assertNotIn('PRIVATE', str(self.events.call_args_list))
+
+    def test_secret_question_keeps_only_a_marker_for_ordinary_input(self):
+        """Keeping typed answers must never save a secret in the outcome, prompt record or journal."""
+        self.prompt = replace(self.prompt, questions=(replace(self.prompt.questions[0], secret=True),))
+        self.catalog = [self.prompt]
+        secret = 'SECRET_TYPED_INPUT'
+        with patch.object(prompt_events, '_journal_event', return_value='retry'):
+            self.assertEqual(prompts.answer(self.root, self.agent, self.prompt.id,
+                                           answers={'q': secret}, wait=False).state, 'submitted')
+            self.queue.clear()
+            self.confirmed.add('prompt-' + self.prompt.id)
+            result = self.result()
+        kept = {'answers': {'q': {'secret': True}}}
+        self.assertEqual((result.state, result.answer), ('answered', kept))
+        self.assertNotIn(secret, str(result))
+        directory = self.directory / 'prompts'
+        record = directory / (self.prompt.id + '.json')
+        self.assertEqual(store.read(record)['answer'], kept)
+        self.assertNotIn(secret, record.read_text())
+        self.assertNotIn(secret, (directory / 'journal' / 'events.json').read_text())
+        self.assertNotIn(secret, str(self.events.call_args_list))
+        self.assertFalse((directory / (self.prompt.id + '.answer.json')).exists())
+        self.assertFalse((self.directory / 'inbox.jsonl').exists())
 
     def test_uncertainty_and_identity_fences_keep_input_out_of_a_new_conversation(self):
         """Lost native writes and generation changes must neither resend nor authorize a conversation switch."""
@@ -351,14 +436,15 @@ class PromptInputTest(BaseTest):
 
     def test_proved_failure_releases_navigation_but_ambiguous_errors_do_not(self):
         """Definite non-delivery must not strand navigation, while malformed or contradictory proof cannot release it."""
-        cases = [(NativeResult('error', 'PRIVATE', {'definite_failure': True}), 'refused')]
-        cases += [(NativeResult('error', 'PRIVATE', {'definite_failure': flag}), 'unknown')
+        diagnostic = 'PRIVATE_NATIVE_DIAGNOSTIC'
+        cases = [(NativeResult('error', diagnostic, {'definite_failure': True}), 'refused')]
+        cases += [(NativeResult('error', diagnostic, {'definite_failure': flag}), 'unknown')
                   for flag in (False, None, 1, 'true', {})]
-        cases += [(NativeResult(state, 'PRIVATE', {'definite_failure': True}), 'unknown')
+        cases += [(NativeResult(state, diagnostic, {'definite_failure': True}), 'unknown')
                   for state in ('unknown', 'unavailable', 'ok', 'native_queued', 'pending')]
-        cases += [(NativeResult(state, 'PRIVATE', {'definite_failure': True, 'transcript_confirmed': True}), 'unknown')
+        cases += [(NativeResult(state, diagnostic, {'definite_failure': True, 'transcript_confirmed': True}), 'unknown')
                   for state in ('error', 'ok', 'native_queued', 'pending')]
-        cases += [(NativeResult(state, 'PRIVATE', value), expected)
+        cases += [(NativeResult(state, diagnostic, value), expected)
                   for state in ('ok', 'native_queued', 'pending')
                   for value, expected in (({}, 'submitted'), ({'transcript_confirmed': True}, 'answered'),
                                           ({'definite_failure': 1}, 'submitted'))]
@@ -377,7 +463,10 @@ class PromptInputTest(BaseTest):
                             self.assertEqual(outcome.state, 'submitted')
                             outcome = self.result()
                         self.assertEqual(outcome.state, expected)
-                        self.assertNotIn('PRIVATE', str(outcome))
+                        self.assertNotIn(diagnostic, str(outcome))
+                        self.assertNotIn('PRIVATE_INPUT:', str(outcome))
+                        typed = {'typed': {'q': [TYPED_ANSWER]}} if expected in ('submitted', 'answered') else None
+                        self.assertEqual(outcome.answer, typed)
                         pending = prompts.pending_inputs(self.directory, self.launch, self.thread, generation)
                         self.assertEqual(pending, None if expected in ('refused', 'answered') else self.prompt.id)
                         self.assertEqual(self.answer().cause, 'already_answered')
