@@ -31,6 +31,7 @@ from ..types import (AttachmentSpec, Capability, CommandSpec, NativeEndpoint, Na
                      ShellCallbackResult, normalize_session_id)
 from . import bridge as agy_bridge
 from . import models as agy_models
+from . import pane as agy_pane
 from . import storage
 
 
@@ -1440,6 +1441,10 @@ class AgyAdapter(ConfiguredAdapter):
         """Validate a requested model and optional session effort against the checked Antigravity table."""
         return agy_models.check(model, effort, environment)
 
+    def display_pane(self, text: str) -> str:
+        """The live pane without Antigravity's input box and footer (pane.py)."""
+        return agy_pane.display(text)
+
     def session_storage_evidence(self, session, home) -> NativeResult:
         return storage.session_storage_evidence(session, home)
 
@@ -1500,6 +1505,11 @@ class AgyAdapter(ConfiguredAdapter):
             else Capability('unavailable', bridge.reason,
                             mechanism='launch-only' if bridge.final else None, required=True)
         )
+        result['queued'] = (
+            Capability('supported', mechanism='agy-stop-hook') if bridge.ready
+            else Capability('unavailable', bridge.reason,
+                            mechanism='launch-only' if bridge.final else None)
+        )
         if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='agy-transcript')
         if session.native_id:
@@ -1522,6 +1532,7 @@ class AgyAdapter(ConfiguredAdapter):
             'send_steer': 'agy-agentapi',
             'send_follow_up': 'agy-stop-hook',
             'get_delivery': 'agy-transcript',
+            'queued': 'agy-stop-hook',
         }
         result = {
             name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
@@ -1997,3 +2008,67 @@ class AgyAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', 'Antigravity has not written a transcript for this session yet')
         return NativeResult('ok', 'Measured from the Antigravity session transcript',
                             {**asdict(usage), **reported})
+
+    def queued_prompts(self, session, executor=None) -> NativeResult:
+        """Read this launch's queued mv2 Stop-hook follow-ups without changing delivery or returning text."""
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            if bridge.final:
+                return NativeResult(
+                    'unavailable',
+                    "This agent runs without mv2's Antigravity bridge (launch-only), so mv2 can't see its queued follow-ups",
+                )
+            return unavailable(bridge)
+        if not session.session_file or not session.launch_id or not session.native_id:
+            return NativeResult('unavailable', 'No Antigravity launch and conversation binding recorded')
+        agent_dir = Path(session.session_file).parent
+        observed_at = now()
+        state, data, reason = agy_bridge.read_followup_queue(agent_dir, session.launch_id)
+        if state == 'missing':
+            return NativeResult('ok', value={
+                'coverage': 'complete', 'reason': None, 'observed_at': observed_at, 'entries': [],
+            })
+        if state != 'ok' or data is None:
+            return NativeResult('ok', value={
+                'coverage': 'unknown', 'reason': reason or "Antigravity's follow-up queue can't be read",
+                'observed_at': observed_at, 'entries': [],
+            })
+        entries = []
+        seen = set()
+        coverage = 'complete'
+        note = None
+        for item in data['entries']:
+            if not isinstance(item, dict):
+                coverage = 'unknown'
+                note = note or "Antigravity's follow-up queue has an unreadable entry"
+                continue
+            if item.get('native_id') != session.native_id:
+                continue
+            item_state = item.get('state', 'queued')
+            if item_state == 'handed_off':
+                continue
+            if item_state == 'agentapi_submitting':
+                coverage = 'unknown'
+                note = note or 'A queued follow-up is currently being submitted to Antigravity'
+                continue
+            if item_state != 'queued':
+                coverage = 'unknown'
+                note = note or "Antigravity's follow-up queue has an entry in an unknown state"
+                continue
+            message_id = item.get('id')
+            if (not isinstance(message_id, str) or not message_id or '\0' in message_id
+                    or len(message_id.encode('utf-8')) > 128):
+                coverage = 'unknown'
+                note = note or "Antigravity's follow-up queue has an invalid message ID"
+                continue
+            if message_id in seen:
+                coverage = 'unknown'
+                note = note or "Antigravity's follow-up queue has a duplicate message ID"
+                continue
+            seen.add(message_id)
+            raw_since = item.get('queued_at')
+            since = raw_since if storage.moment(raw_since) is not None else None
+            entries.append({'message_id': message_id, 'mode': 'follow-up', 'since': since, 'native_id': None})
+        return NativeResult('ok', value={
+            'coverage': coverage, 'reason': note, 'observed_at': observed_at, 'entries': entries,
+        })

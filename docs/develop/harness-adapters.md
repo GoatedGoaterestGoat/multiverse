@@ -266,6 +266,7 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: `agy-receipts/` and transcript cohort confirmation | Bridge: extension | No |
 | `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No | No |
 | `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | Session transcript; the bridge adds window, cost and quota | No | No |
+| `queued` | Bridge: mod queue file | Bridge: app-server after-turn queue | Bridge: launch-local `Stop`-hook follow-up queue | No | No |
 | `compaction` | Live connection, when the compaction plugin is on | No | No | No | No |
 
 `spawn`, `resume`, `send_steer` and `send_follow_up` are marked `required`. Codex checks its app-server only with an executor, so its message capabilities read `unavailable` without `--probe`.
@@ -580,7 +581,7 @@ next sweep and `mv2 doctor`, which reports leftovers without deleting them.
 
 ## Pane display
 
-The optional `PaneDisplay` method `display_pane(text)` is observe. The dashboard inspector's live pane passes each capture of an agent's pane through it, before it keeps the last 100 lines. Claude and Codex implement it; without it, the live pane shows the capture as it is. `mv2 inspect` keeps every row of the terminal.
+The optional `PaneDisplay` method `display_pane(text)` is observe. The dashboard inspector's live pane passes each capture of an agent's pane through it, before it keeps the last 100 lines. Claude, Codex and Antigravity implement it; without it, the live pane shows the capture as it is. `mv2 inspect` keeps every row of the terminal.
 
 - **Pure.** It is a function of the text alone, run on every refresh. It reads no files, starts no process and uses no network, and its cost stays linear in the size of the text.
 - **The input box and what is under it.** It drops the input box with any text typed in it, and the rows the harness draws around it: rules across the pane, status rows or footer, hints, tips and blank padding. It never drops or rewrites conversation text, so a line of dashes in the conversation stays.

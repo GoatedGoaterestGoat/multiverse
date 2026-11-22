@@ -1203,6 +1203,52 @@ def has_queued_followup(agent_dir, launch_id: str, message_id: str) -> bool:
     return followup_state(agent_dir, launch_id, message_id) == 'queued'
 
 
+def read_followup_queue(agent_dir, launch_id: str) -> tuple[str, dict | None, str | None]:
+    """Read-only, anchored inspection of this launch's Stop-hook follow-up queue for QueueProvider.
+
+    Returns `('missing', None, None)`, `('ok', data, None)`, or `('invalid', None, reason)`.
+    Never mutates or creates files and never exposes message text.
+    """
+    try:
+        canonical_launch = normalize_session_id(launch_id)
+    except ValueError:
+        return 'invalid', None, 'Invalid launch ID for Antigravity follow-up queue'
+    agent = Path(agent_dir)
+    agent_fd = launches_fd = launch_fd = fd = -1
+    try:
+        agent_fd = os.open(agent, _DIR_FLAGS)
+        launches_fd = os.open('launches', _DIR_FLAGS, dir_fd=agent_fd)
+        launch_fd = os.open(canonical_launch, _DIR_FLAGS, dir_fd=launches_fd)
+        fd = os.open(FOLLOWUPS_FILE, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=launch_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return 'invalid', None, "Antigravity's follow-up queue is not a regular file"
+        if info.st_uid != os.getuid() or (stat.S_IMODE(info.st_mode) & 0o077) != 0:
+            return 'invalid', None, "Antigravity's follow-up queue has invalid ownership or permissions"
+        if info.st_size > MAX_QUEUE_BYTES:
+            return 'invalid', None, "Antigravity's follow-up queue exceeds the size limit"
+        with os.fdopen(fd, 'rb') as handle:
+            fd = -1
+            raw = handle.read(MAX_QUEUE_BYTES + 1)
+        if len(raw) > MAX_QUEUE_BYTES:
+            return 'invalid', None, "Antigravity's follow-up queue exceeds the size limit"
+        data = json.loads(raw.decode('utf-8'))
+    except FileNotFoundError:
+        return 'missing', None, None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return 'invalid', None, "Antigravity's follow-up queue can't be read"
+    finally:
+        for handle_fd in (fd, launch_fd, launches_fd, agent_fd):
+            if handle_fd >= 0:
+                os.close(handle_fd)
+    if (not isinstance(data, dict) or type(data.get('schema')) is not int or data['schema'] != 1
+            or not isinstance(data.get('entries'), list)):
+        return 'invalid', None, "Antigravity's follow-up queue can't be read"
+    if data.get('launch_id') != canonical_launch:
+        return 'invalid', None, "Antigravity's follow-up queue belongs to another launch"
+    return 'ok', data, None
+
+
 def receipt_path(agent_dir, message_id: str) -> Path:
     return Path(agent_dir) / RECEIPTS_DIR / f'{normalize_session_id(message_id)}.json'
 

@@ -2395,6 +2395,102 @@ class AgyAdapterUnitTest(BaseTest):
                 }
                 self.assertEqual(display.model_label(row), expected_label)
 
+    def test_queued_prompts_and_live_pane_display(self):
+        """Antigravity's Stop-hook queue feeds core's queued-prompts send guard without exposing text, failing closed
+        to unknown coverage on damaged/wrong-launch/in-flight files, and display_pane strips only the composer."""
+        from multiverse.runtime import queued_prompts
+        from multiverse.tools import send as send_tool
+        from multiverse.universe.mailbox import append_message, update_message
+
+        agent_id, launch_id, conv1, conv2 = str(uuid4()), str(uuid4()), str(uuid4()), str(uuid4())
+        peer_id = str(uuid4())
+        agent_dir = self.root / 'state' / 'agents' / agent_id
+        peer_dir = self.root / 'state' / 'agents' / peer_id
+        launch_dir = agent_dir / 'launches' / launch_id
+        launch_dir.mkdir(parents=True)
+        peer_dir.mkdir(parents=True)
+        home = self._create_saved_conversation(conv1)
+        uni_id = read(self.root / 'universe.json')['id']
+        write(agent_dir / 'properties.json', {
+            'id': agent_id, 'name': 'worker', 'harness': 'agy', 'workspace': str(self.work),
+            'universe_id': uni_id, 'native_session_provider': 'agy',
+            'native_session_id': conv1, 'native_session_home': os.path.realpath(home),
+        })
+        write(agent_dir / 'runtime.json', {
+            'launch_id': launch_id, 'state': 'running', 'status': 'working',
+            'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_bridge': BRIDGE,
+        })
+        write(peer_dir / 'properties.json', {
+            'id': peer_id, 'name': 'peer', 'harness': 'agy', 'workspace': str(self.work),
+            'universe_id': uni_id, 'native_session_provider': 'agy',
+        })
+        write(peer_dir / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'dormant', 'status': 'unknown'})
+
+        adapter = AgyAdapter.configured('agy', {})
+        session = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
+
+        # Unbound launch (before native_bridge=BRIDGE) or plain launch reports unavailable; once hooks bind
+        # native_bridge=BRIDGE, queued_prompts works even before agy-ls.json is written.
+        unbound_session = SessionHandle.from_records(
+            read(agent_dir / 'properties.json'),
+            {**read(agent_dir / 'runtime.json'), 'native_bridge': None},
+            agent_dir,
+        )
+        self.assertEqual(adapter.queued_prompts(unbound_session).state, 'unavailable')
+        self.assertEqual(AgyAdapter.configured('agy', {'inbox_bridge': False}).queued_prompts(session).state, 'unavailable')
+        self.assertEqual(adapter.queued_prompts(session).state, 'ok')
+
+        agy_bridge.write_ls_info(agent_dir, launch_id, '127.0.0.1:4242', 'tok-q', conv1)
+        self.assertEqual(adapter.capabilities(session)['queued'].state, 'supported')
+
+        # Missing queue file -> complete with empty entries.
+        empty = adapter.queued_prompts(session)
+        self.assertEqual(empty.state, 'ok')
+        self.assertEqual((empty.value['coverage'], empty.value['entries']), ('complete', []))
+
+        # Enqueue a follow-up from peer, verify queued_prompts lists its ID without text and blocks peer reply without --force.
+        msg = append_message(agent_dir, 'secret queued body', {'agent_id': peer_id, 'name': 'peer', 'universe': str(self.root)}, 'follow-up', target_session=conv1)
+        update_message(agent_dir, msg['id'], submission_state='accepted', attempts=[{
+            'launch_id': launch_id, 'native_session_id': conv1, 'message_id': msg['id'],
+            'mode': 'follow-up', 'state': 'native_queued', 'value': {'route': 'stop-hook'},
+        }])
+        agy_bridge.enqueue_followup(agent_dir, launch_id, msg['id'], conv1, 'secret queued body')
+        # Another conversation's entry (pre-/clear) is ignored.
+        agy_bridge.enqueue_followup(agent_dir, launch_id, str(uuid4()), conv2, 'other conv')
+
+        listed = adapter.queued_prompts(session)
+        self.assertEqual(listed.state, 'ok')
+        self.assertEqual(listed.value['coverage'], 'complete')
+        self.assertEqual([e['message_id'] for e in listed.value['entries']], [msg['id']])
+        self.assertNotIn('secret queued body', json.dumps(listed.value))
+
+        with patch.object(native.NativeExecutor, 'check_session', return_value=None):
+            report, senders, _ = queued_prompts.for_send(self.root, agent_id)
+        self.assertEqual((report.state, report.coverage), ('ok', 'complete'))
+        self.assertEqual([e.message_id for e in report.entries], [msg['id']])
+        self.assertEqual(senders, frozenset({peer_id}))
+
+        # In-flight agentapi_submitting downgrades coverage to unknown; damaged/wrong-schema/wrong-launch fail closed.
+        qpath = launch_dir / agy_bridge.FOLLOWUPS_FILE
+        raw = json.loads(qpath.read_text())
+        raw['entries'][0]['state'] = 'agentapi_submitting'
+        agy_bridge._write_private_json(qpath, raw)
+        self.assertEqual(adapter.queued_prompts(session).value['coverage'], 'unknown')
+
+        for label, bad in (
+            ('damaged json', '{"schema": 1, "entries": ['),
+            ('bool schema', json.dumps({'schema': True, 'launch_id': launch_id, 'entries': []})),
+            ('other launch', json.dumps({'schema': 1, 'launch_id': str(uuid4()), 'entries': []})),
+        ):
+            with self.subTest(label):
+                qpath.write_text(bad)
+                qpath.chmod(0o600)
+                res = adapter.queued_prompts(session)
+                self.assertEqual(res.state, 'ok')
+                self.assertEqual((res.value['coverage'], res.value['entries']), ('unknown', []))
+
 
     def test_stop_hook_pins_launch_id_and_yields_to_idle_before_continuation_cap(self):
         """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's

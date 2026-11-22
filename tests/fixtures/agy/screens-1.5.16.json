@@ -1,0 +1,50 @@
+[
+ {
+  "name": "idle",
+  "note": "idle after a cancelled tool turn with mv2's statusLine under the box: prompt and \"  ---\" row stay",
+  "cli_version": "1.5.16",
+  "width": 80,
+  "text": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravity CLI do instead?\n────────────────────────────────────────────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────────────────────────────────────────────────────────────\nmv2:worker · phase working · bridge\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravity CLI do instead?"
+ },
+ {
+  "name": "working",
+  "note": "mid-turn: the spinner right above the box stays, while the box and statusLine go",
+  "cli_version": "1.5.16",
+  "width": 80,
+  "text": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n⡿  Generating...\n────────────────────────────────────────────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────────────────────────────────────────────────────────────\nmv2:worker · phase working · bridge\n\n\n\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n⡿  Generating..."
+ },
+ {
+  "name": "draft",
+  "note": "a typed draft inside the box goes with its statusLine",
+  "cli_version": "1.5.16",
+  "width": 80,
+  "text": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravity CLI do instead?\n────────────────────────────────────────────────────────────────────────────────\n> first draft line\n────────────────────────────────────────────────────────────────────────────────\nmv2:worker · phase working · bridge\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄\n     ▀▀▀▀▀▀\n    ▀▀▀▀▀▀▀▀\n   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravity CLI do instead?"
+ },
+ {
+  "name": "narrow",
+  "note": "a 40-column pane with mv2's statusLine under the box",
+  "cli_version": "1.5.16",
+  "width": 40,
+  "text": "   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n─────────────────────────────────────\n> Run the shell command `echo\n  mv2_approval_probe` right now. If the\n  command is denied or cancelled, reply\n  with exactly these 3 lines and\n  nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv...) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravi\n────────────────────────────────────────\n> Auto mode: edits & safe commands a...\n────────────────────────────────────────\nmv2:worker · phase working · bridge\n",
+  "shown": "   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n─────────────────────────────────────\n> Run the shell command `echo\n  mv2_approval_probe` right now. If the\n  command is denied or cancelled, reply\n  with exactly these 3 lines and\n  nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv...) (ctrl+o to expand)\n\n  ⎿  Interrupted · What should Antigravi"
+ },
+ {
+  "name": "trust dialog",
+  "note": "the workspace trust dialog on 1.5.16: unchanged",
+  "cli_version": "1.5.16",
+  "width": 80,
+  "text": "Accessing workspace:\n\n/tmp/mv2-pane-1516\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm\nmv2:worker · phase working · bridge\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+  "shown": "Accessing workspace:\n\n/tmp/mv2-pane-1516\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm\nmv2:worker · phase working · bridge\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+ },
+ {
+  "name": "command approval",
+  "note": "real 1.5.16 tool-approval prompt (status waiting, Requesting permission for command): unchanged",
+  "cli_version": "1.5.16",
+  "width": 80,
+  "text": "  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\nCommand\n────────────────────────────────────────────────────────────────────────────────\n\nRequesting permission for:\n   echo mv2_approval_probe\n\nRun this command?\n> 1. Yes, run command\n  2. Yes, and always allow in this conversation for commands that start with\n'echo'\n  3. Yes, and always allow for commands that start with 'echo' (Persist to\nsettings.json)\n  4. No, cancel\n\n  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\nmv2:worker · phase working · bridge\n",
+  "shown": "  Antigravity CLI 1.5.16\n  user@example.com (Google AI Pro)\n  Gemini 3.8 Flash (Medium)\n  /tmp/mv2-pane-1516\n\n────────────────────────────────────────────────────────────\n> Run the shell command `echo mv2_approval_probe` right now. If the command is\n  denied or cancelled, reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n● Ran (echo mv2_approval_probe) (ctrl+o to expand)\n\nCommand\n────────────────────────────────────────────────────────────────────────────────\n\nRequesting permission for:\n   echo mv2_approval_probe\n\nRun this command?\n> 1. Yes, run command\n  2. Yes, and always allow in this conversation for commands that start with\n'echo'\n  3. Yes, and always allow for commands that start with 'echo' (Persist to\nsettings.json)\n  4. No, cancel\n\n  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command\nmv2:worker · phase working · bridge\n"
+ }
+]
