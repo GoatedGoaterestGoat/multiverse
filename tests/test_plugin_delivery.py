@@ -40,6 +40,179 @@ def register(mv):
 """
 
 
+KEEPER = """
+import builtins
+import json
+from pathlib import Path
+
+def register(mv):
+    for kind in json.loads((Path(__file__).parent / "plugin.json").read_text())["events"]:
+        mv.events.on(kind)(lambda event, kind=kind: builtins.KEPT.append((kind, event.seq)))
+"""
+
+
+class ReloadTest(PluginTestCase):
+    def test_a_running_worker_leaves_a_changed_plugins_events_to_its_new_version(self):
+        """A worker whose plugin changed stops before skipping what the new version follows; else those are lost."""
+        import builtins
+        from multiverse.plugins import trust
+        from multiverse.tools import plugins as tool
+        builtins.KEPT = []
+        self.addCleanup(lambda: delattr(builtins, "KEPT"))
+
+        def worker(name):  # what a worker does as it starts: observe, let the loader choose, load
+            observed = host._observe(self.root, name)
+            entry = self.entry(name)
+            loaded = loader.load(entry)
+            return loaded, host._still_running(entry, loaded, self.root, observed)
+        # (source, where, whether it runs at approved content)
+        for number, (source, where, approved) in enumerate((("universe", self.root / "plugins", True),
+                                                             ("personal", trust.user_directory() / "plugins", False))):
+            name = f"keeper{number}"
+            with self.subTest(source):
+                def release(kinds):
+                    self.write_plugin(name, {"module": "plugin", "extends": ["events"], "events": kinds},
+                                      {"plugin.py": KEEPER}, where=where)
+                release(["agent.status"])
+                if approved:
+                    tool.run(self.root, plugin_action="trust", name=name)
+                self.enable(name)
+                loaded, check = worker(name)
+                host._write_cursor(self.root, name, 0)
+                events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={})
+                self.assertIsNone(host._deliver(loaded, api.Plugin(loaded), self.root, name, current=check))
+                release(["agent.status", "message.saved"])  # plugin.json alone changes
+                if approved:
+                    self.assertEqual(check(), "unchanged")  # an edit nobody approved changes nothing that runs
+                    tool.run(self.root, plugin_action="trust", name=name)
+                saved = events.emit(self.root, "message.saved", data={})
+                self.assertIsNotNone(saved)
+                if approved:  # while the approval can't be read: nothing consumed, nothing restarted
+                    with mock.patch.object(trust, "pins_now", return_value=None):
+                        self.assertEqual(host._deliver(loaded, api.Plugin(loaded), self.root, name, current=check),
+                                         "unknown")
+                self.assertEqual(host._deliver(loaded, api.Plugin(loaded), self.root, name, current=check),
+                                 "changed")
+                self.assertLess(host._read_cursor(self.root, name, events.journal_id(self.root)), saved["seq"])
+                loader.reset()  # what a fresh worker process does: its new version, loaded anew
+                fresh, fresh_check = worker(name)
+                host._deliver(fresh, api.Plugin(fresh), self.root, name, current=fresh_check)
+                self.assertIn(("message.saved", saved["seq"]), builtins.KEPT)
+                self.enable(name, False)
+        with self.subTest("approved while it loaded: bound to what loaded"):
+            self.write_plugin("loading", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                              {"plugin.py": KEEPER}, where=self.root / "plugins")
+            tool.run(self.root, plugin_action="trust", name="loading")
+            self.enable("loading")
+            observed = host._observe(self.root, "loading")
+            entry = self.entry("loading")
+            loaded = loader.load(entry)
+            self.write_plugin("loading", {"module": "plugin", "extends": ["events"], "events": ["message.saved"]},
+                              {"plugin.py": KEEPER}, where=self.root / "plugins")
+            tool.run(self.root, plugin_action="trust", name="loading")  # before its worker took its baseline
+            self.assertEqual(host._still_running(entry, loaded, self.root, observed)(), "changed")
+            self.enable("loading", False)
+        with self.subTest("a live plugin edited between its selection and its load"):
+            fixed = "def register(mv):\n    mv.events.on('agent.status')(lambda event: None)\n"
+            self.write_plugin("between", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                              {"plugin.py": fixed}, where=trust.user_directory() / "plugins")
+            self.enable("between")
+            observed = host._observe(self.root, "between")
+            entry = self.entry("between")  # selected with its manifest as it was
+            self.write_plugin("between", {"module": "plugin", "extends": ["events"],
+                                          "events": ["agent.status", "message.saved"]},
+                              {"plugin.py": fixed}, where=trust.user_directory() / "plugins")
+            loaded = loader.load(entry)  # what loaded follows agent.status alone; its plugin.json says more now
+            self.assertEqual(host._still_running(entry, loaded, self.root, observed)(), "changed")
+            self.enable("between", False)
+        with self.subTest("a copy the loader passes over, unchanged, restarts nothing"):
+            for where, kinds in ((self.root / "plugins", ["agent.status"]),
+                                 (trust.user_directory() / "plugins", ["agent.status"])):
+                self.write_plugin("fallback", {"module": "plugin", "extends": ["events"], "events": kinds},
+                                  {"plugin.py": KEEPER}, where=where)
+            tool.run(self.root, plugin_action="trust", name="fallback")
+            self.write_plugin("fallback", {"module": "plugin", "extends": ["events"], "events": ["message.saved"]},
+                              {"plugin.py": KEEPER}, where=self.root / "plugins")  # an edit nobody approved
+            self.enable("fallback")
+            loaded, check = worker("fallback")
+            self.assertEqual(check(), "unchanged")  # chosen as it was, and would be again: no restart loop
+            tool.run(self.root, plugin_action="trust", name="fallback")  # approved now: chosen in its place
+            self.assertEqual(check(), "changed")
+            self.enable("fallback", False)
+        with self.subTest("a passed-over copy restored to what was approved, and one turned unreadable"):
+            for where in (self.root / "plugins", trust.user_directory() / "plugins"):
+                self.write_plugin("restored", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                                  {"plugin.py": KEEPER}, where=where)
+            tool.run(self.root, plugin_action="trust", name="restored")
+            universe = self.root / "plugins" / "restored"
+            approved_bytes = (universe / "plugin.py").read_bytes()
+            (universe / "plugin.py").write_text(KEEPER + "# edited\n")  # nobody approved this
+            self.enable("restored")
+            loaded, check = worker("restored")
+            self.assertEqual(check(), "unchanged")
+            (universe / "plugin.py").write_bytes(approved_bytes)  # undone: eligible again, its pin as it was
+            with mock.patch.object(trust, "signature", side_effect=AssertionError("walked before a page")):
+                self.assertEqual(check(), "unchanged")  # before a page: no tree walked (the user's choice)
+            self.assertEqual(check(full=True), "changed")  # the 5-second refresh notices it
+            loaded, check = worker("restored")
+            (universe / "plugin.json").chmod(0)  # ahead of it, and now unreadable: it could be chosen
+            try:
+                self.assertIn(check(), ("changed", "unknown"))
+                self.assertNotEqual(check(), "unchanged")
+            finally:
+                (universe / "plugin.json").chmod(0o644)
+            self.enable("restored", False)
+        with self.subTest("its plugin.json unreadable for a moment is unknown, never gone"):
+            self.write_plugin("blink", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                              {"plugin.py": KEEPER}, where=trust.user_directory() / "plugins")
+            self.enable("blink")
+            loaded, check = worker("blink")
+            manifest_file = trust.user_directory() / "plugins" / "blink" / "plugin.json"
+            manifest_file.chmod(0)
+            try:
+                self.assertEqual(check(), "unknown")
+            finally:
+                manifest_file.chmod(0o644)
+            self.assertEqual(check(), "unchanged")
+            self.enable("blink", False)
+        with self.subTest("a damaged pin is unknown, a removed one a change, and nothing is discovered in full"):
+            self.write_plugin("pinned", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                              {"plugin.py": KEEPER}, where=self.root / "plugins")
+            tool.run(self.root, plugin_action="trust", name="pinned")
+            self.enable("pinned")
+            loaded, check = worker("pinned")
+            pins = trust.user_directory() / trust.FILE
+            saved = pins.read_bytes()
+            data = json.loads(saved)
+            folder = str((self.root / "plugins" / "pinned").resolve())
+            with mock.patch.object(loader, "entry", side_effect=AssertionError("full discovery")), \
+                    mock.patch.object(loader, "entries", side_effect=AssertionError("full discovery")):
+                self.assertEqual(check(), "unchanged")
+                pins.write_text(json.dumps({**data, "plugins": {**data["plugins"], folder: None}}))
+                self.assertEqual(check(), "unknown")
+                pins.write_text(json.dumps({**data, "plugins": {k: v for k, v in data["plugins"].items()
+                                                                if k != folder}}))
+                self.assertEqual(check(), "changed")
+            pins.write_bytes(saved)
+            self.enable("pinned", False)
+        with self.subTest("another copy selected in its place"):
+            self.write_plugin("forkme", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                              {"plugin.py": KEEPER}, where=trust.user_directory() / "plugins")
+            self.enable("forkme")
+            loaded, check = worker("forkme")
+            self.write_plugin("forkme", {"module": "plugin", "extends": ["events"], "events": ["message.saved"]},
+                              {"plugin.py": KEEPER}, where=self.root / "plugins")
+            self.assertEqual(check(), "changed")  # a copy of it appeared: chosen again, once
+            loaded, check = worker("forkme")  # the loader passes over an untrusted one: this one again
+            self.assertEqual((loaded.source, check()), ("personal", "unchanged"))
+            tool.run(self.root, plugin_action="trust", name="forkme")  # a trusted one is selected instead
+            self.assertEqual(check(), "changed")
+            self.enable("forkme", False)
+        restarts, hung, stopped = {}, {}, {}
+        self.assertTrue(host._may_restart(self.root, "keeper0", host.RELOAD_EXIT, restarts, hung, stopped))
+        self.assertEqual((restarts, stopped), ({}, {}))  # started again at once, never counted against it
+
+
 class Fixture(PluginTestCase):
     def setUp(self):
         super().setUp()
