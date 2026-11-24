@@ -910,9 +910,9 @@ def main():
                 return None
 
             try:
-                listen_proof = RunnerProof(runtime(agent_dir), listen_processes)
+                listen_proof = RunnerProof(agent_dir, launch.name, listen_processes)
                 listen_proof.start()
-                update_runtime(agent_dir, launch.name, runner_listen_socket=list(listen_proof.identity))
+                update_runtime(agent_dir, launch.name, runner_listen_file=listen_proof.identity)
                 roles['listen proof'] = attachments.Role(launch, 'listen proof', started=runner_started)
             except (OSError, ValueError, KeyError):
                 if listen_proof is not None:

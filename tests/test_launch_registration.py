@@ -64,8 +64,8 @@ class RegistrationTest(BaseTest):
                     self.assertIs(signal.getsignal(signum), previous)
                     self.assertEqual(read(self.launch / 'cleanup.json')['state'], 'complete')
 
-    def test_listen_keeps_the_runner_namespace_when_its_socket_is_unavailable(self):
-        """A failed socket must leave same-namespace process verification available."""
+    def test_listen_keeps_the_runner_namespace_when_its_probe_file_is_unavailable(self):
+        """An unavailable probe file must leave same-namespace process verification available."""
         facts = read(self.directory / 'runtime.json')
         write(self.directory / 'runtime.json', {**facts, 'run_directory': str(self.work / 'run')})
         write(self.launch / 'request.json', {**self.request, 'runner_listen': True})
@@ -76,11 +76,11 @@ class RegistrationTest(BaseTest):
                 patch.object(runner.sys, 'argv', ['runner', str(self.launch)]), \
                 patch.object(runner.subprocess, 'Popen', return_value=child), \
                 patch.object(runner, 'pid_namespace', return_value=namespace), \
-                patch.object(listen_proof.RunnerProof, 'start', side_effect=OSError('socket unavailable')):
+                patch.object(listen_proof.RunnerProof, 'start', side_effect=OSError('probe file unavailable')):
             self.assertEqual(runner.main(), 0)
         facts = read(self.directory / 'runtime.json')
         self.assertEqual(facts['runner_pid_namespace'], namespace)
-        self.assertNotIn('runner_listen_socket', facts)
+        self.assertNotIn('runner_listen_file', facts)
 
     def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
         """A parent may release and exit after the runner read an earlier stage, with a real subprocess; fragile

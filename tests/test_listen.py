@@ -78,35 +78,44 @@ class ListenTest(BaseTest):
 
     def test_sandboxed_check_can_use_a_fresh_reply_about_the_same_child(self):
         """An unanswered process check must keep polling until the owning runner proves its current child."""
-        facts = {**self.facts, 'run_directory': str(self.work / 'run'), 'runner_listen': True,
+        facts = {**self.facts, 'runner_listen': True,
                  'runner_pid_namespace': listen_proof.pid_namespace()}
         checks = []
+        live = True
 
         def current():
             checks.append(True)
-            return facts if len(checks) > 1 else None
+            return facts if live and len(checks) > 1 else None
 
-        proof = listen_proof.RunnerProof(facts, current)
+        launch = self.directory / 'launches' / self.launch
+        launch.mkdir(parents=True)
+        proof = listen_proof.RunnerProof(self.directory, self.launch, current)
         proof.start()
         try:
-            facts['runner_listen_socket'] = list(proof.identity)
+            facts['runner_listen_file'] = proof.identity
             store.write(self.directory / 'runtime.json', facts)
             self.message()
             with patch.object(listen, 'ended', return_value=None):
                 self.assertTrue(listen.run(self.root, timeout='0')['ok'])
             self.assertGreaterEqual(len(checks), 2)
-            self.assertFalse(listen_proof.check({**facts, 'pid': facts['pid'] + 1}))
-            self.assertFalse(listen_proof.check({**facts, 'runner_listen_socket': [0, 0]}))
+            self.assertFalse(listen_proof.check(self.directory, {**facts, 'pid': facts['pid'] + 1}))
+            self.assertFalse(listen_proof.check(self.directory, {**facts, 'runner_listen_file': [0, 0]}))
             with patch.object(listen, 'ended', side_effect=(None, True)):
                 with self.assertRaisesRegex(ValueError, 'Listening launch has ended'):
                     listen.run(self.root, timeout='0')
             with patch.object(listen_proof, 'direct_checks_ok', return_value=False), \
                     patch.object(listen, 'ended', side_effect=AssertionError('foreign PID namespace')):
-                self.assertTrue(listen._processes(facts))
-                self.assertFalse(listen._processes({**facts, 'runner_listen_socket': None}))
+                self.assertTrue(listen._processes(facts, self.directory))
+                self.assertFalse(listen._processes({**facts, 'runner_listen_file': None}, self.directory))
+            with (launch / listen_proof.NAME).open('r+b') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                self.assertFalse(listen_proof.check(self.directory, facts))
+            self.assertTrue(listen_proof.check(self.directory, facts))
+            live = False
+            self.assertFalse(listen_proof.check(self.directory, facts))  # The previous reply is stale.
         finally:
             proof.close()
-        self.assertFalse(listen_proof.check(facts))
+        self.assertFalse(listen_proof.check(self.directory, facts))
 
     def note(self, directory):
         """The real turn-end note, saved and committed, with only its native submission left out."""
@@ -392,7 +401,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                 # After an empty read and an unknown check, a message (and maybe new processes) arrives during the
                 # last quiet check before the deadline: the listener reads it with fresh proof, never "Timed out".
                 clock, checks = [0.0], []
-                def quiet(facts):
+                def quiet(facts, _directory):
                     checks.append(facts['pid'])
                     if len(checks) == 3:
                         if moved:
@@ -411,7 +420,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         with self.subTest(unknown='answered while the launch lock stays busy'):
             # An answered check ends the unknown period even when the lock keeps the pair comparison waiting.
             clock, checks = [0.0], []
-            def answered(_):
+            def answered(_facts, _directory):
                 checks.append(clock[0])
                 return len(checks) != 1
             def tick(delay):
@@ -428,7 +437,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
             # No check starts once the first unanswered one began UNKNOWN_SECONDS ago, however slow each is.
             self.message()
             clock, checks = [0.0], []
-            def slow(_):
+            def slow(_facts, _directory):
                 clock[0] += 3.9
                 checks.append(clock[0])
                 return len(checks) == 9
@@ -596,11 +605,11 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
 
         # A focus that begins during the process check holds back an expired timeout until it ends.
         original, printed, checked = listen._processes, [], []
-        def focus_during_check(facts):
+        def focus_during_check(facts, directory):
             if not checked:
                 checked.append(True)
                 focus.start(self.directory)
-            return original(facts)
+            return original(facts, directory)
         with patch.object(listen, '_processes', side_effect=focus_during_check):
             result = run([focus.end], timeout='0',
                          _present=lambda result: printed.append(focus.current(self.directory)))
@@ -639,8 +648,8 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         mailbox.inbox(self.directory, limit=None)
 
         # A focus that ends during the process check: what it held is read before an expired timeout.
-        def end_during_check(facts):
-            proven = original(facts)
+        def end_during_check(facts, directory):
+            proven = original(facts, directory)
             focus.end(self.directory)
             return proven
         def focus_and_hold(directory):
