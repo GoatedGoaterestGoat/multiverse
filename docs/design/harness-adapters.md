@@ -199,9 +199,12 @@ with a provider-selected `ServiceIdentity` (provider plus canonical storage or
 account scope), an existing endpoint and `lifetime="external"`. Its optional
 `attachment` is the current `AttachmentSpec`: where work executes (`terminal`
 or `service`), readiness (`process` or validated `binding`), recovery policy,
-passive status observation and the session-local mouse preference. Claude, Pi
-and legacy adapters keep terminal execution and their existing registration
-readiness; their service and attachment fields default to `None`.
+passive status observation and the legacy session-local mouse preference.
+`CommandSpec.mouse` lets any harness request session-scoped tmux mouse mode
+directly without declaring an `AttachmentSpec` (which would bypass
+`adapter.attachment_ready`). Claude, Pi and legacy adapters keep terminal
+execution and their existing registration readiness; their service and
+attachment fields default to `None`.
 
 `SharedServiceSpec` describes only idempotent explicit start/reuse. Core has no
 service stop or restart operation. Its optional identity is persisted separately
@@ -216,12 +219,14 @@ and any selected `CODEX_SQLITE_HOME`; core never guesses a provider's home.
 checking exact identity, workspace and effective requested permissions. A
 binding-ready attachment stays `starting` until that callback succeeds. Merely
 having an RPC proxy does not authorize readiness or recovery. The usual child
-startup check and startup-input acceptance still gate readiness. Each fallback
-carries its own attachment policy; automatic recovery has no fallback. Core
-applies the final prepared mouse preference before runner startup. A late relay
-fallback applies its selected preference under the launch lock after checking
-the exact owned pane; clearing an earlier mv2 mouse override restores the
-inherited option. Global options and other wrappers are untouched.
+startup check and startup-input acceptance still gate readiness. Each fallback carries its own attachment policy and `mouse` flag; automatic
+recovery has no fallback. Core applies the effective mouse preference
+(`command.mouse` or `command.attachment.mouse`) before runner startup and
+records it in the launch request. A late relay fallback computes its effective
+mouse preference the same way and applies changes under the launch lock after
+checking the exact owned pane; clearing an earlier mv2 mouse override restores
+the inherited option (`set-option -u`). Global options and other wrappers are
+untouched.
 
 The optional `AttachmentProvider` extension leaves the original adapter protocol
 sufficient. `attachment_recovery(session)` defaults to `None`; opted-in providers
@@ -917,11 +922,14 @@ does not stop the updater. The TUI setting separately suppresses update checks a
 interactive update prompts in Codex 0.159.3 and 0.160.0.
 
 Before releasing the native child, core enables tmux's session-scoped `mouse`
-option for Codex adapter wrappers on every spawn and resume, including custom
-profiles and both plain and bridge modes. With Codex 0.160.0 this lets wheel
-events scroll the TUI transcript rather than recall composer history. Global
-tmux options, root key bindings, alternate-screen behavior and other sessions
-are unchanged; legacy schema-1 definitions keep their existing behavior.
+option when the prepared `CommandSpec` sets `mouse=True` or its `AttachmentSpec`
+sets `mouse=True` (honouring saved Codex requests and letting adapters without an
+`AttachmentSpec` opt in without altering readiness). For Codex wrappers on every
+spawn and resume, including custom profiles and both plain and bridge modes,
+Codex 0.160.0 lets wheel events scroll the TUI transcript rather than recall
+composer history. Global tmux options, root key bindings, alternate-screen
+behavior and other sessions are unchanged; legacy schema-1 definitions keep
+their existing behavior.
 Already-running Codex terminals need a resume to pick up the setting. An
 isolated real-TUI test injects wheel events through an attached PTY and verifies
 native transcript scrolling, an unchanged composer, and no tmux copy mode on

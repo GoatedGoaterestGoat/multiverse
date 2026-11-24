@@ -797,10 +797,13 @@ def main():
                     next_env['MV2_SHELL_CALLBACK'] = '1'
                 else:
                     next_env.pop('MV2_SHELL_CALLBACK', None)
+                initial_mouse = bool(request.get('mouse') or attachment.get('mouse'))
+                selected_mouse = bool(fallback.get('mouse') or (fallback.get('attachment') or {}).get('mouse'))
                 next_request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
                                 'env': next_env,
                                 'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
                                 'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
+                                'mouse': selected_mouse,
                                 'cleanup_files': next_cleanup,
                                 'shell_callback': bool(fallback.get('shell_callback')),
                                 'notices': notices, 'startup_retry': fallback.get('startup_retry')}
@@ -813,8 +816,7 @@ def main():
                         raise ValueError('Launch changed or ended before terminal fallback')
                     from multiverse.terminal.tmux import owned
                     backend, pane = owned(properties, facts)
-                    selected_mouse = bool((fallback.get('attachment') or {}).get('mouse'))
-                    if selected_mouse != bool(attachment.get('mouse')):
+                    if selected_mouse != initial_mouse:
                         if selected_mouse:
                             backend.run('set-option', '-t', pane, 'mouse', 'on')
                         else:

@@ -201,6 +201,8 @@ class CommandSpec:
     cleanup_files: tuple[str, ...] = ()
     # Opt in to core's in-session tool-shell callback (`shell_callback` hook) for this launch.
     shell_callback: bool = False
+    # Opt in to session-scoped tmux mouse mode without declaring an AttachmentSpec.
+    mouse: bool = False
 
 
 @dataclass(frozen=True)

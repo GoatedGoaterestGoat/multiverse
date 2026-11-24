@@ -894,7 +894,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.attachment and command.attachment.readiness == 'binding':
                 if not command.rpc_proxy or not command.rpc_proxy.binds_session:
                     raise ValueError('Attachment requires an adapter protocol that validates binding')
-            mouse = bool(command.attachment and command.attachment.mouse)
+            mouse = bool(command.mouse or (command.attachment and command.attachment.mouse))
             progress.mark('recording final launch')
             if mouse:
                 # Apply the final resolved policy before releasing the runner.
@@ -1308,6 +1308,7 @@ def _request(argv, env, command, endpoint, resume_message_id):
             "control_endpoint": endpoint,
             "shared_service": bool(command.shared_service),
             "attachment": asdict(command.attachment) if command.attachment else None,
+            "mouse": bool(command.mouse or (command.attachment and command.attachment.mouse)),
             "native_mode": command.native_mode,
             "fallback": _serialize_fallback(command.fallback),
             "startup_retry": asdict(command.startup_retry) if command.startup_retry else None,
