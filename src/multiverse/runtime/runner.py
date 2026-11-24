@@ -882,6 +882,19 @@ def main():
         def spawn(selected):
             nonlocal process, child_started
             check_stop()
+            if selected.get('task_trust') is True:
+                from shlex import quote
+                from multiverse import harnesses
+                from multiverse.runtime.lifecycle import task_trust_problem
+                properties = _read_record(agent_dir / 'properties.json')
+                task_adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
+                problem = task_trust_problem(task_adapter, Path.cwd(), env)
+                if problem:
+                    retry = (f' Run mv2 deliver {quote(properties["name"])} --retry to send the saved message.'
+                             if selected.get('resume_message_id') else
+                             f' The task is saved in {quote(str(launch / "task.md"))}.')
+                    raise RuntimeError(problem + retry)
+                check_stop()
             process = subprocess.Popen(selected['argv'], env=env, stdin=None)
             child_started = process_started(process.pid)
             try:

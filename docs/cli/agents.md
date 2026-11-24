@@ -30,6 +30,10 @@ Started tester (Claude, bridge). It's waiting at Claude's prompt "Accessing work
 
 mv2 never answers these prompts for you: each asks whether to trust a folder or a mode. Once you answer, the session starts and the agent's status comes from its plugin again.
 
+When a harness requires verified workspace trust before running an initial prompt, mv2 refuses a task-bearing start until it can verify approval. Open the named CLI in that folder without a task and approve trust before retrying. The refusal gives a private saved task file you can pass with `--task-file`. You can remove that copy once the task starts or you discard it.
+
+If a message tried to wake the agent, use `mv2 deliver NAME --retry` after approval.
+
 To start an agent in a subverse, select the subverse with `-u`:
 
 ```sh

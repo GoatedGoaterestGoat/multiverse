@@ -3,18 +3,21 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import stat
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from multiverse.display import outcome
+from multiverse.harnesses.base import ConfiguredAdapter
 from multiverse.harnesses.claude import ClaudeAdapter
 from multiverse.runtime import lifecycle, native, refusal, runner
 from multiverse.terminal import recovery, tmux
-from multiverse.store import write
-from multiverse.tools import list_agents
-from multiverse.universe import agents
+from multiverse.store import read, write
+from multiverse.tools import list_agents, send, spawn
+from multiverse.universe import agents, mailbox
 from test_multiverse import BaseTest
 
 SCREENS = {item['name']: item['text'] for item in
@@ -44,6 +47,67 @@ class StartupPromptTest(BaseTest):
               'pid': 1, 'startup_checked': True, 'native_versions': {'cli': '2.1.330'}})
         (self.directory / 'launches' / self.launch).mkdir(parents=True)
         write(self.directory / 'launches' / self.launch / 'request.json', {'observe_refusal': True})
+
+    def test_task_requires_optional_positive_trust_and_can_be_retried_from_saved_input(self):
+        """A trust refusal must precede pane creation and preserve the task without reserving its name."""
+        adapter = ConfiguredAdapter('guarded', {'spawn': [sys.executable, '{task}'], 'resume': [sys.executable]})
+        adapter.family = 'agy'
+        adapter.workspace_trust = trust = Mock()
+        backend = Mock()
+        backend.create.return_value = {'socket': '/test', 'session': '$1', 'pane': '%1'}
+        task = 'First line\nSecond line'
+        common = {'name': 'workspace-task', 'harness': 'guarded', 'json': True}
+        saved = []
+        with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'Tmux', return_value=backend):
+            for verdict in ('untrusted', 'unknown', True, 'TRUSTED'):
+                with self.subTest(verdict=verdict):
+                    trust.return_value = verdict
+                    refusal = spawn.cli_run(self.root, task=task, **common)
+                    self.assertFalse(refusal['ok'])
+                    self.assertIn('Open the Antigravity CLI in that folder without a task and approve workspace trust',
+                                  refusal['error'])
+                    self.assertIn('rerun the same command', refusal['error'])
+                    self.assertIn('You can delete this copy once the task starts', refusal['error'])
+                    backend.create.assert_not_called()
+                    self.assertNotIn('workspace-task', [read(path)['name'] for path in agents.record_paths(self.root)])
+                    saved = sorted((self.root / 'state').glob('startup-task-*.md'))
+                    self.assertTrue(all(path.read_text() == task for path in saved))
+                    self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in saved))
+            self.assertEqual(len(saved), 4)
+            self.assertTrue(all(call.args == (str(self.work),) for call in trust.call_args_list))
+            trust.return_value = 'trusted'
+            result = spawn.run(self.root, name=common['name'], harness=common['harness'], task_file=saved[0])
+            launch = agents.directory(self.root, result['id']) / 'launches' / result['runtime']['launch_id']
+            self.assertTrue(read(launch / 'request.json')['task_trust'])
+            self.assertEqual((launch / 'task.md').read_text(), task)
+            trust.reset_mock()
+            idle = spawn.run(self.root, name='workspace-idle', harness=common['harness'])
+            launch = agents.directory(self.root, idle['id']) / 'launches' / idle['runtime']['launch_id']
+            self.assertNotIn('task_trust', read(launch / 'request.json'))
+            trust.assert_not_called()
+
+    def test_trust_refusal_for_a_wake_names_one_retry(self):
+        """The delivery formatter already gives the retry command for the saved wake message."""
+        adapter = ConfiguredAdapter('guarded', {'spawn': [sys.executable], 'resume': [sys.executable]})
+        adapter.resume_prompt_args = ('{task}',)
+        adapter.workspace_trust = Mock(return_value='untrusted')
+        properties = self.directory / 'properties.json'
+        write(properties, {**read(properties), 'harness': 'guarded', 'task': 'original task',
+                           'universe_id': read(self.root / 'universe.json')['id']})
+        write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'dormant'})
+        errors = []
+        with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                patch.object(native, 'observe', return_value={'live': 'dormant'}):
+            result = send.run(self.root, agent='asks', text='saved wake', delivery='steer', _present_error=errors.append)
+        self.assertFalse(result['ok'])
+        [line] = errors
+        self.assertIn('Open guarded in that folder without a task and approve workspace trust', line)
+        self.assertEqual(line.count('mv2 deliver asks --retry'), 1)
+        [message] = mailbox.inbox(self.directory, all_messages=True)['messages']
+        self.assertEqual(message['tracking']['submission_state'], 'failed')
+        self.assertFalse(list((self.root / 'state').glob('startup-task-*.md')))
 
     def watch(self, frame, *, bridge=False):
         """Run the launch's screen observer on frames `frame(elapsed)` picks; what it saw, on each frame."""

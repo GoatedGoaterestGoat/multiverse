@@ -82,6 +82,21 @@ class RegistrationTest(BaseTest):
         self.assertEqual(facts['runner_pid_namespace'], namespace)
         self.assertNotIn('runner_listen_file', facts)
 
+    def test_task_trust_is_rechecked_before_starting_the_child(self):
+        """Trust can change between CLI preparation and runner startup."""
+        write(self.launch / 'request.json', {**self.request, 'task_trust': True})
+        (self.launch / 'task.md').write_text('The saved task.')
+        adapter = SimpleNamespace(workspace_trust=Mock(return_value='unknown'))
+        with patch.object(registration, 'wait_for_release'), \
+                patch.object(runner.sys, 'argv', ['runner', str(self.launch)]), \
+                patch.object(runner, 'process_started', return_value=self.owner['parent_started']), \
+                patch('multiverse.harnesses.load', return_value=adapter), \
+                patch.object(runner.subprocess, 'Popen') as child:
+            self.assertEqual(runner.main(), 1)
+        child.assert_not_called()
+        self.assertIn('Cannot verify workspace trust', read(self.directory / 'runtime.json')['error'])
+        self.assertEqual((self.launch / 'task.md').read_text(), 'The saved task.')
+
     def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
         """A parent may release and exit after the runner read an earlier stage, with a real subprocess; fragile
         because the race shows only under load, as intermittent launch failures (ac89025)."""

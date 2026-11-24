@@ -13,6 +13,7 @@ import socket
 import sys
 import time
 import tempfile
+from shlex import quote
 
 from .. import display, harnesses, source, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
@@ -702,6 +703,19 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
+        task_trust = bool(values['task']) and native.adapter_hook(adapter, 'workspace_trust') is not None
+        if task_trust:
+            problem = task_trust_problem(adapter, workdir, {**command.environment, **context.environment})
+            if problem:
+                if resume_message_id is not None:
+                    raise ValueError(problem)
+                try:
+                    task_path = _save_refused_task(root, values['task'])
+                except (OSError, UnicodeError) as error:
+                    raise ValueError(f'{problem} Then rerun the same command. Could not save a retry file: {error}') from error
+                retry = ' Use --task-file with that path if you need to restore the original input.' if not resume else ''
+                raise ValueError(f'{problem} Then rerun the same command. Saved input: {quote(str(task_path))}.{retry}'
+                                 ' You can delete this copy once the task starts.')
         # Preparation can refuse without changing runtime storage or tmux.
         # Recovery still precedes any terminal creation or native service start.
         Tmux.require_launch_version()
@@ -925,6 +939,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 env.pop('MV2_SHELL_CALLBACK', None)
             launch_files.write_request(agent_dir, launch_id, {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
                                            'task_launch': not resume and bool(values['task'].strip()),
+                                           **({'task_trust': True} if task_trust else {}),
                                            'expected_native_id': properties.get('native_session_id') if resume and not fresh else None,
                                            'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
@@ -983,6 +998,44 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         result = launch_result(root, agent_dir)
     notices = display.notice_lines(result.get('notices'), result.get('runtime', {}).get('launch_notices'))
     return {**result, 'notices': notices} if notices else result
+
+
+def task_trust_problem(adapter, workspace, environment):
+    """Return launch guidance unless the adapter positively attests to workspace trust."""
+    from ..plugins.access import Denied
+
+    verdict = 'unknown'
+    if native.adapter_hook(adapter, 'workspace_trust') is not None:
+        try:
+            verdict = effects.call(adapter, 'workspace_trust', str(workspace), environment=dict(environment))
+        except Denied:
+            raise
+        except Exception:
+            pass  # A failing trust read cannot permit a task-bearing launch.
+    if type(verdict) is str and verdict == 'trusted':
+        return None
+    folder = quote(str(workspace))
+    problem = (f'Workspace trust has not been approved for {folder}' if type(verdict) is str and verdict == 'untrusted'
+               else f'Cannot verify workspace trust for {folder}')
+    family = getattr(adapter, 'family', '')
+    harness = display.HARNESS_NAMES.get(family)
+    program = f'the {harness} CLI' if harness else getattr(adapter, 'name', None) or 'the native harness'
+    return f'{problem}. Open {program} in that folder without a task and approve workspace trust.'
+
+
+def _save_refused_task(root, prompt):
+    """Save a refused task without retaining the agent-name reservation."""
+    descriptor, filename = tempfile.mkstemp(prefix='startup-task-', suffix='.md', dir=root / 'state')
+    path = Path(filename)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(prompt)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None, *, fresh_start=True):
