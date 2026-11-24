@@ -9,7 +9,7 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean, live_label, phase_label, summary_label
+from ..display import clean, live_label, paused_queue_line, phase_label, summary_label
 from .columns import summary_text
 from . import theme
 from .plugin_service import in_daemon
@@ -419,6 +419,14 @@ def relay_loss(state, row):
         state.append('\n' + clean(relay.get('detail', '')), style=theme.YELLOW)
 
 
+def paused(state, row):
+    """A native queue paused with accepted messages still behind it, in mv2 inspect's words: read from core's listing
+    row, never from the harness, and nothing for a pause with nothing queued."""
+    line = paused_queue_line(row)
+    if line:
+        state.append("\n" + clean(line), style=theme.YELLOW)
+
+
 def versions(state, row):
     found = row.get('runtime', {}).get('native_versions')
     if found:
@@ -428,8 +436,8 @@ def versions(state, row):
 
 
 # What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
-AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugins_line, progress, focused, context,
-               native_mode, versions)
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, paused, fallback, plugins_line, progress, focused,
+               context, native_mode, versions)
 
 
 def agent_state(row):
