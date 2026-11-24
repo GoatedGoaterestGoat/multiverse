@@ -490,7 +490,8 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(len(mailbox.inbox(directory)['messages']), 1)
         old_cursor = (directory / 'inbox.cursor').read_bytes()
         with store.lock(directory / '.launch.lock'):
-            self.assertEqual(mailbox.end_startup_messages(directory, facts['launch_id'], 'startup failed'), 1)
+            self.assertEqual(mailbox.end_startup_messages(directory, facts['launch_id'], 'startup failed'),
+                             {'failed_startup_messages': 1, 'retryable_startup_messages': 0})
         self.assertEqual(mailbox.inbox(directory)['messages'], [])
         self.assertEqual((directory / 'inbox.cursor').read_bytes(), old_cursor)
         before = len(self.calls)

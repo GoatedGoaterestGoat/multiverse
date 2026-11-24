@@ -567,8 +567,8 @@ def stop(root, reference):
                        last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
     if result.state != 'ok':
         raise RuntimeError(f'Native stop incomplete: {result.reason}')
-    failed = end_startup_messages(directory, session.launch_id, 'Agent stopped before startup delivery')
-    return replace(result, value={**(result.value or {}), 'failed_startup_messages': failed})
+    startup = end_startup_messages(directory, session.launch_id, 'Agent stopped before startup delivery')
+    return replace(result, value={**(result.value or {}), **startup})
 
 
 def capabilities(root, reference, run_probe=False):

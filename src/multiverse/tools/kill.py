@@ -1,4 +1,6 @@
 """End native work and its process, then remove the agent's tmux wrapper."""
+from shlex import quote
+
 from ..runtime import lifecycle
 from .. import universe
 
@@ -28,6 +30,12 @@ def stopped(root, agent, record, attachment_only):
     failed = cancellation.get('failed_startup_messages', cancellation.get('cancelled_startup_messages'))
     if type(failed) is int and failed > 0:
         line += f" {failed} message{'s' if failed != 1 else ''} waiting for it to start {'were' if failed != 1 else 'was'} not delivered."
+        retryable = cancellation.get('retryable_startup_messages', cancellation.get('failed_startup_messages'))
+        if type(retryable) is int and 0 < retryable <= failed:
+            what = 'the retryable messages'
+            if retryable == failed:
+                what = 'it' if failed == 1 else 'them'
+            line += f' Run mv2 deliver {quote(str(name))} --retry to send {what}.'
     return line
 
 

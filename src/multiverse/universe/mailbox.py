@@ -890,18 +890,19 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
 
 
 def end_startup_messages(directory, launch_id, reason):
-    """Caller holds .launch.lock; these messages have never reached a harness."""
-    if launch_id is None:
-        return 0
-    count = 0
-    for message in inbox(directory, all_messages=True, limit=None)['messages']:
-        tracking = message['tracking']
-        if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
-            receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
-            update_message(directory, message['id'], submission_state='failed',
-                           attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
-            count += 1
-    return count
+    """Fail never-submitted input and count what can be retried. Caller holds .launch.lock."""
+    failed = retryable = 0
+    if launch_id is not None:
+        for message in inbox(directory, all_messages=True, limit=None)['messages']:
+            tracking = message['tracking']
+            if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
+                receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
+                saved = update_message(directory, message['id'], submission_state='failed',
+                                       attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
+                failed += 1
+                if not saved.get('dismissed_at') and not saved.get('uncheckable_reported_at'):
+                    retryable += 1
+    return {'failed_startup_messages': failed, 'retryable_startup_messages': retryable}
 
 
 def unread_senders(directory):
