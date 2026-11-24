@@ -1113,6 +1113,28 @@ class CodexSideTest(unittest.TestCase):
 
         asyncio.run(check())
 
+    def test_wake_marks_only_the_matching_cli_input(self):
+        """A Codex wake has no mv2 attempt ID on its native item, so the CLI-input digest must mark it."""
+        self.protocol.settings.update(navigation_cli=(0, 166, 0), turn_task_digest=task_digest('saved input'))
+
+        async def observe(text):
+            self.view.relay_context({'notify_turn_transitions': lambda: None, 'wake_prompt': True,
+                                     'task_launch': False})
+            frame = {'id': 71, 'method': 'turn/start', 'params': {'threadId': self.main,
+                     'clientUserMessageId': 'startup', 'input': [{'type': 'text', 'text': text}]}}
+            await self.view.relay_before_send(self.view.outgoing(frame))
+            self.view.incoming({'method': 'turn/started', 'params': {'threadId': self.main, 'turn': {'id': 'turn'}}})
+            self.view.incoming({'method': 'item/completed', 'params': {'threadId': self.main, 'turnId': 'turn',
+                                'item': {'type': 'userMessage', 'id': 'row', 'clientId': 'startup'}}})
+            native, (edge,) = self.view.relay_turn_transitions()
+            self.assertEqual(native, self.main)
+            return edge
+
+        for text, expected in (('saved input', True), ('another prompt', False)):
+            with self.subTest(expected=expected):
+                self.assertEqual(asyncio.run(observe(text)), TurnStarted(
+                    turn='turn', kind='prompt', ref='row', source='person', attempt='startup', first_task=expected))
+
     def test_primary_queue_events_preserve_interrupt_order_and_ignore_the_side(self):
         """Primary interrupt ordering controls durable queue pause; a side or late old turn must not silently pause a newer primary turn."""
         observe = getattr(self.view, 'primary_event', lambda direction, frame: None)

@@ -97,6 +97,14 @@ class RegistrationTest(BaseTest):
         self.assertIn('Cannot verify workspace trust', read(self.directory / 'runtime.json')['error'])
         self.assertEqual((self.launch / 'task.md').read_text(), 'The saved task.')
 
+    def test_wake_exposes_the_startup_input_marker_to_the_child(self):
+        """Claude's first-prompt observer needs the same launch marker for a wake as a task."""
+        request = {**self.request, 'env': {**self.request['env'], 'MV2_FIRST_TASK': 'stale'}}
+        self.assertNotIn('MV2_FIRST_TASK', runner.launch_environment(request))
+        self.assertEqual(runner.launch_environment({**request, 'task_launch': True})['MV2_FIRST_TASK'], '1')
+        self.assertEqual(runner.launch_environment({**request, 'resume_message_id': str(uuid4())})
+                         ['MV2_FIRST_TASK'], '1')
+
     def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
         """A parent may release and exit after the runner read an earlier stage, with a real subprocess; fragile
         because the race shows only under load, as intermittent launch failures (ac89025)."""

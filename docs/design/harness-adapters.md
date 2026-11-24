@@ -1829,8 +1829,8 @@ the next row in its conversation to say which; Claude raises no turn hooks for
 those. The source is the
 person's for a typed row (Claude stores a typed local command as its own) and the
 harness's otherwise, with the mv2 delivery attempt the mod matched the row to;
-core makes it mv2's. The first prompt row the person's side stores in a task
-launch's first load (`MV2_FIRST_TASK`) is the task. A row belongs to the turn
+core makes it mv2's. On the first load, `MV2_FIRST_TASK` marks the first composer
+prompt row as the launch's command-line input, a task or a wake message. A row belongs to the turn
 running when its append is entered, and rows rank in that order, which is the order
 Claude stores them in (their appends can finish in another). A turn's end goes once
 its rows, from the first the file's tail holds on, are whole in the transcript file

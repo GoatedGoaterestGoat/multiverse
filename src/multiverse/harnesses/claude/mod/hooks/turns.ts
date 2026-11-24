@@ -51,8 +51,7 @@ const waiting = new Set<Owner>()   // owners whose end is being proved: a /clear
 const OUTPUT = ['<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>']
 const isOutput = (text: string) => OUTPUT.some((marker) => text.trimStart().startsWith(marker))
 
-// A load starts with no turn. `firstTask`: core gave this launch a task (MV2_FIRST_TASK) and this is its first load,
-// so the first prompt row the person's side stores is that task; a reload never marks one.
+// On the first load, MV2_FIRST_TASK marks a CLI task or wake prompt. A reload never marks the opener.
 export function loaded(firstTask: boolean) {
   opening = undefined
   current = undefined

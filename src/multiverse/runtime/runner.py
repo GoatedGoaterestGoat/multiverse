@@ -477,7 +477,7 @@ def launch_environment(request):
         env.pop(key, None)
     env.update(request['env'])
     env.pop('MV2_FIRST_TASK', None)
-    if request.get('task_launch') is True:
+    if request.get('task_launch') is True or request.get('resume_message_id'):
         env['MV2_FIRST_TASK'] = '1'
     env.pop('MV2_SHELL_CALLBACK', None)
     if request.get('shell_callback') is True:
@@ -767,6 +767,7 @@ def main():
                 record_primary_event=lambda event: record_primary_event(agent_dir, launch.name, event),
                 navigation=navigate,
                 relay_context={'agent_directory': str(agent_dir), 'launch_id': launch.name,
+                               'wake_prompt': bool(request.get('resume_message_id')),
                                'task_launch': request.get('task_launch') is True},
                 record_delivery_observation=delivery_publisher,
                 record_delivery_error=delivery_publisher.diagnostic if delivery_publisher else None,

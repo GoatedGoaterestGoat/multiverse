@@ -277,12 +277,14 @@ rows through this protocol, with `transcripts.read`.
   anyway, in its place, never dropped; a plugin pairs a null-turn start and
   end by order, since a conversation runs one turn at a time.
 - `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
-  a message, a plugin's send, an answer, a command run with `mv2 slash`, the
-  launch's task) or `harness` (anything else). `message` is the mv2 message ID
-  for a message, from which a plugin reads its sender, and null otherwise; mv2
-  matches the delivery from its own records and never adds the ID to the row
-  or anything the agent sees. `first_task` marks the start of the turn that
-  ran the launch's task, when the harness proves that input was the task.
+  a message, including the one a wake starts the resumed session with, a
+  plugin's send, an answer, a command run with `mv2 slash`, the launch's task)
+  or `harness` (anything else). `message` is the mv2 message ID for a message,
+  from which a plugin reads its sender, and null otherwise; mv2 matches the
+  delivery from its own records and never adds the ID to the row or anything
+  the agent sees. `first_task` marks the start of the turn that ran the
+  launch's task, when the harness proves that input was the task; a wake's
+  message is not a task.
 - `state` is `finished`, `interrupted`, `error` (a model or harness error
   ended it, where the harness records one) or `unknown` (the harness can't
   tell, or mv2 closed the turn because its end was never reported). A plugin

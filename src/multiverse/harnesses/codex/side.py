@@ -349,7 +349,8 @@ class LaunchConnection:
     def relay_context(self, context):
         if callable(context.get('notify_turn_transitions')):
             from .turn_events import Observations
-            startup = self.root.settings.get('turn_task_digest') if context.get('task_launch') is True else None
+            startup = (self.root.settings.get('turn_task_digest')
+                       if context.get('task_launch') is True or context.get('wake_prompt') is True else None)
             self.turn_observations = Observations(startup)
         from .prompts import Relay
         try:

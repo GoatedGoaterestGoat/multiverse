@@ -697,7 +697,11 @@ class TurnCursorProjection:
 
 @dataclass(frozen=True, kw_only=True)
 class TurnStarted:
-    """The first input of a native turn, observed by its owning conversation."""
+    """The first input of a native turn, observed by its owning conversation.
+
+    Set first_task only with proof that this was the launch's starting prompt.
+    Core decides whether the prompt was a task or a wake message.
+    """
     turn: str
     kind: Literal['prompt', 'command']
     ref: str | None
