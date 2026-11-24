@@ -1351,6 +1351,7 @@ class AgyAdapter(ConfiguredAdapter):
                 command,
                 argv=tuple(argv),
                 launch_files=launch_files,
+                mouse=True,
                 native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': problem},
             )
 
@@ -1410,6 +1411,7 @@ class AgyAdapter(ConfiguredAdapter):
             launch_files=launch_files,
             cleanup_files=(agy_bridge.LS_FILE,),
             shell_callback=True,
+            mouse=True,
             native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
         )
 

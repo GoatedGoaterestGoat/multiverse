@@ -3206,6 +3206,68 @@ class AgyAdapterUnitTest(BaseTest):
         )
         self.assertEqual(reply_after, {'decision': 'continue', 'reason': f'msg-{yield_idx}'})
 
+    def test_agy_mouse_mode_on_task_and_wake_keeps_bridge_readiness(self):
+        """Bridged agy --task and wake launches enable session-scoped tmux mouse via CommandSpec.mouse while keeping
+        attachment=None so readiness stays held until AgyAdapter.attachment_ready() sees bridge registration; plain
+        and promptless launches also request mouse."""
+        fake_agy = self.work / 'agy-mouse-stub'
+        fake_agy.write_text('#!/bin/sh\necho "agy 1.5.16"\n')
+        fake_agy.chmod(0o755)
+        adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy)})
+        plain_adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy), 'inbox_bridge': False})
+        values = self._values(task='')
+        self.assertTrue(plain_adapter.spawn(LaunchContext('spawn', values, 'gemini-4-neon-medium')).mouse)
+        promptless = adapter.spawn(LaunchContext('spawn', values, 'gemini-4-neon-medium'))
+        self.assertTrue(promptless.mouse)
+        self.assertEqual(promptless.attachment.readiness, 'process')
+
+        backend = Mock()
+        terminal = {'socket': str(self.work / 'fake-tmux.sock'), 'session': '$7', 'pane': '%7'}
+        backend.create.return_value = backend.respawn.return_value = terminal
+        with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
+             patch.object(lifecycle, 'Tmux', return_value=backend), \
+             patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            # 1. Bridged --task spawn: mouse enabled on tmux session, readiness held before bridge handoff, released after.
+            started = lifecycle.start(self.root, name='agy-task', task='run task', harness='agy')
+            backend.run.assert_any_call('set-option', '-t', '$7', 'mouse', 'on')
+            agent_dir = self.root / 'state' / 'agents' / started['id']
+            launch_id = started['runtime']['launch_id']
+            req = read(agent_dir / 'launches' / launch_id / 'request.json')
+            self.assertTrue(req['mouse'])
+            self.assertIsNone(req['attachment'])
+            write(agent_dir / 'runtime.json', {
+                **read(agent_dir / 'runtime.json'),
+                'state': 'running', 'pid': 1001, 'startup_checked': True, 'startup_delivery': 'ready',
+            })
+            self.assertFalse(lifecycle.wait_ready(self.root, agent_dir, launch_id, adapter, .01)['ready'])
+            conv_id = str(uuid4())
+            self._create_saved_conversation(conv_id)
+            write(agent_dir / 'properties.json', {**read(agent_dir / 'properties.json'), 'native_session_id': conv_id})
+            write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'native_bridge': BRIDGE})
+            self.assertTrue(lifecycle.wait_ready(self.root, agent_dir, launch_id, adapter, .01)['ready'])
+
+            # 2. Bridged wake (resume with resume_prompt): mouse enabled, readiness held before bridge handoff, released after.
+            backend.run.reset_mock()
+            write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'state': 'dormant', 'native_bridge': None})
+            with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
+                woke = lifecycle.start(
+                    self.root, resume=started['id'], harness='agy', resume_prompt='wake up',
+                )
+            backend.run.assert_any_call('set-option', '-t', '$7', 'mouse', 'on')
+            wake_launch = woke['runtime']['launch_id']
+            wake_req = read(agent_dir / 'launches' / wake_launch / 'request.json')
+            self.assertTrue(wake_req['mouse'])
+            self.assertIsNone(wake_req['attachment'])
+            write(agent_dir / 'runtime.json', {
+                **read(agent_dir / 'runtime.json'),
+                'state': 'running', 'pid': 1002, 'startup_checked': True, 'startup_delivery': 'ready',
+                'native_bridge': None,
+            })
+            self.assertFalse(lifecycle.wait_ready(self.root, agent_dir, wake_launch, adapter, .01)['ready'])
+            write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'native_bridge': BRIDGE})
+            self.assertTrue(lifecycle.wait_ready(self.root, agent_dir, wake_launch, adapter, .01)['ready'])
+
+
     def test_f2_f9_pre_ls_queue(self):
         """SessionStart/PreInvocation must unlock bridge readiness without agy-ls.json, and pre-agentapi busy and
         idle sends must queue visibly without failing or double-delivering."""
@@ -3370,6 +3432,17 @@ class AgyTmuxLaunchTest(TerminalBase):
         send_tool.run(self.root, agent='agy-agent', text='held startup ping', delivery='steer')
 
         until(lambda: delivered_log.exists(), 15)
+        # Session-scoped tmux mouse mode is enabled for the agy pane without changing global tmux options.
+        session_mouse = subprocess.run(
+            ['tmux', '-S', str(self.socket), 'show-options', '-v', '-t', started['runtime']['tmux']['session'], 'mouse'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        global_mouse = subprocess.run(
+            ['tmux', '-S', str(self.socket), 'show-options', '-gv', 'mouse'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(session_mouse, 'on')
+        self.assertNotEqual(global_mouse, 'on')
         seen = read(seen_log)
         self.assertEqual(seen['leaked'], [])
         self.assertEqual(stat.S_IMODE((launch_dir / 'AGENTS.md').stat().st_mode), 0o600)

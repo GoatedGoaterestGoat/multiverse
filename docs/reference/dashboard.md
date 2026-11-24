@@ -112,7 +112,7 @@ Press `x` on an agent or subverse to pick it up. Move to the destination folder 
 
 `Enter` on a live agent attaches to its terminal. `Ctrl-b d` detaches and returns you to the dashboard, with your selection where you left it. This works even when the dashboard itself runs inside tmux. Custom tmux prefixes and bindings are kept.
 
-For a Codex agent, the mouse wheel scrolls its transcript. For keyboard scrollback in any agent, press `Ctrl-b [` and then use Page Up and Page Down. Press `q` to leave scrollback.
+For a Codex agent, the mouse wheel scrolls its transcript; for an Antigravity CLI agent, it scrolls the pane through tmux copy-mode scrollback. For keyboard scrollback in any agent, press `Ctrl-b [` and then use Page Up and Page Down. Press `q` to leave scrollback.
 
 ## Subverse portals
 
