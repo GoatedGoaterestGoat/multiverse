@@ -31,6 +31,11 @@ UNKNOWN_SECONDS = 30
 
 def _processes(facts):
     """True once the frontend and its runner are both proven running; False when either cannot be told now."""
+    if facts.get('runner_listen') is True:
+        from ..runtime import listen_proof
+        if not listen_proof.direct_checks_ok(facts):
+            # A PID hidden or remapped by the sandbox cannot attest to the host process ending.
+            return listen_proof.check(facts)
     # Observe the frontend and its runner, never the shared native daemon. A
     # listener must also end if a crash left runtime.json saying "running".
     proven = True
@@ -39,7 +44,10 @@ def _processes(facts):
         if gone is True:
             raise ValueError('Listening launch has ended')
         proven = proven and gone is False
-    return proven
+    if proven or not facts.get('runner_listen_socket'):
+        return proven
+    from ..runtime import listen_proof
+    return listen_proof.check(facts)
 
 
 def _signature(directory):
@@ -145,7 +153,8 @@ def _wait(directory, launch_id, deadline, started, registrations, present):
                 current = _current(directory, launch_id)
                 sender_actor(acting='listen')
                 same_processes = all(current.get(key) == facts.get(key)
-                    for key in ('pid', 'pid_started', 'runner_pid', 'runner_started'))
+                    for key in ('pid', 'pid_started', 'runner_pid', 'runner_started', 'runner_listen_socket',
+                                'runner_pid_namespace', 'runner_listen', 'run_directory'))
                 if not same_processes:
                     pending, next_process_check = True, 0  # proof of replaced processes proves nothing
                 elif proven:

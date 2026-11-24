@@ -1315,6 +1315,7 @@ def _request(argv, env, command, endpoint, resume_message_id):
             "resume_message_id": resume_message_id,
             "cleanup_files": list(command.cleanup_files),
             "shell_callback": bool(command.shell_callback),
+            "runner_listen": bool(command.runner_listen),
             "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None}
 
 

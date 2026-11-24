@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse.runtime import runner, registration, lifecycle
+from multiverse.runtime import runner, registration, lifecycle, listen_proof
 from multiverse.runtime.process import process_started, process_snapshot
 from multiverse.store import now, read, write
 from test_multiverse import BaseTest, TerminalBase, until
@@ -63,6 +63,24 @@ class RegistrationTest(BaseTest):
                     self.assertEqual(slept, [True])
                     self.assertIs(signal.getsignal(signum), previous)
                     self.assertEqual(read(self.launch / 'cleanup.json')['state'], 'complete')
+
+    def test_listen_keeps_the_runner_namespace_when_its_socket_is_unavailable(self):
+        """A failed socket must leave same-namespace process verification available."""
+        facts = read(self.directory / 'runtime.json')
+        write(self.directory / 'runtime.json', {**facts, 'run_directory': str(self.work / 'run')})
+        write(self.launch / 'request.json', {**self.request, 'runner_listen': True})
+        child = Mock(pid=os.getpid())
+        child.poll.return_value = child.wait.return_value = 0
+        namespace = [4, 4026531836]
+        with patch.object(registration, 'wait_for_release'), \
+                patch.object(runner.sys, 'argv', ['runner', str(self.launch)]), \
+                patch.object(runner.subprocess, 'Popen', return_value=child), \
+                patch.object(runner, 'pid_namespace', return_value=namespace), \
+                patch.object(listen_proof.RunnerProof, 'start', side_effect=OSError('socket unavailable')):
+            self.assertEqual(runner.main(), 0)
+        facts = read(self.directory / 'runtime.json')
+        self.assertEqual(facts['runner_pid_namespace'], namespace)
+        self.assertNotIn('runner_listen_socket', facts)
 
     def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
         """A parent may release and exit after the runner read an earlier stage, with a real subprocess; fragile

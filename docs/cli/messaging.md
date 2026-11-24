@@ -332,6 +332,8 @@ While you are [focused](#focus-an-agent), `listen` is refused. To listen while y
 
 The listener belongs to the launch in which it started, before waiting for any lock. It exits nonzero with a reason when that launch ends or is replaced, or its identity cannot be verified, focused or not. A process check that can't be answered, such as a `ps` that times out on a busy machine, reads nothing and is tried again on the next poll, and the timeout waits for one that can be. Once checks have gone unanswered for 30 seconds, no new one starts, and if the one still running can't be answered either, the listener ends. It does not attach to a replacement launch, including when a shared conversation keeps its identity. Busy launch or inbox locks do not suspend the timeout or launch checks. Before reporting unread messages, it checks the launch's processes again.
 
+For a harness that enables runner checks, a listener whose sandbox cannot answer a process check asks its runner to verify the current child. If the runner cannot answer, the listener retries under the same timeout rules.
+
 The harness decides how to notify you when the background shell exits. Claude and Antigravity CLI start a turn for their background-task notification. Codex shows command completion but does not start a new turn after the current turn ends; check the result and inbox at your next turn. mv2 does not send a separate wake message.
 
 ## Report progress

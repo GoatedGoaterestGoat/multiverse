@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 
 from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime, stage_before_boundary
 from multiverse.store import exists_replaced, lock, now, read, retry_missing, write
+from multiverse.runtime.listen_proof import pid_namespace
 from multiverse.runtime.process import process_started
 
 
@@ -658,6 +659,7 @@ def main():
     launch = Path(sys.argv[1])
     agent_dir = launch.parent.parent
     process = None
+    child_started = None
     service_dir = None
     watcher = None
     proxy = None
@@ -665,6 +667,7 @@ def main():
     recovery_monitor = None
     refusal_monitor = None
     binding_requests = None
+    listen_proof = None
     startup_checked = False
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
@@ -721,7 +724,9 @@ def main():
             attachment = asdict(legacy_attachment(request.get('shared_service')))
         update_runtime(agent_dir, launch.name, state="starting" if attachment.get('readiness') in ('binding', 'legacy-binding') else "running", status="unknown",
                        runner_pid=os.getpid(), runner_started=runner_started,
-                       startup_checked=False, attachment=attachment or None)
+                       startup_checked=False, attachment=attachment or None,
+                       runner_listen=request.get('runner_listen') is True,
+                       runner_pid_namespace=pid_namespace() if request.get('runner_listen') is True else None)
         if request.get('rpc_proxy'):
             from multiverse import harnesses
             from multiverse.runtime import rpc
@@ -806,6 +811,7 @@ def main():
                                 'mouse': selected_mouse,
                                 'cleanup_files': next_cleanup,
                                 'shell_callback': bool(fallback.get('shell_callback')),
+                                'runner_listen': bool(fallback.get('runner_listen')),
                                 'notices': notices, 'startup_retry': fallback.get('startup_retry')}
                 # A sender may have queued input while relay startup was still
                 # pending. Plain mode cannot deliver it; retain a retryable failure
@@ -837,6 +843,8 @@ def main():
                                    startup_delivery=None, native_mode=selection, native_relay=None,
                                    native_bridge=None, error=None,
                                    native_service=None, attachment=fallback.get('attachment'),
+                                   runner_listen=next_request['runner_listen'],
+                                   runner_pid_namespace=pid_namespace() if next_request['runner_listen'] else None,
                                    launch_notices=notices,
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
                                    plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
@@ -872,7 +880,7 @@ def main():
         if request.get('observe_refusal') and attachment.get('readiness') == 'process':
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
         def spawn(selected):
-            nonlocal process
+            nonlocal process, child_started
             check_stop()
             process = subprocess.Popen(selected['argv'], env=env, stdin=None)
             child_started = process_started(process.pid)
@@ -886,6 +894,30 @@ def main():
         child_at = time.monotonic()
         initial_native_id = _read_record(agent_dir / 'properties.json').get('native_session_id')
         spawn(request)
+        if request.get('runner_listen') is True:
+            from multiverse.runtime.listen_proof import RunnerProof
+
+            def listen_processes():
+                child = process
+                started = child_started
+                facts = runtime(agent_dir)
+                if (stop_signal is None and facts.get('launch_id') == launch.name
+                        and facts.get('state') in ('starting', 'running') and not facts.get('ending_at')
+                        and facts.get('runner_pid') == os.getpid() and facts.get('runner_started') == runner_started
+                        and facts.get('pid') == child.pid and facts.get('pid_started') == started
+                        and child.poll() is None and process is child):
+                    return facts
+                return None
+
+            try:
+                listen_proof = RunnerProof(runtime(agent_dir), listen_processes)
+                listen_proof.start()
+                update_runtime(agent_dir, launch.name, runner_listen_socket=list(listen_proof.identity))
+                roles['listen proof'] = attachments.Role(launch, 'listen proof', started=runner_started)
+            except (OSError, ValueError, KeyError):
+                if listen_proof is not None:
+                    listen_proof.close()
+                    listen_proof = None
         if initial_native_id is None and not request.get('control_endpoint') and not request.get('rpc_proxy'):
             from multiverse.runtime.binding_requests import BindingRequests
             binding_requests = BindingRequests(Path(env['MV2_UNIVERSE']), launch,
@@ -988,6 +1020,7 @@ def main():
                 roles[name].close()
             except Exception as error:
                 cleanup_errors.append(f'{name}: {error}')
+        close_role('listen proof', listen_proof)
         if startup is not None:
             close_role('startup delivery', startup)
         elif request.get('control_endpoint'):

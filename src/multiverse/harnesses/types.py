@@ -203,6 +203,8 @@ class CommandSpec:
     shell_callback: bool = False
     # Opt in to session-scoped tmux mouse mode without declaring an AttachmentSpec.
     mouse: bool = False
+    # Let a sandboxed listener ask this launch's runner to verify its own child.
+    runner_listen: bool = False
 
 
 @dataclass(frozen=True)

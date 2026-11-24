@@ -17,7 +17,7 @@ from isolation import track
 from test_multiverse import BaseTest, until
 from multiverse import cli, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
-from multiverse.runtime import agent_identity, focus_note, native
+from multiverse.runtime import agent_identity, focus_note, listen_proof, native
 from multiverse.runtime.process import process_started
 from multiverse.tools import inbox as inbox_tool, listen, report, send
 from multiverse.universe import focus, mailbox
@@ -75,6 +75,39 @@ class ListenTest(BaseTest):
         root, directory, launch, environment = callback.call_args.args
         self.assertEqual((root, directory, launch), (self.root, self.directory, self.launch))
         self.assertEqual(environment['MV2_LAUNCH_ID'], self.launch)
+
+    def test_sandboxed_check_can_use_a_fresh_reply_about_the_same_child(self):
+        """An unanswered process check must keep polling until the owning runner proves its current child."""
+        facts = {**self.facts, 'run_directory': str(self.work / 'run'), 'runner_listen': True,
+                 'runner_pid_namespace': listen_proof.pid_namespace()}
+        checks = []
+
+        def current():
+            checks.append(True)
+            return facts if len(checks) > 1 else None
+
+        proof = listen_proof.RunnerProof(facts, current)
+        proof.start()
+        try:
+            facts['runner_listen_socket'] = list(proof.identity)
+            store.write(self.directory / 'runtime.json', facts)
+            self.message()
+            with patch.object(listen, 'ended', return_value=None):
+                self.assertTrue(listen.run(self.root, timeout='0')['ok'])
+            self.assertGreaterEqual(len(checks), 2)
+            self.assertFalse(listen_proof.check({**facts, 'pid': facts['pid'] + 1}))
+            self.assertFalse(listen_proof.check({**facts, 'runner_listen_socket': [0, 0]}))
+            with patch.object(listen, 'ended', side_effect=(None, True)):
+                with self.assertRaisesRegex(ValueError, 'Listening launch has ended'):
+                    listen.run(self.root, timeout='0')
+            with patch.object(listen_proof, 'direct_checks_ok', return_value=False), \
+                    patch.object(listen, 'ended', side_effect=AssertionError('foreign PID namespace')):
+                self.assertTrue(listen._processes(facts))
+                self.assertFalse(listen._processes({**facts, 'runner_listen_socket': None}))
+        finally:
+            proof.close()
+        self.assertFalse(listen_proof.check(facts))
+
     def note(self, directory):
         """The real turn-end note, saved and committed, with only its native submission left out."""
         with patch.object(native, 'send_or_wake', return_value={'state': 'native_queued', 'ok': True}) as submitted:

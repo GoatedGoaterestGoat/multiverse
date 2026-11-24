@@ -75,7 +75,7 @@ Unreadable or malformed metadata, unavailable Zstandard support, damaged compres
 | --- | --- |
 | `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `effort`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
 | `SessionHandle` | `agent_id`, `harness`, `workspace`, `launch_id`, `native_id`, `session_file`, `state`, `endpoint`, `bridge`, `native_mode` |
-| `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment`, `launch_files`, `cleanup_files`, `shell_callback`, `mouse` |
+| `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment`, `launch_files`, `cleanup_files`, `shell_callback`, `mouse`, `runner_listen` |
 | `ShellCallbackResult` | `native_id`, `bridge`, `launch_files` (subset of `CommandSpec.cleanup_files`) |
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
 | `Capability` | `state` (`supported`, `unavailable`, `error`), `reason`, `mechanism`, `required` |
@@ -183,6 +183,8 @@ A **plain** launch is the CLI in its pane. mv2 sees whether it is alive, can sto
 When the bridge can't be prepared, an adapter in auto mode returns the plain spec with `native_mode.fallback_reason` set. With the bridge required, it raises instead.
 
 Set `CommandSpec.mouse = True` to enable session-scoped tmux mouse mode without declaring an `AttachmentSpec` (so `adapter.attachment_ready` keeps controlling readiness). `AttachmentSpec.mouse = True` remains honoured for adapters that declare an attachment, and a `CommandSpec.fallback` carries its own mouse preference (`runner.py` switches or restores inherited mouse mode with `set-option -u`).
+
+Set `CommandSpec.runner_listen = True` when tool shells can reach a launch-local Unix socket but cannot verify host process identity. An unanswered `mv2 listen` process check then asks the launch's runner to verify its own child. On Linux, a listener that cannot verify a shared PID namespace uses the runner directly. The runner answers only for the recorded process pair while that child is running. An unavailable reply leaves the check unknown.
 
 Core can also meet failures later: starting the shared service, a `BridgeUnavailable` from the adapter once the service is up, or the relay. For those, put the plain spec in `CommandSpec.fallback`. The choice is saved in `runtime.json` as `native_mode`, with `policy`, `mode` and `fallback_reason`.
 
