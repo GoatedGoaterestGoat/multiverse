@@ -70,6 +70,22 @@ def _current_file(launch_fd, identity):
     return _private_file(info) and _identity(info) == identity
 
 
+def remove_retired(directory, facts):
+    """Remove the previous launch's recorded probe after launch and teardown checks."""
+    identity = facts.get('runner_listen_file')
+    if not isinstance(identity, list) or len(identity) != 2 or any(type(value) is not int for value in identity):
+        return
+    try:
+        launch_fd = _open_launch(directory, facts.get('launch_id'))
+        try:
+            if _current_file(launch_fd, identity):
+                os.unlink(NAME, dir_fd=launch_fd)
+        finally:
+            os.close(launch_fd)
+    except (OSError, ValueError):
+        pass  # Leftover proof files cannot answer and must not block resume.
+
+
 @contextmanager
 def _locked(fd):
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -267,7 +267,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
 | `agy-receipts/` | Delivery receipts for the Antigravity CLI bridge only: metadata and a SHA-256 hash of the framed message, never raw message text. |
 | `launches/UUID/` | One directory per spawn or resume. |
-| `launches/UUID/.mv2-listen-proof` | Private file (mode `0600`) exchanging a fresh launch check between `mv2 listen` and an opted-in runner. The runner removes it on orderly exit. After forced termination, checks against a leftover file go unanswered. |
+| `launches/UUID/.mv2-listen-proof` | Private file (mode `0600`) exchanging a fresh launch check between `mv2 listen` and an opted-in runner. The runner removes it on orderly exit. The next launch of that agent removes a leftover file if the previous launch is proven stopped and the file still has its recorded identity. Checks against a leftover file go unanswered. |
 
 `runtime.json` temporarily keeps a reported `working` or `idle` as
 `deferred_stop_status` when a stopping launch still has a waiting status.

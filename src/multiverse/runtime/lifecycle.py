@@ -707,6 +707,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         Tmux.require_launch_version()
         paths.prepare(run_root)
         Tmux(socket_path).ensure(root)
+        if previous.get('runner_listen_file'):
+            from . import listen_proof
+            listen_proof.remove_retired(agent_dir, previous)
         if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
             # Resume creates a fresh pane; remove only the old owned wrapper.
             old_backend, old_pane = owned(properties, previous, states=('stopped',))
