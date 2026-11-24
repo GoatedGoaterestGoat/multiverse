@@ -25,9 +25,9 @@ def stopped(root, agent, record, attachment_only):
         line = f"Closed {name}'s terminal. {sentence(reason)}"
     else:
         line = f'Stopped {name}.'
-    cancelled = cancellation.get('cancelled_startup_messages') or 0
-    if isinstance(cancelled, int) and cancelled > 0:
-        line += f" {cancelled} message{'s' if cancelled != 1 else ''} waiting for it to start {'were' if cancelled != 1 else 'was'} not delivered."
+    failed = cancellation.get('failed_startup_messages', cancellation.get('cancelled_startup_messages'))
+    if type(failed) is int and failed > 0:
+        line += f" {failed} message{'s' if failed != 1 else ''} waiting for it to start {'were' if failed != 1 else 'was'} not delivered."
     return line
 
 

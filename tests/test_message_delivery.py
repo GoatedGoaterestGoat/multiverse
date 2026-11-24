@@ -326,41 +326,37 @@ class InboxDeliveryTest(DeliveryFixture):
         self.assertTrue(result['ok'])
         self.assertEqual(len(result['messages']), 55)
         self.assertEqual(len(self.calls), before + 1 + 55)
-        for staged in (False, True):
-            with self.subTest(cancelled_startup=staged):
-                self.recipient()
-                message = append_message(self.directory, 'cancel me', {}, delivery='follow-up')
-                if staged:
-                    update_message(self.directory, message['id'], submission_state='pending',
-                                   deferred_launch_id=self.launch)
-                adapter = harnesses.load(self.root, 'claude')
-                with patch.object(adapter, 'stop', create=True, return_value=NativeResult('ok', value={
-                        'cancelled_message_ids': [] if staged else [message['id']]})):
-                    native.stop(self.root, self.agent)
-                before = message_record(self.directory, message['id'])[1]
-                lines = []
-                # Final cancellation remains reportable even if the harness can no longer load.
-                with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
-                    snapshot, barrier = deliver.mailbox.inbox, threading.Barrier(2)
-                    def simultaneous_snapshot(*args, **kwargs):
-                        result = snapshot(*args, **kwargs)
-                        barrier.wait(timeout=5)
-                        return result
-                    with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous_snapshot), \
-                            ThreadPoolExecutor(max_workers=2) as pool:
-                        results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
-                                                check=True, _present=lines.append), range(2)))
-                    self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
-                    checked = next(result for result in results if result['messages'])
-                    self.assertFalse(checked['ok'], checked)
-                    self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
-                    self.assertEqual(sum('Send a new message' in line for line in lines), 1)
-                    self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
-                    self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
-                after = message_record(self.directory, message['id'])[1]
-                self.assertEqual(after['submission_state'], 'cancelled')
-                self.assertEqual(after.get('attempts'), before.get('attempts'))
-                self.assertEqual(self.calls, [])
+        self.recipient()
+        message = append_message(self.directory, 'cancel me', {}, delivery='follow-up')
+        update_message(self.directory, message['id'], submission_state='accepted')
+        adapter = harnesses.load(self.root, 'claude')
+        with patch.object(adapter, 'stop', create=True, return_value=NativeResult('ok', value={
+                'cancelled_message_ids': [message['id']]})):
+            native.stop(self.root, self.agent)
+        before = message_record(self.directory, message['id'])[1]
+        lines = []
+        # Final cancellation remains reportable even if the harness can no longer load.
+        with patch.object(harnesses, 'load', side_effect=ValueError('harness removed')):
+            snapshot, barrier = deliver.mailbox.inbox, threading.Barrier(2)
+            def simultaneous_snapshot(*args, **kwargs):
+                result = snapshot(*args, **kwargs)
+                barrier.wait(timeout=5)
+                return result
+            with patch.object(deliver.mailbox, 'inbox', side_effect=simultaneous_snapshot), \
+                    ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(lambda _: deliver.run(self.root, agent=self.agent,
+                                        check=True, _present=lines.append), range(2)))
+            self.assertEqual(sorted(len(result['messages']) for result in results), [0, 1])
+            checked = next(result for result in results if result['messages'])
+            self.assertFalse(checked['ok'], checked)
+            self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
+            self.assertEqual(sum('Send a new message' in line for line in lines), 1)
+            self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
+            self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+        after = message_record(self.directory, message['id'])[1]
+        self.assertEqual(after['submission_state'], 'cancelled')
+        self.assertEqual(after.get('attempts'), before.get('attempts'))
+        self.assertEqual(self.calls, [])
 
     def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
         """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can

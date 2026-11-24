@@ -1701,10 +1701,10 @@ def kill(root, reference, *, attachment_only=False):
                 raise
             # A dead child has no terminal connection to preserve. Removing its
             # owned wrapper must not depend on an unreachable shared service.
-            cancelled = mailbox.end_startup_messages(agent_dir, launch_id, 'Cancelled by explicit agent stop', cancelled=True)
+            failed = mailbox.end_startup_messages(agent_dir, launch_id, 'Agent stopped before startup delivery')
             cancellation = NativeResult('unknown',
                 f'Native cancellation unconfirmed: {error}. Retry stop when the native service is reachable.',
-                {'cancelled_startup_messages': cancelled})
+                {'failed_startup_messages': failed})
         update_runtime(agent_dir, launch_id, native_cancellation=cancellation.to_dict() if cancellation else None)
 
     # The runner's relay can be binding under .launch.lock during startup or

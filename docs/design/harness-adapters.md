@@ -320,8 +320,9 @@ a still-running terminal and reports an error. If the child has already exited,
 core removes its owned wrapper even when native cancellation fails, recording
 `native_cancellation.state=unknown` and a retry diagnostic in runtime and the result.
 This does not claim that shared-server work stopped; retry stop once the server
-is reachable. Unsubmitted startup messages are cancelled locally. The shared daemon and sibling agents remain
-running. Stop also works when the pane is gone: under the same launch lock,
+is reachable. Core records unsubmitted startup messages as delivery failures for
+`mv2 deliver NAME --retry`. The shared daemon and sibling agents remain running.
+Stop also works when the pane is gone: under the same launch lock,
 core authorizes native cancellation through the saved endpoint and exact bound
 thread, without authorizing any pane operation. Results report cancelled
 submissions, interrupt requests and background-terminal cleanup; receipt IDs
@@ -507,8 +508,9 @@ inside the native harness. Send and queue draining take `.send.lock` before
 `.launch.lock`; wake releases the latter before calling `start`. Readiness waits
 hold neither. Failed startup leaves never-submitted input as definite failures;
 `deliver AGENT --check` also detects an abandoned launch queue after a runner
-crash. Explicit kill cancels pending startup messages. Recovery never replays
-accepted or uncertain submissions. Existing runners predating this queue retain
+crash. Explicit kill records pending startup messages as delivery failures for
+`mv2 deliver NAME --retry`. Messages upgraded from inbox-only return to the inbox.
+Recovery never replays accepted or uncertain submissions. Existing runners predating this queue retain
 their binding-time refusal until relaunched.
 
 One logical inbox lives in `inbox.jsonl` (immutable messages),

@@ -889,7 +889,7 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
                        **({'wake_prompt_context': prompt_context} if prompt_context is not None else {}))
 
 
-def end_startup_messages(directory, launch_id, reason, cancelled=False):
+def end_startup_messages(directory, launch_id, reason):
     """Caller holds .launch.lock; these messages have never reached a harness."""
     if launch_id is None:
         return 0
@@ -898,7 +898,7 @@ def end_startup_messages(directory, launch_id, reason, cancelled=False):
         tracking = message['tracking']
         if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
             receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
-            update_message(directory, message['id'], submission_state='cancelled' if cancelled else 'failed',
+            update_message(directory, message['id'], submission_state='failed',
                            attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
             count += 1
     return count

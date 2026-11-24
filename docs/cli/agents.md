@@ -86,6 +86,8 @@ mv2 resume worker --effort default
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
+If you stop an agent while a steer or follow-up is still waiting in mv2 for the launch to be ready, mv2 records it as a delivery failure. Run `mv2 deliver NAME --retry` to retry it. Messages that were upgraded from inbox-only return to the inbox.
+
 `--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other sessions. `--effort default` clears the saved effort when permitted. Without a model subset, changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. With a [model subset](../use/harnesses.md#narrow-the-available-choices), an excluded recorded choice refuses resume until you explicitly replace it with an allowed one. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer the native effective default from the person's settings, account and saved conversation.
 
 If an old conversation is missing, `mv2 resume NAME --start-fresh` keeps the
