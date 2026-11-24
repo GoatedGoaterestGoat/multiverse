@@ -1,7 +1,7 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import (error_text, model_label, phase_label, shorten, startup_prompt_line, state, summary_label,
-                       live_label)
+from ..display import (error_text, model_label, paused_queue_line, phase_label, shorten, startup_prompt_line, state,
+                       summary_label, live_label)
 from ..runtime import lifecycle
 from ..universe import focus
 from .. import universe
@@ -115,6 +115,9 @@ def problems(row, wide):
         lines.append('  ' + asked)
     if row.get('recovery_note'):
         lines.append('  Note: Reconnected automatically.')
+    paused = paused_queue_line(row)
+    if paused:
+        lines.append('  Note: ' + paused)
     if row.get('focus'):
         lines.append(f"  Focused {focus.ends(row['focus'])}: agents' messages to it wait in its inbox.")
     return lines

@@ -173,6 +173,14 @@ checks; the provider interprets native replies. Internal command/RPC plans are
 never public send results. There is no new model loop, simulated chat
 UI, or fallback that invokes another model to forward a message.
 
+Any adapter with a local queue can report a pause in `queue_state` for the
+launch and conversation it owns. The optional `paused_message_ids` names
+the mv2 submissions still held. The optional `paused_count` describes the
+adapter's local queue. List and inspect read saved delivery records to count
+accepted, unconfirmed queued messages in the pause's scope. When present,
+`paused_message_ids` limits the count to those submissions. Listing needs
+no native queue query and shows a pause only for a positive count.
+
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate

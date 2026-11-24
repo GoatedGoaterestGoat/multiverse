@@ -297,29 +297,78 @@ def _states(agent_dir, *, observed_missing=None, budget=None):
 
 
 def delivery_problem(agent_dir, name, *, is_final=None, observed_missing=None):
-    """Count reported failures in real inbox messages, without native queries.
+    """Describe failed delivery in a real inbox, without native queries."""
+    problem, _ = delivery_indicators(agent_dir, name, is_final=is_final, observed_missing=observed_missing)
+    return problem
 
-    Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
-    rather than making the agent's identity or terminal record unusable.
+
+def _accepted_queued(identifier, state, native_id, launch_id, held):
+    if (state.get('submission_state') != 'accepted' or state.get('dismissed_at')
+            or state.get('uncheckable_reported_at') or state.get('transcript_confirmed_at')):
+        return False
+    attempt = (state.get('attempts') or [{}])[-1]
+    if held is not None:
+        submitted = attempt.get('native_message_id', identifier)
+        if not isinstance(submitted, str) or submitted not in held:
+            return False
+    last = state.get('last_receipt') or attempt
+    last_value = last.get('value') if isinstance(last, dict) else None
+    receipt = state.get('native_receipt')
+    if receipt is None:
+        receipt = last_value
+    if (not isinstance(receipt, dict) or receipt.get('transcript_confirmed') is True
+            or isinstance(last_value, dict) and last_value.get('transcript_confirmed') is True):
+        return False
+    if attempt.get('native_session_id') not in (None, native_id):
+        return False
+    if launch_id is not None and attempt.get('launch_id') != launch_id:
+        return False
+    if receipt.get('queued') is False:
+        return False
+    queued_id = receipt.get('queued_submission_id')
+    return (receipt.get('paused') is True or receipt.get('queued') is True
+            or isinstance(queued_id, str) and bool(queued_id))
+
+
+def delivery_indicators(agent_dir, name, *, is_final=None, observed_missing=None,
+                        paused_native_id=None, paused_launch_id=None, paused_message_ids=None):
+    """Count failures and accepted, unconfirmed receipts in the current paused queue in one inbox read.
+
+    The caller supplies the scope only when the runtime snapshot says its queue is paused. A launch-scoped queue
+    requires a receipt from that launch. A conversation-scoped native queue can survive resuming the same session.
+    When the snapshot names its held submissions, an older acceptance cannot count towards the current pause.
     """
     ledgers = tuple(agent_dir / entry for entry in ('inbox-state.json', 'native-delivery.json'))
     if observed_missing is None:
         observed_missing = missing_records(ledgers)
     if (not any(path not in observed_missing and exists_replaced(path) for path in ledgers)
             and not (agent_dir / 'inbox-unsubmitted').exists()):
-        return None
+        return None, 0
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir, observed_missing=observed_missing)
         failed = {identifier for identifier, state in states.items()
                   if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at') and not state.get('dismissed_at')}
-        if not failed:
-            return None
+        queued = ({identifier for identifier, state in states.items()
+                   if _accepted_queued(identifier, state, paused_native_id, paused_launch_id, paused_message_ids)}
+                  if paused_native_id else set())
+        if not failed and not queued:
+            return None, 0
         _, _, messages = _messages(agent_dir)
-        count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
-                    and message.get('id') in failed
-                    and not (is_final and is_final(message, states[message['id']]))
-                    for _, message in messages)
-    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry or --dismiss' if count else None
+        failures = paused = 0
+        for _, message in messages:
+            if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
+                continue
+            identifier = message.get('id')
+            if identifier in failed and not (is_final and is_final(message, states[identifier])):
+                failures += 1
+            if identifier in queued:
+                target = states[identifier].get('target_session') or message.get('target_session')
+                if target == paused_native_id:
+                    paused += 1
+                    queued.remove(identifier)
+    problem = (f'{failures} {"message" if failures == 1 else "messages"} not delivered: '
+               f'mv2 deliver {name} --retry or --dismiss') if failures else None
+    return problem, paused
 
 
 def preflight_delivery(agent_dir):

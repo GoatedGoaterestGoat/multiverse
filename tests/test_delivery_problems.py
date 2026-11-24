@@ -523,3 +523,115 @@ class DeliveryProblemTest(BaseTest):
                 self.assertEqual(deliver.run(root, agent='recipient', check=True)['messages'], [])
                 self.assertEqual(deliver.run(root, agent='recipient', retry=True)['messages'], [])
                 self.assertEqual(doctor.run(root)['problems'], [])
+
+    def test_paused_queue_displays_only_accepted_unconfirmed_queued_messages(self):
+        """An interrupted empty queue must stay quiet, and list/inspect should count only current queued receipts."""
+        conversation = read(self.directory / 'properties.json')['native_session_id']
+        launch = uid()
+
+        def runtime(queue):
+            write(self.directory / 'runtime.json', {
+                **self.running(), 'launch_id': launch, 'status': 'idle', 'queue_state': queue,
+            })
+
+        def saved(value, *, target=conversation, accepted='accepted', confirmation=None, launched=launch):
+            message = mailbox.append_message(self.directory, 'saved input', {}, delivery='follow-up',
+                                             target_session=target)
+            mailbox.update_message(self.directory, message['id'], submission_state=accepted,
+                                   attempts=[{'launch_id': launched, 'native_session_id': target}],
+                                   native_receipt=value, transcript_confirmed_at=confirmation)
+            return message
+
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch.object(lifecycle, 'terminal_action', return_value=''), \
+                patch.object(native, 'deliver', side_effect=AssertionError('listing must not query native delivery')):
+            def check(expected):
+                listed = list_agents.run(self.root, wide=True)
+                inspected = inspect.cli_run(self.root, agent='recipient')
+                public = inspect.cli_run(self.root, agent='recipient', json=True)
+                self.assertEqual(public.get('paused_queue'), expected)
+                self.assertEqual('Queue paused' in listed, expected is not None)
+                self.assertEqual('Queue paused' in inspected, expected is not None)
+                self.assertNotIn('delivery_problem', public)
+                return listed
+
+            codex = {'native_session_id': conversation, 'state': 'paused'}
+            runtime(codex)
+            check(None)
+            # A stored adapter count by itself still proves no local message.
+            runtime({**codex, 'paused_count': 9})
+            check(None)
+            stale_launch = uid()
+            saved({'queued_submission_id': 'native-queued'}, launched=stale_launch)
+            saved({'queued': True, 'transcript_confirmed': True})
+            saved({'queued': True}, target=uid())
+            saved({'queued': True}, accepted='pending')
+            saved({'queued': True}, confirmation=now())
+            saved({'transcript_confirmed': False})  # A native acceptance alone does not prove queuing.
+            saved({'queued_submission_id': 'former-queue-id', 'queued': False})
+            saved({'queued': True}, accepted='cancelled')
+            runtime(codex)
+            self.assertIn('Queue paused (1 message)', check({'state': 'paused', 'count': 1}))
+            runtime({'state': 'paused'})
+            check({'state': 'paused', 'count': 1})
+            # Conversation-scoped Codex receipts survive resume, launch-scoped Agy receipts do not.
+            agy = {**codex, 'launch_id': launch, 'reason': 'error', 'paused_count': 9}
+            runtime(agy)
+            check(None)
+            receipt = saved({'queued': True})
+            self.assertIn('Queue paused (1 message) after a turn error',
+                          check({'state': 'paused', 'count': 1, 'reason': 'error'}))
+            second = saved({'paused': True})
+            check({'state': 'paused', 'count': 2, 'reason': 'error'})
+            # Older accepted receipts can outlive a handoff. The current pause
+            # names only the retry submission that is still held.
+            retry_id = uid()
+            mailbox.update_message(self.directory, second['id'], attempts=[{
+                'launch_id': launch, 'native_session_id': conversation, 'native_message_id': retry_id,
+            }])
+            paused_retry = {**agy, 'paused_message_ids': [retry_id, retry_id, uid()]}
+            runtime(paused_retry)
+            check({'state': 'paused', 'count': 1, 'reason': 'error'})
+            for damaged in (None, [], [retry_id, {}], [second['id']]):
+                runtime({**agy, 'paused_message_ids': damaged})
+                check(None)
+            bad_attempt = saved({'queued': True})
+            mailbox.update_message(self.directory, bad_attempt['id'], attempts=[{
+                'launch_id': launch, 'native_session_id': conversation, 'native_message_id': [],
+            }])
+            runtime(paused_retry)
+            check({'state': 'paused', 'count': 1, 'reason': 'error'})
+            mailbox.update_message(self.directory, bad_attempt['id'], dismissed_at=now())
+            mailbox.update_message(self.directory, second['id'], transcript_confirmed_at=now())
+            runtime(paused_retry)
+            check(None)
+            runtime({**agy, 'reason': ['damaged'], 'paused_count': True})
+            check({'state': 'paused', 'count': 1})
+            for stale in ({'launch_id': stale_launch}, {'native_session_id': uid()}, {'state': 'idle'}):
+                runtime({**agy, **stale})
+                check(None)
+            runtime(agy)
+            with patch.object(lifecycle, 'observe', return_value={'live': 'stopped'}):
+                check(None)
+            mailbox.update_message(self.directory, receipt['id'], dismissed_at=now())
+            check(None)
+
+    def test_deliver_check_renders_a_recorded_pause_cause_without_guessing(self):
+        """Bad or unfamiliar receipt metadata must not break deliver --check or invent a cause."""
+        self.message('pending')
+        cases = (({}, 'after an interrupt'),
+                 ({'paused_reason': 'interrupt'}, 'after an interrupt'),
+                 ({'paused_reason': 'error'}, 'after a turn error'),
+                 ({'paused_reason': 'cancel'}, 'after turn cancellation'),
+                 ({'paused_reason': []}, ''), ({'paused_reason': {}}, ''),
+                 ({'paused_reason': 'unrecognized'}, ''))
+        for evidence, cause in cases:
+            with self.subTest(evidence=evidence):
+                receipt = {'state': 'native_queued', 'ok': True,
+                           'value': {'queued': True, 'paused': True, **evidence}}
+                lines = []
+                with patch.object(native, 'finalize_launch_only', return_value=None), \
+                        patch.object(native, 'deliver', return_value=receipt):
+                    deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+                suffix = f' {cause}' if cause else ''
+                self.assertIn(f'message queued and paused{suffix}.', '\n'.join(lines))

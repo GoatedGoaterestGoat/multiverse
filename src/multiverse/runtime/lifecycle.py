@@ -295,12 +295,22 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = (None if facts.get('exit_code') in (-15, 143) else
                                 facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None))
+                paused = display.paused_queue_state({**observation, 'runtime': facts,
+                                                     'native_session_id': properties.get('native_session_id')})
+                paused_ids = None
+                if paused and 'paused_message_ids' in paused:
+                    saved_ids = paused['paused_message_ids']
+                    paused_ids = (frozenset(saved_ids) if isinstance(saved_ids, list)
+                                  and all(isinstance(value, str) and value for value in saved_ids) else frozenset())
                 try:
-                    delivery_problem = mailbox.delivery_problem(path.parent, properties['name'],
+                    delivery_problem, paused_count = mailbox.delivery_indicators(path.parent, properties['name'],
                         is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']),
-                        observed_missing=observed_missing)
+                        observed_missing=observed_missing,
+                        paused_native_id=properties.get('native_session_id') if paused else None,
+                        paused_launch_id=paused.get('launch_id') if paused else None,
+                        paused_message_ids=paused_ids)
                 except (OSError, ValueError, TypeError, KeyError):
-                    delivery_problem = None  # Doctor reports ledger damage separately.
+                    delivery_problem, paused_count = None, 0  # Doctor reports ledger damage separately.
                 rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, **model_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": status, "active_now": status == 'working',
@@ -311,6 +321,7 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
+                             **({'paused_queue_count': paused_count} if paused_count else {}),
                              "focus": focus.current(path.parent, observed_missing=observed_missing), "runtime": facts,
                              "model_name": model_policy.recorded_name(scope, properties, model_names),
                              **model_policy.default_fields(scope, properties, model_names),

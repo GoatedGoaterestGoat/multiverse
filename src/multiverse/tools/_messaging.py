@@ -1,7 +1,7 @@
 """Human summaries of delivery evidence; internal receipts stay unchanged."""
 import re
 import json
-from ..display import clean
+from ..display import clean, paused_queue_cause
 
 
 def failure_reason(reason, text='', *, preserve_details=False):
@@ -68,7 +68,9 @@ def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, 
     if state == 'cancelled':
         return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
     if value.get('paused') is True:
-        return f'{name}: message queued and paused after an interrupt. A new submitted message or terminal turn resumes the queue. Do not resend.'
+        cause = paused_queue_cause(value.get('paused_reason', 'interrupt'))
+        suffix = f' {cause}' if cause else ''
+        return f'{name}: message queued and paused{suffix}. A new submitted message or terminal turn resumes the queue. Do not resend.'
     if state in ('error', 'unavailable'):
         if value.get('repair_terminal') is True:
             why = failure_reason(reason, text, preserve_details=True)

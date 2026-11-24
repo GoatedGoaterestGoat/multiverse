@@ -188,6 +188,14 @@ Core can also meet failures later: starting the shared service, a `BridgeUnavail
 
 An optional relay view's `primary_event(direction, value)` describes exact-primary turn events after protocol validation: `interrupt`, `started`, or `completed`, with `native_session_id` and `turn_id`; completed events also have `status` (`interrupted` or `finished`). Side traffic and stale turn completions must return nothing. Core records an outgoing interrupt before forwarding it. `SessionHandle.queue_state` carries core's exact-conversation pause and explicit restart context to receipt and continuation operations; it grants no additional authority.
 
+An adapter with a local queue can publish `queue_state` for its owned launch
+and conversation. A paused record carries `state: "paused"`, `launch_id`
+and `native_session_id`. The optional `paused_message_ids` lists the
+`Message.id` values still held, including per-attempt IDs when enabled.
+`paused_count`, if supplied, describes the adapter's own queue. Core counts
+accepted, unconfirmed local delivery records in scope, matching the listed
+IDs when present. An empty list produces no pause line.
+
 An optional pure `delivery_observation(value)` hook runs after incoming protocol
 validation. It returns `None` or `kind: user_message` with four bounded opaque IDs:
 `native_session_id`, `turn_id`, `item_id`, and `client_message_id`. It must qualify

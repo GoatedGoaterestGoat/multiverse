@@ -305,6 +305,9 @@ record with its request correlation and admission token. `checking` and
 stays fenced. `session_generation` distinguishes a switch away and back within
 one launch. `queue_history` retains each earlier conversation's pause state,
 while `queue_state` names the current one. Resume preserves these pause records.
+When `queue_state` carries `paused_message_ids`, list and inspect count only
+accepted, unconfirmed delivery records whose mv2 submission IDs are in that
+list. An empty list records that no submissions are held.
 Input saved during the fence has `navigation_wait` in `inbox-state.json`; a
 resolved switch can submit it once. Before an explicit resume replaces a stopped
 launch, pending input still carrying that deferral becomes a reported failure
