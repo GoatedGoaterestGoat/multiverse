@@ -86,6 +86,10 @@ class HarnessContracts(unittest.TestCase):
         builds resume differently, and a wrong target silently resumes another conversation."""
         for harness in ('codex', 'claude', 'pi', 'agy'):
             with self.subTest('through lifecycle.start', harness=harness):
+                if harness == 'agy':
+                    agy_settings = Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'settings.json'
+                    agy_settings.parent.mkdir(parents=True, exist_ok=True)
+                    write(agy_settings, {'trustedWorkspaces': [str(self.work.resolve())]})
                 row = self.start(name=f'offline-{harness}', harness=harness)
                 directory = self.root / 'state/agents' / row['id']
                 native = row.get('native_session_id')

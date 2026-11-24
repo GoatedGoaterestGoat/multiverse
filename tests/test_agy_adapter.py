@@ -101,6 +101,19 @@ class AgyAdapterUnitTest(BaseTest):
             db.write_bytes(b'SQLite format 3\x00')
         return home
 
+    def _trust_workspace(self, workspace=None):
+        home = agy_storage.agy_home()
+        settings = home / 'settings.json'
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        existing = json.loads(settings.read_text()) if settings.exists() else {}
+        trusted = list(existing.get('trustedWorkspaces') or [])
+        target = os.path.realpath(workspace or self.work)
+        if target not in trusted:
+            trusted.append(target)
+        existing['trustedWorkspaces'] = trusted
+        settings.write_text(json.dumps(existing) + '\n')
+        return settings
+
     def test_spawn_resume_settings_merge_and_missing_conversation_refusal(self):
         """Agy spawn/resume place --prompt-interactive last, write AGENTS.md/hooks/settings launch_files, merge user
         --settings instead of clobbering it, scrub PARENT_AGY, and refuse resume when no saved conversation exists;
@@ -2491,7 +2504,6 @@ class AgyAdapterUnitTest(BaseTest):
                 self.assertEqual(res.state, 'ok')
                 self.assertEqual((res.value['coverage'], res.value['entries']), ('unknown', []))
 
-
     def test_transcript_reading_compaction_and_turn_projection(self):
         """Antigravity's TranscriptProvider and TurnEventProvider expose real transcript_full.jsonl/transcript.jsonl
         rows, labels, CHECKPOINT compaction context boundaries, rewrite detection and turn projection through core's
@@ -3209,16 +3221,20 @@ class AgyAdapterUnitTest(BaseTest):
     def test_agy_mouse_mode_on_task_and_wake_keeps_bridge_readiness(self):
         """Bridged agy --task and wake launches enable session-scoped tmux mouse via CommandSpec.mouse while keeping
         attachment=None so readiness stays held until AgyAdapter.attachment_ready() sees bridge registration; plain
-        and promptless launches also request mouse."""
+        and promptless launches also request mouse and runner_listen."""
+        self._trust_workspace()
         fake_agy = self.work / 'agy-mouse-stub'
         fake_agy.write_text('#!/bin/sh\necho "agy 1.5.16"\n')
         fake_agy.chmod(0o755)
         adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy)})
         plain_adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy), 'inbox_bridge': False})
         values = self._values(task='')
-        self.assertTrue(plain_adapter.spawn(LaunchContext('spawn', values, 'gemini-4-neon-medium')).mouse)
+        plain_cmd = plain_adapter.spawn(LaunchContext('spawn', values, 'gemini-4-neon-medium'))
+        self.assertTrue(plain_cmd.mouse)
+        self.assertTrue(plain_cmd.runner_listen)
         promptless = adapter.spawn(LaunchContext('spawn', values, 'gemini-4-neon-medium'))
         self.assertTrue(promptless.mouse)
+        self.assertTrue(promptless.runner_listen)
         self.assertEqual(promptless.attachment.readiness, 'process')
 
         backend = Mock()
@@ -3234,6 +3250,7 @@ class AgyAdapterUnitTest(BaseTest):
             launch_id = started['runtime']['launch_id']
             req = read(agent_dir / 'launches' / launch_id / 'request.json')
             self.assertTrue(req['mouse'])
+            self.assertTrue(req['runner_listen'])
             self.assertIsNone(req['attachment'])
             write(agent_dir / 'runtime.json', {
                 **read(agent_dir / 'runtime.json'),
@@ -3257,6 +3274,7 @@ class AgyAdapterUnitTest(BaseTest):
             wake_launch = woke['runtime']['launch_id']
             wake_req = read(agent_dir / 'launches' / wake_launch / 'request.json')
             self.assertTrue(wake_req['mouse'])
+            self.assertTrue(wake_req['runner_listen'])
             self.assertIsNone(wake_req['attachment'])
             write(agent_dir / 'runtime.json', {
                 **read(agent_dir / 'runtime.json'),
@@ -3267,10 +3285,13 @@ class AgyAdapterUnitTest(BaseTest):
             write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'native_bridge': BRIDGE})
             self.assertTrue(lifecycle.wait_ready(self.root, agent_dir, wake_launch, adapter, .01)['ready'])
 
+    def test_f2_f9_pre_ls_queue_f3_workspace_trust_and_f5_runner_listen(self):
+        """SessionStart/PreInvocation must unlock bridge readiness without agy-ls.json, pre-agentapi busy and idle
+        sends must queue visibly without failing or double-delivering, and workspace_trust must require an exact
+        resolved match in readable settings.json before any task/wake launch."""
+        from multiverse.tools import deliver as deliver_tool, spawn as spawn_tool
+        from multiverse.universe.mailbox import append_message, update_message
 
-    def test_f2_f9_pre_ls_queue(self):
-        """SessionStart/PreInvocation must unlock bridge readiness without agy-ls.json, and pre-agentapi busy and
-        idle sends must queue visibly without failing or double-delivering."""
         fake_agy = self.work / 'agy-f235-stub'
         flush_log = self.work / 'f2-flush.jsonl'
         fake_agy.write_text(
@@ -3282,6 +3303,60 @@ class AgyAdapterUnitTest(BaseTest):
         )
         fake_agy.chmod(0o755)
         adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy)})
+
+        # F3: read-only workspace_trust matrix (exact resolved match only; never writes to Antigravity home).
+        env_home = {'HOME': str(self.work)}
+        ws_real = (self.work / 'trusted-ws').resolve()
+        ws_real.mkdir()
+        ws_sub = ws_real / 'subdir'
+        ws_sub.mkdir()
+        ws_link = self.work / 'link-ws'
+        ws_link.symlink_to(ws_real)
+        settings_path = self.work / '.gemini' / 'antigravity-cli' / 'settings.json'
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'unknown')
+        self.assertFalse(settings_path.exists())
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps({'trustedWorkspaces': [str(ws_real)]}) + '\n')
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'trusted')
+        self.assertEqual(adapter.workspace_trust(str(ws_sub), environment=env_home), 'untrusted')
+        self.assertEqual(adapter.workspace_trust(str(ws_link), environment=env_home), 'trusted')
+        # Unreadable, corrupt, missing-HOME, or relative inputs fail closed to 'unknown'.
+        settings_path.chmod(0o000)
+        try:
+            self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'unknown')
+        finally:
+            settings_path.chmod(0o600)
+        self.assertEqual(adapter.workspace_trust('relative/path', environment=env_home), 'unknown')
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment={}), 'unknown')
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment={'HOME': str(self.work / 'no-such-home')}), 'unknown')
+        settings_path.write_text('{not json')
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'unknown')
+        settings_path.write_text(json.dumps({'trustedWorkspaces': [123]}))
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'unknown')
+        settings_path.write_text(json.dumps({'colorScheme': 'dark'}))
+        self.assertEqual(adapter.workspace_trust(str(ws_real), environment=env_home), 'untrusted')
+
+        # End-to-end F3 refusal through lifecycle/spawn: untrusted workspace refuses --task and preserves input,
+        # allows promptless spawn, then accepts --task once trusted.
+        backend = Mock()
+        backend.create.return_value = {'socket': str(self.work / 'fake-tmux.sock'), 'session': '$9', 'pane': '%9'}
+        with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'Tmux', return_value=backend):
+            refused = spawn_tool.cli_run(self.root, name='untrusted-task', harness='agy', task='secret task', json=True)
+            self.assertFalse(refused['ok'])
+            self.assertIn('without a task and approve workspace trust', refused['error'])
+            backend.create.assert_not_called()
+            saved_tasks = sorted((self.root / 'state').glob('startup-task-*.md'))
+            self.assertEqual(len(saved_tasks), 1)
+            self.assertEqual(saved_tasks[0].read_text(), 'secret task')
+            promptless_ok = spawn_tool.run(self.root, name='untrusted-idle', harness='agy')
+            self.assertEqual(promptless_ok['name'], 'untrusted-idle')
+            self._trust_workspace()
+            trusted_ok = spawn_tool.run(self.root, name='untrusted-task', harness='agy', task_file=saved_tasks[0])
+            self.assertEqual(trusted_ok['name'], 'untrusted-task')
+            t_launch = self.root / 'state' / 'agents' / trusted_ok['id'] / 'launches' / trusted_ok['runtime']['launch_id']
+            self.assertTrue(read(t_launch / 'request.json')['task_trust'])
+            self.assertTrue(read(t_launch / 'request.json')['runner_listen'])
 
         # F2 & F9: SessionStart binds conversation and activates bridge readiness without agy-ls.json.
         agent_id, launch_id, conv_id = str(uuid4()), str(uuid4()), str(uuid4())
@@ -3375,6 +3450,7 @@ class AgyAdapterUnitTest(BaseTest):
         delivered = [json.loads(line)['text'] for line in flush_log.read_text().splitlines() if line.strip()]
         self.assertEqual(delivered, ['queued until agentapi'])
 
+
 class AgyTmuxLaunchTest(TerminalBase):
     def setUp(self):
         super().setUp()
@@ -3385,10 +3461,23 @@ class AgyTmuxLaunchTest(TerminalBase):
         }))
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
 
+    def _trust_workspace(self, workspace=None):
+        settings = self.work / '.gemini' / 'antigravity-cli' / 'settings.json'
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        existing = json.loads(settings.read_text()) if settings.exists() else {}
+        trusted = list(existing.get('trustedWorkspaces') or [])
+        target = os.path.realpath(workspace or self.work)
+        if target not in trusted:
+            trusted.append(target)
+        existing['trustedWorkspaces'] = trusted
+        settings.write_text(json.dumps(existing) + '\n')
+        return settings
+
     def test_tmux_bridge_shell_handoff_drains_startup_queue_and_cleans_ls_file(self):
         """A real tmux launch with a fake agy binary scrubs PARENT_AGY, writes 0600 launch_files, activates the bridge
         via mv2 report, flushes a held startup message through agentapi, and unlinks agy-ls.json on exit; fragile
         because runner StartupDelivery, shell callback handoff and exit cleanup span three separate processes."""
+        self._trust_workspace()
         server = _LoopbackListener()
         self.addCleanup(server.close)
         conv_id = str(uuid4())
@@ -3492,6 +3581,7 @@ class AgyTmuxLaunchTest(TerminalBase):
         succeed once the Antigravity UI starts rather than timing out; an unbound fresh launch still advises
         mv2 kill + mv2 deliver --retry, while a bound idle session before its first mv2 command queues visibly
         without failing and stays retryable after mv2 kill."""
+        self._trust_workspace()
         conv_id = str(uuid4())
         fake_agy = self.root / 'harnesses' / 'agy' / 'fake-agy-idle'
         fake_agy.write_text(

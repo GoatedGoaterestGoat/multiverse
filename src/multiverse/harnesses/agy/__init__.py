@@ -1352,6 +1352,7 @@ class AgyAdapter(ConfiguredAdapter):
                 argv=tuple(argv),
                 launch_files=launch_files,
                 mouse=True,
+                runner_listen=True,
                 native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': problem},
             )
 
@@ -1412,6 +1413,7 @@ class AgyAdapter(ConfiguredAdapter):
             cleanup_files=(agy_bridge.LS_FILE,),
             shell_callback=True,
             mouse=True,
+            runner_listen=True,
             native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
         )
 
@@ -1519,6 +1521,57 @@ class AgyAdapter(ConfiguredAdapter):
                     'run an mv2 command inside this session'
                 )
         return None
+
+    def workspace_trust(self, workspace, *, environment=None) -> str:
+        """Read-only check of Antigravity's `trustedWorkspaces` in `<agy_home>/settings.json`.
+
+        Returns `'trusted'`, `'untrusted'`, or `'unknown'`. Never writes to Antigravity's home.
+        """
+        if not isinstance(workspace, (str, os.PathLike)):
+            return 'unknown'
+        raw = os.fspath(workspace)
+        if not isinstance(raw, str) or not raw.strip() or not os.path.isabs(raw):
+            return 'unknown'
+        try:
+            resolved = os.path.realpath(raw)
+        except OSError:
+            return 'unknown'
+        source = os.environ if environment is None else environment
+        raw_home = source.get('HOME') if hasattr(source, 'get') else None
+        if not isinstance(raw_home, str) or not raw_home or not os.path.isabs(raw_home):
+            return 'unknown'
+        home_path = Path(raw_home)
+        try:
+            if not home_path.is_dir():
+                return 'unknown'
+        except OSError:
+            return 'unknown'
+        settings_path = home_path / '.gemini' / 'antigravity-cli' / 'settings.json'
+        try:
+            fd = os.open(settings_path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            return 'unknown'
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > (4 << 20):
+                return 'unknown'
+            os.set_blocking(fd, True)
+            with os.fdopen(fd, 'r', encoding='utf-8') as handle:
+                fd = -1
+                loaded = json.loads(_strip_jsonc(handle.read()))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return 'unknown'
+        finally:
+            if fd >= 0:
+                os.close(fd)
+        if not isinstance(loaded, dict):
+            return 'unknown'
+        raw_trusted = loaded.get('trustedWorkspaces')
+        if raw_trusted is None:
+            return 'untrusted'
+        if not isinstance(raw_trusted, list) or not all(isinstance(item, str) for item in raw_trusted):
+            return 'unknown'
+        return 'trusted' if resolved in set(raw_trusted) else 'untrusted'
 
     def launch_prompt(self, evidence):
         return _startup_prompt(evidence.get('text') if isinstance(evidence, dict) else None)
