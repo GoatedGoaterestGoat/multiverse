@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "claude_code": "2.1.330",
+  "claude_code": "2.1.332",
   "models": [
     {
       "id": "claude-3-5-haiku",
@@ -819,7 +819,7 @@
       "per_provider": {
         "bedrock": "claude-opus-5-5",
         "vertex": "claude-opus-5-5",
-        "foundry": "claude-opus-4-6",
+        "foundry": "claude-opus-5-5",
         "mantle": "claude-opus-5-5",
         "anthropic_aws": "claude-opus-5-5",
         "gateway": "claude-opus-4-7"
@@ -829,9 +829,9 @@
       "default": "claude-sonnet-5-5",
       "per_provider": {
         "bedrock": "claude-sonnet-4-5",
-        "vertex": "claude-sonnet-4-5",
-        "foundry": "claude-sonnet-4-5",
-        "mantle": "claude-sonnet-4-5",
+        "vertex": "claude-sonnet-5-5",
+        "foundry": "claude-sonnet-5-5",
+        "mantle": "claude-sonnet-5",
         "anthropic_aws": "claude-sonnet-4-6",
         "gateway": "claude-sonnet-4-6"
       }
