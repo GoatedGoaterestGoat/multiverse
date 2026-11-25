@@ -10,7 +10,7 @@ from ..store import lock, read, retry_missing
 from ..universe import agents, blocked, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
-from ._messaging import delivery_line, failure_reason
+from ._messaging import delivery_line, failure_reason, inbox_reminder
 
 def configure(parser):
     parser.add_argument("agent", help="Agent name, or comma-separated names")
@@ -158,7 +158,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             elif result.get('upgrade_unavailable'):
                 line = (f"{name} is blocked on you, but cannot take a follow-up in its current session. " + line)
             if recipient_id in unread_senders:
-                line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
+                line += ('\n' if '\n' in line else ' ') + inbox_reminder(name)
             if (force and queue_check is not None and queue_check.state == 'ok'
                     and queue_check.coverage == 'complete' and recipient_id not in queued_senders):
                 note = f"You have no queued follow-ups from {display.clean(name)}, so you don't need --force."

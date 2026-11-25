@@ -4,6 +4,10 @@ import json
 from ..display import clean, paused_queue_cause
 
 
+def inbox_reminder(name):
+    return f'Reminder: you have unread inbox messages from {clean(name)}. Read them with mv2 inbox.'
+
+
 def failure_reason(reason, text='', *, preserve_details=False):
     reason = str(reason or 'the session could not accept the message')
     if text:

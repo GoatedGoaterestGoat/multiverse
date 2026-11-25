@@ -126,7 +126,8 @@ class BlockedOnTest(BaseTest):
             files = lambda: {p.name: p.read_bytes() for p in directory.glob('inbox*') if p.is_file()}
             before = files()
             line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
-            self.assertEqual(line.strip(), 'Reported blocked on helper. Reminder: you have unread messages from helper.')
+            self.assertEqual(line.strip(), 'Reported blocked on helper. Reminder: you have unread inbox messages from helper. '
+                             'Read them with mv2 inbox.')
             self.assertEqual(files(), before)
             with patch.dict(os.environ):
                 for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID'):
@@ -137,7 +138,7 @@ class BlockedOnTest(BaseTest):
             for source_kind in ('user', 'self'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', source_kind)
                 self.assertTrue(line.startswith(f'Reported blocked on {source_kind}.'))
-                self.assertNotIn('Reminder: you have unread messages', line)
+                self.assertNotIn('Reminder:', line)
             with store.lock(directory / '.inbox.lock'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
                 self.assertNotIn('Reminder:', line)

@@ -186,8 +186,8 @@ workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
 from observed liveness. The report CLI prints one line (`Reported working.`, or `Reported blocked on NAME.`
 when a dependency is named). Only a report whose phase is `done` adds `You have N unread inbox messages.`
-when inbox-only messages wait, counted without marking them read. The separate blocked-on reminder names
-unread messages from the dependency. The CLI never echoes the summary or task/properties data; its Python `run()` result
+when unread inbox messages wait, counted without marking them read. The separate blocked-on reminder names
+the dependency with unread inbox messages and directs the agent to `mv2 inbox`. The CLI never echoes the summary or task/properties data; its Python `run()` result
 remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 

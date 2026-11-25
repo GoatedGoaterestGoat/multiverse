@@ -8,6 +8,7 @@ from ..store import lock
 from .. import display
 from . import listen
 from ._common import add_agent, callback
+from ._messaging import inbox_reminder
 
 def configure(parser):
     add_agent(parser)
@@ -60,7 +61,7 @@ def cli_run(root=None, *, agent=None, phase=None, summary=None, blocked_on=None,
             line += f" You have {count} unread inbox {noun}."
     if (os.environ.get('MV2_AGENT_ID') and dependency and dependency['kind'] == 'agent'
             and dependency['id'] in mailbox.unread_senders(directory)):
-        line += f" Reminder: you have unread messages from {display.clean(target['name'])}."
+        line += ' ' + inbox_reminder(target['name'])
     if record.get('phase') == 'blocked':
         if dependency is None:
             line += ' Name what you are blocked on with --blocked-on: an agent, user, or self.'
