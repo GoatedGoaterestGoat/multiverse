@@ -988,7 +988,10 @@ and their notes folder), and the `CLAUDE_CODE_PROJECT_DIR_NAME` and
 the parent's scratchpad. Also its `CLAUDE_CODE_CHROME_MCP_ORG_DENIED` (that its
 organization denied the Chrome tools), and since 2.1.330 the
 `CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE` Claude sets for its own tool shells
-when its host holds connector downloads, beside `CLAUDE_PID` and `CLAUDE_EFFORT`.
+when its host holds connector downloads, and since 2.1.332
+`CLAUDE_CODE_BRIDGE_CHILD_HELD_TO_AUTO` (Remote Control's hold on a session it
+starts: any permission mode but auto is dropped, so an agent spawned from inside
+such a session would lose its harness's mode), beside `CLAUDE_PID` and `CLAUDE_EFFORT`.
 Claude itself removes the identity names when it starts a fresh Claude, but keeps
 the project-folder name and scratchpad. Also removed is what Claude's background-session
 host gives a session, which Claude removes for a fresh Claude too: its credential
