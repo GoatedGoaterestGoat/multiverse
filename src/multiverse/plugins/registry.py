@@ -321,11 +321,11 @@ def record(root, current, *, person, approved=None, admitted=None):
 
 
 def _approvals():
-    """{resolved folder: its pin record} from trusted-plugins.json, {} when it was never written, None when it can't
-    be read for sure (trust.pins_now): then a listing keeps the types established before."""
+    """{resolved folder: its pin record} from trusted-plugins.json, {} when it isn't there (a reset), None when it's
+    there but can't be read (trust.pins_now): then a listing keeps the types established before."""
     from . import trust
     try:
-        return trust.pins_now()
+        return trust.pins_now(wait=trust.written_before())  # a listing may wait out a replacement gap
     except Exception:
         return None
 

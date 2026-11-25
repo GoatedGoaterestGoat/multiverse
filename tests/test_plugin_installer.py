@@ -2,7 +2,9 @@
 network), shown before they're placed, pinned at their content, and removed only where the installer put them."""
 import json
 import os
+import shlex
 import shutil
+import time
 from pathlib import Path
 import subprocess
 import sys
@@ -181,6 +183,81 @@ class InstallerTest(PluginTestCase):
         with mock.patch.dict(os.environ, {"MV2_AGENT_ID": "x"}), self.assertRaisesRegex(plugins.PluginError,
                                                                                        "Only the person"):
             plugins.remove_installed("notes", self.root)
+        with self.subTest("trusted-plugins.json damaged: nothing is removed, and the file is named"):
+            pin_map = trust.user_directory() / trust.FILE
+            saved = pin_map.read_bytes()
+            pin_map.write_text("{")
+            try:
+                with self.assertRaisesRegex((plugins.PluginError, installer.InstallError), trust.FILE):
+                    tool.run(self.root, plugin_action="remove", name="notes")
+                self.assertTrue((target / "plugin.json").is_file())  # its pin couldn't be dropped: still there
+                self.assertIn("notes", installer.Place(self.root).records())
+                self.assertEqual(list(installer.Place(self.root).staging.glob("removed-*")), [])
+                real_replace, where = os.replace, installer.Place(self.root)
+                for refused in ((), (where.recovery,)):  # put back refused; then the move to plugin-recovery too
+                    with self.subTest(f"and the folder can't be put back (refused: {len(refused) + 1})"):
+                        def replace(source, destination, *args, **kwargs):
+                            if Path(destination) == target or any(Path(destination).parent == place
+                                                                  for place in refused):
+                                raise PermissionError(13, "refused", str(destination))
+                            return real_replace(source, destination, *args, **kwargs)
+                        with mock.patch.object(installer.os, "replace", replace):
+                            with self.assertRaisesRegex((plugins.PluginError, installer.InstallError),
+                                                        "couldn't be put back: it is in") as caught:
+                                tool.run(self.root, plugin_action="remove", name="notes")
+                        kept = Path(str(caught.exception).rsplit("it is in ", 1)[1])
+                        self.assertTrue((kept / "plugin.json").is_file())
+                        self.assertEqual(kept.parent, where.staging if refused else where.recovery)
+                        aged = time.time() - (installer.STALE_HOURS + 1) * 3600
+                        os.utime(kept, (aged, aged))
+                        installer._sweep(where)  # as the next install preview does
+                        self.assertTrue((kept / "plugin.json").is_file())  # the reported place outlives a sweep
+                        os.replace(kept, target)
+            finally:
+                pin_map.write_bytes(saved)
+        full = OSError(28, "No space left on device")
+        real_replace = os.replace
+        for case in ("put back", "kept elsewhere", "already gone"):
+            with self.subTest(f"its record can't be saved, the folder {case}: says where it is and repeats the scope"):
+                def replace(source, destination, *args, **kwargs):
+                    if case == "kept elsewhere" and Path(destination) == target:
+                        raise PermissionError(13, "refused", str(destination))
+                    return real_replace(source, destination, *args, **kwargs)
+                if case == "already gone":
+                    os.replace(target, self.work / "notes-away")
+                with mock.patch.object(installer.Place, "save", side_effect=full), \
+                        mock.patch.object(installer.os, "replace", replace):
+                    with self.assertRaises((plugins.PluginError, installer.InstallError)) as caught:
+                        tool.run(self.root, plugin_action="remove", name="notes", here=True)
+                said = str(caught.exception)
+                self.assertIn(f"mv2 -u {shlex.quote(str(self.root))} plugins remove notes --here", said)  # any cwd
+                self.assertNotIn("plugins trust", said)  # trust picks by precedence, maybe not this install
+                self.assertIn("notes", installer.Place(self.root).records())
+                if case == "put back":
+                    self.assertIn(f"back in {target}", said)
+                    self.assertTrue((target / "plugin.json").is_file())
+                    self.assertNotEqual(self.state(), "on")  # its pin is gone: verified, so it doesn't run
+                elif case == "kept elsewhere":
+                    kept = Path(said.split("kept in ", 1)[1].split(":", 1)[0])
+                    self.assertTrue((kept / "plugin.json").is_file())
+                    self.assertNotIn(f"back in {target}", said)
+                    os.replace(kept, target)
+                else:
+                    self.assertIn("already gone", said)
+                    self.assertNotIn(str(target) + ",", said)
+                    os.replace(self.work / "notes-away", target)
+                trust.trust(target)  # pinned again for the next case
+        with self.subTest("a remove interrupted before it drops the pin: its folder outlives a sweep"):
+            where = installer.Place(self.root)
+            with mock.patch.object(trust, "forget", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    tool.run(self.root, plugin_action="remove", name="notes")
+            kept, = [child for child in where.staging.iterdir() if child.name.startswith(installer.KEPT)]
+            aged = time.time() - (installer.STALE_HOURS + 1) * 3600
+            os.utime(kept, (aged, aged))
+            installer._sweep(where)
+            self.assertTrue((kept / "plugin.json").is_file())
+            os.replace(kept, target)
         removed = tool.run(self.root, plugin_action="remove", name="notes")
         self.assertFalse(target.exists())
         self.assertNotIn(str(target.resolve()), trust._records())
@@ -477,40 +554,23 @@ class InstallerTest(PluginTestCase):
         (target / installer.MARKER).unlink()
         real, missed = installer.read, []
 
-        def missing(times):
-            def read(path):
-                if Path(path).name == trust.FILE and len(missed) < times:
-                    missed.append(path)
-                    raise FileNotFoundError(2, "No such file or directory", str(path))
-                return real(path)
-            return read
-        with self.subTest("trusted-plugins.json caught mid-replacement once"):
-            with mock.patch.object(installer, "read", missing(1)):
-                self.assertEqual(self.state(), "changed")  # verified: its marker is gone, so it isn't what was pinned
-            self.assertTrue(missed)
-        with self.subTest("missing through every retry, then back unchanged"):
-            missed.clear()
-            with mock.patch.object(installer, "read", missing(10 ** 6)):
-                self.assertEqual(self.state(), "changed")  # uncertain: every personal plugin is verified
-            self.assertEqual(self.state(), "changed")  # and that listing wasn't kept as ordinary
-        with self.subTest("known by its pin alone, both readers missing it, then back unchanged"):
+        pin_map = trust.user_directory() / trust.FILE
+        with self.subTest("trusted-plugins.json there but damaged, then read cleanly again"):
+            saved = pin_map.read_bytes()
+            pin_map.write_text("{")
+            self.assertEqual(self.state(), "untrusted")  # its pin can't be read: every personal plugin is verified
+            pin_map.write_bytes(saved)
+            self.assertEqual(self.state(), "changed")  # pinned with its marker, now gone; that listing wasn't kept
+        with self.subTest("known by its pin alone, both readers finding the map damaged, then read cleanly"):
             jot = trust.user_directory() / "plugins" / "jot"
             os.replace(jot, self.work / "jot-aside")  # notes alone: the doubtful and the clean read class it alike
             self.addCleanup(lambda: (self.work / "jot-aside").exists() and os.replace(self.work / "jot-aside", jot))
             trust.trust(target)  # pinned at what is there now: it runs
             self.assertEqual(self.state(), "on")
-            real_trust, gone = trust.read, []
-
-            def trust_missing(path, *args, **kwargs):
-                if Path(path).name == trust.FILE:
-                    gone.append(path)
-                    raise FileNotFoundError(2, "No such file or directory", str(path))
-                return real_trust(path, *args, **kwargs)
-            missed.clear()
-            with mock.patch.object(installer, "read", missing(10 ** 6)), \
-                    mock.patch.object(trust, "read", trust_missing):
-                self.assertNotEqual(plugins.entry(self.root, "notes").state, "on")
-            self.assertTrue(gone)
+            saved = pin_map.read_bytes()
+            pin_map.write_text("{")
+            self.assertNotEqual(plugins.entry(self.root, "notes").state, "on")
+            pin_map.write_bytes(saved)
             self.assertEqual(plugins.entry(self.root, "notes").state, "on")  # read cleanly again: not the doubtful one
             os.replace(self.work / "jot-aside", jot)
         with self.subTest("a record written before the write lock, missed once"):
@@ -559,10 +619,4 @@ class InstallerTest(PluginTestCase):
                 self.assertEqual(self.state("jot"), "untrusted")  # can't tell installs apart: none runs unverified
                 path.write_text(saved)
         self.assertEqual(self.state("jot"), "off")  # placed by hand, and not on: an ordinary personal plugin
-        missed.clear()
-        with mock.patch.object(installer, "read", missing(10 ** 6)):
-            loader.reset()
-            plugins.entries(self.root)
-            self.assertEqual(plugins.entry(self.root, "jot").state, "untrusted")  # uncertain: verified
-        self.assertEqual(plugins.entry(self.root, "jot").state, "off")  # same files, read cleanly: not kept
         shutil.rmtree(hand)

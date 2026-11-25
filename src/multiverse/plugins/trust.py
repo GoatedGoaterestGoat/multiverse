@@ -169,19 +169,21 @@ def read_regular(path, limit=READ_LIMIT, raw=False):
     return data if raw else json.loads(data)
 
 
-def pins_now():
-    """The paths trusted-plugins.json pins ({path: record}), read without waiting (read_regular): {} when it was
-    never written, None when it can't be read for sure (missing though its writers' lock is there, not a regular
-    file, damaged)."""
-    path = user_directory() / FILE
+def pins_now(wait=False):
+    """The paths trusted-plugins.json pins ({path: record}), read as _records reads, without waiting unless `wait`
+    (a status report or a host page never waits): {} when it isn't there, never written or removed (no pins, as
+    every trust writer reads it), None when it is there but can't be read (a link, not a regular file, damaged)."""
     try:
-        data = read_regular(path)
-    except FileNotFoundError:
-        return None if (user_directory() / ".trusted-plugins.lock").exists() else {}
-    except (OSError, ValueError):
+        return _records(strict=True, wait=wait)
+    except MapUnreadable:
         return None
-    plugins = data.get("plugins") if isinstance(data, dict) else None
-    return plugins if isinstance(plugins, dict) else None
+
+
+def written_before():
+    """Whether trusted-plugins.json's writers' lock is there: then a miss may be a gap while it's replaced, worth a
+    bounded retry where a wait is allowed. No proof it was written (every trust operation takes that lock), so it
+    decides only whether to wait, never what a miss means."""
+    return (user_directory() / ".trusted-plugins.lock").exists()
 
 
 def copy_events(value):
@@ -229,7 +231,10 @@ def keep_events(directory, value, events):
     directory = Path(directory).resolve()
     path = user_directory() / FILE
     with lock(user_directory() / ".trusted-plugins.lock"):
-        records = _records()
+        try:
+            records = _records(strict=True)
+        except MapUnreadable:
+            return False
         record = records.get(str(directory))
         if not isinstance(record, dict) or record.get("fingerprint") != value or "events" in record:
             return False
@@ -421,7 +426,11 @@ def prune_cache():
         children = list(base.iterdir())
     except OSError:
         return removed
-    trusted = {record.get("fingerprint") for record in _records().values() if isinstance(record, dict)}
+    try:
+        records = _records(strict=True)
+    except MapUnreadable:
+        return removed  # which copies are trusted can't be told: none is removed
+    trusted = {record.get("fingerprint") for record in records.values() if isinstance(record, dict)}
     now_ = time.time()
     for path in children:
         try:
@@ -442,14 +451,33 @@ def prune_cache():
     return removed
 
 
-def _records():
+class MapUnreadable(OSError):
+    """trusted-plugins.json is there but can't be read: what it approves is unknown, and nothing writes over it."""
+
+
+def _records(strict=False, wait=True):
+    """The pins in trusted-plugins.json ({path: record}), read as read_regular reads (no link followed, a FIFO never
+    waited on), with a gap while it's replaced retried (bounded) when `wait`. {} when it isn't there (no pins, even
+    if it was written before: a reset). One that is there but can't be read: MapUnreadable with `strict`, which
+    every writer passes so it never replaces approvals someone could restore; else {}, so nothing reads as
+    trusted."""
     path = user_directory() / FILE
     try:
-        data = retry_missing(lambda: read(path))
-    except (OSError, ValueError):
+        data = retry_missing(lambda: read_regular(path), path=path) if wait else read_regular(path)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        if strict:
+            raise MapUnreadable(f"{path} can't be read ({error}); fix it, or remove it to start over (each plugin "
+                                f"you trusted then needs mv2 plugins trust again)") from None
         return {}
     plugins = data.get("plugins") if isinstance(data, dict) else None
-    return plugins if isinstance(plugins, dict) else {}
+    if isinstance(plugins, dict):
+        return plugins
+    if strict:
+        raise MapUnreadable(f"{path} can't be read (its plugins aren't a map); fix it, or remove it to start over "
+                            f"(each plugin you trusted then needs mv2 plugins trust again)")
+    return {}
 
 
 def state(directory):
@@ -480,7 +508,7 @@ def trust(directory):
     events = events_of(directory, raw)  # of exactly the bytes trusted; no copy made, so an edit after still won't run
     path = user_directory() / FILE
     with lock(user_directory() / ".trusted-plugins.lock"):
-        records = _records()
+        records = _records(strict=True)
         records[str(directory)] = _pin_record(value, events)
         write(path, {"schema": 1, "plugins": records})
     prune_cache()
@@ -493,7 +521,7 @@ def pin(directory, value, events=None):
     those bytes, when known."""
     directory = Path(directory).resolve()
     with lock(user_directory() / ".trusted-plugins.lock"):
-        records = _records()
+        records = _records(strict=True)
         records[str(directory)] = _pin_record(value, events)
         write(user_directory() / FILE, {"schema": 1, "plugins": records})
 
@@ -506,13 +534,10 @@ def pin_first(directory, value, events=None):
     path = user_directory() / FILE
     with lock(user_directory() / ".trusted-plugins.lock"):
         try:
-            data = retry_missing(lambda: read(path))
-        except FileNotFoundError:
-            data = {"plugins": {}}
-        except (OSError, ValueError):
+            records = _records(strict=True)
+        except MapUnreadable:
             return False
-        records = data.get("plugins") if isinstance(data, dict) else None
-        if not isinstance(records, dict) or str(directory) in records:
+        if str(directory) in records:
             return False
         records[str(directory)] = _pin_record(value, events)
         write(path, {"schema": 1, "plugins": records})
@@ -523,7 +548,7 @@ def forget(directory):
     """Stop trusting the plugin at `directory`; True when it was trusted."""
     directory = Path(directory).resolve()
     with lock(user_directory() / ".trusted-plugins.lock"):
-        records = _records()
+        records = _records(strict=True)
         removed = records.pop(str(directory), None) is not None
         if removed:
             write(user_directory() / FILE, {"schema": 1, "plugins": records})
