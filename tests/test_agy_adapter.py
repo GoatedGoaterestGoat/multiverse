@@ -20,7 +20,8 @@ from multiverse.harnesses.agy import AgyAdapter, BRIDGE
 from multiverse.harnesses.agy import bridge as agy_bridge
 from multiverse.harnesses.agy import storage as agy_storage
 from multiverse.harnesses.base import PARENT_AGY
-from multiverse.harnesses.types import CommandSpec, LaunchContext, Message, NativeEndpoint, SessionHandle, ShellCallbackResult
+from multiverse.harnesses.types import (CommandSpec, LaunchContext, LaunchRefused, Message, NativeEndpoint,
+                                        SessionHandle, ShellCallbackResult)
 from multiverse.runtime import launch_files, lifecycle, native, runner
 from multiverse.store import now, read, write
 from multiverse.tools import _messaging
@@ -168,15 +169,11 @@ class AgyAdapterUnitTest(BaseTest):
                         'read_file',
                         'not a rule',
                     ],
-                    'ask': ['write_file(~/notes)', 'write_file(~/docs/*)', 'write_file(./rel-ask)', 'command(git push)'],
+                    'ask': ['write_file(~/notes)', 'write_file(./rel-ask)', 'read_file(docs/b.txt)', 'command(git push)'],
                     'deny': [
                         'write_file(/etc)',
                         'read_file(~/.aws/prod)',
-                        'read_file(~/private/**)',
-                        'read_file(~/finance/*.csv)',
-                        'write_file(build/**)',
-                        'write_file(.env)',
-                        'read_file(~otheruser/.ssh)',
+                        'read_file(~/private)',
                         'command(rm -rf ~/*)',
                     ],
                 },
@@ -206,8 +203,8 @@ class AgyAdapterUnitTest(BaseTest):
                 merged['permissions']['ask'],
                 [
                     f'write_file({spawn_home / "notes"})',
-                    f'write_file({spawn_home / "docs" / "*"})',
                     'write_file(./rel-ask)',
+                    'read_file(docs/b.txt)',
                     'command(git push)',
                 ],
             )
@@ -216,11 +213,7 @@ class AgyAdapterUnitTest(BaseTest):
                 [
                     'write_file(/etc)',
                     f'read_file({spawn_home / ".aws" / "prod"})',
-                    f'read_file({spawn_home / "private" / "**"})',
-                    f'read_file({spawn_home / "finance" / "*.csv"})',
-                    'write_file(build/**)',
-                    'write_file(.env)',
-                    'read_file(~otheruser/.ssh)',
+                    f'read_file({spawn_home / "private"})',
                     'command(rm -rf ~/*)',
                 ],
             )
@@ -260,14 +253,15 @@ class AgyAdapterUnitTest(BaseTest):
                 'read_file(', 'read_file()', 'read_file', 'not a rule',
             ):
                 self.assertIn(expected_named, invalid_notices[0])
-            for kept_restrictive in ('write_file(./rel-ask)', 'read_file(~otheruser/.ssh)', 'write_file(build/**)', 'write_file(.env)'):
+            for kept_restrictive in ('write_file(./rel-ask)', 'read_file(docs/b.txt)'):
                 self.assertNotIn(kept_restrictive, invalid_notices[0])
-            # Every file rule emitted into launch permissions.allow is absolute and non-globbed.
-            for emitted in merged['permissions']['allow']:
-                if emitted.startswith(('read_file(', 'write_file(')):
-                    inner = emitted[emitted.index('(') + 1:-1]
-                    self.assertTrue(os.path.isabs(inner), f'allow: {emitted!r}')
-                    self.assertFalse(any(ch in inner for ch in ('*', '?', '[')), f'allow: {emitted!r}')
+            # Every file rule emitted into launch permissions.allow and permissions.deny is absolute and non-globbed.
+            for bucket in ('allow', 'deny'):
+                for emitted in merged['permissions'][bucket]:
+                    if emitted.startswith(('read_file(', 'write_file(')):
+                        inner = emitted[emitted.index('(') + 1:-1]
+                        self.assertTrue(os.path.isabs(inner), f'{bucket}: {emitted!r}')
+                        self.assertFalse(any(ch in inner for ch in ('*', '?', '[')), f'{bucket}: {emitted!r}')
             # Derived rules also expand leading ~/ before running the wide derived exclusion checks.
             derived_merged = agy._merge_permissions(
                 {}, None,
@@ -1767,8 +1761,8 @@ class AgyAdapterUnitTest(BaseTest):
             '  "colorScheme": "dark",\n'
             '  "permissions": {\n'
             '    "allow": ["command(git status)",],\n'
-            '    "ask": ["command(git push)",],\n'
-            '    "deny": ["read_file(/etc/shadow)", "write_file(.env)",],\n'
+            '    "ask": ["command(git push)", "write_file(.env)",],\n'
+            '    "deny": ["read_file(/etc/shadow)", "write_file(~/secrets/.env)",],\n'
             '  },\n'
             '}\n'
         )
@@ -1778,22 +1772,33 @@ class AgyAdapterUnitTest(BaseTest):
         ))
         self.assertEqual(merged_cmd.native_mode['mode'], 'bridge')
         merged_perms = json.loads(merged_cmd.launch_files['settings.json'])['permissions']
-        self.assertEqual(merged_perms['deny'], ['read_file(/etc/shadow)', 'write_file(.env)'])
-        self.assertEqual(merged_perms['ask'], ['command(git push)'])
+        self.assertEqual(
+            merged_perms['deny'],
+            ['read_file(/etc/shadow)', f'write_file({personal_home.resolve() / "secrets" / ".env"})'],
+        )
+        self.assertEqual(merged_perms['ask'], ['command(git push)', 'write_file(.env)'])
         self.assertIn('command(git status)', merged_perms['allow'])
         self.assertIn(f'read_file({self.root.resolve()})', merged_perms['allow'])
         personal_settings.write_text('{broken')
         team_settings = self.work / 'team-settings.json'
-        team_settings.write_text(json.dumps({'permissions': {'deny': ['write_file(prod.env)']}}))
+        team_settings.write_text(json.dumps({'permissions': {'deny': ['write_file(/etc/prod.env)']}}))
         auto_bad = AgyAdapter.configured('agy', {'args': ['--settings', str(team_settings)]}).spawn(LaunchContext(
             'spawn', self._values(task='hi'), environment={'HOME': str(personal_home)},
         ))
         self.assertEqual(auto_bad.native_mode['mode'], 'plain')
         self.assertIn('personal settings', auto_bad.native_mode['fallback_reason'])
-        # Plain fallback must preserve the harness's own --settings flag (including any deny rules).
+        # Plain fallback must preserve the harness's own --settings flag (including any valid deny rules).
         self.assertIn('--settings', auto_bad.argv)
         self.assertIn(str(team_settings), auto_bad.argv)
         self.assertNotIn('settings.json', auto_bad.launch_files)
+        # Even when auto falls back to plain on corrupt personal settings, an invalid harness --settings deny refuses.
+        team_settings.write_text(json.dumps({'permissions': {'deny': ['write_file(prod.env)']}}))
+        with self.assertRaises(LaunchRefused) as err_corrupt_plain:
+            AgyAdapter.configured('agy', {'args': ['--settings', str(team_settings)]}).spawn(LaunchContext(
+                'spawn', self._values(task='hi'), environment={'HOME': str(personal_home)},
+            ))
+        self.assertIn('write_file(prod.env)', str(err_corrupt_plain.exception))
+        self.assertIn(str(team_settings), str(err_corrupt_plain.exception))
         with self.assertRaisesRegex(ValueError, 'personal settings'):
             AgyAdapter.configured('agy', {'inbox_bridge': True}).spawn(LaunchContext(
                 'spawn', self._values(task='hi'), environment={'HOME': str(personal_home)},
@@ -3357,6 +3362,238 @@ class AgyAdapterUnitTest(BaseTest):
             t_launch = self.root / 'state' / 'agents' / trusted_ok['id'] / 'launches' / trusted_ok['runtime']['launch_id']
             self.assertTrue(read(t_launch / 'request.json')['task_trust'])
             self.assertTrue(read(t_launch / 'request.json')['runner_listen'])
+
+        # AG-2: unsupported permissions.deny (personal or harness --settings) and unsupported harness permissions.ask
+        # refuse spawn/resume/wake before tmux with LaunchRefused, preserving spawn --task as startup-task-*.md and
+        # keeping wake messages retryable in the mailbox; ignored personal permissions.ask rules drop with a notice.
+        from multiverse.tools import send as send_tool
+        from multiverse.universe import agents as agents_mod, mailbox as mailbox_mod
+        ag2_home = self.work / 'ag2-home'
+        ag2_personal = ag2_home / '.gemini' / 'antigravity-cli' / 'settings.json'
+        ag2_personal.parent.mkdir(parents=True, exist_ok=True)
+        ag2_personal.write_text(json.dumps({
+            'trustedWorkspaces': [str(self.work.resolve())],
+            'permissions': {
+                'ask': [
+                    'write_file(~/notes)',
+                    'read_file(docs/b.txt)',
+                    'write_file(~/docs/*)',
+                    'read_file(~otheruser/docs)',
+                    'read_file($HOME/docs)',
+                    'read_file(',
+                ],
+            },
+        }))
+        ag2_values = self._values(workspace=str(self.work), task='ag2 task')
+        ag2_env = {'HOME': str(ag2_home), 'MV2_UNIVERSE': str(self.root)}
+        p_ask_cmd = AgyAdapter.configured('agy', {}).spawn(
+            LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env),
+        )
+        p_ask_perms = json.loads(p_ask_cmd.launch_files['settings.json'])['permissions']
+        self.assertEqual(p_ask_perms['ask'], [f'write_file({ag2_home.resolve() / "notes"})', 'read_file(docs/b.txt)'])
+        ask_notices = [n for n in p_ask_cmd.notices if 'Left out unsupported personal permissions.ask' in n]
+        self.assertEqual(len(ask_notices), 1)
+        self.assertIn(str(ag2_personal), ask_notices[0])
+        for ignored_rule in ('write_file(~/docs/*)', 'read_file(~otheruser/docs)', 'read_file($HOME/docs)', 'read_file('):
+            self.assertIn(ignored_rule, ask_notices[0])
+
+        # Harness --settings file with unsupported deny and ask rules refuses up front naming every rule and file.
+        bad_rules_file = self.work / 'bad-agy-rules.json'
+        bad_rules_file.write_text(json.dumps({
+            'permissions': {
+                'deny': [
+                    'read_file(~/private/**)',
+                    'write_file(build/**)',
+                    'write_file(.env)',
+                    'read_file(~otheruser/.ssh)',
+                    'read_file($HOME/secret)',
+                    'read_file(',
+                ],
+                'ask': ['write_file(~/docs/*)', 'read_file(~otheruser/docs)'],
+            },
+        }))
+        bad_file_adapter = AgyAdapter.configured('agy', {'args': ['--settings', str(bad_rules_file)]})
+        with self.assertRaises(LaunchRefused) as err_file:
+            bad_file_adapter.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        msg_file = str(err_file.exception)
+        self.assertIn('absolute path with no glob', msg_file)
+        self.assertIn(str(bad_rules_file), msg_file)
+        for bad_rule in (
+            'read_file(~/private/**)', 'write_file(build/**)', 'write_file(.env)',
+            'read_file(~otheruser/.ssh)', 'read_file($HOME/secret)', 'read_file(',
+            'write_file(~/docs/*)', 'read_file(~otheruser/docs)',
+        ):
+            self.assertIn(bad_rule, msg_file)
+
+        # Inline harness.json --settings unsupported deny names harness.json --settings.
+        inline_bad_adapter = AgyAdapter.configured('agy', {'args': [
+            '--settings', '{{"permissions": {{"deny": ["write_file(.env)"]}}}}',
+        ]})
+        with self.assertRaises(LaunchRefused) as err_inline:
+            inline_bad_adapter.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        self.assertIn('write_file(.env)', str(err_inline.exception))
+        self.assertIn('harness.json --settings', str(err_inline.exception))
+
+        # Personal settings.json unsupported deny refuses (even in auto mode) naming personal settings.json.
+        ag2_personal.write_text(json.dumps({
+            'trustedWorkspaces': [str(self.work.resolve())],
+            'permissions': {'deny': ['read_file(~/private/**)', 'write_file(.env)']},
+        }))
+        personal_deny_adapter = AgyAdapter.configured('agy', {})
+        with self.assertRaises(LaunchRefused) as err_personal:
+            personal_deny_adapter.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        self.assertIn('read_file(~/private/**)', str(err_personal.exception))
+        self.assertIn('write_file(.env)', str(err_personal.exception))
+        self.assertIn(str(ag2_personal), str(err_personal.exception))
+
+        # Resume also refuses up front with LaunchRefused.
+        ag2_conv = str(uuid4())
+        ag2_conv_dir = ag2_home / '.gemini' / 'antigravity-cli' / 'conversations'
+        ag2_conv_dir.mkdir(parents=True, exist_ok=True)
+        (ag2_conv_dir / f'{ag2_conv}.db').write_bytes(b'SQLite format 3\x00')
+        ag2_agy_home = os.path.realpath(ag2_home / '.gemini' / 'antigravity-cli')
+        ag2_session = SessionHandle(ag2_values['agent_id'], 'agy', str(self.work),
+                                    native_id=ag2_conv, home=ag2_agy_home)
+        with self.assertRaises(LaunchRefused) as err_resume:
+            bad_file_adapter.resume(ag2_session, LaunchContext('resume', ag2_values, environment=ag2_env))
+        self.assertIn('read_file(~/private/**)', str(err_resume.exception))
+        self.assertIn(str(bad_rules_file), str(err_resume.exception))
+
+        # Plain / launch-only path (inbox_bridge: False and too-old-bridge auto fallback) runs the same deny/ask
+        # refusal check before returning (including unexpanded ~/ deny rules, since launch-only writes no launch file).
+        plain_bad_file = AgyAdapter.configured('agy', {'inbox_bridge': False, 'args': ['--settings', str(bad_rules_file)]})
+        with self.assertRaises(LaunchRefused) as err_plain_file:
+            plain_bad_file.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        self.assertIn('read_file(~/private/**)', str(err_plain_file.exception))
+        self.assertIn(str(bad_rules_file), str(err_plain_file.exception))
+        plain_personal_only = AgyAdapter.configured('agy', {'inbox_bridge': False})
+        with self.assertRaises(LaunchRefused) as err_plain_personal:
+            plain_personal_only.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        self.assertIn('write_file(.env)', str(err_plain_personal.exception))
+        self.assertIn(str(ag2_personal), str(err_plain_personal.exception))
+        tilde_only_file = self.work / 'tilde-deny-rules.json'
+        tilde_only_file.write_text(json.dumps({'permissions': {'deny': ['read_file(~/private)']}}))
+        plain_tilde = AgyAdapter.configured('agy', {'inbox_bridge': False, 'args': ['--settings', str(tilde_only_file)]})
+        ag2_clean_home = self.work / 'ag2-clean-home'
+        ag2_clean_home.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(LaunchRefused) as err_plain_tilde:
+            plain_tilde.spawn(LaunchContext(
+                'spawn', ag2_values, 'gemini-3.8-flash-low',
+                environment={'HOME': str(ag2_clean_home), 'MV2_UNIVERSE': str(self.root)},
+            ))
+        self.assertIn('read_file(~/private)', str(err_plain_tilde.exception))
+        self.assertIn('launch-only', str(err_plain_tilde.exception))
+        with patch.object(agy, 'bridge_problem', return_value='Antigravity CLI is too old'):
+            with self.assertRaises(LaunchRefused) as err_old_bridge:
+                bad_file_adapter.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_env))
+        self.assertIn('read_file(~/private/**)', str(err_old_bridge.exception))
+
+        # Sandbox-off CLI flags (--dangerously-skip-permissions / --sandbox=false) disable exebox while CoversPath
+        # still enforces absolute and workspace-relative non-glob deny rules: personal relative deny works, personal
+        # glob deny is left out with a notice, harness relative deny works, and harness glob deny still refuses.
+        # Conversely, settings.json sandbox: {enabled: false} without CLI flags does NOT disable exebox.
+        ag2_dsp_home = self.work / 'ag2-dsp-home'
+        ag2_dsp_personal = ag2_dsp_home / '.gemini' / 'antigravity-cli' / 'settings.json'
+        ag2_dsp_personal.parent.mkdir(parents=True, exist_ok=True)
+        ag2_dsp_personal.write_text(json.dumps({
+            'permissions': {'deny': ['write_file(.env)', 'read_file(~/private)', 'read_file(~/private/**)']},
+        }))
+        ag2_dsp_env = {'HOME': str(ag2_dsp_home), 'MV2_UNIVERSE': str(self.root)}
+        for off_flag in ('--dangerously-skip-permissions', '--sandbox=false'):
+            dsp_adapter = AgyAdapter.configured('agy', {'args': [off_flag]})
+            dsp_cmd = dsp_adapter.spawn(LaunchContext('spawn', ag2_values, 'gemini-3.8-flash-low', environment=ag2_dsp_env))
+            dsp_perms = json.loads(dsp_cmd.launch_files['settings.json'])['permissions']
+            self.assertEqual(
+                dsp_perms['deny'],
+                ['write_file(.env)', f'read_file({ag2_dsp_home.resolve() / "private"})'],
+            )
+            deny_notices = [n for n in dsp_cmd.notices if 'Left out unsupported personal permissions.deny' in n]
+            self.assertEqual(len(deny_notices), 1)
+            self.assertIn('read_file(~/private/**)', deny_notices[0])
+            self.assertIn(str(ag2_dsp_personal), deny_notices[0])
+        dsp_rel_harness = AgyAdapter.configured('agy', {'args': [
+            '--dangerously-skip-permissions', '--settings', '{{"permissions": {{"deny": ["write_file(.env)"]}}}}',
+        ]})
+        dsp_rel_cmd = dsp_rel_harness.spawn(LaunchContext(
+            'spawn', ag2_values, 'gemini-3.8-flash-low',
+            environment={'HOME': str(ag2_clean_home), 'MV2_UNIVERSE': str(self.root)},
+        ))
+        self.assertEqual(json.loads(dsp_rel_cmd.launch_files['settings.json'])['permissions']['deny'], ['write_file(.env)'])
+        dsp_glob_harness = AgyAdapter.configured('agy', {'args': [
+            '--dangerously-skip-permissions', '--settings', str(bad_rules_file),
+        ]})
+        with self.assertRaises(LaunchRefused) as err_dsp_glob:
+            dsp_glob_harness.spawn(LaunchContext(
+                'spawn', ag2_values, 'gemini-3.8-flash-low',
+                environment={'HOME': str(ag2_clean_home), 'MV2_UNIVERSE': str(self.root)},
+            ))
+        self.assertIn('read_file(~/private/**)', str(err_dsp_glob.exception))
+        self.assertNotIn('write_file(.env)', str(err_dsp_glob.exception))
+        settings_sandbox_false = AgyAdapter.configured('agy', {'args': [
+            '--settings', '{{"sandbox": {{"enabled": false}}, "permissions": {{"deny": ["write_file(.env)"]}}}}',
+        ]})
+        with self.assertRaises(LaunchRefused):
+            settings_sandbox_false.spawn(LaunchContext(
+                'spawn', ag2_values, 'gemini-3.8-flash-low',
+                environment={'HOME': str(ag2_clean_home), 'MV2_UNIVERSE': str(self.root)},
+            ))
+
+        # End-to-end lifecycle refusal: task-bearing spawn saves startup-task-*.md without reserving the name or
+        # touching tmux; promptless spawn refuses without saving a task file; wake stays retryable in the mailbox.
+        for old_task in (self.root / 'state').glob('startup-task-*.md'):
+            old_task.unlink()
+        ag2_backend = Mock()
+        ag2_backend.create.return_value = {'socket': str(self.work / 'ag2-tmux.sock'), 'session': '$8', 'pane': '%8'}
+        with patch.dict(os.environ, {'HOME': str(ag2_home)}, clear=False), \
+                patch.object(lifecycle.harnesses, 'load', return_value=personal_deny_adapter), \
+                patch.object(lifecycle, 'Tmux', return_value=ag2_backend):
+            refused_spawn = spawn_tool.cli_run(
+                self.root, name='ag2-denied-spawn', harness='agy', task='keep this task', json=True,
+            )
+            self.assertFalse(refused_spawn['ok'])
+            self.assertIn('read_file(~/private/**)', refused_spawn['error'])
+            self.assertIn(str(ag2_personal), refused_spawn['error'])
+            self.assertIn('Saved input:', refused_spawn['error'])
+            ag2_backend.create.assert_not_called()
+            self.assertNotIn('ag2-denied-spawn', [read(p)['name'] for p in agents_mod.record_paths(self.root)])
+            ag2_saved = sorted((self.root / 'state').glob('startup-task-*.md'))
+            self.assertEqual(len(ag2_saved), 1)
+            self.assertEqual(ag2_saved[0].read_text(), 'keep this task')
+            self.assertEqual(stat.S_IMODE(ag2_saved[0].stat().st_mode), 0o600)
+            ag2_saved[0].unlink()
+
+            refused_promptless = spawn_tool.cli_run(self.root, name='ag2-denied-idle', harness='agy', json=True)
+            self.assertFalse(refused_promptless['ok'])
+            self.assertIn('write_file(.env)', refused_promptless['error'])
+            ag2_backend.create.assert_not_called()
+            self.assertFalse(list((self.root / 'state').glob('startup-task-*.md')))
+
+            wake_id, wake_launch = str(uuid4()), str(uuid4())
+            wake_dir = self.root / 'state' / 'agents' / wake_id
+            (wake_dir / 'launches' / wake_launch).mkdir(parents=True)
+            write(wake_dir / 'properties.json', {
+                'id': wake_id, 'name': 'ag2-wake', 'harness': 'agy', 'workspace': str(self.work),
+                'task': 'original task',
+                'universe_id': read(self.root / 'universe.json')['id'],
+                'native_session_id': ag2_conv, 'native_session_home': ag2_agy_home,
+            })
+            write(wake_dir / 'runtime.json', {'launch_id': wake_launch, 'state': 'dormant'})
+            wake_errors = []
+            with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                    patch.object(native, 'observe', return_value={'live': 'dormant'}):
+                wake_res = send_tool.run(
+                    self.root, agent='ag2-wake', text='retryable wake', delivery='follow-up',
+                    _present_error=wake_errors.append,
+                )
+            self.assertFalse(wake_res['ok'])
+            self.assertEqual(len(wake_errors), 1)
+            self.assertIn('read_file(~/private/**)', wake_errors[0])
+            self.assertIn(str(ag2_personal), wake_errors[0])
+            self.assertEqual(wake_errors[0].count('mv2 deliver ag2-wake --retry'), 1)
+            ag2_backend.create.assert_not_called()
+            [wake_msg] = mailbox_mod.inbox(wake_dir, all_messages=True)['messages']
+            self.assertEqual(wake_msg['tracking']['submission_state'], 'failed')
+            self.assertFalse(list((self.root / 'state').glob('startup-task-*.md')))
 
         # F2 & F9: SessionStart binds conversation and activates bridge readiness without agy-ls.json.
         agent_id, launch_id, conv_id = str(uuid4()), str(uuid4()), str(uuid4())

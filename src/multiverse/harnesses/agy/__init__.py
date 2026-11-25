@@ -28,7 +28,7 @@ from uuid import uuid4
 from ...plugins import harness as plugin_harness
 from ...store import now, read, retry_missing
 from ..base import ConfiguredAdapter, PARENT_AGY
-from ..types import (AttachmentSpec, Capability, CommandSpec, NativeEndpoint, NativeResult,
+from ..types import (AttachmentSpec, Capability, CommandSpec, LaunchRefused, NativeEndpoint, NativeResult,
                      ShellCallbackResult, normalize_session_id)
 from . import bridge as agy_bridge
 from . import models as agy_models
@@ -238,7 +238,12 @@ def _strip_jsonc(text: str) -> str:
     return ''.join(cleaned)
 
 
-def _extract_user_settings(argv: list[str], *, forbidden_roots: Sequence[Path] = ()) -> tuple[list[str], dict]:
+def _extract_user_settings(
+    argv: list[str],
+    *,
+    forbidden_roots: Sequence[Path] = (),
+    sources: dict[str, str] | None = None,
+) -> tuple[list[str], dict]:
     """Remove any user `--settings` flag from `argv` and load its JSON/JSONC object for merging."""
     kept = []
     merged = {}
@@ -256,11 +261,13 @@ def _extract_user_settings(argv: list[str], *, forbidden_roots: Sequence[Path] =
             raw_value = arg.split('=', 1)[1]
         if raw_value is not None:
             if raw_value.lstrip().startswith('{'):
+                source_label = 'harness.json --settings'
                 try:
                     loaded = json.loads(_strip_jsonc(raw_value))
                 except ValueError as error:
                     raise ValueError(f'Invalid inline Antigravity --settings JSON: {error}') from None
             else:
+                source_label = raw_value
                 candidate = Path(raw_value).expanduser()
                 try:
                     resolved_candidate = candidate.resolve()
@@ -294,6 +301,9 @@ def _extract_user_settings(argv: list[str], *, forbidden_roots: Sequence[Path] =
                         os.close(fd)
             if not isinstance(loaded, dict):
                 raise ValueError(f'Antigravity --settings {raw_value!r} must be a JSON object')
+            if sources is not None:
+                for key in loaded:
+                    sources[key] = source_label
             merged.update(loaded)
             index += advance
             continue
@@ -394,8 +404,48 @@ def _is_valid_sandbox_file_path(path_str: str) -> bool:
     return True
 
 
-def _prepare_permission_rule(rule: str, home_dir: Path | None) -> tuple[str, str | None, bool] | None:
-    """Parse a permission rule and expand leading `~` / `~/` in file-rule paths before exclusion checks.
+def _is_valid_ask_file_path(path_str: str) -> bool:
+    """True when `path_str` is a non-glob path enforced by Antigravity 1.5.16's `permissions.ask` matcher."""
+    if not path_str or '\x00' in path_str or '\n' in path_str or '\r' in path_str:
+        return False
+    if path_str.startswith(('~', '$')):
+        return False
+    if any(ch in path_str for ch in _GLOB_CHARS):
+        return False
+    return True
+
+
+def _sandbox_enabled_for_argv(argv: Sequence[str]) -> bool:
+    """True unless CLI argv disables Antigravity 1.5.16's OS sandbox (`--dangerously-skip-permissions` or `--sandbox=false`).
+
+    Live probes on agy 1.5.16 show exebox runs by default (even with no `--sandbox` flag and even when
+    settings.json sets `sandbox: false` or `sandbox: {"enabled": false}`); only CLI flags turn exebox off.
+    """
+    enabled = True
+    for arg in argv[1:]:
+        if arg == '--dangerously-skip-permissions':
+            return False
+        if arg.startswith('--dangerously-skip-permissions='):
+            if arg.split('=', 1)[1].strip().lower() in ('1', 't', 'true'):
+                return False
+        elif arg == '--sandbox':
+            enabled = True
+        elif arg.startswith('--sandbox='):
+            val = arg.split('=', 1)[1].strip().lower()
+            if val in ('0', 'f', 'false'):
+                enabled = False
+            elif val in ('1', 't', 'true'):
+                enabled = True
+    return enabled
+
+
+def _prepare_permission_rule(
+    rule: str,
+    home_dir: Path | None,
+    *,
+    expand_tilde: bool = True,
+) -> tuple[str, str | None, bool] | None:
+    """Parse a permission rule and (when `expand_tilde`) expand leading `~` / `~/` in file-rule paths.
 
     Returns `(prepared_rule, file_path, is_file_rule)`, or `None` when the rule cannot be parsed or expanded.
     """
@@ -413,6 +463,10 @@ def _prepare_permission_rule(rule: str, home_dir: Path | None) -> tuple[str, str
         return None
     if not _is_file_rule_tool(tool_raw):
         return (rule.strip(), None, False)
+    if not expand_tilde:
+        if raw.startswith('~'):
+            return None
+        return (f'{tool_raw}({raw})', raw, True)
     expanded = _expand_tilde_path(raw, home_dir)
     if expanded is None:
         return None
@@ -992,13 +1046,46 @@ def _process_derived_rule(
     return rule_text
 
 
-def _expand_person_restrictive_rule(item: str, home_dir: Path | None) -> str:
-    """Expand leading `~` / `~/` in a `deny` or `ask` file rule without ever dropping the rule."""
-    prepared = _prepare_permission_rule(item, home_dir)
-    if prepared is None:
-        return item
-    rule_text, _, is_file_rule = prepared
-    return rule_text if is_file_rule else item
+def _format_permission_refusal(
+    refused: Sequence[tuple[str, str, str]],
+    *,
+    sandbox_on: bool = True,
+    expand_tilde: bool = True,
+) -> str:
+    """Build an actionable LaunchRefused reason naming each unsupported deny/ask rule and its source file."""
+    unique = list(dict.fromkeys(refused))
+    has_deny = any(bucket == 'permissions.deny' for bucket, _, _ in unique)
+    has_ask = any(bucket == 'permissions.ask' for bucket, _, _ in unique)
+    items = '; '.join(
+        f'{bucket} {rule if rule.strip() else repr(rule)} in {source}'
+        for bucket, rule, source in unique
+    )
+    tilde_hint = '' if expand_tilde else ' (and no unexpanded ~ in launch-only mode)'
+    if has_deny and sandbox_on:
+        deny_part = (
+            f'Antigravity 1.5.16 needs an absolute path with no glob{tilde_hint} for permissions.deny '
+            '(its OS sandbox rejects non-absolute or globbed deny rules and fails every sandboxed command)'
+        )
+        lead = f'{deny_part} and a non-glob path for permissions.ask' if has_ask else deny_part
+    elif has_deny and has_ask:
+        lead = (
+            f'Antigravity 1.5.16 ignores globs and unexpandable paths{tilde_hint} in permissions.deny and '
+            'permissions.ask (use an absolute or workspace-relative path with no glob)'
+        )
+    elif has_deny:
+        lead = (
+            f'Antigravity 1.5.16 ignores globs and unexpandable paths{tilde_hint} in permissions.deny '
+            '(use an absolute or workspace-relative path with no glob)'
+        )
+    else:
+        lead = (
+            f'Antigravity 1.5.16 ignores globs and unexpandable paths{tilde_hint} in permissions.ask '
+            '(use an absolute or workspace-relative path with no glob)'
+        )
+    return (
+        f'Refusing Antigravity launch: {lead}; mv2 will not drop those rules: {items}. '
+        'Fix those rules in the named file(s).'
+    )
 
 
 def _process_person_rule(
@@ -1006,60 +1093,165 @@ def _process_person_rule(
     key: str,
     home_dir: Path | None,
     *,
+    source: str,
+    from_personal: bool,
     workspace: Path | None,
     dropped: list[str] | None,
     invalid: list[str] | None,
+    ignored_personal: list[tuple[str, str]] | None,
+    refused: list[tuple[str, str, str]] | None,
     extra_sensitive: Sequence[Path] | None,
+    sandbox_on: bool = True,
+    expand_tilde: bool = True,
 ) -> str | None:
-    """Expand leading `~` / `~/` before exclusion checks; drop protected or unsupported `allow` rules only."""
-    if key != 'allow':
-        return _expand_person_restrictive_rule(item, home_dir)
-    prepared = _prepare_permission_rule(item, home_dir)
+    """Expand leading `~` / `~/` (when bridged); enforce allow drops, personal ignores, and deny/harness-ask refusals."""
+    prepared = _prepare_permission_rule(item, home_dir, expand_tilde=expand_tilde)
+    if key == 'allow':
+        if prepared is None:
+            if invalid is not None:
+                invalid.append(item)
+            return None
+        rule_text, file_path, is_file_rule = prepared
+        if is_file_rule and _rule_allows_sensitive(
+            rule_text, home_dir, workspace=workspace,
+            sensitive_rels=_PERSON_SENSITIVE_HOME_REL, broad_roots=False,
+            extra_sensitive=extra_sensitive,
+        ):
+            if dropped is not None:
+                dropped.append(item)
+            return None
+        if is_file_rule and (file_path is None or not _is_valid_sandbox_file_path(file_path)):
+            if invalid is not None:
+                invalid.append(item)
+            return None
+        return rule_text
+    if key == 'deny':
+        if sandbox_on:
+            # With exebox on, plain agy 1.5.16 rejects any non-absolute or globbed deny rule from personal or --settings.
+            if prepared is None:
+                if refused is not None:
+                    refused.append(('permissions.deny', item, source))
+                return None
+            rule_text, file_path, is_file_rule = prepared
+            if is_file_rule and (file_path is None or not _is_valid_sandbox_file_path(file_path)):
+                if refused is not None:
+                    refused.append(('permissions.deny', item, source))
+                return None
+            return rule_text
+        # With exebox off (--dangerously-skip-permissions / --sandbox=false), CoversPath still enforces absolute and
+        # workspace-relative non-glob deny rules while silently ignoring globs / unexpandable / malformed rules.
+        if prepared is None:
+            if from_personal:
+                if ignored_personal is not None:
+                    ignored_personal.append(('permissions.deny', item))
+            elif refused is not None:
+                refused.append(('permissions.deny', item, source))
+            return None
+        rule_text, file_path, is_file_rule = prepared
+        if is_file_rule and (file_path is None or not _is_valid_ask_file_path(file_path)):
+            if from_personal:
+                if ignored_personal is not None:
+                    ignored_personal.append(('permissions.deny', item))
+            elif refused is not None:
+                refused.append(('permissions.deny', item, source))
+            return None
+        return rule_text
+    # key == 'ask': plain Antigravity 1.5.16 enforces absolute and workspace-relative non-glob ask rules without
+    # passing ask to exebox, and silently ignores globs / unexpandable / malformed ask rules.
     if prepared is None:
-        if invalid is not None:
-            invalid.append(item)
+        if from_personal:
+            if ignored_personal is not None:
+                ignored_personal.append(('permissions.ask', item))
+        elif refused is not None:
+            refused.append(('permissions.ask', item, source))
         return None
     rule_text, file_path, is_file_rule = prepared
-    if is_file_rule and _rule_allows_sensitive(
-        rule_text, home_dir, workspace=workspace,
-        sensitive_rels=_PERSON_SENSITIVE_HOME_REL, broad_roots=False,
-        extra_sensitive=extra_sensitive,
-    ):
-        if dropped is not None:
-            dropped.append(item)
-        return None
-    if is_file_rule and (file_path is None or not _is_valid_sandbox_file_path(file_path)):
-        if invalid is not None:
-            invalid.append(item)
+    if is_file_rule and (file_path is None or not _is_valid_ask_file_path(file_path)):
+        if from_personal:
+            if ignored_personal is not None:
+                ignored_personal.append(('permissions.ask', item))
+        elif refused is not None:
+            refused.append(('permissions.ask', item, source))
         return None
     return rule_text
+
+
+def _validate_plain_permissions(
+    personal: Mapping[str, object],
+    override: object,
+    *,
+    home_dir: Path | None,
+    workspace: Path | None,
+    sandbox_on: bool,
+    personal_source: str,
+    override_source: str,
+) -> None:
+    """Refuse launch-only (`plain`) launches when personal or harness `--settings` deny/ask rules would cripple or fail."""
+    refused: list[tuple[str, str, str]] = []
+    for key in ('deny', 'ask'):
+        value = personal.get(key) if isinstance(personal, Mapping) else None
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    _process_person_rule(
+                        item, key, home_dir, source=personal_source, from_personal=True,
+                        workspace=workspace, dropped=None, invalid=None,
+                        ignored_personal=None, refused=refused, extra_sensitive=None,
+                        sandbox_on=sandbox_on, expand_tilde=False,
+                    )
+    if isinstance(override, Mapping):
+        for key in ('deny', 'ask'):
+            value = override.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        _process_person_rule(
+                            item, key, home_dir, source=override_source, from_personal=False,
+                            workspace=workspace, dropped=None, invalid=None,
+                            ignored_personal=None, refused=refused, extra_sensitive=None,
+                            sandbox_on=sandbox_on, expand_tilde=False,
+                        )
+    if refused:
+        raise LaunchRefused(_format_permission_refusal(refused, sandbox_on=sandbox_on, expand_tilde=False))
 
 
 def _merge_permissions(personal: Mapping[str, object], override: object, allow_rules: Sequence[str], *,
                        home_dir: Path | None = None, workspace: Path | None = None,
                        dropped: list[str] | None = None,
                        invalid: list[str] | None = None,
+                       ignored_personal: list[tuple[str, str]] | None = None,
+                       sandbox_on: bool = True,
+                       personal_source: str = '~/.gemini/antigravity-cli/settings.json',
+                       override_source: str = 'harness.json --settings',
                        extra_sensitive: Sequence[Path] | None = None) -> dict | None:
-    """Layer personal, harness `--settings`, and mv2 `allow_rules` without ever removing `deny`/`ask` entries.
+    """Layer personal, harness `--settings`, and mv2 `allow_rules` with Antigravity 1.5.16 sandbox safety.
 
-    Every rule expands leading `~` / `~/` against `home_dir` before exclusion checks run. Person-written `allow`
-    rules covering the narrow hard-exclusion list (`~/.ssh`, `~/.gnupg`, `~/Library/Keychains`, agy sign-in files,
-    and `~/.multiverse/plugin-secrets`) are recorded in `dropped`; unparseable, unexpandable (`~name`), non-absolute
-    or globbed `allow` rules are recorded in `invalid` so no bad allow rule breaks Antigravity's OS sandbox.
-    `deny` and `ask` rules expand leading `~` / `~/` and otherwise pass through as written.
+    Every rule expands leading `~` / `~/` against `home_dir` before exclusion checks run.
+    - `allow`: protected credential paths go to `dropped`; unsupported/malformed allow rules go to `invalid`.
+    - `deny`: when `sandbox_on` is True, non-absolute, globbed, unexpandable or malformed deny rules (personal or
+      harness) raise `LaunchRefused` naming each rule and source file, because exebox rejects them and breaks every
+      sandboxed command; when `sandbox_on` is False (`--dangerously-skip-permissions` / `--sandbox=false`), absolute
+      and workspace-relative non-glob deny rules stay enforced while globbed/unexpandable rules are left out with a
+      notice for personal settings and raise `LaunchRefused` for harness `--settings`.
+    - `ask`: absolute and workspace-relative non-glob rules stay enforced; globs, unexpandable paths and malformed
+      rules are left out with a notice when from personal settings (plain agy ignores them) and raise
+      `LaunchRefused` when passed through harness `--settings`.
     """
     if override is not None and not isinstance(override, dict):
         raise ValueError('Antigravity settings "permissions" must be a JSON object')
     if not personal and override is None and not allow_rules:
         return None
     perms: dict[str, object] = {}
+    refused: list[tuple[str, str, str]] = []
     for key, value in personal.items():
         if key in ('allow', 'ask', 'deny') and isinstance(value, list):
             kept: list[str] = []
             for item in value:
                 cleaned = _process_person_rule(
-                    item, key, home_dir, workspace=workspace,
-                    dropped=dropped, invalid=invalid, extra_sensitive=extra_sensitive,
+                    item, key, home_dir, source=personal_source, from_personal=True,
+                    workspace=workspace, dropped=dropped, invalid=invalid,
+                    ignored_personal=ignored_personal, refused=refused, extra_sensitive=extra_sensitive,
+                    sandbox_on=sandbox_on, expand_tilde=True,
                 )
                 if cleaned is not None and cleaned not in kept:
                     kept.append(cleaned)
@@ -1078,14 +1270,18 @@ def _merge_permissions(personal: Mapping[str, object], override: object, allow_r
                 existing = list(perms.get(key) or ())
                 for item in value:
                     cleaned = _process_person_rule(
-                        item, key, home_dir, workspace=workspace,
-                        dropped=dropped, invalid=invalid, extra_sensitive=extra_sensitive,
+                        item, key, home_dir, source=override_source, from_personal=False,
+                        workspace=workspace, dropped=dropped, invalid=invalid,
+                        ignored_personal=ignored_personal, refused=refused, extra_sensitive=extra_sensitive,
+                        sandbox_on=sandbox_on, expand_tilde=True,
                     )
                     if cleaned is not None and cleaned not in existing:
                         existing.append(cleaned)
                 perms[key] = existing
             else:
                 perms[key] = value
+    if refused:
+        raise LaunchRefused(_format_permission_refusal(refused, sandbox_on=sandbox_on, expand_tilde=True))
     if allow_rules:
         allow = list(perms.get('allow') or ())
         for rule in allow_rules:
@@ -1101,6 +1297,10 @@ def _settings_config(base: dict, allow_rules: Sequence[str] = (),
                      home_dir: Path | None = None, workspace: Path | None = None,
                      dropped: list[str] | None = None,
                      invalid: list[str] | None = None,
+                     ignored_personal: list[tuple[str, str]] | None = None,
+                     sandbox_on: bool = True,
+                     personal_source: str = '~/.gemini/antigravity-cli/settings.json',
+                     override_source: str = 'harness.json --settings',
                      extra_sensitive: Sequence[Path] | None = None) -> str:
     merged = dict(base)
     merged['statusLine'] = {
@@ -1111,6 +1311,8 @@ def _settings_config(base: dict, allow_rules: Sequence[str] = (),
     perms = _merge_permissions(
         personal_permissions or {}, merged.get('permissions'), allow_rules,
         home_dir=home_dir, workspace=workspace, dropped=dropped, invalid=invalid,
+        ignored_personal=ignored_personal, sandbox_on=sandbox_on,
+        personal_source=personal_source, override_source=override_source,
         extra_sensitive=extra_sensitive,
     )
     if perms is not None:
@@ -1307,11 +1509,19 @@ class AgyAdapter(ConfiguredAdapter):
                 pass
         if home_dir is not None:
             forbidden_settings_roots.append(home_dir / '.multiverse' / 'tmux-servers')
+        sandbox_on = _sandbox_enabled_for_argv(argv)
         user_settings = {}
+        user_settings_sources: dict[str, str] = {}
         personal_permissions = {}
+        personal_settings_source = str(storage.agy_home(sandbox_env) / 'settings.json')
+        user_settings_loaded = False
+        personal_loaded = False
         if bridge:
             plain_argv = list(argv)
-            bridge_argv, user_settings = _extract_user_settings(argv, forbidden_roots=forbidden_settings_roots)
+            bridge_argv, user_settings = _extract_user_settings(
+                argv, forbidden_roots=forbidden_settings_roots, sources=user_settings_sources,
+            )
+            user_settings_loaded = True
             try:
                 personal_permissions = _load_personal_permissions(sandbox_env)
             except ValueError as error:
@@ -1321,6 +1531,7 @@ class AgyAdapter(ConfiguredAdapter):
                 problem = str(error)
                 argv = plain_argv
             else:
+                personal_loaded = True
                 argv = bridge_argv
 
         plan = plugin_harness.plan_for(
@@ -1345,6 +1556,22 @@ class AgyAdapter(ConfiguredAdapter):
             command = replace(command, environment=plan.environment, plugins=plan.record())
 
         if not bridge:
+            if not user_settings_loaded:
+                try:
+                    _, user_settings = _extract_user_settings(argv, sources=user_settings_sources)
+                except ValueError:
+                    user_settings = {}
+            if not personal_loaded and (problem is None or 'personal settings' not in problem):
+                try:
+                    personal_permissions = _load_personal_permissions(sandbox_env)
+                except ValueError:
+                    personal_permissions = {}
+            _validate_plain_permissions(
+                personal_permissions, user_settings.get('permissions'),
+                home_dir=home_dir, workspace=workspace_root, sandbox_on=sandbox_on,
+                personal_source=personal_settings_source,
+                override_source=user_settings_sources.get('permissions', 'harness.json --settings'),
+            )
             if prompt_arg is not None:
                 argv.append(prompt_arg)
             return replace(
@@ -1359,10 +1586,14 @@ class AgyAdapter(ConfiguredAdapter):
         allow_rules = _sandbox_allow_rules(sandbox_env)
         dropped_rules: list[str] = []
         invalid_rules: list[str] = []
+        ignored_personal: list[tuple[str, str]] = []
         launch_files['settings.json'] = _settings_config(
             user_settings, allow_rules, personal_permissions,
             home_dir=home_dir, workspace=workspace_root,
-            dropped=dropped_rules, invalid=invalid_rules,
+            dropped=dropped_rules, invalid=invalid_rules, ignored_personal=ignored_personal,
+            sandbox_on=sandbox_on,
+            personal_source=personal_settings_source,
+            override_source=user_settings_sources.get('permissions', 'harness.json --settings'),
             extra_sensitive=extra_sensitive,
         )
         if dropped_rules:
@@ -1379,6 +1610,20 @@ class AgyAdapter(ConfiguredAdapter):
                 f'Dropped unsupported permissions.allow {label} (Antigravity file allow rules require absolute '
                 f'paths or ~/ without globs): {", ".join(unique_invalid)}.'
             )
+        if ignored_personal:
+            for bucket in ('permissions.deny', 'permissions.ask'):
+                bucket_rules = [
+                    rule if rule.strip() else repr(rule)
+                    for b, rule in dict.fromkeys(ignored_personal) if b == bucket
+                ]
+                if not bucket_rules:
+                    continue
+                label = 'rule' if len(bucket_rules) == 1 else 'rules'
+                extra_notices.append(
+                    f'Left out unsupported personal {bucket} {label} from {personal_settings_source} '
+                    f'(plain Antigravity 1.5.16 ignores globs, unexpandable paths and malformed rules here): '
+                    f'{", ".join(bucket_rules)}.'
+                )
         hook_launch_id = sandbox_env.get('MV2_LAUNCH_ID')
         if not isinstance(hook_launch_id, str) or not hook_launch_id:
             hook_launch_id = Path(launch_dir).name if launch_dir else None
