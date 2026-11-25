@@ -49,6 +49,8 @@ def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, 
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
     dismiss = (f' To stop checking it, use mv2 deliver {name} --dismiss; it may still have arrived.' if check else '')
+    if state == 'read':
+        return f'{name}: message already read in the inbox' + (', not resent.' if retry else '.')
     if value.get('dismissed') is True:
         return f'{name}: message dismissed; kept in history. Nothing resent.'
     if value.get('outside_lineage') is True:

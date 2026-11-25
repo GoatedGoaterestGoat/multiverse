@@ -40,7 +40,7 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`send`](#send) | Save and deliver a message to the exact native session. |
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
 | [`held`](#held) | Read the steer and follow-up messages held during your last focus, and mark only those read. |
-| [`listen`](#listen) | Wait in a background shell for unread inbox-only messages, without reading them. |
+| [`listen`](#listen) | Wait in a background shell for unread inbox messages without marking them read. |
 | [`focus`](#focus) | Focus an agent while it needs the user: steer and follow-up messages from agents wait in the agent's inbox. |
 | [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
@@ -335,7 +335,7 @@ mv2 held [--json]
 
 ## listen
 
-Wait in a background shell for unread inbox-only messages, without reading them.
+Wait in a background shell for unread inbox messages without marking them read.
 
 ```sh
 mv2 listen [--timeout TIMEOUT]

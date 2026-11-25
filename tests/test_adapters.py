@@ -136,10 +136,18 @@ class NativeDeliveryTest(BaseTest):
             with patch.object(native, 'owned'), patch.object(native, 'execute') as execute:
                 result = native.deliver(self.root, self.agent, message['id'])
                 self.assertEqual(result['state'], 'unavailable')
+                self.assertEqual(result['value'], {'launch_only': True, 'final': False})
                 execute.assert_not_called()
             self.assertEqual(inbox(self.directory)['messages'], [])
-            self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 1)
+            saved, = inbox(self.directory, all_messages=True)['messages']
+            self.assertEqual(saved['tracking']['submission_state'], 'failed')  # Retry when a bridge is available.
             self.assertEqual(native_status.run(self.root, agent=self.agent, operation='ask')['state'], 'unavailable')
+        with self.subTest('a recorded bridge with a missing connection'):
+            adapter = harnesses.load(self.root, 'codex')
+            session = SessionHandle('agent', 'codex', str(self.work), native_id=self.native_id,
+                                    state='running', native_mode={'mode': 'bridge', 'policy': 'auto'})
+            result = adapter.send(session, Message('id', 'text'), Mock())
+            self.assertEqual((result.state, result.value), ('unavailable', None))
         with self.subTest("a terminal that is not this launch's"):
             message = append_message(self.directory, 'not to stale pane', {}, delivery='steer')
             with patch.object(native, 'owned', side_effect=ValueError('wrong launch')), \

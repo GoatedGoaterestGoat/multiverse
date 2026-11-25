@@ -82,7 +82,7 @@ A delivered message has not necessarily been read or answered. Wait for a reply,
 
 When an agent sends a message and has unread inbox messages from that recipient, its output ends with `Reminder: you have unread messages from NAME.` This applies to every delivery mode, including saved messages whose native delivery fails, and to each matching recipient in a batch. The check peeks before sending and leaves messages unread; like `inbox --peek`, it uses complete rows before an unfinished tail. A busy or unreadable inbox skips the reminder.
 
-If the recipient reports that it is blocked on the sending agent, an inbox-only send becomes a follow-up. The sender's output says why before its usual delivery result. The recipient gets the original message text under the usual sender header. Update your reported status when that dependency is resolved. This applies to `--queue-only` too; explicit steer and follow-up sends keep their timing. Each recipient in a batch is checked separately. A focused recipient still holds the upgraded message in its inbox as an intended follow-up: `mv2 held` reads it after focus ends, and the focus-end note counts it. The sender's output says that the follow-up was scheduled and held, rather than delivered natively; the held message keeps its original text. Reading it never submits it again. If the recipient is launch-only and cannot take a follow-up now, or its follow-up availability cannot be checked, the send stays inbox-only and says so; it remains available to `mv2 inbox`. A stopped agent that supports waking still resumes with the follow-up. If the follow-up is definitely refused before delivery, the original text stays readable in `mv2 inbox` and cannot be retried natively. This also applies when startup fails after send returned. The send output says it tried a follow-up and saved the message in the inbox, without claiming delivery. If delivery is not confirmed, the original is also readable in the inbox with a note that it may also have arrived as a follow-up. Queue acceptance, a pending wake and an unknown result are not delivery confirmation: keeping the input readable takes priority over avoiding a possible duplicate between the conversation and inbox. The native attempt is not sent again. A confirmed delivery needs no unread inbox copy; `mv2 deliver AGENT --check` can record that confirmation. This fallback applies only to blocked-on upgrades, not explicit steer or follow-up sends.
+If the recipient reports that it is blocked on the sending agent, an inbox-only send becomes a follow-up. The sender's output says why before its usual delivery result. The recipient gets the original message text under the usual sender header. Update your reported status when that dependency is resolved. This applies to `--queue-only` too; explicit steer and follow-up sends keep their timing. Each recipient in a batch is checked separately. A focused recipient still holds the upgraded message in its inbox as an intended follow-up: `mv2 held` reads it after focus ends, and the focus-end note counts it. The sender's output says that the follow-up was scheduled and held, rather than delivered natively; the held message keeps its original text. Reading it never submits it again. If the recipient is launch-only and cannot take a follow-up now, or its follow-up availability cannot be checked, the send stays inbox-only and says so; it remains available to `mv2 inbox`. A stopped agent that supports waking still resumes with the follow-up. If the follow-up is definitely refused before delivery, the original text stays readable in `mv2 inbox` and cannot be retried natively. This also applies when startup fails after send returned. The send output says it tried a follow-up and saved the message in the inbox, without claiming delivery. If delivery is not confirmed, the original is also readable in the inbox with a note that it may also have arrived as a follow-up. Queue acceptance, a pending wake and an unknown result are not delivery confirmation: keeping the input readable takes priority over avoiding a possible duplicate between the conversation and inbox. The native attempt is not sent again. A confirmed delivery needs no unread inbox copy; `mv2 deliver AGENT --check` can record that confirmation. Only blocked-on upgrades keep a copy while native delivery is unconfirmed.
 
 The match follows the recipient's agent ID across renames and moves. People, plugin senders and `--json` output get no reminder.
 
@@ -136,6 +136,13 @@ invocation; an already recorded confirmation does not need another check.
 advice to send a new message if you still want it delivered. Later checks omit
 that cancellation, including concurrent checks. It stays in history; neither
 `--check` nor `--retry` resends it.
+
+If the recipient already read a failed message with `mv2 inbox`, the next
+`--check` or `--retry` reports it as already read in the inbox. `--retry`
+also says it was not resent. With `--json`, that result has `state: "read"`
+and `ok: true`. Later checks omit it, and later retries count it only with
+earlier final messages. The original delivery attempt stays in history. An
+inbox peek leaves the message eligible for retry.
 
 A message outside the recorded conversation lineage is also reported only once
 by `--check` or `--retry`. Its saved delivery evidence remains unchanged, but it is final for
@@ -304,14 +311,14 @@ A timed focus that runs out, and a focus the user ends, tell the agent nothing. 
 Agents check their inbox at startup, between steps and before finishing. You can read any agent's inbox too.
 
 ```sh
-mv2 inbox                              # inside an agent: its unread inbox-only messages
+mv2 inbox                              # inside an agent: its unread inbox messages
 mv2 inbox --agent worker --peek        # read without marking them read
 mv2 inbox --agent worker --all --last 20
 mv2 inbox --agent worker --all --since 2h
-mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
+mv2 inbox --wait --timeout 5m          # wait for the next unread inbox message
 ```
 
-Plain `inbox` shows unread `inbox-only` messages, including [held](#read-held-messages) ones and the original input of unconfirmed blocked-on upgrades, and marks them read once printed. Ordinary explicit steer and follow-up messages are not repeated there. A blocked-on upgrade can appear in both the conversation and inbox when delivery has not been confirmed. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
+Plain `inbox` shows unread `inbox-only` messages, including [held](#read-held-messages) ones, and unread steers or follow-ups whose delivery failed or was cancelled. It marks them read once printed. The original input of an unconfirmed blocked-on upgrade can appear in both the conversation and inbox. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
 
 An unreadable or damaged delivery ledger is reported with its full file path and
 a repair/reset hint, including for `inbox --all` and `--peek`. Back it up before
@@ -324,11 +331,13 @@ bookkeeping is not evidence that the agent never received an older message.
 
 When you have finished your work and are waiting, run `"$MV2_CLI" listen` using your harness's background-shell tool. Stop that shell if new work arrives meanwhile. If you run `mv2 report --phase working` while your listener is still running, mv2 reminds you to stop it. After reading and handling the messages, start it again when you are waiting.
 
-Inside an agent session, `mv2 listen` waits for unread inbox-only messages without marking them read. It exits immediately if any are already waiting. Ordinary steers and follow-ups do not end the wait; the unread inbox copy of a blocked-on upgrade does.
+Inside an agent session, `mv2 listen` waits for messages you can read with `mv2 inbox`. It exits immediately if any are already unread. A steer or follow-up wakes it when delivery is recorded as failed or cancelled and the message is still unread. Delivery in progress, queued acceptance, and a successful retry do not wake it. The original inbox copy of a blocked-on upgrade can also end the wait.
 
-On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. Run `mv2 inbox` to read them. It waits without a time limit unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
+An old undelivered message may surface once after updating. Dismissing a failure ends delivery tracking and leaves any unread message in the recipient's inbox. A launch-only refusal stays in history and does not wake the listener, even if the sender can retry after restoring the bridge.
 
-While you are [focused](#focus-an-agent), `listen` is refused. To listen while you wait for the user, start it before `mv2 focus`. It then reports nothing until the focus ends, and a `--timeout` that runs out meanwhile waits for the end too. If anything is unread then, it prints a line such as `3 unread inbox messages (including 2 steer/follow-up messages held during focus mode)` and exits. Otherwise it keeps waiting. A listener that reports this way replaces the follow-up note a `--turn` focus would send.
+On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. If delivery failed, it tells you to read the saved input with `mv2 inbox`. Only the inbox read marks it read. The listener waits indefinitely unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
+
+While you are [focused](#focus-an-agent), `listen` is refused. To listen while you wait for the user, start it before `mv2 focus`. It then reports nothing until the focus ends, and a `--timeout` that runs out meanwhile waits for the end too. If anything is unread then, it prints a line such as `3 unread inbox messages (including 2 steer/follow-up messages held during focus mode). 1 could not be delivered. Run mv2 inbox to read them.` Otherwise it keeps waiting. A listener that reports held messages replaces the follow-up note a `--turn` focus would send.
 
 The listener belongs to the launch in which it started, before waiting for any lock. It exits nonzero with a reason when that launch ends or is replaced, or its identity cannot be verified, focused or not. A process check that can't be answered, such as a `ps` that times out on a busy machine, reads nothing and is tried again on the next poll, and the timeout waits for one that can be. Once checks have gone unanswered for 30 seconds, no new one starts, and if the one still running can't be answered either, the listener ends. It does not attach to a replacement launch, including when a shared conversation keeps its identity. Busy launch or inbox locks do not suspend the timeout or launch checks. Before reporting unread messages, it checks the launch's processes again.
 
@@ -383,7 +392,7 @@ With a live connection, Claude Code and Pi have a `/multiverse` command you can 
 | `/multiverse` or `/multiverse list` | Show the catalog | yes | yes |
 | `/multiverse NAME [args]` | Run that command, workflow or skill as your prompt | yes | yes |
 | `/multiverse send AGENT TEXT` | Message another agent as this agent | yes | no |
-| `/multiverse inbox` | Show this agent's unread inbox-only messages and mark them read | yes | no |
+| `/multiverse inbox` | Show this agent's unread inbox messages and mark them read | yes | no |
 
 In Codex and launch-only sessions, ask the agent in words instead, such as "Please run /multiverse list". You can also run `mv2 catalog` yourself.
 

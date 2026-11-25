@@ -1148,9 +1148,15 @@ def _check_recovery(previous, properties, recovery):
         raise ValueError('Automatic recovery cancelled or superseded')
 
 
+class WakeMessageRead(ValueError):
+    """The saved prompt was read in the inbox while a wake was being prepared."""
+
+
 def _wake_prompt(root, agent_dir, properties, message_id):
     """The waking message as the resumed session's starting prompt, and its delivery tracking."""
     message, tracking = message_record(agent_dir, message_id)
+    if mailbox.failed_copy_read(tracking):
+        raise WakeMessageRead('Message already read in the inbox, not resent')
     if message.get('delivery') not in ('steer', 'follow-up') or tracking.get('submission_state', 'pending') not in ('pending', 'failed'):
         raise ValueError('Wake message is ineligible or may already have been submitted; refusing replay')
     tracking = native.retarget_message(agent_dir, properties, message, tracking)

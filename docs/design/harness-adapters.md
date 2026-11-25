@@ -533,17 +533,18 @@ or retry database.
 | launch-only | Final refusal: this launch has no native delivery path. History only; not retried or counted as an open failure. |
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
-The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
-map to failed, except a typed `launch_only: true` refusal, which maps to the final
-launch-only state. Only old failed receipts with that exact typed flag are
-normalized to it; accepted and uncertain input is never reclassified. Supported
+The immediate tool result `native_queued` maps to accepted. `unavailable` and `error`
+map to failed. A typed `launch_only: true` refusal goes to the final launch-only
+state unless its receipt says `final: false`, which leaves it retryable. A launch-only
+refusal stays in history and does not appear as an unread failed copy. Only old
+failed receipts with explicit final proof are normalized to the final state. Supported
 stopped-agent wake and failed wake retry stay separate from live delivery.
 Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh
 mv2 inbox                         # show unread sender/content blocks and mark them read
-mv2 inbox --wait --timeout 30s     # wait for unread inbox-only messages
+mv2 inbox --wait --timeout 30s     # wait for unread inbox messages
 mv2 inbox --all --last 20          # recent history, oldest first
 mv2 inbox --all --since 2h         # history from the last two hours
 mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
@@ -554,8 +555,10 @@ mv2 deliver worker --retry        # retry this recipient's definite failures
 mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```
 
-The CLI prints one `Message from NAME:` block per unread inbox-only message,
-with its full text and no metadata. Names are resolved from the sender's agent
+The CLI prints one `Message from NAME:` block per unread inbox message,
+with its full text and no metadata. Steers and follow-ups whose delivery failed
+or was cancelled appear in this view until read or delivered by a retry.
+Names are resolved from the sender's agent
 record; people appear as `user`, and another universe keeps core's
 `(in universe NAME)` wording. An empty page prints `No unread messages.`
 Unread pages contain up to 50 messages. The CLI advances the read position only
@@ -568,11 +571,12 @@ Python `inbox.run()` still returns and consumes the existing dictionary for
 callers such as the dashboard. CLI `--json` preserves that machine output
 (sender, text, time and delivery mode on ordinary reads).
 
-`inbox --wait` returns as soon as an unread inbox-only message arrives. It waits
+`inbox --wait` returns as soon as an unread inbox message is available. It waits
 indefinitely unless `--timeout DURATION` is given (seconds, or units `s`, `m`,
 `h`, `d`, `w`). It polls file metadata between reads, releases the launch and
-inbox locks between checks, and still rejects outdated launches. Native-only
-messages do not satisfy the wait. Timeout exits 1 without advancing the read
+inbox locks between checks, and still rejects outdated launches. Native
+delivery that is still in progress or accepted does not make an explicit steer
+or follow-up unread in the inbox. Timeout exits 1 without advancing the read
 position: readable output says `Timed out waiting for unread messages.`; JSON
 adds `timed_out: true` and `ok: false`. It can combine with `--peek` and `--json`,
 but not history options.
@@ -1695,7 +1699,7 @@ typeahead with an argument hint, and runnable while a turn is running):
   shown as printed: what was delivered, or what was saved and why it was not.
 - `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
   and formats it; the CLI's default output is readable text for people): it shows
-  this agent's unread inbox-only messages and marks them read. The output is
+  this agent's unread inbox messages and marks them read. The output is
   ordinary command output, so the model sees it on its next turn under Claude's
   "do not respond" caveat and acts only if asked. (The status line's count uses `mv2 inbox --peek --json` instead,
   which marks nothing read.)
@@ -1737,7 +1741,7 @@ The order of the keys is the order on screen; a missing key keeps the default sh
 an unknown key is ignored, and an unreadable file means the defaults (logged once).
 `agent` is the agent's name, plus `(universe)` only for an agent in a subverse (the
 root universe is left out, the same rule as the tmux bar), `phase` and `summary` the agent's last `mv2 report`
-(shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
+(shown as one segment, `working: reading the diff`), `inbox` the unread inbox
 count (only when above zero, `50+` at the cap), and `compaction` the built trees out of
 all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),
 shown only for an agent launched with tree compaction enabled. A 2 s timer compares the size and time of four files (`properties.json`,

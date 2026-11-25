@@ -45,25 +45,55 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                  and message.get('delivery') in ('steer', 'follow-up')
                  and not message['tracking'].get('uncheckable_reported_at')
                  and not message['tracking'].get('dismissed_at')
+                 and not mailbox.failed_copy_read(message['tracking'])
                  and message['tracking']['submission_state'] in ('failed', 'launch-only')] if held else []
     # A focus holds only agents' messages: a person's or a plugin's is retried, an agent's waits for the unfocus.
     # An agent running the retry is an agent sending: everything waits.
     from ..runtime.agent_identity import runs_in_agent
     by_agent = runs_in_agent(root=root)
     holds = (lambda message: True) if by_agent else (lambda message: focus.holds(message.get('from')))
-    if retryable and all(holds(message) for message in retryable):
+    if (retryable and all(holds(message) for message in retryable)
+            and not any(mailbox.failed_copy_read(message['tracking'])
+                        and not message['tracking'].get('inbox_read_reported_at')
+                        and not message['tracking'].get('dismissed_at') for message in history)):
         return _focused(name, held, [], _present_error or _present, waiting=len(retryable), by_agent=by_agent)
     waiting = 0
     results = []
     finalized = 0
     counts = {}
     details = []
+
+    def report_inbox_read(message):
+        nonlocal finalized
+        if dismiss:
+            return
+        if not mailbox.claim_inbox_read_report(directory, message['id']):
+            finalized += int(retry)
+            return
+        receipt = native.inbox_read_receipt(message['id'], retry=retry)
+        results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message},
+                        **delivery_summary(receipt)})
+        if check:
+            counts['read in inbox'] = counts.get('read in inbox', 0) + 1
+        if _present:
+            line = delivery_line(name, receipt, retry=retry)
+            if check:
+                details.append((_present, line))
+            else:
+                _present(line)
+
     for message in history:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']
         if tracking.get('dismissed_at'):
             finalized += int(retry)
+            continue
+        if mailbox.failed_copy_read(tracking):
+            if tracking.get('inbox_read_reported_at'):
+                finalized += int(retry)
+            else:
+                report_inbox_read(message)
             continue
         final_lineage = bool(tracking.get('uncheckable_reported_at'))
         state = tracking['submission_state']
@@ -104,7 +134,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
             if not outside_lineage and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
                 continue
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
-            if final is not None and retry:
+            if final is not None and final.get('state') != 'read' and retry:
                 finalized += 1
                 continue
             if outside_lineage:
@@ -144,6 +174,9 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True,
                        **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
+        if receipt.get('state') == 'read':
+            report_inbox_read(message)
+            continue
         if check and state != 'cancelled' and receipt.get('state') == 'cancelled':
             # Another checker may have selected the same still-accepted snapshot.
             if mailbox.claim_cancelled_report(directory, message['id']) is None:
@@ -200,7 +233,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         return {'messages': results, 'confirmed': confirmed, 'dismissed': failures + unconfirmed,
                 'dismissed_failures': failures, 'dismissed_unconfirmed': unconfirmed, 'ok': True}
     if _present and check and results:
-        order = ('confirmed', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain', 'could not check')
+        order = ('confirmed', 'read in inbox', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain',
+                 'could not check')
         _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
         for present, line in details:
             present(line)

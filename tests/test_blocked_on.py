@@ -550,7 +550,7 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(mailbox.inbox(fresh)['messages'], [])
         self.assertFalse(mailbox.message_record(fresh, tagged['id'])[1].get('dismissed_at'))
 
-        # The optional fallback must not change explicit follow-up failures.
+        # Explicit failures become readable without the upgrade's native retry dismissal.
         store.write(directory / 'runtime.json', facts)
         self.behavior = NativeResult('error', 'explicit refusal')
         for delivery in ('steer', 'follow-up'):
@@ -558,7 +558,9 @@ class BlockedOnTest(BaseTest):
                 result = send.run(self.root, agent='asker', delivery=delivery, text='explicit')
                 self.assertFalse(result['ok'])
                 explicit = mailbox.inbox(directory, all_messages=True, limit=None)['messages'][-1]
+                self.assertEqual(explicit['tracking']['submission_state'], 'failed')
                 self.assertFalse(explicit['tracking'].get('dismissed_at'))
+                self.assertEqual([m['text'] for m in mailbox.inbox(directory)['messages']], ['explicit'])
                 self.assertEqual(mailbox.inbox(directory)['messages'], [])
 
     def test_fallback_stays_final_after_internal_refresh_or_an_old_runner_write(self):

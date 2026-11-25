@@ -115,6 +115,18 @@ def _messages(agent_dir, *, observed_missing=(), max_bytes=None):
 INBOX_EVIDENCE = ('inbox.cursor', 'inbox-read.json', 'inbox-state.json', 'native-delivery.json')
 
 
+def inbox_signature(agent_dir):
+    """A polling hint that includes failures recorded without an append or cursor move."""
+    stamps = []
+    for name in ('inbox.jsonl', *INBOX_EVIDENCE, 'inbox-unsubmitted'):
+        try:
+            info = (agent_dir / name).stat()
+            stamps.append((info.st_ino, info.st_size, info.st_mtime_ns))
+        except FileNotFoundError:
+            stamps.append(None)
+    return tuple(stamps)
+
+
 def _empty_history(agent_dir, *, observed_missing=()):
     """Missing append-only history is empty only when no saved inbox evidence remains."""
     evidence = tuple(agent_dir / name for name in INBOX_EVIDENCE)
@@ -271,8 +283,7 @@ def _states(agent_dir, *, observed_missing=None, budget=None):
             states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                 'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
     for state in states.values():
-        last = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
-        value = last.get('value') if isinstance(last, dict) else None
+        value = _last_receipt_value(state)
         final = isinstance(value, dict) and value.get('launch_only') is True and value.get('final') is True
         if state.get('submission_state') == 'failed' and final:
             state.update(submission_state='launch-only', final_reason='launch-only')
@@ -347,7 +358,8 @@ def delivery_indicators(agent_dir, name, *, is_final=None, observed_missing=None
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir, observed_missing=observed_missing)
         failed = {identifier for identifier, state in states.items()
-                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at') and not state.get('dismissed_at')}
+                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at')
+                  and not state.get('dismissed_at') and not failed_copy_read(state)}
         queued = ({identifier for identifier, state in states.items()
                    if _accepted_queued(identifier, state, paused_native_id, paused_launch_id, paused_message_ids)}
                   if paused_native_id else set())
@@ -433,21 +445,59 @@ def _dated(value):
         return False
 
 
+def _confirmed_receipt(value):
+    return isinstance(value, dict) and value.get('transcript_confirmed') is True
+
+
+def _delivery_confirmed(state):
+    if _dated(state.get('transcript_confirmed_at')) or _confirmed_receipt(state.get('native_receipt')):
+        return True
+    last = state.get('last_receipt')
+    if isinstance(last, dict) and _confirmed_receipt(last.get('value')):
+        return True
+    for attempt in state.get('attempts', ()):
+        evidence = attempt.get('delivery_receipt')
+        if (_confirmed_receipt(attempt.get('value'))
+                or isinstance(evidence, dict) and _confirmed_receipt(evidence.get('value'))):
+            return True  # A positive can belong to a retained, older attempt.
+    return False
+
+
+def _failed_copy(message, state):
+    """Expose definite native failures without reopening accepted or confirmed input."""
+    if (message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up')
+            or state.get('submission_state') not in ('failed', 'cancelled') or _delivery_confirmed(state)):
+        return False
+    value = _last_receipt_value(state)
+    return not (state['submission_state'] == 'failed' and isinstance(value, dict) and value.get('launch_only') is True)
+
+
+def _last_receipt_value(state):
+    receipt = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
+    return receipt.get('value') if isinstance(receipt, dict) else None
+
+
+def failed_copy_read(state):
+    """A definite failure whose saved input the recipient already read."""
+    return state.get('submission_state') == 'failed' and _dated(state.get('inbox_copy_read_at'))
+
+
 def inbox_copy(message, state):
     """Only blocked-on upgrades retain manual input without positive delivery confirmation.
 
     Queue acceptance is not confirmation. The copy shares the saved message ID and can overlap a native
     delivery; it neither retries nor cancels that attempt. A successful inbox read consumes only the copy.
     """
-    receipt = state.get('native_receipt') or {}
     return (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
             and isinstance(message.get('inbox_only_text'), str)
-            and not _dated(state.get('transcript_confirmed_at')) and receipt.get('transcript_confirmed') is not True)
+            and not _delivery_confirmed(state))
 
 
-def _copy_text(message, state):
-    original = message['inbox_only_text']
-    if inbox_fallback(message, state) or state.get('final_reason') == 'lost':
+def _copy_text(message, state, *, failed):
+    original = message.get('inbox_only_text')
+    if not isinstance(original, str):
+        return message['text']
+    if failed or inbox_fallback(message, state) or state.get('final_reason') == 'lost':
         return original
     return 'This message may also have arrived as a follow-up.\n\n' + original
 
@@ -462,7 +512,7 @@ def inbox_fallback(message, state):
 
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
           last=None, since=None, present=None, blocking=True, unread=False):
-    """Read unread manual messages; peek and full history do not consume them.
+    """Read unread manual and undelivered messages; peek and full history do not consume them.
 
     blocking=False raises BlockingIOError on contention so a waiter can check
     its own deadline and lifetime without keeping another lock while waiting.
@@ -523,7 +573,9 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
     copies = []
     for offset, message in records:
         state = states.get(message['id'], {})
-        unread_copy = inbox_copy(message, state) and not _dated(state.get('inbox_copy_read_at'))
+        upgraded = inbox_copy(message, state)
+        failed = _failed_copy(message, state)
+        unread_copy = (upgraded or failed) and not _dated(state.get('inbox_copy_read_at'))
         # Native rows may have been skipped before their evidence changed. Their original inbox input
         # remains unread independently of the cursor; no second message or native attempt is created.
         if offset <= start and (all_messages or not unread_copy):
@@ -536,12 +588,13 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
         if all_messages:
             messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
                                                      **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
-            if unread:  # what an ordinary inbox read would show now: an unread blocked-on copy, or an inbox-only
+            if unread:  # what an ordinary inbox read would show now: an unread copy, or an inbox-only
                 # message past the read position that mv2 held hasn't read ahead
                 messages[-1]['unread'] = bool(unread_copy or (_manual(message) and offset > read_cursor
                                                               and message['id'] not in marks))
         elif unread_copy:
-            messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
+            messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state, failed=failed),
+                             **({'delivery_failed': True} if failed else {})})
             copies.append(message['id'])
         elif _manual(message) and message['id'] not in marks:
             messages.append(message)
@@ -819,6 +872,7 @@ def dismissible(message, state):
                  or isinstance(receipt, dict) and receipt.get('transcript_confirmed') is True)
     return (message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
             and state.get('submission_state') in ('failed', 'launch-only', 'accepted', 'unknown', 'submitting')
+            and not failed_copy_read(state)
             and not (confirmed or state.get('dismissed_at') or state.get('uncheckable_reported_at')))
 
 
@@ -841,6 +895,19 @@ def dismiss_messages(agent_dir, message_ids):
         if any(dismissed.values()):
             write(agent_dir / 'inbox-state.json', states)
     return dismissed
+
+
+def claim_inbox_read_report(agent_dir, message_id):
+    """Report a failed copy read in the inbox once, leaving the native receipt intact."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if not failed_copy_read(current) or current.get('inbox_read_reported_at') or current.get('dismissed_at'):
+            return False
+        states[message_id] = {**current, 'inbox_read_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return True
 
 
 def claim_cancelled_report(agent_dir, message_id):

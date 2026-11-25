@@ -63,7 +63,7 @@ If the installed Claude Code is too old for the mod and `inbox_bridge` is unset,
 **Status line.** Connected sessions show a line under Claude's prompt, next to your own status line. It shows these items:
 
 - The reported phase.
-- The count of unread inbox-only messages, when above zero.
+- The count of unread inbox messages, when above zero.
 - The compaction trees (`trees 116/118 · building`), when compaction is on.
 
 Choose the items and their order in `statusline.json` at the universe root:

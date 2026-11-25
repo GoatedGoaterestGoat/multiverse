@@ -10,11 +10,11 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse import harnesses
-from multiverse.runtime import native, attachments
+from multiverse.runtime import native, attachments, lifecycle
 from multiverse.harnesses.types import Capability, NativeResult
 from multiverse.harnesses.claude import ClaudeAdapter
-from multiverse.universe.mailbox import append_message, inbox, message_record, update_message
-from multiverse.store import read, write, now
+from multiverse.universe.mailbox import append_message, delivery_problem, inbox, message_record, update_message
+from multiverse.store import lock, read, write, now
 from multiverse.tools import send, deliver
 from multiverse.tools import inbox as inbox_tool
 from test_multiverse import BaseTest
@@ -285,6 +285,95 @@ class InboxDeliveryTest(DeliveryFixture):
                     receipts[second] = confirmed
                     deliver.run(self.root, agent=self.agent, check=True)
                     self.assertTrue(message_record(self.directory, logical)[1]['native_receipt']['transcript_confirmed'])
+
+    def test_retry_skips_failed_input_the_recipient_read(self):
+        """A read settles the failed inbox copy without changing the receipt or suppressing retries of unread copies."""
+        self.behavior = NativeResult('error', 'definite failure')
+        seen = self.send('read first', delivery='steer')
+        self.assertEqual([row['text'] for row in inbox_tool.run(self.root, agent=self.agent)['messages']], ['read first'])
+        _, tracking = message_record(self.directory, seen['id'])
+        unread = self.send('peek only', delivery='follow-up')
+        self.assertEqual([row['text'] for row in inbox_tool.run(self.root, agent=self.agent, peek=True)['messages']],
+                         ['peek only'])
+        self.behavior = NativeResult('native_queued')
+        lines = []
+        result = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
+        self.assertTrue(result['ok'])
+        self.assertEqual([row['state'] for row in result['messages']], ['read', 'native_queued'])
+        self.assertIn('message already read in the inbox, not resent.', lines[0])
+        self.assertEqual(result['messages'][0]['reason'], 'Message already read in the inbox, not resent')
+        self.assertEqual([message.id for _, message, _ in self.calls], [seen['id'], unread['id'], unread['id']])
+        _, settled = message_record(self.directory, seen['id'])
+        self.assertTrue(settled.pop('inbox_read_reported_at'))
+        self.assertEqual(settled, tracking)
+        self.assertIsNone(delivery_problem(self.directory, self.agent))
+
+    def test_a_read_failure_is_reported_once_across_checks_and_retries(self):
+        """Concurrent operators share one final report and no later check advises a resend."""
+        self.behavior = NativeResult('error', 'definite failure')
+        self.send('read just before check', delivery='steer')
+        inbox_tool.run(self.root, agent=self.agent)
+        lines = []
+        result = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+        self.assertEqual(lines[-1], f'recipient-{self.agent[:8]}: message already read in the inbox.')
+        self.assertEqual(result['messages'][0]['reason'], 'Message already read in the inbox')
+
+        self.recipient()
+        self.behavior = NativeResult('error', 'definite failure')
+        message = self.send('read before checking', delivery='steer')
+        inbox_tool.run(self.root, agent=self.agent)
+
+        def report(check):
+            return deliver.run(self.root, agent=self.agent, check=check, retry=not check)
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(report, [True, False, True, False]))
+        self.assertTrue(all(result['ok'] for result in results))
+        self.assertEqual([row['state'] for result in results for row in result['messages']], ['read'])
+        self.assertEqual(report(True), {'messages': [], 'ok': True})
+        self.assertEqual(report(False), {'messages': [], 'ok': True, 'finalized': 1})
+        self.assertEqual(deliver.run(self.root, agent=self.agent, dismiss=True)['dismissed'], 0)
+        self.assertEqual(len(self.calls), 1)
+        _, tracking = message_record(self.directory, message['id'])
+        self.assertEqual(tracking['submission_state'], 'failed')
+        self.assertEqual(len(tracking['attempts']), 1)
+
+    def test_retry_rechecks_an_inbox_read_before_live_submission_or_wake(self):
+        """A read that wins the launch lock between retry selection and submission cannot be replayed."""
+        for wake in (False, True):
+            with self.subTest(wake=wake):
+                self.recipient()
+                self.behavior = NativeResult('error', 'definite failure')
+                message = self.send('read while retrying', delivery='steer')
+                self.behavior = NativeResult('native_queued')
+                live_deliver = native.deliver
+
+                def received():
+                    result = inbox_tool.run(self.root, agent=self.agent)
+                    self.assertEqual([row['text'] for row in result['messages']], ['read while retrying'])
+
+                def live(*args, **kwargs):
+                    received()
+                    return live_deliver(*args, **kwargs)
+
+                def start(root, *, resume_message_id, **options):
+                    received()
+                    with lock(self.directory / '.launch.lock'):
+                        lifecycle._wake_prompt(root, self.directory, read(self.directory / 'properties.json'),
+                                               resume_message_id)
+                    self.fail('The waking launch admitted a prompt already read in the inbox')
+
+                adapter = harnesses.load(self.root, 'claude')
+                with patch.object(adapter, 'capabilities', create=True, return_value={'wake': Capability('supported')}), \
+                        patch.object(native, 'observe', return_value={'live': 'stopped' if wake else 'alive'}), \
+                        patch.object(native, 'deliver', side_effect=live) as submitted, \
+                        patch.object(lifecycle, 'start', side_effect=start) as launched:
+                    with lock(self.directory / '.send.lock'):
+                        receipt = native.send_or_wake(self.root, self.agent, message['id'], retry=True)
+                self.assertEqual((receipt['state'], receipt['ok']), ('read', True))
+                self.assertEqual((submitted.call_count, launched.call_count), (int(not wake), int(wake)))
+                self.assertEqual(len(self.calls), 1)
+                self.assertEqual(message_record(self.directory, message['id'])[1]['submission_state'], 'failed')
 
     def test_check_and_retry_select_eligible_messages_across_the_whole_history(self):
         """deliver --check selects accepted, unknown and pending messages and --retry only definite failures, across

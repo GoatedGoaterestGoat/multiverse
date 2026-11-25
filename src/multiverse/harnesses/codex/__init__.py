@@ -494,8 +494,13 @@ class CodexAdapter(ConfiguredAdapter):
         if mode not in ('steer', 'follow-up'):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
+            # A legacy auto launch with no app-server metadata has no delivery path in this launch.
+            # A recorded or required bridge with a missing endpoint is a connection failure instead.
+            legacy_plain = (session.launch_id and session.state == 'running' and not session.native_mode and not session.endpoint
+                            and not session.native_relay and not session.service
+                            and self.settings.get('inbox_bridge') is None)
             value = ({'launch_only': True, 'final': self.settings.get('inbox_bridge') is False}
-                     if self._plain_delivery(session) else None)
+                     if self._plain_delivery(session) or legacy_plain else None)
             return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID', value)
         if session.state != 'running':
             return NativeResult('unavailable', 'Native launch is still binding; retry after validation completes, or inspect runtime.json for a launch error')

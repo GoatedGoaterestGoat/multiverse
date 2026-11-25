@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from isolation import track
 from test_multiverse import BaseTest, until
 from multiverse import cli, store
-from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeServiceHandle, ServiceIdentity
+from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity, focus_note, listen_proof, native
 from multiverse.runtime.process import process_started
 from multiverse.tools import inbox as inbox_tool, listen, report, send
@@ -243,7 +243,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                 patch.dict(os.environ, {'MV2_LAUNCH_ID': current}):
             self.assertNotIn(advice, report.cli_run(self.root, agent=self.agent, phase='working'))
 
-    def test_listen_notifies_only_for_unread_manual_messages_and_never_consumes_them(self):
+    def test_listen_notifies_for_unread_manual_messages_and_never_consumes_them(self):
         """A background notification must neither repeat native prompts nor mark quiet work read before the agent sees it."""
         for delivery in ('steer', 'follow-up'):
             self.message(delivery)
@@ -280,6 +280,120 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         before = self.ledger()
         self.assertEqual(self.command('--timeout', '0')[0], 1)
         self.assertEqual(self.ledger(), before)
+
+    def test_a_failed_delivery_wakes_listen_after_focus_and_can_be_read_once(self):
+        """A failure can arrive after the inbox cursor passes its row, even while a listener is focused."""
+        self.proven()
+        message = self.message('steer')
+        self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
+        adapter = SimpleNamespace(send=Mock(return_value=NativeResult('error', 'test delivery rejected')))
+
+        def fail():
+            focus.start(self.directory)
+            receipt = native.deliver(self.root, self.agent, message['id'])
+            self.assertEqual(receipt['reason'], 'test delivery rejected')
+
+        def release():
+            self.assertEqual(sys.stdout.getvalue(), '')
+            self.assertTrue(focus.listener(self.directory))
+            focus.end(self.directory)
+
+        steps = [fail, release]
+        with patch.object(native.harnesses, 'load', return_value=adapter), patch.object(native, 'owned'), \
+                patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                patch.object(listen, 'time', SimpleNamespace(monotonic=time.monotonic, sleep=lambda _: steps.pop(0)())):
+            code, output, error = self.command()
+        self.assertEqual(steps, [])
+        adapter.send.assert_called_once()
+        self.assertEqual((code, output, error),
+                         (0, 'inbox message from sender. It could not be delivered. Run mv2 inbox to read it.\n', ''))
+        self.assertIsNone(focus.last(self.directory)['report'])
+        before = self.ledger()
+        self.assertEqual(self.command('--timeout', '0'), (0, output, ''))
+        self.assertEqual(self.ledger(), before)
+        self.assertEqual([row['text'] for row in inbox_tool.run(self.root, agent=self.agent)['messages']],
+                         ['quiet work'])
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        saved, tracking = mailbox.message_record(self.directory, message['id'])
+        self.assertEqual((saved['delivery'], tracking['submission_state']), ('steer', 'failed'))
+
+    def test_listen_only_wakes_for_a_cancelled_or_failed_delivery_with_no_positive_receipt(self):
+        """A retry or late receipt can supersede an old failure without changing inbox history."""
+        self.proven()
+        message = self.message('follow-up')
+        adapter = SimpleNamespace(send=Mock(side_effect=[
+            NativeResult('error', 'test delivery rejected'), NativeResult('native_queued')]))
+        with patch.object(native.harnesses, 'load', return_value=adapter), patch.object(native, 'owned'), \
+                patch.object(native, 'observe', return_value={'live': 'alive'}):
+            self.assertFalse(native.deliver(self.root, self.agent, message['id'])['ok'])
+            self.assertTrue(native.deliver(self.root, self.agent, message['id'], retry=True)['ok'])
+        for state in ('accepted', 'submitting', 'unknown', 'pending'):
+            with self.subTest(state=state):
+                mailbox.update_message(self.directory, message['id'], submission_state=state)
+                self.assertEqual(self.command('--timeout', '0')[0], 1)
+        mailbox.update_message(self.directory, message['id'], submission_state='failed', dismissed_at=store.now())
+        self.assertIn('could not be delivered', self.command('--timeout', '0')[1])
+        mailbox.update_message(self.directory, message['id'], submission_state='cancelled')
+        self.assertIn('could not be delivered', self.command('--timeout', '0')[1])
+        mailbox.update_message(self.directory, message['id'], native_receipt={'transcript_confirmed': True})
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        mailbox.update_message(self.directory, message['id'], native_receipt=None,
+                               attempts=[{'delivery_receipt': {'value': {'transcript_confirmed': True}}}])
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        refusal = {'state': 'unavailable', 'value': {'launch_only': True, 'final': True}}
+        mailbox.update_message(self.directory, message['id'], submission_state='launch-only',
+                               dismissed_at=None, attempts=[refusal], last_receipt=refusal)
+        self.assertEqual(mailbox.message_record(self.directory, message['id'])[1]['submission_state'], 'launch-only')
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        temporary = {'state': 'unavailable', 'value': {'launch_only': True, 'final': False}}
+        mailbox.update_message(self.directory, message['id'], submission_state='failed',
+                               attempts=[temporary], last_receipt=temporary)
+        self.assertEqual(mailbox.message_record(self.directory, message['id'])[1]['submission_state'], 'failed')
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+
+    def test_failed_delivery_does_not_change_which_held_messages_listen_claims(self):
+        """The focus note and listener share the held claim, but the failure remains independently unread."""
+        self.proven()
+        failed_line = 'inbox message from sender. It could not be delivered. Run mv2 inbox to read it.\n'
+        mixed_line = ('2 unread inbox messages (including 1 steer/follow-up message held during focus mode). '
+                      '1 could not be delivered. Run mv2 inbox to read them.\n')
+        for note_first, line, claim in ((False, mixed_line, 'listener'), (True, failed_line, 'note')):
+            with self.subTest(note_first=note_first):
+                pending = self.message('steer')
+
+                def hold_and_fail():
+                    focus.start(self.directory)
+                    focus.hold(self.directory, lambda focus_id: mailbox.append_message(
+                        self.directory, 'held', {'name': 'sender'}, 'inbox-only', intended='steer', focus=focus_id))
+                    mailbox.update_message(self.directory, pending['id'], submission_state='failed')
+
+                def release():
+                    self.assertEqual(sys.stdout.getvalue(), '')
+                    self.assertTrue(focus.listener(self.directory))
+                    focus.end(self.directory)
+                    if note_first:
+                        self.note(self.directory)
+
+                steps = [hold_and_fail, release]
+                with patch.object(listen, 'time', SimpleNamespace(monotonic=time.monotonic,
+                                                                 sleep=lambda _: steps.pop(0)())):
+                    self.assertEqual(self.command(), (0, line, ''))
+                self.assertEqual(focus.last(self.directory)['report'], claim)
+                self.assertEqual([row['text'] for row in mailbox.inbox(self.directory)['messages']],
+                                 ['quiet work', 'held'])
+
+    def test_listen_notices_failure_before_native_submission(self):
+        """A separate pre-submission failure marker can arrive without changing the inbox or delivery ledger."""
+        self.proven()
+        message = self.message('follow-up')
+        mailbox.inbox(self.directory)
+        # An existing marker directory must also show a change when a new entry is recorded.
+        (self.directory / 'inbox-unsubmitted').mkdir()
+        sleeps = [lambda: mailbox.record_unsubmitted(self.directory, message['id'], 'failed preflight')]
+        with patch.object(listen, 'time', SimpleNamespace(monotonic=time.monotonic, sleep=lambda _: sleeps.pop(0)())):
+            code, output, error = self.command()
+        self.assertEqual((code, error, sleeps), (0, '', []))
+        self.assertIn('could not be delivered', output)
 
     def test_listen_stops_when_its_launch_ends_even_with_stable_conversation_identity(self):
         """Cached Codex identity and stale running records must not leave an old background listener watching a replacement."""
