@@ -116,14 +116,18 @@ class LaunchConnection:
             if configured or any(value != expected[key] for key, value in supplied.items()):
                 root.invalidate_grants()
                 return
-            # Even equal cwd/roots can select daemon defaults. The owning terminal
-            # supplies both on ordinary input, so carry the verified local selection.
+            # Even equal cwd/roots can select daemon defaults. Carry the verified
+            # local selection for ordinary input from the owning terminal.
             resets_environment = (method == 'thread/settings/update' and cwd is not None
                                   or method == 'turn/start' and (cwd is not None
                                       or 'runtimeWorkspaceRoots' in supplied))
             if local and resets_environment and params.get('environments') is None:
                 cli = root.settings.get('navigation_cli')
-                if (method == 'turn/start' and cwd is not None and 'runtimeWorkspaceRoots' in supplied
+                # 0.172's remote TUI leaves the workspace roots to the server.
+                roots_match = ('runtimeWorkspaceRoots' in supplied
+                               or self.version == (0, 172, 0)
+                               and 'runtimeWorkspaceRoots' in params and params['runtimeWorkspaceRoots'] is None)
+                if (method == 'turn/start' and cwd is not None and roots_match
                         and self.owns_primary() and params['threadId'] == root.grants_native_id == root.native_id
                         and requires_local_environment(cli) and tuple(cli) == self.version):
                     return {**value, 'params': {**params, 'environments':

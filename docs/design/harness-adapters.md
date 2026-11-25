@@ -896,6 +896,38 @@ unchecked version refusal, launch and resume, permission and lineage checks,
 navigation, side conversations, queue continuation, prompt routing, delivery
 observations, rollout reading and private requests with empty tool lists.
 
+### Codex 0.172.0 compatibility audit
+
+The official 0.171.0 and 0.172.0 source pins are `ccf9be8cc458` and
+`3d86e43b075a`. All five recorded CLI help outputs match. The installed
+experimental export has 483 schemas, of which 32 changed. The two bundled
+model catalogs differ only in the release stamp. See the
+[release notes](https://github.com/openai/codex/releases/tag/rust-v0.172.0).
+
+The built-in slash command names, aliases and availability while a turn runs
+are unchanged. Codex adds argument completion and thread links. The bridge
+still requires exact ownership and saved lineage for a conversation switch.
+The renderer fixtures cover the idle composer, queued follow-up and status
+footer, argument completion, question and approval dialogs, and the
+ownership warning.
+
+The 0.172.0 remote terminal leaves runtime workspace roots to the server
+and sends null roots with its cwd on ordinary turn start. Even an equal cwd
+would otherwise select daemon defaults. For matched 0.172.0 on the owning
+terminal, the bridge can carry forward the already verified single local
+environment when the request targets the current grant-bound primary and
+its cwd and grant overrides agree. Explicit roots still have to match.
+Other unproved reselections still invalidate cached navigation grants.
+The 0.169.0 through 0.171.0 request checks retain their earlier boundaries.
+
+Local start and resume still return plain absolute paths, the full grant
+envelope and the native identity expected by the bridge. The stock terminal's
+`/new`, `/clear` and owned `/resume` are tested against a private daemon.
+The queue, approval/async response and exact user-item receipt checks retain
+their separate matched-version gates. The checks cover the local workspace
+and scripted provider; cross-OS workspaces, Bedrock and external services
+remain outside this qualification.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other

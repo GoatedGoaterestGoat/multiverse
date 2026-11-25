@@ -168,7 +168,7 @@ verified selection when its explicit cwd, roots and any grant settings match
 the cached grants. Codex would otherwise rebuild the selection from daemon
 defaults. Other requests that reselect an unverified environment invalidate the
 cached grants before forwarding. Native settings notifications omit top-level runtime workspace roots.
-Codex 0.169.0, 0.170.0 and 0.171.0 require an ordinary root conversation with
+Codex 0.169.0, 0.170.0, 0.171.0 and 0.172.0 require an ordinary root conversation with
 explicitly null parent, attachment and fork relations and no feature thread source. Each
 initial, selected or reselected reply must expose exactly one built-in `local`
 environment. Its native cwd and complete runtime root set must match the known

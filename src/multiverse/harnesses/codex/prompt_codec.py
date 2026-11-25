@@ -10,8 +10,8 @@ import json
 from urllib.parse import urlsplit
 
 
-VERSION = (0, 171, 0)
-VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), (0, 170, 0), VERSION))
+VERSION = (0, 172, 0)
+VERSIONS = frozenset(((0, 166, 0), (0, 167, 0), (0, 167, 1), (0, 167, 2), (0, 169, 0), (0, 170, 0), (0, 171, 0), VERSION))
 DETAIL_BYTES = 64 << 10
 RESPONSE_BYTES = 128 << 10  # Typed wrappers and offered native values can expand a bounded answer file.
 METHODS = {
