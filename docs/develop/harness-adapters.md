@@ -27,6 +27,8 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 | `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
 
 `EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+
+Raise `LaunchRefused` from launch preparation when the adapter can identify a condition the person must fix before starting the harness. Give the reason and the steps to fix it. Core saves a task-bearing spawn's input to a private retry file and releases its name. A wake keeps its message in the inbox for retry. The adapter writes no retry files.
 An adapter with `ask_snapshot_only = True` receives a read-only source snapshot,
 without identity reconciliation or a launch lock. Its `ask` must use
 `executor.run_once(adapter, session, prepare)` to revalidate the captured generation

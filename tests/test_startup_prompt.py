@@ -13,6 +13,7 @@ from uuid import uuid4
 from multiverse.display import outcome
 from multiverse.harnesses.base import ConfiguredAdapter
 from multiverse.harnesses.claude import ClaudeAdapter
+from multiverse.harnesses.types import LaunchRefused
 from multiverse.runtime import lifecycle, native, refusal, runner
 from multiverse.terminal import recovery, tmux
 from multiverse.store import read, write
@@ -87,7 +88,38 @@ class StartupPromptTest(BaseTest):
             self.assertNotIn('task_trust', read(launch / 'request.json'))
             trust.assert_not_called()
 
-    def test_trust_refusal_for_a_wake_names_one_retry(self):
+    def test_adapter_refusal_preserves_the_task_before_pane_creation(self):
+        """A native preparation refusal must leave its spawn name and saved input available for retry."""
+        adapter = ConfiguredAdapter('guarded', {'spawn': [sys.executable, '{task}']})
+        backend = Mock()
+        backend.create.return_value = {'socket': '/test', 'session': '$1', 'pane': '%1'}
+        common = {'name': 'refused-task', 'harness': 'guarded'}
+        task = 'First line\nSecond line'
+        with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'Tmux', return_value=backend):
+            with patch.object(adapter, 'spawn', side_effect=LaunchRefused('Correct the harness settings')):
+                with self.assertRaises(ValueError) as refused:
+                    spawn.cli_run(self.root, task=task, **common)
+                reason = str(refused.exception)
+                self.assertIn('Correct the harness settings. Then rerun the same command.', reason)
+                self.assertIn('--task-file', reason)
+                with patch.object(lifecycle, '_save_refused_task', side_effect=OSError('retry file unavailable')):
+                    with self.assertRaisesRegex(ValueError, 'Correct the harness settings.*retry file unavailable'):
+                        spawn.cli_run(self.root, task=task, **common)
+                idle = spawn.cli_run(self.root, json=True, **common)
+                self.assertFalse(idle['ok'])
+                self.assertNotIn('Saved input', idle['error'])
+            with patch.object(adapter, 'spawn', side_effect=ValueError('Ordinary error')):
+                refused = spawn.cli_run(self.root, task=task, json=True, **common)
+                self.assertNotIn('Saved input', refused['error'])
+            backend.create.assert_not_called()
+            self.assertNotIn(common['name'], [read(path)['name'] for path in agents.record_paths(self.root)])
+            [saved] = (self.root / 'state').glob('startup-task-*.md')
+            self.assertEqual(saved.read_text(), task)
+            self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+            self.assertEqual(spawn.run(self.root, task_file=saved, **common)['name'], common['name'])
+
+    def test_wake_refusal_names_one_retry(self):
         """The delivery formatter already gives the retry command for the saved wake message."""
         adapter = ConfiguredAdapter('guarded', {'spawn': [sys.executable], 'resume': [sys.executable]})
         adapter.resume_prompt_args = ('{task}',)
@@ -96,17 +128,23 @@ class StartupPromptTest(BaseTest):
         write(properties, {**read(properties), 'harness': 'guarded', 'task': 'original task',
                            'universe_id': read(self.root / 'universe.json')['id']})
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'dormant'})
-        errors = []
         with patch.object(lifecycle.harnesses, 'load', return_value=adapter), \
                 patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
                 patch.object(native, 'observe', return_value={'live': 'dormant'}):
-            result = send.run(self.root, agent='asks', text='saved wake', delivery='steer', _present_error=errors.append)
-        self.assertFalse(result['ok'])
-        [line] = errors
-        self.assertIn('Open guarded in that folder without a task and approve workspace trust', line)
-        self.assertEqual(line.count('mv2 deliver asks --retry'), 1)
-        [message] = mailbox.inbox(self.directory, all_messages=True)['messages']
-        self.assertEqual(message['tracking']['submission_state'], 'failed')
+            for reason, prepare in (
+                ('Open guarded in that folder without a task and approve workspace trust', adapter.resume),
+                ('Correct the harness settings', Mock(side_effect=LaunchRefused('Correct the harness settings'))),
+            ):
+                with self.subTest(reason=reason), patch.object(adapter, 'resume', prepare):
+                    errors = []
+                    result = send.run(self.root, agent='asks', text='saved wake', delivery='steer',
+                                      _present_error=errors.append)
+                    self.assertFalse(result['ok'])
+                    [line] = errors
+                    self.assertIn(reason, line)
+                    self.assertEqual(line.count('mv2 deliver asks --retry'), 1)
+        messages = mailbox.inbox(self.directory, all_messages=True)['messages']
+        self.assertEqual([message['tracking']['submission_state'] for message in messages], ['failed', 'failed'])
         self.assertFalse(list((self.root / 'state').glob('startup-task-*.md')))
 
     def watch(self, frame, *, bridge=False):

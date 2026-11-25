@@ -33,6 +33,10 @@ class BridgeUnavailable(ValueError):
     """Preparation failed before a native child or conversation was started."""
 
 
+class LaunchRefused(ValueError):
+    """Decline launch preparation with an actionable reason and let core preserve the spawn task."""
+
+
 class LocalProtocolError(Exception):
     """Reject one correlated relay frame without changing launch health.
 

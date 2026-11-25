@@ -191,6 +191,12 @@ unread messages from the dependency. The CLI never echoes the summary or task/pr
 remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
+An adapter can stop initial spawn or resume preparation by raising
+`LaunchRefused` with an actionable reason. Core shows that reason before
+starting a native service or opening a pane. It releases a refused spawn's
+name and saves its task in a private retry file. A refused wake keeps its
+message in the delivery ledger as a retryable failure.
+
 ### Native service, session and terminal attachment
 
 These are separate identities. `SessionHandle` still identifies the exact

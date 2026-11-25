@@ -16,7 +16,7 @@ import tempfile
 from shlex import quote
 
 from .. import display, harnesses, source, universe
-from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, ModelCheck
+from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, LaunchRefused, ModelCheck
 from ..store import exists_replaced, retry_missing, existing_lock, lock, missing_records, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
@@ -636,8 +636,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                     fresh_start=not any(item.fresh_start for item in storage_notices)) if resume and session else [])
         resolved_model = None
         while True:
-            command = (effects.call(adapter, 'resume', session, context) if resume and not fresh
-                       else effects.call(adapter, 'spawn', context))
+            try:
+                command = (effects.call(adapter, 'resume', session, context) if resume and not fresh
+                           else effects.call(adapter, 'spawn', context))
+            except LaunchRefused as error:
+                if resume or not values['task']:
+                    raise ValueError(str(error)) from None
+                raise _task_refusal(root, values['task'], str(error)) from None
             # An adapter may resolve a saved path through a changed symlink. Compare
             # its effective selection with recorded strings, never re-resolve history.
             selected_storage = dict(storage)
@@ -709,13 +714,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if problem:
                 if resume_message_id is not None:
                     raise ValueError(problem)
-                try:
-                    task_path = _save_refused_task(root, values['task'])
-                except (OSError, UnicodeError) as error:
-                    raise ValueError(f'{problem} Then rerun the same command. Could not save a retry file: {error}') from error
-                retry = ' Use --task-file with that path if you need to restore the original input.' if not resume else ''
-                raise ValueError(f'{problem} Then rerun the same command. Saved input: {quote(str(task_path))}.{retry}'
-                                 ' You can delete this copy once the task starts.')
+                raise _task_refusal(root, values['task'], problem, can_use_task_file=not resume)
         # Preparation can refuse without changing runtime storage or tmux.
         # Recovery still precedes any terminal creation or native service start.
         Tmux.require_launch_version()
@@ -1036,6 +1035,21 @@ def _save_refused_task(root, prompt):
         path.unlink(missing_ok=True)
         raise
     return path
+
+
+def _task_refusal(root, prompt, problem, *, can_use_task_file=True):
+    """Attach the saved task path and retry steps to a preparation refusal."""
+    problem = problem.rstrip()
+    if not problem.endswith(('.', '!', '?')):
+        problem += '.'
+    advice = f'{problem} Then rerun the same command.'
+    try:
+        task_path = _save_refused_task(root, prompt)
+    except (OSError, UnicodeError) as error:
+        return ValueError(f'{advice} Could not save a retry file: {error}')
+    retry = ' Use --task-file with that path if you need to restore the original input.' if can_use_task_file else ''
+    return ValueError(f'{advice} Saved input: {quote(str(task_path))}.{retry}'
+                      ' You can delete this copy once the task starts.')
 
 
 def _resume_notices(adapter, session, caller_environment, effective_environment, storage=None, *, fresh_start=True):

@@ -46,7 +46,7 @@ project/
 | `universe.json` | mv2 | You may edit `name`, `description` and `workspace`. |
 | `template-files.json` | mv2 | Written by `init`, `subverse` and `refresh --apply`. |
 | `state/` | mv2 | Records of agents and their messages. Git ignores it. Don't edit it while agents run. |
-| `state/startup-task-*.md` | mv2 | Private copies (mode `0600`) of tasks refused before launch because workspace trust could not be verified. The refusal names the file to pass to `mv2 spawn --task-file`. You can remove the copy once the task starts or you decide to discard it. |
+| `state/startup-task-*.md` | mv2 | Private copies (mode `0600`) of tasks preserved when preparation refuses a spawn. The refusal names the file to pass to `mv2 spawn --task-file`. You can remove the copy once the task starts or you decide to discard it. |
 | `subverses/` | mv2 | Created by `subverse`, and changed by `move` and `remove`. |
 | `trash/` | mv2 | Filled by `remove` and `refresh --apply`, and emptied by `trash --empty`. Git ignores it. |
 
