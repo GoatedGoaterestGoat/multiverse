@@ -4,6 +4,7 @@ Only exact pane tags authorize closing a terminal. Historical requests locate
 servers and the generation-private relay; they never supply a guessed child PID
 or authority to contact a shared native server directly.
 """
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 import os
@@ -367,13 +368,8 @@ def kill(root, directory, *, attachment_only=False):
                 # Preserve partial native counters even when the operation did
                 # not finish. Only returned exact mailbox IDs are bookkeeping.
                 details = cancellation.value if isinstance(cancellation.value, dict) else {}
-                for message_id in details.get('cancelled_message_ids', []):
-                    try:
-                        mailbox.message_record(directory, message_id)
-                    except ValueError:
-                        continue
-                    mailbox.update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
-                        last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+                cancelled = mailbox.cancel_delivery_messages(directory, details.get('cancelled_message_ids', []))
+                cancellation = replace(cancellation, value={**details, **cancelled})
             except Exception as error:
                 cancellation = NativeResult('unknown', f'runtime.json {condition}; native cancellation unconfirmed: ' + str(error),
                                             cancellation.value)
@@ -399,8 +395,9 @@ def kill(root, directory, *, attachment_only=False):
         agents.update_runtime(directory, launch_id, state='dormant', status='unknown', dormant_at=now(),
                               native_cancellation=cancellation.to_dict(),
                               error=cancellation.reason if cancellation.state != 'ok' else None)
-        mailbox.end_startup_messages(directory, launch_id, 'Terminal closed after runtime.json was lost; saved for explicit retry')
+        startup = mailbox.end_startup_messages(directory, launch_id,
+            'Terminal closed after runtime.json was lost; saved for explicit retry')
     details = cancellation.value if isinstance(cancellation.value, dict) else {}
     result = {'state': cancellation.state, 'reason': cancellation.reason,
-              **{key: value for key, value in details.items() if key != 'cancelled_message_ids'}}
+              **{key: value for key, value in details.items() if key != 'cancelled_message_ids'}, **startup}
     return {'id': directory.name, 'state': 'dormant', 'native_cancellation': result}

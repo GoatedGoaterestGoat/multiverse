@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from multiverse.runtime import attachments, lifecycle, native
 from multiverse.store import now, read, uid, write
@@ -12,7 +13,8 @@ from multiverse.tools import deliver, doctor, inspect, list_agents, send
 from multiverse.universe import mailbox, templates
 from multiverse import harnesses
 from multiverse.harnesses.claude import BRIDGE, CONVERSATION_MISSING, FRESH_SESSION, NEVER_USED, NOT_REGISTERED
-from multiverse.harnesses.types import NativeResult, Message, NativeEndpoint, SessionHandle
+from multiverse.harnesses.types import NativeResult, Message, NativeEndpoint, RestartRequired, SessionHandle
+from multiverse.ui.inspector import agent_state
 from test_multiverse import BaseTest
 
 TOO_OLD = 'Claude Code 2.1.279 is older than 2.1.280, which the multiverse mod needs'
@@ -60,6 +62,117 @@ class DeliveryProblemTest(BaseTest):
         self.assertEqual(row['delivery_problem'], expected)
         self.assertNotIn('PRIVATE BODY', expected)
 
+    def test_a_recorded_bridge_restart_is_visible_before_sending_and_while_input_waits(self):
+        """A launch-local restart diagnosis must reach every inspection surface without a native probe."""
+        facts = {**self.running(), 'native_mode': {'mode': 'bridge', 'policy': 'auto'},
+                 'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'bridge.sock')}}
+        properties = read(self.directory / 'properties.json')
+        write(self.directory / 'properties.json', {**properties, 'restart_required': 'stale property'})
+        write(self.directory / 'runtime.json', facts)
+        reason = 'This bridge predates queued input delivery'
+        expected = f'{reason}. Run mv2 kill recipient, then mv2 resume recipient.'
+        adapter = SimpleNamespace(
+            connection_problem=Mock(return_value=RestartRequired(reason)),
+            capabilities=Mock(side_effect=AssertionError('inspection must not probe capabilities')),
+            get_delivery=Mock(return_value=NativeResult('pending', reason, {'restart_required': True})),
+            send=Mock(side_effect=AssertionError('a check must never submit')),
+        )
+        with patch.object(harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                patch.object(native, 'usage_snapshot', return_value={}), \
+                patch.object(inspect, 'run', return_value=''):
+            row, = lifecycle.listing(self.root, usage=False)
+            self.assertEqual(row['restart_required'], expected)
+            self.assertIn(expected, list_agents.run(self.root))
+            self.assertIn(expected, inspect.cli_run(self.root, agent='recipient'))
+            self.assertEqual(inspect.cli_run(self.root, agent='recipient', json=True)['restart_required'], expected)
+            self.assertIn(expected, agent_state(row).plain)
+            diagnosis = doctor.run(self.root)
+            self.assertFalse(diagnosis['ok'])
+            self.assertIn(f'recipient: {expected}', diagnosis['problems'])
+
+            lines = []
+            empty = deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+            self.assertEqual(empty, {'messages': [], 'ok': True, 'restart_required': expected})
+            self.assertIn(f'recipient: {expected}', lines)
+            adapter.get_delivery.assert_not_called()
+            with patch.object(native, 'observe', return_value={'live': 'dormant'}):
+                self.assertNotIn('restart_required', deliver.run(self.root, agent='recipient', check=True))
+            with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
+                self.assertIsNone(lifecycle.listing(self.root, usage=False)[0]['restart_required'])
+                self.assertNotIn(f'recipient: {expected}', doctor.run(self.root)['problems'])
+
+            message = mailbox.append_message(self.directory, 'already queued', {}, delivery='follow-up',
+                                             target_session=properties['native_session_id'])
+            mailbox.update_message(self.directory, message['id'], submission_state='accepted', attempts=[{
+                'state': 'native_queued', 'launch_id': facts['launch_id'], 'native_session_id': properties['native_session_id'],
+            }])
+            _, before = mailbox.message_record(self.directory, message['id'])
+            lines.clear()
+            result = deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['restart_required'], expected)
+            self.assertTrue(result['messages'][0]['restart_required'])
+            self.assertIn('recipient: 1 waiting for restart.', lines)
+            self.assertIn('recipient: message waiting for restart.', lines)
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before)
+
+            refused = mailbox.append_message(self.directory, 'refused input', {}, delivery='steer',
+                                             target_session=properties['native_session_id'])
+            mailbox.update_message(self.directory, refused['id'], submission_state='failed', attempts=[{
+                'state': 'unavailable', 'ok': False, 'reason': reason,
+            }])
+            lines.clear()
+            errors = []
+            result = deliver.run(self.root, agent='recipient', check=True, _present=lines.append,
+                                 _present_error=errors.append)
+            self.assertFalse(result['ok'])
+            self.assertEqual(lines, [f'recipient: {expected}',
+                                     'recipient: 1 waiting for restart, 1 not delivered.',
+                                     'recipient: message waiting for restart.'])
+            self.assertEqual(errors, [f'recipient: message not delivered: {reason}. '
+                                      'After the restart, run mv2 deliver recipient --retry. '
+                                      "It is waiting in recipient's inbox. A retry submits it as a prompt if it is still unread."])
+        self.assertEqual(adapter.get_delivery.call_count, 2)  # Only the queued message was checked.
+        adapter.capabilities.assert_not_called()
+        adapter.send.assert_not_called()
+
+    def test_delivery_failure_advice_distinguishes_running_and_stopped_agents(self):
+        """Resume alone cannot restore a running agent's connection after a check or retry fails."""
+        write(self.directory / 'runtime.json', self.running())
+        message = self.message('pending')
+        self.message('pending')  # A check shares one live observation across its failure lines.
+        failure = {'state': 'unavailable', 'reason': 'Bridge refused connection', 'ok': False}
+        name = 'recipient'
+        with patch.object(native, 'deliver', return_value=failure), \
+                patch.object(native, 'send_or_wake', return_value=failure), \
+                patch.object(native, 'finalize_launch_only', return_value=None), \
+                patch.object(native, 'connection_problem', return_value=None):
+            for check in (True, False):
+                if not check:
+                    mailbox.update_message(self.directory, message['id'], submission_state='failed')
+                for live in ('alive', 'stopped'):
+                    with self.subTest(check=check, live=live), \
+                            patch.object(native, 'observe', return_value={'live': live}) as observed:
+                        lines = []
+                        deliver.run(self.root, agent=name, check=check, retry=not check, _present=lines.append)
+                        observed.assert_called_once()
+                        if check and live == 'alive':
+                            self.assertEqual(lines[-1], 'recipient: could not check delivery: Bridge refused connection. '
+                                             'Saved. Restart it with mv2 kill recipient, then mv2 resume recipient. '
+                                             'Then run mv2 deliver recipient --check.')
+                        elif not check and live == 'alive':
+                            self.assertEqual(lines[-1], 'Not delivered to recipient: Bridge refused connection. Saved; '
+                                             'restart it with mv2 kill recipient, then mv2 resume recipient, '
+                                             'then mv2 deliver recipient --retry or --dismiss. '
+                                             "It is waiting in recipient's inbox. A retry submits it as a prompt if it is still unread.")
+                        else:
+                            self.assertIn('Saved; resume it', lines[-1])
+                with patch.object(deliver, 'running_for_delivery_advice') as observed:
+                    deliver.run(self.root, agent=name, check=check, retry=not check, json=True)
+                    observed.assert_not_called()
+
     def test_dismissed_messages_stay_in_history_and_can_never_be_resent(self):
         """Dismissal must close uncertainty without replaying it, hiding confirmation, or cancelling pending startup input."""
         selected = [self.message(state) for state in ('failed', 'launch-only', 'accepted', 'unknown', 'submitting')]
@@ -82,7 +195,8 @@ class DeliveryProblemTest(BaseTest):
             self.assertTrue(result['ok'])
             self.assertEqual(result['dismissed'], 5)
             self.assertEqual((result['dismissed_failures'], result['dismissed_unconfirmed']), (2, 3))
-            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.',
+            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent. '
+                                    "1 of the messages just dismissed is still waiting in recipient's inbox.",
                                     'recipient: 3 unconfirmed messages dismissed; they may still have arrived. Kept in history. Nothing resent.'])
             self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
         self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
@@ -117,7 +231,8 @@ class DeliveryProblemTest(BaseTest):
         self.message('failed')
         lines = []
         self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)['dismissed'], 1)
-        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent.'])
+        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent. '
+                                 "1 of the messages just dismissed is still waiting in recipient's inbox."])
         self.message('unknown')
         lines = []
         result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)
@@ -523,3 +638,115 @@ class DeliveryProblemTest(BaseTest):
                 self.assertEqual(deliver.run(root, agent='recipient', check=True)['messages'], [])
                 self.assertEqual(deliver.run(root, agent='recipient', retry=True)['messages'], [])
                 self.assertEqual(doctor.run(root)['problems'], [])
+
+    def test_paused_queue_displays_only_accepted_unconfirmed_queued_messages(self):
+        """An interrupted empty queue must stay quiet, and list/inspect should count only current queued receipts."""
+        conversation = read(self.directory / 'properties.json')['native_session_id']
+        launch = uid()
+
+        def runtime(queue):
+            write(self.directory / 'runtime.json', {
+                **self.running(), 'launch_id': launch, 'status': 'idle', 'queue_state': queue,
+            })
+
+        def saved(value, *, target=conversation, accepted='accepted', confirmation=None, launched=launch):
+            message = mailbox.append_message(self.directory, 'saved input', {}, delivery='follow-up',
+                                             target_session=target)
+            mailbox.update_message(self.directory, message['id'], submission_state=accepted,
+                                   attempts=[{'launch_id': launched, 'native_session_id': target}],
+                                   native_receipt=value, transcript_confirmed_at=confirmation)
+            return message
+
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch.object(lifecycle, 'terminal_action', return_value=''), \
+                patch.object(native, 'deliver', side_effect=AssertionError('listing must not query native delivery')):
+            def check(expected):
+                listed = list_agents.run(self.root, wide=True)
+                inspected = inspect.cli_run(self.root, agent='recipient')
+                public = inspect.cli_run(self.root, agent='recipient', json=True)
+                self.assertEqual(public.get('paused_queue'), expected)
+                self.assertEqual('Queue paused' in listed, expected is not None)
+                self.assertEqual('Queue paused' in inspected, expected is not None)
+                self.assertNotIn('delivery_problem', public)
+                return listed
+
+            codex = {'native_session_id': conversation, 'state': 'paused'}
+            runtime(codex)
+            check(None)
+            # A stored adapter count by itself still proves no local message.
+            runtime({**codex, 'paused_count': 9})
+            check(None)
+            stale_launch = uid()
+            saved({'queued_submission_id': 'native-queued'}, launched=stale_launch)
+            saved({'queued': True, 'transcript_confirmed': True})
+            saved({'queued': True}, target=uid())
+            saved({'queued': True}, accepted='pending')
+            saved({'queued': True}, confirmation=now())
+            saved({'transcript_confirmed': False})  # A native acceptance alone does not prove queuing.
+            saved({'queued_submission_id': 'former-queue-id', 'queued': False})
+            saved({'queued': True}, accepted='cancelled')
+            runtime(codex)
+            self.assertIn('Queue paused (1 message)', check({'state': 'paused', 'count': 1}))
+            runtime({'state': 'paused'})
+            check({'state': 'paused', 'count': 1})
+            # Conversation-scoped Codex receipts survive resume, launch-scoped Agy receipts do not.
+            agy = {**codex, 'launch_id': launch, 'reason': 'error', 'paused_count': 9}
+            runtime(agy)
+            check(None)
+            receipt = saved({'queued': True})
+            self.assertIn('Queue paused (1 message) after a turn error',
+                          check({'state': 'paused', 'count': 1, 'reason': 'error'}))
+            second = saved({'paused': True})
+            check({'state': 'paused', 'count': 2, 'reason': 'error'})
+            # Older accepted receipts can outlive a handoff. The current pause
+            # names only the retry submission that is still held.
+            retry_id = uid()
+            mailbox.update_message(self.directory, second['id'], attempts=[{
+                'launch_id': launch, 'native_session_id': conversation, 'native_message_id': retry_id,
+            }])
+            paused_retry = {**agy, 'paused_message_ids': [retry_id, retry_id, uid()]}
+            runtime(paused_retry)
+            check({'state': 'paused', 'count': 1, 'reason': 'error'})
+            for damaged in (None, [], [retry_id, {}], [second['id']]):
+                runtime({**agy, 'paused_message_ids': damaged})
+                check(None)
+            bad_attempt = saved({'queued': True})
+            mailbox.update_message(self.directory, bad_attempt['id'], attempts=[{
+                'launch_id': launch, 'native_session_id': conversation, 'native_message_id': [],
+            }])
+            runtime(paused_retry)
+            check({'state': 'paused', 'count': 1, 'reason': 'error'})
+            mailbox.update_message(self.directory, bad_attempt['id'], dismissed_at=now())
+            mailbox.update_message(self.directory, second['id'], transcript_confirmed_at=now())
+            runtime(paused_retry)
+            check(None)
+            runtime({**agy, 'reason': ['damaged'], 'paused_count': True})
+            check({'state': 'paused', 'count': 1})
+            for stale in ({'launch_id': stale_launch}, {'native_session_id': uid()}, {'state': 'idle'}):
+                runtime({**agy, **stale})
+                check(None)
+            runtime(agy)
+            with patch.object(lifecycle, 'observe', return_value={'live': 'stopped'}):
+                check(None)
+            mailbox.update_message(self.directory, receipt['id'], dismissed_at=now())
+            check(None)
+
+    def test_deliver_check_renders_a_recorded_pause_cause_without_guessing(self):
+        """Bad or unfamiliar receipt metadata must not break deliver --check or invent a cause."""
+        self.message('pending')
+        cases = (({}, 'after an interrupt'),
+                 ({'paused_reason': 'interrupt'}, 'after an interrupt'),
+                 ({'paused_reason': 'error'}, 'after a turn error'),
+                 ({'paused_reason': 'cancel'}, 'after turn cancellation'),
+                 ({'paused_reason': []}, ''), ({'paused_reason': {}}, ''),
+                 ({'paused_reason': 'unrecognized'}, ''))
+        for evidence, cause in cases:
+            with self.subTest(evidence=evidence):
+                receipt = {'state': 'native_queued', 'ok': True,
+                           'value': {'queued': True, 'paused': True, **evidence}}
+                lines = []
+                with patch.object(native, 'finalize_launch_only', return_value=None), \
+                        patch.object(native, 'deliver', return_value=receipt):
+                    deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+                suffix = f' {cause}' if cause else ''
+                self.assertIn(f'message queued and paused{suffix}.', '\n'.join(lines))

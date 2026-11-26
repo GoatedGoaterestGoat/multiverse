@@ -4,11 +4,18 @@ The tmux status line keeps its own copies of a few of these: tmux runs it with
 `python -S`, outside this package's imports.
 """
 from datetime import datetime, timezone
+from shlex import quote
 
 
 def clean(value):
     """Printable text only: terminal control characters become spaces."""
     return "".join(c if c.isprintable() else " " for c in str(value))
+
+
+def restart_required_line(name, reason):
+    agent = quote(clean(name))
+    problem = clean(reason).strip().rstrip('.')
+    return f'{problem}. Run mv2 kill {agent}, then mv2 resume {agent}.'
 
 
 # Agents and launches
@@ -187,7 +194,7 @@ def phase_label(row):
     return f"{phase} ({age})" if phase and age else phase
 
 
-HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
+HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi", "agy": "Antigravity"}
 
 
 def mode(record):
@@ -222,6 +229,62 @@ def startup_prompt_line(record, prompt):
     where = f" ({clean(detail)})" if isinstance(detail, str) and detail else ""
     return (f"It's waiting at {HARNESS_NAMES.get(harness, harness)}'s prompt \"{clean(prompt['title'])}\"{where}: "
             f"answer it in its pane with mv2 attach {record['name']}.")
+
+
+_PAUSED_REASONS = {
+    "error": "after a turn error",
+    "cancel": "after turn cancellation",
+    "interrupt": "after an interrupt",
+}
+
+
+def paused_queue_cause(reason):
+    """Return the display phrase for a recognized pause reason."""
+    return _PAUSED_REASONS.get(reason, "") if isinstance(reason, str) else ""
+
+
+def paused_queue_state(row):
+    """The live listing snapshot's pause, scoped to its launch and conversation."""
+    if not isinstance(row, dict) or row.get("live") != "alive":
+        return None
+    facts = row.get("runtime")
+    if not isinstance(facts, dict):
+        return None
+    queue = facts.get("queue_state")
+    if not isinstance(queue, dict) or queue.get("state") != "paused":
+        return None
+    for key, current in (("launch_id", facts.get("launch_id")), ("native_session_id", row.get("native_session_id"))):
+        saved = queue.get(key)
+        if saved is not None and (not isinstance(saved, str) or not saved or saved != current):
+            return None
+    return queue
+
+
+def paused_queue(row):
+    """Public paused-queue details, backed by accepted unconfirmed local messages."""
+    count = row.get("paused_queue_count")
+    if type(count) is not int or count < 1:
+        return None
+    queue = paused_queue_state(row)
+    if queue is None:
+        return None
+    result = {"state": "paused", "count": count}
+    reason = queue.get("reason")
+    if paused_queue_cause(reason):
+        result["reason"] = reason
+    return result
+
+
+def paused_queue_line(row):
+    """Human one-line note for a pause with known queued messages."""
+    info = paused_queue(row)
+    if info is None:
+        return None
+    count = info["count"]
+    count_part = f"{count} {'message' if count == 1 else 'messages'}"
+    reason = paused_queue_cause(info.get("reason"))
+    reason_part = f" {reason}" if reason else ""
+    return f"Queue paused ({count_part}){reason_part}: send a new steer or follow-up, or type a terminal prompt, to resume."
 
 
 def with_notices(summary, record):

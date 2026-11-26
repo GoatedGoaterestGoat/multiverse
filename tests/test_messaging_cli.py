@@ -72,6 +72,7 @@ class MessagingCliTest(BaseTest):
 
     def test_send_reminders_peek_once_and_match_the_recipient_not_its_name(self):
         """A reminder must survive renames and moves without consuming unread messages or confusing names and native-queued senders."""
+        reminder = 'Reminder: you have unread inbox messages from first. Read them with mv2 inbox.'
         directory = self.directories['third']
         properties = store.read(directory / 'properties.json')
         store.write(directory / 'properties.json', {**properties, 'universe_id': store.read(self.root / 'universe.json')['id']})
@@ -108,21 +109,20 @@ class MessagingCliTest(BaseTest):
                                          '--delivery', delivery, '--text', 'reply')
                     output = checked_notes(output, [] if delivery == 'inbox-only' else ['first', 'second'])
                     self.assertEqual(len(output.splitlines()), 2)
-                    self.assertTrue(output.splitlines()[0].endswith('Reminder: you have unread messages from first.'))
+                    self.assertTrue(output.splitlines()[0].endswith(reminder), output)
                     self.assertNotIn('Reminder:', output.splitlines()[1])
                     peek.assert_called_once_with(directory, limit=None, peek=True, blocking=False)
                     self.assertEqual(snapshot(), before)
             self.behavior = NativeResult('error', 'fixture refusal')
             self.output('send', 'first', '--text', 'failed reply', code=1)
-            self.assertTrue(checked_notes(self.stderr, ['first']).strip().endswith(
-                'Reminder: you have unread messages from first.'))
+            self.assertTrue(checked_notes(self.stderr, ['first']).strip().endswith(reminder))
             self.assertEqual(snapshot(), before)
             with self.subTest('a launch notice and the reminder stay separate'), \
                     patch.object(native, 'send_or_wake', return_value={'state': 'native_queued',
                                  'notices': ['Note: this launch starts it fresh under the same session ID']}):
                 output = self.output('send', 'first', '--text', 'with a launch notice')
                 output = checked_notes(output, ['first'])
-                self.assertTrue(output.endswith('same session ID\nReminder: you have unread messages from first.\n'), output)
+                self.assertTrue(output.endswith(f'same session ID\n{reminder}\n'), output)
             with patch.object(mailbox, 'inbox', side_effect=AssertionError('JSON and plugin sends do not peek')) as peek:
                 result = json.loads(self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'json', '--json'))
                 self.assertEqual(result['state'], 'queued')
@@ -137,7 +137,7 @@ class MessagingCliTest(BaseTest):
                 relocate.move_agent(self.root, 'first', destination)
             with self.subTest('the same recipient after a move'), patch.object(self, 'root', destination):
                 output = self.output('send', 'first', '--delivery', 'inbox-only', '--text', 'after a move')
-                self.assertTrue(output.strip().endswith('Reminder: you have unread messages from first.'), output)
+                self.assertTrue(output.strip().endswith(reminder), output)
             replacement = self.root / 'state/agents' / str(uuid4())
             store.write(replacement / 'properties.json', {**first_properties, 'id': replacement.name,
                         'native_session_id': str(uuid4())})
@@ -348,7 +348,8 @@ class MessagingCliTest(BaseTest):
                     self.output('send', 'third', '--text', 'wake message', code=1)
                     self.assertEqual(self.stderr.strip(),
                         f'Not delivered to third: Could not wake agent: {reason} Saved; fix the reason, '
-                        'then mv2 deliver third --retry or --dismiss.')
+                        'then mv2 deliver third --retry or --dismiss. '
+                        "It is waiting in third's inbox. A retry submits it as a prompt if it is still unread.")
                     self.assertEqual(self.history('third')[-1]['tracking']['attempts'][-1]['reason'],
                                      'Could not wake agent: ' + diagnostic)
                     record = json.loads(self.output('send', 'third', '--text', 'wake message', '--json', code=1))

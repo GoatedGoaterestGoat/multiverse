@@ -8,7 +8,7 @@ history starts after the harness's own compaction, and the one-shot run.
 Harness-neutral conversation entries come later (see [Later](#later)).
 
 The protocols are mv2's own. A plugin uses them; it never defines what an
-adapter implements ([plugins](plugins.md)). Reading is implemented for Claude and Codex. Pi reports it unavailable
+adapter implements ([plugins](plugins.md)). Reading is implemented for Claude, Codex and Antigravity CLI. Pi reports it unavailable
 ("not implemented for this harness yet") until it gets its own implementation.
 
 ## Rules
@@ -169,6 +169,15 @@ switch is unresolved, current reads and Codex ask are unavailable (try again)
 rather than choosing a conversation; a read of an explicitly selected earlier
 generation still works.
 
+### Antigravity transcript rules
+
+Antigravity reads `brain/<uuid>/.system_generated/logs/transcript_full.jsonl` under the agent's recorded `~/.gemini/antigravity-cli` home, falling back to `transcript.jsonl` when the full log is absent. Components are opened with `O_NOFOLLOW`; symlinks and unreadable files report an error rather than absence, while a missing log reports unavailable with `retry=True`.
+
+- Every complete newline-terminated JSONL line is one row; an unfinished last line waits for its newline, and damaged rows remain `meta` with no body. Unique nonnegative `step_index` values form refs `step-<n>`. Positions chain the SHA-256 digests of preceding line bytes; body reads re-prove the prefix on concurrent growth and raise `TranscriptRowsChanged` on rewrites.
+- `USER_INPUT` is `prompt` (`source="human"` for `USER_EXPLICIT`). `USER_INPUT` with `source: SYSTEM_SDK` is a message mv2's hooks injected: `prompt` with `source="plugin"` when no turn is open and `mid_turn` while one is. `PLANNER_RESPONSE` is `response` and ends the turn when `status` is `DONE` with text and no `tool_calls` (or `CANCELLED`/`INTERRUPTED`). `GENERIC` rows from `MODEL` are `tool_result`.
+- `SYSTEM_MESSAGE` rows carrying Antigravity's `Stop hook blocked termination:` envelope (follow-ups from mv2 releases before hook injection) are `prompt` (`source="plugin"`). Rows carrying `[Message] ... content=` with `sender=system` and `priority=MESSAGE_PRIORITY_HIGH`, `priority=MESSAGE_PRIORITY_NORMAL` or no priority field (excluding server-restart notices and mv2's fixed wake ping, which is `injected`) are `agentapi` deliveries: `mid_turn` while a turn is open and `prompt` when idle (`source="plugin"`). Rows with `sender=<conversation>/task-<n>` (background-task notifications) use `source="task-notification"` (`mid_turn` while a turn is open, `prompt` when idle). Low-priority system notices (such as Antigravity's `priority=MESSAGE_PRIORITY_LOW` server-restart notice), other `[Message]` senders and all other system messages are `injected`.
+- `CHECKPOINT` rows are `compaction` and advance `context_from` so earlier rows read as out of context.
+
 ## History and context
 
 The **history** is the conversation as it now stands, across every
@@ -268,12 +277,14 @@ rows through this protocol, with `transcripts.read`.
   anyway, in its place, never dropped; a plugin pairs a null-turn start and
   end by order, since a conversation runs one turn at a time.
 - `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
-  a message, a plugin's send, an answer, a command run with `mv2 slash`, the
-  launch's task) or `harness` (anything else). `message` is the mv2 message ID
-  for a message, from which a plugin reads its sender, and null otherwise; mv2
-  matches the delivery from its own records and never adds the ID to the row
-  or anything the agent sees. `first_task` marks the start of the turn that
-  ran the launch's task, when the harness proves that input was the task.
+  a message, including the one a wake starts the resumed session with, a
+  plugin's send, an answer, a command run with `mv2 slash`, the launch's task)
+  or `harness` (anything else). `message` is the mv2 message ID for a message,
+  from which a plugin reads its sender, and null otherwise; mv2 matches the
+  delivery from its own records and never adds the ID to the row or anything
+  the agent sees. `first_task` marks the start of the turn that ran the
+  launch's task, when the harness proves that input was the task; a wake's
+  message is not a task.
 - `state` is `finished`, `interrupted`, `error` (a model or harness error
   ended it, where the harness records one) or `unknown` (the harness can't
   tell, or mv2 closed the turn because its end was never reported). A plugin
@@ -405,7 +416,7 @@ transport_retries=, timeout=, cancel=)` (API 1.14, `spend`, needs
 `models.FAMILY`) gets one model reply to a context the plugin supplies, with
 no tools and no saved conversation. `run_options()` (`observe`, but it may start
 the harness once per process to read its version) says whether a
-harness runs at all and what it keeps. Claude and checked Codex releases implement it; Pi and custom harnesses report it unsupported.
+harness runs at all and what it keeps. Claude and checked Codex releases implement it; Antigravity CLI (1.5.14 lacks a zero-tools headless mode, a persistence-free option and synthetic conversation-history import), Pi and custom harnesses report it unsupported.
 
 - **Messages.** A `Row` is the native passthrough: this harness's format, with
   its body, used in the order given as one linear conversation, with the

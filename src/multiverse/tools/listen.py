@@ -1,4 +1,4 @@
-"""Wait in a background shell for unread inbox-only messages, without reading them."""
+"""Wait in a background shell for unread inbox messages without marking them read."""
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import time
@@ -29,8 +29,14 @@ def _current(directory, launch_id):
 UNKNOWN_SECONDS = 30
 
 
-def _processes(facts):
+def _processes(facts, directory):
     """True once the frontend and its runner are both proven running; False when either cannot be told now."""
+    from ..runtime import listen_proof
+
+    if facts.get('runner_listen') is True:
+        if not listen_proof.direct_checks_ok(facts):
+            # A PID hidden or remapped by the sandbox cannot attest to the host process ending.
+            return listen_proof.check(directory, facts)
     # Observe the frontend and its runner, never the shared native daemon. A
     # listener must also end if a crash left runtime.json saying "running".
     proven = True
@@ -39,22 +45,13 @@ def _processes(facts):
         if gone is True:
             raise ValueError('Listening launch has ended')
         proven = proven and gone is False
-    return proven
-
-
-def _signature(directory):
-    stamps = []
-    for name in ('inbox.jsonl', 'inbox.cursor', 'inbox-state.json', 'inbox-read.json'):
-        try:
-            info = (directory / name).stat()
-            stamps.append((info.st_ino, info.st_size, info.st_mtime_ns))
-        except FileNotFoundError:
-            stamps.append(None)
-    return tuple(stamps)
+    if proven or facts.get('runner_listen') is not True:
+        return proven
+    return listen_proof.check(directory, facts)
 
 
 def run(root=None, *, timeout=None, _present=None):
-    """Wait for unread inbox-only messages. A focus that begins meanwhile holds the report, and the timeout,
+    """Wait for unread inbox messages. A focus that begins meanwhile holds the report, and the timeout,
     until it ends.
 
     `_present(result)` prints the line. It runs under the focus lock, after the last check that no focus is
@@ -79,6 +76,8 @@ def run(root=None, *, timeout=None, _present=None):
     launch_id = agents.runtime(directory).get('launch_id')
     if not launch_id:
         raise ValueError('No running launch to listen for')
+    from ..runtime import native
+    native.try_shell_callback(caller.root, directory, launch_id)
     with ExitStack() as listeners:
         registrations = [listeners.enter_context(focus.listening(directory))]
         try:
@@ -117,7 +116,7 @@ def _wait(directory, launch_id, deadline, started, registrations, present):
         owed = owed or focused
         # Nothing is read during a focus, so `previous` keeps the last read from before it: whatever arrived
         # or was read during the focus counts as a change once it ends.
-        wanted = not focused and (owed or _signature(directory) != previous)
+        wanted = not focused and (owed or mailbox.inbox_signature(directory) != previous)
         # A cached observation keeps quiet polling cheap, but never authorizes
         # success: every prospective inbox read gets fresh process proof.
         proven = unknown = False
@@ -125,7 +124,7 @@ def _wait(directory, launch_id, deadline, started, registrations, present):
             if unknown_since is not None and time.monotonic() - unknown_since >= UNKNOWN_SECONDS:
                 raise ValueError('Cannot verify that the listening launch is still running')
             checked = time.monotonic()
-            proven = _processes(facts)
+            proven = _processes(facts, directory)
             unknown = not proven
             if proven:
                 next_process_check = time.monotonic() + 1
@@ -143,12 +142,13 @@ def _wait(directory, launch_id, deadline, started, registrations, present):
                 current = _current(directory, launch_id)
                 sender_actor(acting='listen')
                 same_processes = all(current.get(key) == facts.get(key)
-                    for key in ('pid', 'pid_started', 'runner_pid', 'runner_started'))
+                    for key in ('pid', 'pid_started', 'runner_pid', 'runner_started', 'runner_listen_file',
+                                'runner_pid_namespace', 'runner_listen'))
                 if not same_processes:
                     pending, next_process_check = True, 0  # proof of replaced processes proves nothing
                 elif proven:
                     unknown_since = None
-                if not wanted and not pending and _signature(directory) != previous:
+                if not wanted and not pending and mailbox.inbox_signature(directory) != previous:
                     pending = True  # arrived during this poll's check: the next poll reads it, with fresh proof
                 if wanted and proven and same_processes:
                     with ExitStack() as fence:
@@ -160,7 +160,7 @@ def _wait(directory, launch_id, deadline, started, registrations, present):
                             if focus.current(directory):
                                 owed = True
                             else:
-                                signature = _signature(directory)
+                                signature = mailbox.inbox_signature(directory)
                                 if owed or signature != previous:
                                     messages = mailbox.inbox(directory, limit=None, peek=True, blocking=False)['messages']
                                     report = _report(directory, messages, started) if messages else None
@@ -222,6 +222,10 @@ def _report(directory, messages, started):
         name = sender.get('name') if isinstance(sender, dict) else None
         name = ' '.join(name.split()) if isinstance(name, str) and name.strip() else 'unknown sender'
         line = f'inbox message from {name}' + (' (a steer/follow-up message held during focus mode)' if held else '')
+    failed = sum(message.get('delivery_failed') is True for message in messages)
+    if failed:
+        line += ('. It could not be delivered. Run mv2 inbox to read it.' if len(messages) == 1 else
+                 f'. {failed} could not be delivered. Run mv2 inbox to read them.')
     return {'ok': True, 'line': line}, (latest['id'] if held else None)
 
 

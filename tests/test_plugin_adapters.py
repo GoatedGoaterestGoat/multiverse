@@ -1,5 +1,6 @@
 """Harness adapters applying plugin launch plans: Claude and Pi here; Codex in its own tests."""
 import json
+import os
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -196,3 +197,100 @@ class PluginLaunchTest(PluginTestCase):
             old, _ = self.launch(version=(2, 1, 270))  # auto falls back to plain on an old Claude
             self.assertEqual(old.native_mode["mode"], "plain")
             self.assertNotIn("--plugin-dir", old.argv)
+
+    def test_agy_plugin_dirs_and_contributions_stay_before_prompt(self):
+        """Antigravity plugin --add-dir entries and launch contributions apply in both bridged and plain launches
+        before --prompt-interactive=..., honor needs_bridge and version bounds, and block ANTIGRAVITY_* spoofing."""
+        self.write_plugin("agy-pack", {
+            "module": "plugin", "extends": ["launch"], "permissions": ["harness.agy"],
+            "harnesses": {"agy": [
+                {"dir": "agy/common", "min_version": "1.5.20"},
+                {"dir": "agy/bridged", "needs_bridge": True},
+            ]},
+        }, {
+            "plugin.py": (
+                "from multiverse.plugins import api\n"
+                "def register(mv):\n"
+                "    @mv.launch.contribute('agy')\n"
+                "    def agy(info):\n"
+                "        return api.Contribution(environment={'MV2_AGY_PACK': '1', 'MV2_AGY_PACK_BRIDGE': '1' if info.bridge else '0'})\n"
+            ),
+        })
+        self.write_plugin("agy-spoof", {"module": "plugin", "extends": ["launch"]}, {
+            "plugin.py": (
+                "from multiverse.plugins import api\n"
+                "def register(mv):\n"
+                "    mv.launch.contribute('agy', lambda info: api.Contribution("
+                "environment={'ANTIGRAVITY_CSRF_TOKEN': 'forged'}))\n"
+            ),
+        })
+        self.enable("agy-pack")
+        self.enable("agy-spoof")
+        common = str((self.plugins_dir / "agy-pack" / "agy" / "common").resolve())
+        bridged = str((self.plugins_dir / "agy-pack" / "agy" / "bridged").resolve())
+        launch_dir = self.agent_dir / "launches" / "l1"
+        launch_dir.mkdir(parents=True)
+
+        def spawn_agy(bridge, version=(1, 5, 20), environment=None):
+            path = self.root / "harnesses" / "agy" / "harness.json"
+            data = read(path)
+            if bridge is None:
+                data.setdefault("settings", {}).pop("inbox_bridge", None)
+            else:
+                data.setdefault("settings", {})["inbox_bridge"] = bridge
+            write(path, data)
+            values = {
+                "name": "worker", "agent_id": self.agent_dir.name, "session_id": "", "bootstrap": "b",
+                "bootstrap_json": '"b"', "task": "do task", "agent_dir": str(self.agent_dir),
+                "launch_dir": str(launch_dir), "harness_dir": str(self.root / "harnesses" / "agy"),
+                "session_file": "", "bootstrap_file": str(launch_dir / "AGENTS.md"),
+                "task_file": "", "workspace": str(self.work), "model": "gemini-4-neon",
+                "control_socket": str(self.work / "agy.sock"),
+            }
+            with patch("multiverse.harnesses.agy.agy_version", return_value=version):
+                return harnesses.load(self.root, "agy").spawn(
+                    LaunchContext("spawn", values, environment=environment),
+                )
+
+        plain = spawn_agy(False)
+        self.assertIn(common, plain.argv)
+        self.assertNotIn(bridged, plain.argv)
+        self.assertEqual(plain.argv[-1], "--prompt-interactive=do task")
+        self.assertLess(plain.argv.index(common), len(plain.argv) - 1)
+        self.assertEqual(plain.environment["MV2_AGY_PACK"], "1")
+        self.assertEqual(plain.environment["MV2_AGY_PACK_BRIDGE"], "0")
+        self.assertNotIn("ANTIGRAVITY_CSRF_TOKEN", plain.environment)
+        self.assertEqual(plain.plugins["plugins"]["agy-spoof"]["state"], "skipped")
+        self.assertEqual(plain.plugins["plugins"]["agy-pack"]["unfit"],
+                         ["needs mv2's bridge, which this launch does not use"])
+
+        live = spawn_agy(True)
+        self.assertIn(common, live.argv)
+        self.assertIn(bridged, live.argv)
+        self.assertEqual(live.argv[-1], "--prompt-interactive=do task")
+        self.assertLess(live.argv.index(bridged), len(live.argv) - 1)
+        self.assertEqual(live.environment["MV2_AGY_PACK_BRIDGE"], "1")
+        self.assertEqual(live.plugins["plugins"]["agy-pack"]["added"], ["agy_add_dirs", "environment"])
+
+        older_bridged = spawn_agy(True, version=(1, 5, 17))
+        self.assertNotIn(common, older_bridged.argv)
+        self.assertIn(bridged, older_bridged.argv)
+
+        auto_fallback = spawn_agy(None, version=(1, 4, 0))
+        self.assertEqual(auto_fallback.native_mode["mode"], "plain")
+        self.assertNotIn(bridged, auto_fallback.argv)
+        self.assertNotIn("MV2_AGY_PACK_BRIDGE", auto_fallback.environment)
+
+        # Corrupt personal settings auto-fallback turns the launch plain before plugin planning so
+        # needs_bridge entries stay out and contributions see bridge=False.
+        bad_home = self.work / "bad-agy-home"
+        bad_settings = bad_home / ".gemini" / "antigravity-cli" / "settings.json"
+        bad_settings.parent.mkdir(parents=True)
+        bad_settings.write_text("{not valid json")
+        corrupt_fallback = spawn_agy(None, environment={"HOME": str(bad_home), "PATH": os.environ["PATH"]})
+        self.assertEqual(corrupt_fallback.native_mode["mode"], "plain")
+        self.assertIn(common, corrupt_fallback.argv)
+        self.assertNotIn(bridged, corrupt_fallback.argv)
+        self.assertEqual(corrupt_fallback.environment["MV2_AGY_PACK_BRIDGE"], "0")
+        self.assertEqual(corrupt_fallback.plugins["plugins"]["agy-pack"]["unfit"],
+                         ["needs mv2's bridge, which this launch does not use"])

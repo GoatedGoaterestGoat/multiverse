@@ -15,7 +15,7 @@ refuses the send:
 > first before messaging them. If you still want to message B, resend with --force.
 
 Nothing is saved or sent. `--force` sends anyway. Follow-ups matter more than inbox messages and may change what A
-does, so A reads them first; the reminder about unread inbox messages from B is unchanged.
+does, so A reads them first. A send that proceeds can also remind A to read B's unread inbox messages with `mv2 inbox`.
 
 An agent's `--force` send still makes the bounded queue read, including for inbox-only sends. A complete report with no follow-ups from a recipient adds: "You have no queued follow-ups from B, so you don't need --force." This is per recipient, matches by stored agent ID after a name or folder change, and appears as `force_note` in JSON. Legacy records without an ID use their folder name. Incomplete or unavailable reports cannot establish absence, so they add no force reminder. Force always bypasses the refusal; it also keeps suppressing the unknown-queue advice.
 

@@ -27,6 +27,8 @@ Start with a [command harness](#command-harnesses). Write an adapter when you ne
 | `get_usage(session, executor=None)` | `observe` | `NativeResult` | Return measured context and token usage, or `unavailable`. Never estimate. |
 
 `EFFECTS` in `harnesses/types.py` declares these classes for core dispatch.
+
+Raise `LaunchRefused` from launch preparation when the adapter can identify a condition the person must fix before starting the harness. Give the reason and the steps to fix it. Core saves a task-bearing spawn's input to a private retry file and releases its name. A wake keeps its message in the inbox for retry. The adapter writes no retry files.
 An adapter with `ask_snapshot_only = True` receives a read-only source snapshot,
 without identity reconciliation or a launch lock. Its `ask` must use
 `executor.run_once(adapter, session, prepare)` to revalidate the captured generation
@@ -52,12 +54,15 @@ Core also looks for these optional methods and attributes:
 
 | Method or attribute | Used for |
 | --- | --- |
-| `family` | Which status line defaults apply: `claude`, `codex`, `pi` or `''` |
+| `family` | Which status line defaults apply: `claude`, `codex`, `pi`, `agy` or `''` |
+| `shell_callback(session, environment)` | `act` hook for launches with `CommandSpec.shell_callback = True`. Runs from `mv2 report`, `mv2 inbox`, `mv2 send` and `mv2 listen` in the agent's shell. Returns a `ShellCallbackResult` (binding an unbound `native_id`, publishing `bridge`, and writing only files listed in `CommandSpec.cleanup_files`) or `None`. Core owns the launch/runtime locks, binding checks and file writes. |
 | `session_home(environment)` | Resolve an explicit candidate storage home; return `None` when its supplied environment cannot identify one. |
+| `workspace_trust(workspace, *, environment)` | Optional read-only startup check for harnesses that can run a command-line prompt before native trust approval. Return `trusted`, `untrusted` or `unknown` for this absolute workspace in the selected native environment. Core requires `trusted` for a task-bearing spawn or wake prompt. The runner checks again before starting the child. |
 | `session_storage_evidence(session, home)` | Read-only proof that this exact conversation exists under an absolute candidate home: `ok` with `value.present` true or false, or `unknown` with a reason for incomplete evidence. An absent answer adds `value.store_read`: exactly true proves the primary conversation store existed and was read completely (including other existing stores the finder checks); false means it was missing. Recorded candidates require this proof for `--start-fresh`; normal adoption and caller-only destinations do not. A reason may name the missing store. |
 | `resume_notice(session, caller_environment, effective_environment)` | A notice about the selected storage or conversation. If it accepts the optional keyword `fresh_start`, core passes false after announcing its own proven fresh start; other notices still apply. |
 | `allow_recorded_launch(session)` | Explicitly allow core to verify retained bridge-launch identity for data callbacks; exactly `True` opts in, absent/default is false. The current adapter policy must equal the saved policy; this never grants control authority. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
+| `connection_problem(session)` | Return a diagnostic string or `None`, or `RestartRequired(reason)` if the current launch record proves a fresh launch is needed. Give only the cause. Core adds the named kill and resume commands. Keep this read cheap and use no native queries. |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
 | `status_watch(session)` | A passive status stream the runner follows |
 | `attachment_recovery(session)` | A read-only check that an idle terminal can be reconnected |
@@ -74,7 +79,8 @@ Unreadable or malformed metadata, unavailable Zstandard support, damaged compres
 | --- | --- |
 | `LaunchContext` | `mode`, `values` (the [placeholders](../reference/files.md#schema-1)), `model`, `effort`, `environment`, `endpoint`, `executor`, `resume_prompt`, `storage_keys` |
 | `SessionHandle` | `agent_id`, `harness`, `workspace`, `launch_id`, `native_id`, `session_file`, `state`, `endpoint`, `bridge`, `native_mode` |
-| `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment` |
+| `CommandSpec` | `argv`, `unset_env`, `environment`, `control_endpoint`, `shared_service`, `rpc_proxy`, `native_mode`, `fallback`, `attachment`, `launch_files`, `cleanup_files`, `shell_callback`, `mouse`, `runner_listen` |
+| `ShellCallbackResult` | `native_id`, `bridge`, `launch_files` (subset of `CommandSpec.cleanup_files`) |
 | `NativeResult` | `state` (`ok`, `native_queued`, `pending`, `unavailable`, `error`, `unknown`), `reason`, `value` |
 | `Capability` | `state` (`supported`, `unavailable`, `error`), `reason`, `mechanism`, `required` |
 
@@ -90,7 +96,9 @@ One-shot runs also recheck the exact prepared payload environment, after command
 
 The dashboard projection's `default_model` is the verified canonical configured model in the offered list, or `None`; it is never the table's default. Model omission is independent of effort omission: an allowed configured model permits `unset`, while its `effort_unset` can still require an explicit effort.
 
-An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude and Codex support it; Pi refuses it.
+An adapter may opt into session-only effort with `supports_launch_effort = True`. It must validate `LaunchContext.effort` and pass it to both spawn and resume without changing the person's defaults. Core supplies the saved effort to every preparation and refuses a nonempty effort for adapters without this opt-in. Claude, Codex and Antigravity support it; Pi refuses it.
+
+Antigravity passes `--effort=LEVEL` before `--prompt-interactive=...` on spawn and resume, keeps `harnesses/agy/models.json` as an offline checked table, and splits known effort-suffixed `PLANNER_RESPONSE.model` transcript spellings into observed `(model, effort)` pairs.
 
 Codex encodes the validated effort as `-c` and `model_reasoning_effort="LEVEL"`, before the literal argument separator and before plain/bridge selection. The same per-launch value wins over configured and plugin defaults in the bridge request merge. Core pairs a nonempty effort with a requested, recorded or configured model; it never infers that model from the release table's default. An omitted effort adds no override. These are requested settings: a loaded native thread can retain its existing settings, and only its owning `thread/start` or `thread/resume` reply reports the observed `model` and `reasoningEffort`. Launch success alone does not verify that they changed.
 
@@ -117,7 +125,7 @@ The whole read, including connection checks, the ledger join and worker teardown
 | --- | --- | --- | --- |
 | `file` | The argv names a file, `{session_file}` (`state/agents/ID/session.jsonl`) | Reopens that file; refuses if it is missing | Pi; the default for schema 1 |
 | `assigned` | mv2 sets it to the agent ID at spawn and passes `{session_id}` | Passes the same `{session_id}` | Claude |
-| `reported` | The harness chooses it and mv2 binds it | Refuses until bound | Codex |
+| `reported` | The harness chooses it and mv2 binds it | Refuses until bound | Codex, Antigravity |
 
 A `reported` harness binds its ID in one of two ways:
 
@@ -171,17 +179,30 @@ A **plain** launch is the CLI in its pane. mv2 sees whether it is alive, can sto
 | --- | --- | --- | --- |
 | Claude | `unix-lines`: Claude's peer inbox (`--messaging-socket-path`) | The `multiverse` mod in `claude/mod/`, loaded with `--plugin-dir` | Auto |
 | Codex | `unix-websocket`: a launch relay to the shared app-server | `codex/launch.py` and `codex/protocol.py` | Auto |
+| Antigravity | `unix-json` marker; hooks and a loopback `agentapi` wake | `agy/bridge.py`, wired by launch-private `--settings`, `.agents/hooks.json` and `shell_callback` | Auto |
 | Pi | `unix-json`: a socket the extension listens on | `pi/extension.ts`, loaded with `--extension` | Off |
 
 `settings.inbox_bridge` in `harness.json` picks the mode. Unset means the default above, `true` requires the bridge, and `false` launches plain.
 
 When the bridge can't be prepared, an adapter in auto mode returns the plain spec with `native_mode.fallback_reason` set. With the bridge required, it raises instead.
 
+Set `CommandSpec.mouse = True` to enable session-scoped tmux mouse mode without declaring an `AttachmentSpec` (so `adapter.attachment_ready` keeps controlling readiness). `AttachmentSpec.mouse = True` remains honoured for adapters that declare an attachment, and a `CommandSpec.fallback` carries its own mouse preference (`runner.py` switches or restores inherited mouse mode with `set-option -u`).
+
+Set `CommandSpec.runner_listen = True` when tool shells can read and write launch-local files but cannot verify host process identity. An unanswered `mv2 listen` process check then asks the launch's runner to verify its own child through a private file in the launch directory. On Linux, a listener that cannot verify a shared PID namespace uses the runner directly. The runner polls the file every 0.1 seconds and answers fresh requests for the recorded process pair while that child is running. The listener gives each check up to 0.3 seconds. An unavailable reply leaves the check unknown.
+
 Core can also meet failures later: starting the shared service, a `BridgeUnavailable` from the adapter once the service is up, or the relay. For those, put the plain spec in `CommandSpec.fallback`. The choice is saved in `runtime.json` as `native_mode`, with `policy`, `mode` and `fallback_reason`.
 
 `CommandSpec.startup_retry` describes a separate, single retry after an exited native process fails before startup. Its `StartupRetrySpec` carries only replacement argv and conditional notices. The adapter's `startup_retryable(snapshot)` must return exactly `True` for its specific native diagnostic; core checks exit, readiness and launch ownership before using it. The snapshot includes the exact agent directory and owned-pane text with only the runner's actually printed leading notices removed. Native screen chrome stays in the text; the adapter can recognize a complete diagnostic naming that exact directory without parsing the screen layout. Other command fields stay unchanged. This is not a general retry of native work.
 
 An optional relay view's `primary_event(direction, value)` describes exact-primary turn events after protocol validation: `interrupt`, `started`, or `completed`, with `native_session_id` and `turn_id`; completed events also have `status` (`interrupted` or `finished`). Side traffic and stale turn completions must return nothing. Core records an outgoing interrupt before forwarding it. `SessionHandle.queue_state` carries core's exact-conversation pause and explicit restart context to receipt and continuation operations; it grants no additional authority.
+
+An adapter with a local queue can publish `queue_state` for its owned launch
+and conversation. A paused record carries `state: "paused"`, `launch_id`
+and `native_session_id`. The optional `paused_message_ids` lists the
+`Message.id` values still held, including per-attempt IDs when enabled.
+`paused_count`, if supplied, describes the adapter's own queue. Core counts
+accepted, unconfirmed local delivery records in scope, matching the listed
+IDs when present. An empty list produces no pause line.
 
 An optional pure `delivery_observation(value)` hook runs after incoming protocol
 validation. It returns `None` or `kind: user_message` with four bounded opaque IDs:
@@ -243,17 +264,18 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 
 `mv2 capabilities --agent NAME` shows what an agent's current launch supports. `--harness NAME` shows the same for a definition. The built-in support is:
 
-| Capability | Claude | Codex | Pi | Schema 1 |
-| --- | --- | --- | --- | --- |
-| `spawn`, `resume` | Yes | Yes | Yes | Yes (`resume` if defined) |
-| `wake` | Yes | Yes | Yes | No |
-| `session_name` | `--name` | Bridge: `thread/name/set` | `--name` | No |
-| `stop` | Terminal | Bridge: cancels app-server work, then terminal | Terminal | Terminal |
-| `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: extension socket | No |
-| `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: extension | No |
-| `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No |
-| `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | No | No |
-| `compaction` | Live connection, when the compaction plugin is on | No | No | No |
+| Capability | Claude | Codex | Antigravity | Pi | Schema 1 |
+| --- | --- | --- | --- | --- | --- |
+| `spawn`, `resume` | Yes | Yes | Yes | Yes | Yes (`resume` if defined) |
+| `wake` | Yes | Yes | Yes | Yes | No |
+| `session_name` | `--name` | Bridge: `thread/name/set` | No | `--name` | No |
+| `stop` | Terminal | Bridge: cancels app-server work, then terminal | Terminal | Terminal | Terminal |
+| `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: hook-injected user messages (`PreInvocation` for steers, `PostInvocation` for follow-ups), woken by an `agentapi` ping when idle | Bridge: extension socket | No |
+| `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: `agy-receipts/` and transcript cohort confirmation | Bridge: extension | No |
+| `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No | No |
+| `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | Session transcript; the bridge adds window, cost and quota | No | No |
+| `queued` | Bridge: mod queue file | Bridge: app-server after-turn queue | Bridge: launch-local hook message queue | No | No |
+| `compaction` | Live connection, when the compaction plugin is on | No | No | No | No |
 
 `spawn`, `resume`, `send_steer` and `send_follow_up` are marked `required`. Codex checks its app-server only with an executor, so its message capabilities read `unavailable` without `--probe`.
 
@@ -281,6 +303,12 @@ A stopped attempt-scoped recipient resumes with no interactive prompt; the durab
 mod's row-storage deadline expires: this is a deliberate policy exception to
 proof of non-delivery, so a manual retry may duplicate a late stored copy.
 
+For input still held by the current launch that needs a restart, `get_delivery`
+can return `NativeResult('pending', reason, {'restart_required': True})`. Core
+shows that it is waiting for restart and preserves the saved delivery evidence.
+Use this only for a receipt that proves the input is still held. The adapter's
+ordinary stop and delivery logic still owns whether the input can be retried.
+
 Adapters that set `delivery_attempt_ids = True` receive a fresh private UUID in
 `Message.id` for every actual submission. Core persists it as `native_message_id`
 on the attempt and its `delivery_context` before calling `send`, and passes the
@@ -295,6 +323,7 @@ Legacy text-allocation cohorts include every scoped acceptance under its native 
 | --- | --- |
 | Claude | The mod writes `claude-receipts/ATTEMPT_ID.json` for delivery and `ATTEMPT_ID.not-delivered.json` for failure. A valid delivery wins when both exist; older records use the message ID. |
 | Codex | The adapter searches the thread's queue (100 entries) and recent turns (20) |
+| Antigravity | `agy-receipts/ATTEMPT_ID.json` stores route, submission time and SHA-256 hash; `get_delivery` confirms against `transcript_full.jsonl` / `transcript.jsonl` with route-specific rows (hook-injected `SYSTEM_SDK` user input, or the older `agentapi` and `Stop`-hook envelopes) and oldest-first cohort allocation |
 | Pi | The extension answers from its transcript metadata and in-process records |
 
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text. Optional `message.sent_at` carries the original aware ISO send timestamp from the inbox row, never the retry or receipt time. Core frames age at submission preparation when it exceeds 10 minutes; older callers may leave this field `None`. A provider that updates the age when it stores the row must preserve the message body and account for that first-line change when reading delivery evidence.
@@ -349,7 +378,9 @@ Report `TurnStarted` for the first input of a native turn, `TurnJoined` for a pr
 
 In-session adapters send the ordered array to `runtime_update --turn-events-json` with `--turn-session-id` for the exact conversation. Each object has `type` (`started`, `joined` or `ended`) and the corresponding fields from the dataclass. Send a known end with or before the status update that goes idle. A relay can instead drain `relay_turn_transitions()` as `(native_session_id, transitions)` without I/O. An optional `notify_turn_transitions()` in the relay context requests the same drain for edges discovered outside frame handling. Core stages the edges before the accompanying status event. The runtime status changes immediately, and the plugin host publishes the edges and status events in order.
 
-Set `source` to `person` only when the native input proves a terminal composer or command, and to `harness` otherwise. Include `attempt` only as native delivery correlation. Core supplies a message ID only after a scoped match with a saved delivery attempt. A proved launch task has `source=mv2` and a null message ID. Core retries a busy inbox lock within the same bounded observation window. A verified command or retained answer can have that source without a message ID. Mark `first_task` only with exact startup-input evidence from a launch with a task. The relay context supplies `task_launch`; the in-session caller can use `MV2_FIRST_TASK=1`. Report metadata only.
+Set `source` to `person` only when the native input proves a terminal composer or command, and to `harness` otherwise. Include `attempt` only as native delivery correlation. Core supplies a message ID only after a scoped match with a saved delivery attempt. A proved launch task has `source=mv2` and a null message ID. Core retries a busy inbox lock within the same bounded observation window. A verified command or retained answer can have that source without a message ID.
+
+Set the adapter's `first_task` field only with native evidence that this input is the launch's command-line prompt. Core decides whether it was a task or a wake message. The relay context supplies `task_launch` and `wake_prompt`. An in-session caller can use `MV2_FIRST_TASK=1` for either. An adapter that identifies the exact wake can report its message ID as the start's `attempt`. Core checks the launch request and saved delivery attempt and attributes at most one wake opener per launch. Only a spawn task sets the public event's `first_task`. Report metadata only.
 
 The host translates turn and row IDs through the same snapshot the transcript API uses, scoped to the conversation the adapter reported. A provider whose event IDs differ from transcript row IDs can implement `project_turn_event(session, view, transition, *, reader=None)` and return a `TurnProjection` with the exact validated row positions. Honor the supplied reader's deadline during storage reads and metadata indexing. A reported row can be retried briefly if storage lags behind the notification. Event references use the public `rows()` cursor and generation. When proof fails, the event keeps its place with `resolved=false` and null reference fields.
 
@@ -566,7 +597,7 @@ next sweep and `mv2 doctor`, which reports leftovers without deleting them.
 
 ## Pane display
 
-The optional `PaneDisplay` method `display_pane(text)` is observe. The dashboard inspector's live pane passes each capture of an agent's pane through it, before it keeps the last 100 lines. Claude and Codex implement it; without it, the live pane shows the capture as it is. `mv2 inspect` keeps every row of the terminal.
+The optional `PaneDisplay` method `display_pane(text)` is observe. The dashboard inspector's live pane passes each capture of an agent's pane through it, before it keeps the last 100 lines. Claude, Codex and Antigravity implement it; without it, the live pane shows the capture as it is. `mv2 inspect` keeps every row of the terminal.
 
 - **Pure.** It is a function of the text alone, run on every refresh. It reads no files, starts no process and uses no network, and its cost stays linear in the size of the text.
 - **The input box and what is under it.** It drops the input box with any text typed in it, and the rows the harness draws around it: rules across the pane, status rows or footer, hints, tips and blank padding. It never drops or rewrites conversation text, so a line of dashes in the conversation stays.

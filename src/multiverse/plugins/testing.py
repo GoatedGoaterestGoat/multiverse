@@ -49,15 +49,15 @@ def plugin_module(directory, name):
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
-# The guard: no test writes under the real ~/.multiverse, ~/.claude or ~/.codex, to ~/.claude.json, or under the
-# .multiverse of the mv2 checkout it runs from. An audit hook (in native_safety's style) refuses
-# writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
+# The guard: no test writes under the real ~/.multiverse, ~/.claude, ~/.codex or ~/.gemini/antigravity-cli, to
+# ~/.claude.json, or under the .multiverse of the mv2 checkout it runs from. An audit hook (in native_safety's style)
+# refuses writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
 # changed, and records each one, so the test fails (check(), which PluginTestCase calls when it ends) or, for a
 # thread that outlived its test, the process exits 1 at its end.
 
 _protected = set()  # absolute directories no test may change
 _protected_files = set()  # absolute files no test may change, nor the copies named after them (FILE.tmp…)
-_harness = set()  # those of them that are Claude's or Codex's home, not mv2's: no bytecode exemption there
+_harness = set()  # those of them that are Claude's, Codex's or Antigravity's home, not mv2's: no bytecode exemption there
 _exempt = set()  # directories inside them that are not mv2's state: the plugin under test (PluginTestCase.plugin)
 _violations = []  # {"path", "event", "test", "thread", "unreported"}
 _current = None  # the test running now
@@ -69,9 +69,10 @@ _follow_context = threading.local()  # chmod/utime audit events omit follow_syml
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
-# The user's real Claude Code and Codex homes, captured the same way: tests run the harnesses only in homes of their
-# own, so a write here would change the person's real Claude or Codex state.
-_HARNESS_HOMES = [os.path.join(os.path.expanduser("~"), name) for name in (".claude", ".codex")]
+# The user's real Claude Code, Codex and Antigravity CLI homes, captured the same way: tests run the harnesses only in
+# homes of their own, so a write here would change the person's real Claude, Codex or Antigravity state.
+_HARNESS_HOMES = [os.path.join(os.path.expanduser("~"), name)
+                  for name in (".claude", ".codex", os.path.join(".gemini", "antigravity-cli"))]
 # Claude Code's account and per-folder trust state, a file beside ~/.claude, which it writes by way of temporary and
 # backup copies beside it.
 _HARNESS_FILES = [os.path.join(os.path.expanduser("~"), ".claude.json")]
@@ -97,9 +98,9 @@ _CHECKOUT_STATE = str(_SOURCE / ".multiverse") if (_SOURCE / "src" / "multiverse
 
 def install(home=None, strict=True):
     """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
-    ~/.multiverse, ~/.claude, ~/.claude.json (and its ~/.claude.json.* copies) and ~/.codex as they were when this
-    module was imported, and the .multiverse of the mv2 checkout this module runs from. Returns the directory now
-    protected (the real ~/.multiverse by default).
+    ~/.multiverse, ~/.claude, ~/.claude.json (and its ~/.claude.json.* copies), ~/.codex and ~/.gemini/antigravity-cli
+    as they were when this module was imported, and the .multiverse of the mv2 checkout this module runs from. Returns
+    the directory now protected (the real ~/.multiverse by default).
 
     A refused write counts against the test it came from: the test running then, or for a thread the test that
     started it. Strict (the default): writes that no check() reported (no test named itself, or a thread outlived
@@ -159,8 +160,9 @@ def check(test=None):
     for item in found:
         item["unreported"] = False
     if found:
-        raise AssertionError("a test wrote mv2's real state, or the user's Claude or Codex home: under ~/.multiverse, "
-                             "~/.claude, ~/.claude.json, ~/.codex or this checkout's .multiverse (refused): "
+        raise AssertionError("a test wrote mv2's real state, or the user's Claude, Codex or Antigravity home: under "
+                             "~/.multiverse, ~/.claude, ~/.claude.json, ~/.codex, ~/.gemini/antigravity-cli or this "
+                             "checkout's .multiverse (refused): "
                              + "; ".join(
             f"{item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})" for item in found))
 
@@ -215,8 +217,8 @@ def _hook(event, args):
                 continue
             if _guarded(candidate):
                 _record(event, candidate)
-                raise PermissionError(f"a test may not change mv2's real state or the user's Claude or Codex home: "
-                                      f"{candidate}")
+                raise PermissionError("a test may not change mv2's real state or the user's Claude, Codex or "
+                                      f"Antigravity home: {candidate}")
 
 
 def _in_harness_home(where):
@@ -260,7 +262,7 @@ def _follow_with_context(real, *, default=True):
 def _allowed(where):
     """Not mv2's state although inside the home: the plugin under test's own directory, and Python's bytecode in
     a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs;
-    never in Claude's or Codex's home, whose plugins folders are theirs."""
+    never in Claude's, Codex's or Antigravity's home, whose plugins folders are theirs."""
     if any(where == top or where.startswith(top + os.sep) for top in _exempt):
         return True
     parts = where.split(os.sep)
@@ -333,7 +335,7 @@ CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV
 # Beyond those, what a plugin test inherits from no shell or agent running it, by the rule mv2's own tests use
 # (tests/isolation.py): every mv2 variable (the agent's identity and identity mode, universe, sockets, read-only
 # cap), the harnesses' session markers (CODEX_*, CLAUDE_CODE_*, Claude's own), and tmux's.
-INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
+INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_", "ANTIGRAVITY_", "AGY_")
 INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "TMUX", "TMUX_PANE")
 
 

@@ -27,7 +27,7 @@ import tracking
 
 # What a test must not inherit from the shell or agent running the suite: the agent's identity, universe,
 # tmux server and messaging socket, and the harnesses' homes, and any credential.
-INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
+INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_", "ANTIGRAVITY_", "AGY_")
 # The mv2 under test, which a test or what it starts may call: this checkout's, never the running agent's.
 OWN = {"MV2_CLI": str(Path(__file__).resolve().parents[1] / "bin" / "mv2"), "MV2_PYTHON": sys.executable}
 INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CONFIG_DIR", "TMUX", "TMUX_PANE")

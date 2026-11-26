@@ -998,7 +998,7 @@ def prompt_answer_problem(prompt, answer):
     return None
 
 
-# How Claude words a person's refusal in the call's result (2.1.330). A No with text typed after Tab lets the agent
+# How Claude words a person's refusal in the call's result (2.1.332). A No with text typed after Tab lets the agent
 # carry on with that text, as mv2's deny does with its message; a plain No or Esc stops the turn ("[Request
 # interrupted by user for tool use]" follows), which no choice mv2 offers does. A note may follow either, behind a
 # flag of Claude's.

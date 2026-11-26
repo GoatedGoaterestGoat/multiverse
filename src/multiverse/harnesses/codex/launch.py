@@ -47,7 +47,7 @@ def grant_policy(observed):
 
 def requires_local_environment(version):
     return (isinstance(version, (list, tuple)) and all(type(part) is int for part in version)
-            and tuple(version) in ((0, 169, 0), (0, 170, 0), (0, 171, 0)))
+            and tuple(version) in ((0, 169, 0), (0, 170, 0), (0, 171, 0), (0, 172, 0)))
 
 
 def navigation_workspace(value, expected):

@@ -897,7 +897,8 @@ class TurnJournalTest(BaseTest):
                    'launch_id': 'launch', 'native_session_id': 'native'}
         snapshot = {'message': {'attempts': [attempt]}}
         with patch.object(mailbox, 'delivery_observation_snapshot', return_value=snapshot):
-            self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0), {0: 'message'})
+            self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0),
+                             {0: turn_events.Attribution('message')})
             snapshot['other'] = {'attempts': [dict(attempt)]}
             self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0), {})
             snapshot.pop('other')
@@ -905,7 +906,50 @@ class TurnJournalTest(BaseTest):
                                                       'item_id': 'earlier-item', 'client_message_id': 'wire'}}
             self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0), {})
             attempt['delivery_receipt']['value']['item_id'] = 'item'
-            self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0), {0: 'message'})
+            self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0),
+                             {0: turn_events.Attribution('message')})
+
+    def test_wake_attribution_requires_witnessed_opener_and_exact_saved_attempt(self):
+        """A wake uses a CLI prompt with no native delivery ID, and a later retry can replace its current receipt."""
+        request = self.agent / 'launches' / 'launch' / 'request.json'
+        wake = mailbox.append_message(self.agent, 'private wake text', {'name': 'user'}, delivery='steer')
+        saved = {'resume_message_id': wake['id'], 'expected_native_id': 'native',
+                 'env': {'MV2_AGENT_ID': 'worker', 'MV2_LAUNCH_ID': 'launch'}}
+        write(request, saved)
+        attempt = {'state': 'ok', 'launch_id': 'launch'}
+        mailbox.update_message(self.agent, wake['id'], attempts=[attempt, {'state': 'unknown', 'launch_id': 'retry'}],
+                               delivery_method='resume_prompt', wake_launch_id='retry')
+        session = SimpleNamespace(agent_id='worker', launch_id='launch', native_id='native')
+        witnessed = TurnStarted(turn='turn', kind='prompt', ref=None, source='harness', first_task=True)
+        later = TurnStarted(turn='later', kind='prompt', ref=None, source='person')
+        join = TurnJoined(turn='turn', ref=None, source='harness', attempt='unrelated')
+        edges = (witnessed, later, join)
+        self.assertEqual(turn_events.attribution(self.agent, session, 0, edges, deadline=0),
+                         {0: turn_events.Attribution(wake['id'], wake=True)})
+        reported = TurnStarted(turn='qy', kind='prompt', ref=None, source='harness', attempt=wake['id'])
+        self.assertEqual(turn_events.attribution(self.agent, session, 0, (reported,), deadline=0),
+                         {0: turn_events.Attribution(wake['id'], wake=True)})
+        self.assertEqual(turn_events.attribution(self.agent, session, 1, edges, deadline=0), {})
+        for wrong in ({'resume_message_id': None}, {'expected_native_id': 'another'},
+                      {'env': {**saved['env'], 'MV2_LAUNCH_ID': 'retry'}}):
+            with self.subTest(request=wrong):
+                write(request, {**saved, **wrong})
+                self.assertEqual(turn_events.attribution(self.agent, session, 0, edges, deadline=0), {})
+        write(request, saved)
+        for wrong_attempts in ([], [{'state': 'error', 'launch_id': 'launch'}], [attempt, attempt],
+                               [{**attempt, 'mode': 'steer'}], [{**attempt, 'native_message_id': 'wire'}]):
+            with self.subTest(attempts=wrong_attempts):
+                mailbox.update_message(self.agent, wake['id'], attempts=wrong_attempts)
+                self.assertEqual(turn_events.attribution(self.agent, session, 0, edges, deadline=0), {})
+        mailbox.update_message(self.agent, wake['id'], attempts=[attempt])
+        prompt_events.stage_turns(self.root, self.agent, 'launch', 'native', (witnessed, later), generation=0)
+        starts = [data for kind, data in self.drain() if kind == 'turn.started']
+        self.assertEqual([(row['source'], row['message'], row['first_task']) for row in starts],
+                         [('mv2', wake['id'], False), ('person', None, False)])
+        self.assertNotIn('private wake text', str(starts))
+        prompt_events.stage_turns(self.root, self.agent, 'launch', 'native', (reported,), generation=0)
+        [start] = [data for kind, data in self.drain() if kind == 'turn.started']
+        self.assertEqual((start['source'], start['message'], start['first_task']), ('harness', None, False))
 
     def test_turn_attribution_keeps_a_saved_attempt_after_brief_inbox_contention(self):
         """A concurrent inbox reader must not turn a proved delivery into a harness-origin input."""

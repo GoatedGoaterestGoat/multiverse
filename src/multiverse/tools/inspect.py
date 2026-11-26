@@ -3,7 +3,8 @@ import re
 from ..universe import agents, focus
 from ..runtime import effects, lifecycle
 from .. import harnesses, universe
-from ..display import clean, error_text, label, mode, state, notice_lines, startup_prompt_line
+from ..display import (clean, error_text, label, mode, notice_lines, paused_queue, paused_queue_line,
+                       startup_prompt_line, state)
 
 TAIL_LINES = 30
 
@@ -96,10 +97,15 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
             result['notices'] = notices
         if row.get('delivery_problem'):
             result['delivery_problem'] = row['delivery_problem']
+        if row.get('restart_required'):
+            result['restart_required'] = row['restart_required']
         if live and isinstance(row.get('runtime', {}).get('startup_prompt'), dict):
             result['startup_prompt'] = {key: row['runtime']['startup_prompt'].get(key) for key in ('title', 'detail')}
         if row.get('runtime', {}).get('auto_recovery'):
             result['recovery'] = row['runtime']['auto_recovery']
+        paused = paused_queue(row)
+        if paused is not None:
+            result['paused_queue'] = paused
         return result
     description = 'leftover folder' if damage and damage.get('recover') == 'remove' else label(row)
     head = f'{row["name"]} · {description} · {state(row)}'
@@ -109,6 +115,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     if row.get('model'):
         out.append(f"Model: {clean(row['model'])}" + (f" (effort: {clean(row['effort'])})" if row.get('effort') else ''))
     out.extend('Note: ' + notice for notice in notices)
+    if row.get('restart_required'):
+        out.append(row['restart_required'])
     if row.get('delivery_problem'):
         out.append(row['delivery_problem'])
     asked = startup_prompt_line(row, row.get('runtime', {}).get('startup_prompt')) if live else None
@@ -116,6 +124,9 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
         out.append(asked)
     if row.get('recovery_note'):
         out.append('Note: Reconnected automatically.')
+    paused_line = paused_queue_line(row)
+    if paused_line:
+        out.append('Note: ' + paused_line)
     if row.get('focus'):
         out.append(f"Focused {focus.ends(row['focus'])}: agents' messages to it wait in its inbox.")
     shown = tail(capture, lines)

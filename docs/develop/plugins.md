@@ -159,7 +159,7 @@ A plugin adds; it never alters mv2. It adds commands, columns, status items, cap
 | `agent.slash_commands()` | A `CommandList` of what the agent's harness offers, and why mv2 refuses any (1.16) | `agents.read` |
 | `agent.waiting_prompts()`, `agent.prompt_result(id)` | A `PromptList` of the prompts the agent waits on now; an earlier answer's `PromptResult` (1.17); see [waiting prompts](#waiting-prompts) | `agents.read` |
 | `agent.answer_prompt(id, choice=None, message=None, answers=None, notes=None, timeout=30, wait=True)` | A `PromptResult`: the answer, given through the harness's own answer path (1.17) | `prompts.answer` |
-| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`, and neither marks any read. `inbox()` gives the unread inbox-only ones; `history()` the last `last` messages, read or not, each also with `unread` (1.20): whether the agent's inbox would still show it | `messages.read` |
+| `agent.inbox()`, `agent.history(last=20)` | Messages as `{at, from, text, delivery}`. Both leave read state alone. `inbox()` gives the unread messages that `mv2 inbox` would show. `history()` gives the last `last` messages, each also with `unread` (1.20) indicating whether the agent's inbox would still show it | `messages.read` |
 | `agent.message(id)` | One message by its mv2 ID (1.21), as a turn event's `message` names it: `{at, from, delivery, as_user}`, `from` the sender as mv2 records it (`name`, `agent_id`, `plugin`), never the text; `api.Error` for an ID this agent didn't receive | `messages.read` |
 | `agent.transcript()`, `transcript_rows(...)`, `iter_transcript_rows(...)`, `transcript_turns(...)`, `transcript_turn(id, ...)` | The agent's conversation, by cursor (1.13); see [transcripts](#transcripts) | `transcripts.read` |
 | `mv.agent_at(directory)`, `mv.current_agent()` | The agent of a `state/agents/ID` directory; the agent this process runs for, or `None` | `agents.read` |
@@ -200,7 +200,7 @@ Like permissions, this guards against mistakes and makes a plugin's reach readab
 
 ### Transcripts
 
-A Claude or Codex agent's conversation reads by cursor (1.13). The design is [transcript-protocols](../design/transcript-protocols.md).
+A Claude, Codex or Antigravity CLI agent's conversation reads by cursor (1.13). The design is [transcript-protocols](../design/transcript-protocols.md).
 
 ```python
 info = agent.transcript()                     # cheap: counts, cursors, info.earlier
@@ -236,7 +236,7 @@ if not check.ok:
 - **`verified` false** means the model isn't in mv2's table (`catalog.free_form` is true for Claude and Codex) and is taken unchecked; `reason` says so.
 - **The person's model choices:** where a harness's `harness.json` lists `settings.models`, `models()` gives only those models (and only their listed efforts), with `free_form` false, and `check()` refuses any other with a `reason`; an alias the list allows resolves to its table ID. A model listed with `efforts` needs one of them named; a check that passes without one gives `effort` as `None`. `spawn`, `resume` and `run_once` keep to the same list, so check a model your settings name with `check()` and say so in your settings check rather than failing later.
 - **`api.ModelsUnavailable`** comes from a harness without models (Pi for now), whose models can't be read, or whose `settings.models` can't be used. For a harness without models, catch it to offer a free-form model field. For unusable model choices, show its reason, which names the file to fix, rather than a way around it: a later `check()` or run still refuses.
-- **Codex** uses its release's bundled model table, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
+- **Codex** and **Antigravity CLI** use their release's bundled model tables, with `source="table"` and `provider=None`. A check verifies the release's ID and effort, not account availability or custom-provider support. The release default may differ from your account's. Neither call reads login state, account caches or a running daemon.
 - Treat a `source`, `provider`, input or effort you don't know as an opaque name: later minors may add them.
 
 ### Observed model
@@ -252,7 +252,7 @@ When `agent.usage()["state"]` is `"ok"`, its `value` says which model and effort
 
 ### One-shot runs
 
-One model reply to a context you supply, with no tools and nothing saved (1.14; `spend`, needs `models.FAMILY`). Claude and checked Codex releases run it; Pi and custom harnesses report it unavailable. The design is [transcript-protocols](../design/transcript-protocols.md#the-one-shot-run).
+One model reply to a context you supply, with no tools and nothing saved (1.14; `spend`, needs `models.FAMILY`). Claude and checked Codex releases run it; Antigravity CLI, Pi and custom harnesses report it unavailable. The design is [transcript-protocols](../design/transcript-protocols.md#the-one-shot-run).
 
 ```python
 claude = mv.universe(root).harness("claude")
@@ -348,7 +348,7 @@ if result.state == "submitted":                 # the wait ended first: it may s
 | `messages.send`, `messages.ask`, `messages.read` | By the API | `send`; `ask`; `inbox` and `history` |
 | `transcripts.read` | By the API | The transcript reads (1.13) |
 | `universe.write` | By the API | `refresh(apply=True)` |
-| `harness.claude`, `harness.codex`, `harness.pi` | By the manifest | A `harnesses` entry for that family; `mv.launch.contribute` doesn't check it |
+| `harness.claude`, `harness.codex`, `harness.pi`, `harness.agy` | By the manifest | A `harnesses` entry for that family (`dir` for `claude` and `agy`, `extension` for `pi`); `mv.launch.contribute` doesn't check it |
 | `process.spawn` | By the manifest | A Codex entry's local MCP server; otherwise declared only |
 | `models.HARNESS` | By the API (1.14) | A harness's `run_once()`: spending that harness's model tokens (`models.claude`) |
 | `network.listen` | Declared only | Listening for connections |
@@ -498,12 +498,12 @@ Each test gets:
 
 - a temporary universe from the base template (`self.root`), with the plugin found and on;
 - a temporary home, `CLAUDE_CONFIG_DIR`, tmux socket folder (`TMUX_TMPDIR`, so the default tmux server, where your agents run, is out of reach) and run folder (`MV2_RUN_DIR`), and `bin/` first on `PATH`;
-- no inherited agent identity: none of the `MV2_*`, `CODEX_*` or `CLAUDE_CODE_*` variables of the shell or agent running the tests (its identity, identity mode, universe and sockets among them), nor Claude's or tmux's, except `MV2_PYTHON`, set to the test's own Python;
+- no inherited agent identity: none of the `MV2_*`, `CODEX_*`, `CLAUDE_CODE_*`, `ANTIGRAVITY_*` or `AGY_*` variables of the shell or agent running the tests (its identity, identity mode, universe and sockets among them), nor Claude's or tmux's, except `MV2_PYTHON`, set to the test's own Python;
 - `self.transcript(agent, rows)` (1.13): a Claude transcript the agent reads through the real API, core and Claude adapter, its rows written as that session's (1.19: a `ClaudeRows` row names it; a row you give another `sessionId` or an explicit `null` keeps it and isn't this session's, and a row with none is taken as this session's, as Claude's older rows are), with `append(*rows)`, `rewrite(rows)` (the same file, its bytes changed), `clear(rows)` (a `/clear`: a new session, the old one in `info.earlier`) and `unreadable()`; build rows with `testing.ClaudeRows` (`prompt`, `response`, `tool_result`, `turn_end`, `interrupted`, `steer`, `command`, `rewind`, and `compaction(summary, stored=True)` (1.14), Claude's own compaction, whose `stored=False` starts the history at its summary);
 - `self.fake_runs(*answers)` (1.14): one-shot runs answered from a script of `api.Reply` and `api.RunError`, in order, for the rest of the test. Claude and Codex runs both work (Codex from 1.16): the test's `bin/` gets stand-in `claude` and `codex` that only print a checked version, and its home a Codex file login whose contents are never read. The API's, the harness's and core's checks still run, so a request the real harness refuses fails here too; only the run is replaced, and nothing is spawned or written. `fake.requests` holds what each run was asked, in full;
 - `self.fake_prompts(prompts, *outcomes)` (1.17): the prompts this test's agents wait on, answered from a script for the rest of the test. `prompts` are the `api.WaitingPrompt` the harness shows; each answer it receives takes the next outcome: a dict of what the harness reports (`state`, default `answered`; `saved_rule`, `person_answer`), or `"pending"` (no outcome until `fake.settle(id, outcome)`). The API's and core's checks, refusals, the exclusive answer, its record and the wait are real; agents count as waiting only while the test sets their status so. `fake.answers` holds each answer the harness received, with its notes, a secret question's answer and note masked; `fake.show(prompt, agent)` and `fake.end(id, agent, state="gone", cause="resolved")` (1.21) open and end a prompt as the harness reports them, so the journal records `prompt.opened` and `prompt.closed` for a subscribed plugin (`state="person"`: answered in the terminal), and `fake.settle` reports the end of an answer mv2 sent (the agent needs a conversation: `self.agent(..., native_id=...)`);
 - `self.fake_slash(commands, *answers)` (1.16): harness commands answered from a script for the rest of the test. `commands` are the `api.SlashCommand` the harness lists; each run takes the next answer: a dict of what it reports (`output`, `prompted`, ...), `"queued"` (no result until `fake.finish(id, answer)`) or `"lost"` (the agent stops before it runs). The API's and core's checks, refusals, run records and wait are real, and this test's agents count as running with mv2's bridge. `fake.requests` holds each command the harness was sent;
-- a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json` and `~/.codex`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
+- a guard on your real `~/.multiverse`, `~/.claude`, `~/.claude.json`, `~/.codex` and `~/.gemini/antigravity-cli`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 
 Nothing starts an agent, tmux, a harness or the plugin host. A test sees only its own plugins unless the class sets `bundled = True`.
 

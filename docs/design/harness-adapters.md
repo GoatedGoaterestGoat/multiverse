@@ -173,15 +173,29 @@ checks; the provider interprets native replies. Internal command/RPC plans are
 never public send results. There is no new model loop, simulated chat
 UI, or fallback that invokes another model to forward a message.
 
+Any adapter with a local queue can report a pause in `queue_state` for the
+launch and conversation it owns. The optional `paused_message_ids` names
+the mv2 submissions still held. The optional `paused_count` describes the
+adapter's local queue. List and inspect read saved delivery records to count
+accepted, unconfirmed queued messages in the pause's scope. When present,
+`paused_message_ids` limits the count to those submissions. Listing needs
+no native queue query and shows a pause only for a positive count.
+
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
 from observed liveness. The report CLI prints one line (`Reported working.`, or `Reported blocked on NAME.`
 when a dependency is named). Only a report whose phase is `done` adds `You have N unread inbox messages.`
-when inbox-only messages wait, counted without marking them read. The separate blocked-on reminder names
-unread messages from the dependency. The CLI never echoes the summary or task/properties data; its Python `run()` result
+when unread inbox messages wait, counted without marking them read. The separate blocked-on reminder names
+the dependency with unread inbox messages and directs the agent to `mv2 inbox`. The CLI never echoes the summary or task/properties data; its Python `run()` result
 remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
+
+An adapter can stop initial spawn or resume preparation by raising
+`LaunchRefused` with an actionable reason. Core shows that reason before
+starting a native service or opening a pane. It releases a refused spawn's
+name and saves its task in a private retry file. A refused wake keeps its
+message in the delivery ledger as a retryable failure.
 
 ### Native service, session and terminal attachment
 
@@ -191,9 +205,12 @@ with a provider-selected `ServiceIdentity` (provider plus canonical storage or
 account scope), an existing endpoint and `lifetime="external"`. Its optional
 `attachment` is the current `AttachmentSpec`: where work executes (`terminal`
 or `service`), readiness (`process` or validated `binding`), recovery policy,
-passive status observation and the session-local mouse preference. Claude, Pi
-and legacy adapters keep terminal execution and their existing registration
-readiness; their service and attachment fields default to `None`.
+passive status observation and the legacy session-local mouse preference.
+`CommandSpec.mouse` lets any harness request session-scoped tmux mouse mode
+directly without declaring an `AttachmentSpec` (which would bypass
+`adapter.attachment_ready`). Claude, Pi and legacy adapters keep terminal
+execution and their existing registration readiness; their service and
+attachment fields default to `None`.
 
 `SharedServiceSpec` describes only idempotent explicit start/reuse. Core has no
 service stop or restart operation. Its optional identity is persisted separately
@@ -208,12 +225,14 @@ and any selected `CODEX_SQLITE_HOME`; core never guesses a provider's home.
 checking exact identity, workspace and effective requested permissions. A
 binding-ready attachment stays `starting` until that callback succeeds. Merely
 having an RPC proxy does not authorize readiness or recovery. The usual child
-startup check and startup-input acceptance still gate readiness. Each fallback
-carries its own attachment policy; automatic recovery has no fallback. Core
-applies the final prepared mouse preference before runner startup. A late relay
-fallback applies its selected preference under the launch lock after checking
-the exact owned pane; clearing an earlier mv2 mouse override restores the
-inherited option. Global options and other wrappers are untouched.
+startup check and startup-input acceptance still gate readiness. Each fallback carries its own attachment policy and `mouse` flag; automatic
+recovery has no fallback. Core applies the effective mouse preference
+(`command.mouse` or `command.attachment.mouse`) before runner startup and
+records it in the launch request. A late relay fallback computes its effective
+mouse preference the same way and applies changes under the launch lock after
+checking the exact owned pane; clearing an earlier mv2 mouse override restores
+the inherited option (`set-option -u`). Global options and other wrappers are
+untouched.
 
 The optional `AttachmentProvider` extension leaves the original adapter protocol
 sufficient. `attachment_recovery(session)` defaults to `None`; opted-in providers
@@ -307,8 +326,9 @@ a still-running terminal and reports an error. If the child has already exited,
 core removes its owned wrapper even when native cancellation fails, recording
 `native_cancellation.state=unknown` and a retry diagnostic in runtime and the result.
 This does not claim that shared-server work stopped; retry stop once the server
-is reachable. Unsubmitted startup messages are cancelled locally. The shared daemon and sibling agents remain
-running. Stop also works when the pane is gone: under the same launch lock,
+is reachable. Core records unsubmitted startup messages as delivery failures for
+`mv2 deliver NAME --retry`. The shared daemon and sibling agents remain running.
+Stop also works when the pane is gone: under the same launch lock,
 core authorizes native cancellation through the saved endpoint and exact bound
 thread, without authorizing any pane operation. Results report cancelled
 submissions, interrupt requests and background-terminal cleanup; receipt IDs
@@ -494,8 +514,9 @@ inside the native harness. Send and queue draining take `.send.lock` before
 `.launch.lock`; wake releases the latter before calling `start`. Readiness waits
 hold neither. Failed startup leaves never-submitted input as definite failures;
 `deliver AGENT --check` also detects an abandoned launch queue after a runner
-crash. Explicit kill cancels pending startup messages. Recovery never replays
-accepted or uncertain submissions. Existing runners predating this queue retain
+crash. Explicit kill records pending startup messages as delivery failures for
+`mv2 deliver NAME --retry`. Messages upgraded from inbox-only return to the inbox.
+Recovery never replays accepted or uncertain submissions. Existing runners predating this queue retain
 their binding-time refusal until relaunched.
 
 One logical inbox lives in `inbox.jsonl` (immutable messages),
@@ -512,17 +533,18 @@ or retry database.
 | launch-only | Final refusal: this launch has no native delivery path. History only; not retried or counted as an open failure. |
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
-The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
-map to failed, except a typed `launch_only: true` refusal, which maps to the final
-launch-only state. Only old failed receipts with that exact typed flag are
-normalized to it; accepted and uncertain input is never reclassified. Supported
+The immediate tool result `native_queued` maps to accepted. `unavailable` and `error`
+map to failed. A typed `launch_only: true` refusal goes to the final launch-only
+state unless its receipt says `final: false`, which leaves it retryable. A launch-only
+refusal stays in history and does not appear as an unread failed copy. Only old
+failed receipts with explicit final proof are normalized to the final state. Supported
 stopped-agent wake and failed wake retry stay separate from live delivery.
 Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh
 mv2 inbox                         # show unread sender/content blocks and mark them read
-mv2 inbox --wait --timeout 30s     # wait for unread inbox-only messages
+mv2 inbox --wait --timeout 30s     # wait for unread inbox messages
 mv2 inbox --all --last 20          # recent history, oldest first
 mv2 inbox --all --since 2h         # history from the last two hours
 mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
@@ -533,8 +555,10 @@ mv2 deliver worker --retry        # retry this recipient's definite failures
 mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```
 
-The CLI prints one `Message from NAME:` block per unread inbox-only message,
-with its full text and no metadata. Names are resolved from the sender's agent
+The CLI prints one `Message from NAME:` block per unread inbox message,
+with its full text and no metadata. Steers and follow-ups whose delivery failed
+or was cancelled appear in this view until read or delivered by a retry.
+Names are resolved from the sender's agent
 record; people appear as `user`, and another universe keeps core's
 `(in universe NAME)` wording. An empty page prints `No unread messages.`
 Unread pages contain up to 50 messages. The CLI advances the read position only
@@ -547,11 +571,12 @@ Python `inbox.run()` still returns and consumes the existing dictionary for
 callers such as the dashboard. CLI `--json` preserves that machine output
 (sender, text, time and delivery mode on ordinary reads).
 
-`inbox --wait` returns as soon as an unread inbox-only message arrives. It waits
+`inbox --wait` returns as soon as an unread inbox message is available. It waits
 indefinitely unless `--timeout DURATION` is given (seconds, or units `s`, `m`,
 `h`, `d`, `w`). It polls file metadata between reads, releases the launch and
-inbox locks between checks, and still rejects outdated launches. Native-only
-messages do not satisfy the wait. Timeout exits 1 without advancing the read
+inbox locks between checks, and still rejects outdated launches. Native
+delivery that is still in progress or accepted does not make an explicit steer
+or follow-up unread in the inbox. Timeout exits 1 without advancing the read
 position: readable output says `Timed out waiting for unread messages.`; JSON
 adds `timed_out: true` and `ok: false`. It can combine with `--peek` and `--json`,
 but not history options.
@@ -871,6 +896,38 @@ unchecked version refusal, launch and resume, permission and lineage checks,
 navigation, side conversations, queue continuation, prompt routing, delivery
 observations, rollout reading and private requests with empty tool lists.
 
+### Codex 0.172.0 compatibility audit
+
+The official 0.171.0 and 0.172.0 source pins are `ccf9be8cc458` and
+`3d86e43b075a`. All five recorded CLI help outputs match. The installed
+experimental export has 483 schemas, of which 32 changed. The two bundled
+model catalogs differ only in the release stamp. See the
+[release notes](https://github.com/openai/codex/releases/tag/rust-v0.172.0).
+
+The built-in slash command names, aliases and availability while a turn runs
+are unchanged. Codex adds argument completion and thread links. The bridge
+still requires exact ownership and saved lineage for a conversation switch.
+The renderer fixtures cover the idle composer, queued follow-up and status
+footer, argument completion, question and approval dialogs, and the
+ownership warning.
+
+The 0.172.0 remote terminal leaves runtime workspace roots to the server
+and sends null roots with its cwd on ordinary turn start. Even an equal cwd
+would otherwise select daemon defaults. For matched 0.172.0 on the owning
+terminal, the bridge can carry forward the already verified single local
+environment when the request targets the current grant-bound primary and
+its cwd and grant overrides agree. Explicit roots still have to match.
+Other unproved reselections still invalidate cached navigation grants.
+The 0.169.0 through 0.171.0 request checks retain their earlier boundaries.
+
+Local start and resume still return plain absolute paths, the full grant
+envelope and the native identity expected by the bridge. The stock terminal's
+`/new`, `/clear` and owned `/resume` are tested against a private daemon.
+The queue, approval/async response and exact user-item receipt checks retain
+their separate matched-version gates. The checks cover the local workspace
+and scripted provider; cross-OS workspaces, Bedrock and external services
+remain outside this qualification.
+
 ### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
@@ -909,11 +966,14 @@ does not stop the updater. The TUI setting separately suppresses update checks a
 interactive update prompts in Codex 0.159.3 and 0.160.0.
 
 Before releasing the native child, core enables tmux's session-scoped `mouse`
-option for Codex adapter wrappers on every spawn and resume, including custom
-profiles and both plain and bridge modes. With Codex 0.160.0 this lets wheel
-events scroll the TUI transcript rather than recall composer history. Global
-tmux options, root key bindings, alternate-screen behavior and other sessions
-are unchanged; legacy schema-1 definitions keep their existing behavior.
+option when the prepared `CommandSpec` sets `mouse=True` or its `AttachmentSpec`
+sets `mouse=True` (honouring saved Codex requests and letting adapters without an
+`AttachmentSpec` opt in without altering readiness). For Codex wrappers on every
+spawn and resume, including custom profiles and both plain and bridge modes,
+Codex 0.160.0 lets wheel events scroll the TUI transcript rather than recall
+composer history. Global tmux options, root key bindings, alternate-screen
+behavior and other sessions are unchanged; legacy schema-1 definitions keep
+their existing behavior.
 Already-running Codex terminals need a resume to pick up the setting. An
 isolated real-TUI test injects wheel events through an attached PTY and verifies
 native transcript scrolling, an unchanged composer, and no tmux copy mode on
@@ -964,7 +1024,10 @@ and their notes folder), and the `CLAUDE_CODE_PROJECT_DIR_NAME` and
 the parent's scratchpad. Also its `CLAUDE_CODE_CHROME_MCP_ORG_DENIED` (that its
 organization denied the Chrome tools), and since 2.1.330 the
 `CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE` Claude sets for its own tool shells
-when its host holds connector downloads, beside `CLAUDE_PID` and `CLAUDE_EFFORT`.
+when its host holds connector downloads, and since 2.1.332
+`CLAUDE_CODE_BRIDGE_CHILD_HELD_TO_AUTO` (Remote Control's hold on a session it
+starts: any permission mode but auto is dropped, so an agent spawned from inside
+such a session would lose its harness's mode), beside `CLAUDE_PID` and `CLAUDE_EFFORT`.
 Claude itself removes the identity names when it starts a fresh Claude, but keeps
 the project-folder name and scratchpad. Also removed is what Claude's background-session
 host gives a session, which Claude removes for a fresh Claude too: its credential
@@ -1668,7 +1731,7 @@ typeahead with an argument hint, and runnable while a turn is running):
   shown as printed: what was delivered, or what was saved and why it was not.
 - `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
   and formats it; the CLI's default output is readable text for people): it shows
-  this agent's unread inbox-only messages and marks them read. The output is
+  this agent's unread inbox messages and marks them read. The output is
   ordinary command output, so the model sees it on its next turn under Claude's
   "do not respond" caveat and acts only if asked. (The status line's count uses `mv2 inbox --peek --json` instead,
   which marks nothing read.)
@@ -1710,7 +1773,7 @@ The order of the keys is the order on screen; a missing key keeps the default sh
 an unknown key is ignored, and an unreadable file means the defaults (logged once).
 `agent` is the agent's name, plus `(universe)` only for an agent in a subverse (the
 root universe is left out, the same rule as the tmux bar), `phase` and `summary` the agent's last `mv2 report`
-(shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
+(shown as one segment, `working: reading the diff`), `inbox` the unread inbox
 count (only when above zero, `50+` at the cap), and `compaction` the built trees out of
 all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),
 shown only for an agent launched with tree compaction enabled. A 2 s timer compares the size and time of four files (`properties.json`,
@@ -1811,8 +1874,8 @@ the next row in its conversation to say which; Claude raises no turn hooks for
 those. The source is the
 person's for a typed row (Claude stores a typed local command as its own) and the
 harness's otherwise, with the mv2 delivery attempt the mod matched the row to;
-core makes it mv2's. The first prompt row the person's side stores in a task
-launch's first load (`MV2_FIRST_TASK`) is the task. A row belongs to the turn
+core makes it mv2's. On the first load, `MV2_FIRST_TASK` marks the first composer
+prompt row as the launch's command-line input, a task or a wake message. A row belongs to the turn
 running when its append is entered, and rows rank in that order, which is the order
 Claude stores them in (their appends can finish in another). A turn's end goes once
 its rows, from the first the file's tail holds on, are whole in the transcript file
@@ -1958,7 +2021,7 @@ change, and a deadline during the write leaves neither an index nor a temporary
 file.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.330; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.332; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

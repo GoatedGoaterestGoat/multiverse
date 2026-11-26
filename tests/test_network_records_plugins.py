@@ -68,7 +68,8 @@ class NetworkPluginRecordsTest(PluginTestCase):
             (journal / events.ID, "a" * 32 + "\n", lambda: events.journal_id(self.root), "a" * 32, None),
             (journal / "seq", "10\n", lambda: events._counter(journal), 10, None),
         ]
-        descriptor_reads = {directory / "properties.json", journal / events.ID, journal / "seq"}
+        descriptor_reads = {directory / "properties.json", journal / events.ID, journal / "seq",
+                            trust.user_directory() / trust.FILE}
         for path, value, read, recovered, absent in cases:
             with self.subTest(path=path.name):
                 method = "os.open" if path in descriptor_reads else "read_text"

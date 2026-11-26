@@ -126,7 +126,8 @@ class BlockedOnTest(BaseTest):
             files = lambda: {p.name: p.read_bytes() for p in directory.glob('inbox*') if p.is_file()}
             before = files()
             line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
-            self.assertEqual(line.strip(), 'Reported blocked on helper. Reminder: you have unread messages from helper.')
+            self.assertEqual(line.strip(), 'Reported blocked on helper. Reminder: you have unread inbox messages from helper. '
+                             'Read them with mv2 inbox.')
             self.assertEqual(files(), before)
             with patch.dict(os.environ):
                 for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID'):
@@ -137,7 +138,7 @@ class BlockedOnTest(BaseTest):
             for source_kind in ('user', 'self'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', source_kind)
                 self.assertTrue(line.startswith(f'Reported blocked on {source_kind}.'))
-                self.assertNotIn('Reminder: you have unread messages', line)
+                self.assertNotIn('Reminder:', line)
             with store.lock(directory / '.inbox.lock'):
                 line = self.output('report', '--phase', 'blocked', '--blocked-on', 'helper')
                 self.assertNotIn('Reminder:', line)
@@ -490,7 +491,8 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(len(mailbox.inbox(directory)['messages']), 1)
         old_cursor = (directory / 'inbox.cursor').read_bytes()
         with store.lock(directory / '.launch.lock'):
-            self.assertEqual(mailbox.end_startup_messages(directory, facts['launch_id'], 'startup failed'), 1)
+            self.assertEqual(mailbox.end_startup_messages(directory, facts['launch_id'], 'startup failed'),
+                             {'failed_startup_messages': 1, 'retryable_startup_messages': 0})
         self.assertEqual(mailbox.inbox(directory)['messages'], [])
         self.assertEqual((directory / 'inbox.cursor').read_bytes(), old_cursor)
         before = len(self.calls)
@@ -549,7 +551,7 @@ class BlockedOnTest(BaseTest):
         self.assertEqual(mailbox.inbox(fresh)['messages'], [])
         self.assertFalse(mailbox.message_record(fresh, tagged['id'])[1].get('dismissed_at'))
 
-        # The optional fallback must not change explicit follow-up failures.
+        # Explicit failures become readable without the upgrade's native retry dismissal.
         store.write(directory / 'runtime.json', facts)
         self.behavior = NativeResult('error', 'explicit refusal')
         for delivery in ('steer', 'follow-up'):
@@ -557,7 +559,9 @@ class BlockedOnTest(BaseTest):
                 result = send.run(self.root, agent='asker', delivery=delivery, text='explicit')
                 self.assertFalse(result['ok'])
                 explicit = mailbox.inbox(directory, all_messages=True, limit=None)['messages'][-1]
+                self.assertEqual(explicit['tracking']['submission_state'], 'failed')
                 self.assertFalse(explicit['tracking'].get('dismissed_at'))
+                self.assertEqual([m['text'] for m in mailbox.inbox(directory)['messages']], ['explicit'])
                 self.assertEqual(mailbox.inbox(directory)['messages'], [])
 
     def test_fallback_stays_final_after_internal_refresh_or_an_old_runner_write(self):

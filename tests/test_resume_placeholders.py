@@ -191,8 +191,8 @@ class ResumePlaceholderTest(TerminalBase):
                             submit.assert_called_once()
                             self.assertIn('WAKE:' + case, submit.call_args.args[1].text)
                         self.assertIn('With a working bridge', advice[0])
-                        self.assertIn('For a launch-only agent', advice[0])
-                        self.assertIn('--delivery inbox-only', advice[0])
+                        self.assertIn("It is waiting in socket-custom-swept's inbox.", advice[0])
+                        self.assertNotIn('--delivery inbox-only', advice[0])
                     else:
                         self.assertTrue(result['ok'] if 'ok' in result else result['ready'], result)
                         until(lambda: output.exists() and file_output.exists())

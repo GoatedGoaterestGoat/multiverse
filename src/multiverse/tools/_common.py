@@ -60,6 +60,12 @@ def callback(root, agent, *, agent_scoped=False):
     return root, directory, launch_id
 
 
+def delivery_waits_for_restart(receipt):
+    value = receipt.get('value')
+    return (receipt.get('state') == 'pending' and isinstance(value, dict)
+            and value.get('restart_required') is True and value.get('transcript_confirmed') is not True)
+
+
 def delivery_summary(receipt):
     """Expose delivery evidence without provider or core message identifiers."""
     result = {key: receipt[key] for key in ('state', 'reason', 'ok', 'reused') if key in receipt}
@@ -68,6 +74,8 @@ def delivery_summary(receipt):
         result['transcript_confirmed'] = value['transcript_confirmed']
     if isinstance(value, dict) and value.get('paused') is True:
         result['paused'] = True
+    if delivery_waits_for_restart(receipt):
+        result['restart_required'] = True
     if isinstance(value, dict) and value.get('historical_conversation') is True:
         result['conversation'] = value.get('native_session_id')
     return result

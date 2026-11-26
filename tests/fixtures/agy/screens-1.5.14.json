@@ -1,0 +1,50 @@
+[
+ {
+  "name": "idle",
+  "note": "idle after a reply with mv2's statusLine under the box: the banner divider, \"  ---\" row and reply stay",
+  "cli_version": "1.5.14",
+  "width": 100,
+  "text": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────────────────────────────────────────────────────────────────────────────────\nmv2:worker · phase working · bridge\n\n\n\n\n\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule"
+ },
+ {
+  "name": "idle with default footer",
+  "note": "idle after a reply with Antigravity's default ? for shortcuts + model/effort footer",
+  "cli_version": "1.5.14",
+  "width": 80,
+  "text": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule\n\n────────────────────────────────────────────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────────────────────────────────────────────────────────────\n? for shortcuts                                    auto · Gemini 4 Neon · medium\n\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule"
+ },
+ {
+  "name": "working",
+  "note": "mid-turn: the spinner right above the box stays, while the box and esc to cancel footer go",
+  "cli_version": "1.5.14",
+  "width": 80,
+  "text": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n⣻  Generating...\n────────────────────────────────────────────────────────────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────────────────────────────────────────────────────────────\nesc to cancel                                      auto · Gemini 4 Neon · medium\n\n\n\n\n\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n⣻  Generating..."
+ },
+ {
+  "name": "draft",
+  "note": "a two-row typed draft inside the box goes with its right-aligned mode/model/effort footer",
+  "cli_version": "1.5.14",
+  "width": 80,
+  "text": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule\n\n────────────────────────────────────────────────────────────────────────────────\n> first draft line\n  second draft line\n────────────────────────────────────────────────────────────────────────────────\n                                                   auto · Gemini 4 Neon · medium\n\n\n\n\n",
+  "shown": "\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       user@example.com (Google AI Pro)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Neon (Medium)\n   ▄▀▀    ▀▀▄     /tmp/mv2-pane-try\n  ▄▀▀      ▀▀▄\n\n────────────────────────────────────────────────────────────\n> Do not run any tools. Reply with exactly these 3 lines and nothing else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule"
+ },
+ {
+  "name": "narrow",
+  "note": "a 40-column pane with mv2's statusLine under the box",
+  "cli_version": "1.5.14",
+  "width": 40,
+  "text": "   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.14\n  user@example.com (Google AI Pro)\n  Gemini 4 Neon (Medium)\n  /tmp/mv2-pane-try\n\n─────────────────────────────────────\n> Do not run any tools. Reply with\n  exactly these 3 lines and nothing\n  else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule\n\n────────────────────────────────────────\n> Auto mode: edits & safe commands a...\n────────────────────────────────────────\nmv2:worker · phase working · bridge\n",
+  "shown": "   ▄▀▀    ▀▀▄\n  ▄▀▀      ▀▀▄\n\n  Antigravity CLI 1.5.14\n  user@example.com (Google AI Pro)\n  Gemini 4 Neon (Medium)\n  /tmp/mv2-pane-try\n\n─────────────────────────────────────\n> Do not run any tools. Reply with\n  exactly these 3 lines and nothing\n  else:\n  Before the rule\n  ---\n  After the rule\n\n  Before the rule\n\n  After the rule"
+ },
+ {
+  "name": "trust dialog",
+  "note": "the workspace trust dialog with no input box: unchanged",
+  "cli_version": "1.5.14",
+  "width": 80,
+  "text": "Accessing workspace:\n\n/tmp/mv2-pane-try\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm\n                                                          Gemini 4 Neon · medium\n\n\n\n\n\n\n\n\n\n\n\n",
+  "shown": "Accessing workspace:\n\n/tmp/mv2-pane-try\n\nDo you trust the contents of this project?\n\nAntigravity CLI requires permission to read, edit, and execute files here.\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm\n                                                          Gemini 4 Neon · medium\n\n\n\n\n\n\n\n\n\n\n\n"
+ }
+]

@@ -49,7 +49,8 @@ def usage_identity(row):
 
 # What an agent's unread inbox count depends on: its messages, its read cursor, what it has marked read, and the
 # delivery records the read checks (a damaged one makes it fail, and a repair makes it succeed again).
-INBOX_FILES = ("inbox.jsonl", "inbox.cursor", "inbox-read.json", "inbox-state.json", "native-delivery.json")
+INBOX_FILES = ("inbox.jsonl", "inbox.cursor", "inbox-read.json", "inbox-state.json", "native-delivery.json",
+               "properties.json", "sessions.jsonl")
 UNSUBMITTED = "inbox-unsubmitted"  # one record per message that was never submitted, each checked by the read
 
 

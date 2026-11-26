@@ -1,4 +1,6 @@
 """End native work and its process, then remove the agent's tmux wrapper."""
+from shlex import quote
+
 from ..runtime import lifecycle
 from .. import universe
 
@@ -25,9 +27,21 @@ def stopped(root, agent, record, attachment_only):
         line = f"Closed {name}'s terminal. {sentence(reason)}"
     else:
         line = f'Stopped {name}.'
-    cancelled = cancellation.get('cancelled_startup_messages') or 0
-    if isinstance(cancelled, int) and cancelled > 0:
-        line += f" {cancelled} message{'s' if cancelled != 1 else ''} waiting for it to start {'were' if cancelled != 1 else 'was'} not delivered."
+    counts = (cancellation.get(key) for key in ('startup_messages_in_inbox', 'cancelled_messages_in_inbox'))
+    waiting = sum(count for count in counts if type(count) is int and count > 0)
+    if waiting:
+        line += (f" This stop left {waiting} {'undelivered message' if waiting == 1 else 'undelivered messages'} "
+                 f"waiting in {name}'s inbox.")
+    failed = cancellation.get('failed_startup_messages', cancellation.get('cancelled_startup_messages'))
+    if type(failed) is int and failed > 0:
+        line += f" {failed} message{'s' if failed != 1 else ''} waiting for it to start {'were' if failed != 1 else 'was'} not delivered."
+        retryable = cancellation.get('retryable_startup_messages', cancellation.get('failed_startup_messages'))
+        if type(retryable) is int and 0 < retryable <= failed:
+            what = 'the retryable messages'
+            if retryable == failed:
+                what = 'it' if failed == 1 else 'them'
+            ending = ' as a prompt if unread' if waiting and retryable == 1 else ' as prompts if unread' if waiting else ''
+            line += f' Run mv2 deliver {quote(str(name))} --retry to send {what}{ending}.'
     return line
 
 

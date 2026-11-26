@@ -30,6 +30,12 @@ Started tester (Claude, bridge). It's waiting at Claude's prompt "Accessing work
 
 mv2 never answers these prompts for you: each asks whether to trust a folder or a mode. Once you answer, the session starts and the agent's status comes from its plugin again.
 
+When a harness requires verified workspace trust before running an initial prompt, mv2 refuses a task-bearing start until it can verify approval. Open the named CLI in that folder without a task and approve trust before retrying.
+
+If a spawn refusal names a private saved task file, pass it with `--task-file` after fixing the problem. You can remove that copy once the task starts or you discard it.
+
+If a message tried to wake the agent, use `mv2 deliver NAME --retry` after approval.
+
 To start an agent in a subverse, select the subverse with `-u`:
 
 ```sh
@@ -46,7 +52,7 @@ mv2 list --columns name,phase   # only these columns, in this order
 mv2 list --columns name         # one name per line, for scripts
 ```
 
-Each line shows the agent's name, status, reported phase and summary. A `working` or `blocked` phase also says how long ago the agent last reported, such as `working (10m)`. A blocked agent's summary starts with what it's waiting for, if it said, such as `Waiting for user: decide the model list`; `--json` gives them as `reported_at` and `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. Agents waiting for you come first.
+Each line shows the agent's name, status, reported phase and summary. A `working` or `blocked` phase also says how long ago the agent last reported, such as `working (10m)`. A blocked agent's summary starts with what it's waiting for, if it said, such as `Waiting for user: decide the model list`; `--json` gives them as `reported_at` and `blocked_on`. The status is what a live agent is doing, or why it isn't live, such as `dormant`. Lines that start with `!` under an agent say what is wrong with it. When a live agent has paused messages that mv2 knows are still queued, `mv2 list` and `mv2 inspect` show their count and the cause when recorded. `mv2 inspect --json` includes these details as `paused_queue`. Agents waiting for you come first.
 
 `--columns` chooses the columns and their order from `name`, `status`, `phase`, `summary`, `harness`, `model`, `universe` and `id`. `model` shows the agent's model by its display name with its effort, such as `Opus 5.5 (xhigh)`: for a running agent, what its session last reported, otherwise its launch choice or its harness's default ([the dashboard's Model column](../reference/dashboard.md) explains which). It reads running agents' usage, so it takes longer than the other columns. With one column, `mv2 list` prints one value per line and nothing else, so `for name in $(mv2 list --columns name)` sees only agents. An empty list, an empty entry or a column named twice is refused rather than guessed at.
 
@@ -85,6 +91,8 @@ mv2 resume worker --effort default
 `kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane, then prints `Stopped NAME.` If mv2 couldn't confirm the work was cancelled, the line says so and why; `--json` prints the record. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`. If a caller storage override is ignored to preserve the saved conversation, the resume summary explains it on a separate line (also with `--wait`); `--json` includes it in `notices`. A message that wakes the agent returns the same notice.
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
+
+If you stop an agent while a steer or follow-up is still waiting in mv2 for the launch to be ready, mv2 records it as a delivery failure. The stop output counts unread inbox copies left by that stop. It shows `mv2 deliver NAME --retry` when you can retry a message. That command submits a retryable message as a prompt only while its inbox copy is unread. Messages that were upgraded from inbox-only return to the inbox.
 
 `--model` and `--effort` are saved with the agent and reused on later resumes. These launch options change only that agent; they do not save defaults for the person's other sessions. `--effort default` clears the saved effort when permitted. Without a model subset, changing `--model` without `--effort` keeps a compatible saved effort; otherwise mv2 drops it and reports that choice. With a [model subset](../use/harnesses.md#narrow-the-available-choices), an excluded recorded choice refuses resume until you explicitly replace it with an allowed one. An explicitly requested unsupported effort is refused before launch. A refusal for a saved effort identifies its origin in the agent's record. If the agent has no recorded model and its harness has no configured model, give `--model` with an effort level: mv2 cannot reliably infer the native effective default from the person's settings, account and saved conversation.
 

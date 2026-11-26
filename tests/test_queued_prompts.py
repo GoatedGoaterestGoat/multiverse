@@ -203,6 +203,8 @@ class QueueTest(BaseTest):
                     self.assertFalse(outcome['saved'])
                     self.assertEqual(outcome['blocked_recipients'], ['b'])
                     self.assertIn('--force', outcome['reason'])
+                    self.assertIn('unread messages from b queued as follow-ups', outcome['reason'])
+                    self.assertNotIn('mv2 inbox', outcome['reason'])
                     self.assertFalse(self.sent)
                     for name in ('b', 'c'):
                         self.assertFalse((self.directories[name] / 'inbox.jsonl').exists())
@@ -246,7 +248,8 @@ class QueueTest(BaseTest):
             mailbox.append_message(self.directories['a'], 'manual reply', {'agent_id': self.directories['b'].name})
             output = []
             send.run(self.root, agent='renamed', text='allowed', _present=output.append)
-            self.assertIn('Reminder: you have unread messages from renamed.', '\n'.join(output))
+            self.assertIn('Reminder: you have unread inbox messages from renamed. Read them with mv2 inbox.',
+                          '\n'.join(output))
             # Unknown queue notes concern this recipient's unconfirmed follow-ups only.
             ledger_path = self.directories['a'] / 'inbox-state.json'
             ledger = store.read(ledger_path)

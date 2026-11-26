@@ -31,6 +31,7 @@ project/
     artifacts/                 # optional files that view widgets show
     state/
       agents/UUID/             # one directory per agent
+      startup-task-*.md        # private retry copies of tasks refused before launch
       plugins/NAME/            # each plugin's logs and state for this universe
       events/                  # the event journal, while a plugin here subscribes to events
     subverses/NAME/            # a nested universe with this same layout
@@ -45,6 +46,7 @@ project/
 | `universe.json` | mv2 | You may edit `name`, `description` and `workspace`. |
 | `template-files.json` | mv2 | Written by `init`, `subverse` and `refresh --apply`. |
 | `state/` | mv2 | Records of agents and their messages. Git ignores it. Don't edit it while agents run. |
+| `state/startup-task-*.md` | mv2 | Private copies (mode `0600`) of tasks preserved when preparation refuses a spawn. The refusal names the file to pass to `mv2 spawn --task-file`. You can remove the copy once the task starts or you decide to discard it. |
 | `subverses/` | mv2 | Created by `subverse`, and changed by `move` and `remove`. |
 | `trash/` | mv2 | Filled by `remove` and `refresh --apply`, and emptied by `trash --empty`. Git ignores it. |
 
@@ -168,21 +170,21 @@ Schema 2 points at a built-in adapter and adjusts it:
 | Field | Meaning |
 | --- | --- |
 | `schema` | `2`. |
-| `adapter` | `codex`, `claude` or `pi`. |
+| `adapter` | `codex`, `claude`, `pi` or `agy`. |
 | `description` | Shown by `mv2 catalog`. |
 | `settings` | An object in which every key is optional. Unknown keys are errors. |
 
 | Setting | Meaning |
 | --- | --- |
-| `executable` | Command to run instead of `codex`, `claude` or `pi`. |
+| `executable` | Command to run instead of `codex`, `claude`, `pi` or `agy`. |
 | `model` | Default model for agents spawned without `--model`. |
 | `model_names` | Optional map from exact recorded model spellings to nonempty, single-line display names. It changes labels only; see [display names](../use/harnesses.md#model-display-names). |
 | `models` | Optional nonempty object from a catalog model ID or alias to `{}` or `{"efforts": ["low", "high"]}`. An effort list is nonempty, distinct and limited to offered levels. Unknown entries refuse launches and runs; see [model choices](../use/harnesses.md#narrow-the-available-choices). |
 | `args` | Extra arguments for spawn and resume, inserted after the executable and before the prompt. |
 | `spawn_args`, `resume_args` | Extra arguments for spawn only or resume only, after `args`. |
 | `env` | Variables (name to string) set for every spawn and resume. It can't set `MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`, or the storage variables mv2 reads (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). Pi's can set `PI_CODING_AGENT_DIR`, which mv2 does not use to locate Pi sessions: spawn records that value, and a resume keeps the recorded one and names a changed setting or shell value it ignored; `mv2 resume --start-fresh` takes the current one. |
-| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID` and a parent Claude session's markers ([environment](environment.md)) are always removed when inherited. |
-| `inbox_bridge` | The live connection (the bridge). For Codex and Claude, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
+| `unset_env` | Variables removed from the agent's environment. It replaces the default list, `NO_COLOR`. A variable named in `env` is kept. `CODEX_THREAD_ID`, parent Claude session markers and parent Antigravity CLI session markers ([environment](environment.md)) are always removed when inherited. |
+| `inbox_bridge` | The live connection (the bridge). For Codex, Claude and Antigravity CLI, unset connects if it can and otherwise launches launch-only, `true` requires the connection, and `false` never connects. For Pi, it is off unless `true`. |
 | `system_prompt_snapshot` | Claude only. `"off"`, the default, gives a resumed agent the current bootstrap. `"on"` keeps the system prompt Claude recorded at the conversation's first request, so a bootstrap change reaches only new conversations. A `--system-prompt-snapshot` flag in `args` or `resume_args` overrides it. |
 
 ### Schema 1
@@ -207,7 +209,7 @@ Arguments may use these substitutions:
 | Value | Meaning |
 | --- | --- |
 | `{name}`, `{agent_id}`, `{workspace}` | Agent name, UUID and working directory |
-| `{agent_dir}`, `{harness_dir}` | The agent's state directory and `harnesses/NAME/` |
+| `{agent_dir}`, `{harness_dir}`, `{launch_dir}` | The agent's state directory, `harnesses/NAME/` and this launch's directory under `launches/UUID/` |
 | `{task}`, `{task_file}` | Initial prompt, or the file it is saved in |
 | `{bootstrap}`, `{bootstrap_file}` | Bootstrap text, or the file it is saved in |
 | `{bootstrap_json}` | Bootstrap as a quoted JSON string, also valid as a TOML string |
@@ -253,8 +255,8 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). A message a focus held is `inbox-only` and adds `intended` (`steer` or `follow-up`) and `focus` (the focus's `id`). mv2's note about a focus's held messages is a `follow-up` with `focus_note` (that focus's `id`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
 | `inbox-read.json` | Messages past `inbox.cursor` that `mv2 held` has read, by message ID. |
-| `inbox-state.json` | Delivery attempts and receipts per message. For an adapter using attempt IDs, each submission stores its `native_message_id` and checked `delivery_receipt`; the logical inbox message ID stays unchanged. |
-| `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. Removed before a later submission; never inferred for older uncertain messages. |
+| `inbox-state.json` | Delivery attempts and receipts per message. `failed_inbox_copy` marks a newly recorded failure or cancellation for inbox reading if its conversation is still eligible. For an adapter using attempt IDs, each submission stores its `native_message_id` and checked `delivery_receipt`; the logical inbox message ID stays unchanged. |
+| `inbox-unsubmitted/UUID.json` | Negative proof for a newly saved message blocked by damaged delivery state before submission. New records carry `failed_inbox_copy`. A later submission removes the proof. |
 | `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `id`, `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
 | `focus-last.json` | The latest focus, kept after it ends: `id`, `since`, `held` (messages it held), `report` (`listener` once a listener's line printed, `note` once the turn-end note was saved, or `null`) and `note` (the note's message ID). |
 | `slash/UUID.json` | A [harness command](../cli/harness-commands.md): its request, original caller and launch, and correlated outcome. Model and effort readbacks update `properties.json` before a successful outcome is returned. Events contain the command name, state and caller, never arguments or output. |
@@ -265,7 +267,9 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `status-items/NAME.txt` | The text of a plugin's status-line item for this agent. |
 | `claude-usage.json` | Claude only: the agent's usage indexes, so a new process parses only what Claude wrote since (per transcript its inode, the offset read to, a SHA-256 of those bytes, the latest time and turn, each response's counted usage; no transcript text). Written by any process that reads usage; taken over only when the digest matches. Safe to delete. |
 | `claude-receipts/`, `claude-asks/` | Delivery receipts and `mv2 ask` answers, for the Claude bridge only. `<attempt-id>.json` records delivery; `<attempt-id>.not-delivered.json` records a reported failure. A valid delivery takes precedence if both files exist. |
+| `agy-receipts/` | Delivery receipts for the Antigravity CLI bridge only: metadata and a SHA-256 hash of the framed message, never raw message text. |
 | `launches/UUID/` | One directory per spawn or resume. |
+| `launches/UUID/.mv2-listen-proof` | Private file (mode `0600`) exchanging a fresh launch check between `mv2 listen` and an opted-in runner. The runner removes it on orderly exit. The next launch of that agent removes a leftover file if the previous launch is proven stopped and the file still has its recorded identity. Checks against a leftover file go unanswered. |
 
 `runtime.json` temporarily keeps a reported `working` or `idle` as
 `deferred_stop_status` when a stopping launch still has a waiting status.
@@ -304,6 +308,9 @@ record with its request correlation and admission token. `checking` and
 stays fenced. `session_generation` distinguishes a switch away and back within
 one launch. `queue_history` retains each earlier conversation's pause state,
 while `queue_state` names the current one. Resume preserves these pause records.
+When `queue_state` carries `paused_message_ids`, list and inspect count only
+accepted, unconfirmed delivery records whose mv2 submission IDs are in that
+list. An empty list records that no submissions are held.
 Input saved during the fence has `navigation_wait` in `inbox-state.json`; a
 resolved switch can submit it once. Before an explicit resume replaces a stopped
 launch, pending input still carrying that deferral becomes a reported failure
@@ -325,6 +332,7 @@ Each launch directory holds:
 | `cleanup.json`, `roles/` | Whether this launch's own connections and helpers have closed. A resume or a finished `kill` waits for them. |
 | `.connections.lock` | Serializes connection records with cleanup inspection. Readers use an existing lock without creating one. An empty regular lock left by an older inspection is not startup evidence. |
 | `native-refusal.json` | A native refusal recorded for this launch, such as Codex's "open in another app". |
+| Adapter launch files | Private (`0600`) files declared by an adapter, such as Antigravity CLI's `AGENTS.md`, `settings.json`, `.agents/hooks.json`, and ephemeral handoff files (`agy-ls.json`) removed when the runner exits normally (a force-killed runner leaves them until cleanup). |
 
 ## subverses/ and trash/
 
@@ -340,7 +348,7 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | --- | --- |
 | `~/.multiverse/templates/NAME/` | Your own templates, found by `init --template NAME` before the bundled ones. |
 | `~/.multiverse/plugins/NAME/` | Your own plugins, which every universe can turn on. |
-| `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted, the plugins `mv2 plugins install` placed, and the folders a universe records: each one's path, the SHA-256 of its files, when, and the event types those files follow, which the journal reads instead of hashing anything. Written by `mv2 plugins trust`, `untrust`, `install`, `update`, `remove`, and by turning on a plugin a universe records. |
+| `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted, the plugins `mv2 plugins install` placed, and the folders a universe records: each one's path, the SHA-256 of its files, when, and the event types those files follow, which the journal reads instead of hashing anything. Written by `mv2 plugins trust`, `untrust`, `install`, `update`, `remove`, and by turning on a plugin a universe records. Removing it starts over with nothing trusted; one that can't be read stops the plugins checked against it and is never written over. |
 | `~/.multiverse/plugin-installs.json` | What `mv2 plugins install` placed in `~/.multiverse/plugins/`: each plugin's source, the ref asked for, the commit, the folder inside the repository, the SHA-256 of its files and what it could do then. `update` and `remove` act only on what it names. A universe's own installs (`--here`) are in its `state/plugin-installs.json`. |
 | `~/.multiverse/plugin-staging/` | Plugins fetched by `mv2 plugins install` or `update`, waiting for your yes. Anything left there for a day is removed. A universe's own installs stage in its `state/plugin-staging/`. |
 | `~/.multiverse/plugin-cache/SHA256/` | The copy of a trusted universe plugin that actually runs, with `.mv2-files`, the files it was made with. A copy whose listed files were edited doesn't run. A copy nothing trusts and nothing used for 14 days is removed. |
@@ -351,4 +359,4 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | `~/.multiverse/tmux-servers/` | Server identity records and per-socket recovery locks, keyed by the canonical socket path. The records retain the socket, PID, process start token and tmux start epoch; they contain no prompts. A locked caller removes its touched record and lock once that server is proven gone, or a lone lock when no record was written. Waiters recheck the lock's identity before entering. Live, uncertain and damaged records remain; there is no directory-wide sweep. |
 | `~/.multiverse/run/` | Private runtime directory (mode `0700`), overridden by `MV2_RUN_DIR`. `tmux.sock` serves new agent terminals unless `MV2_TMUX_SOCKET` selects another address. `native/LAUNCH/rpc.sock` is a launch's private bridge socket; its launch folder is removed on exit. See [Environment](environment.md). |
 | Legacy tmux server `multiverse-v2`, `/tmp/mv2-native-LAUNCH/` | Older launches keep these saved addresses until stopped and resumed. Discovery still checks the old server. |
-| Codex, Claude and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`); mv2 never moves or deletes them. |
+| Codex, Claude, Antigravity CLI and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `~/.gemini/antigravity-cli`); mv2 never moves or deletes them. |

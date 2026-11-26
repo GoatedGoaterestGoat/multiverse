@@ -19,7 +19,7 @@ typeahead   on           bundled   1.0.0     Suggests /multiverse subcommands, c
 | Kind | Example |
 | --- | --- |
 | `mv2` commands | `mv2 compaction AGENT` sets an agent's compaction; `mv2 remote` shows the remote control's address and token |
-| Launch additions for Claude Code, Codex and Pi | typeahead loads a Claude Code plugin into every connected Claude session; compaction adds its hooks |
+| Launch additions for Claude Code, Codex, Antigravity CLI and Pi | typeahead loads a Claude Code plugin into every connected Claude session; compaction adds its hooks |
 | Status-line items, on Claude's line and the tmux bar | compaction's `compaction` (`trees 51/52 · building`), cost-item's `cost` (`$0.42`) |
 | Dashboard columns, panels, inspector lines, palette actions and settings screens (under `P`) | hello-column's `uptime` column; compaction's settings screen |
 | Background work in the [plugin host](#the-plugin-host) | notifier's desktop notifications; the remote control's endpoint |
@@ -185,6 +185,7 @@ A repository can carry plugins in its `.multiverse/plugins/`, and cloning the re
 - `trust NAME` trusts the universe's own copy, even when a bundled, checkout or personal plugin has the same name. It says which copy it trusted and what that copy now overrides. Use this to run your own fork of a plugin such as compaction.
 - Python bytecode and test-tool caches are left out of the hash and never run, so running a plugin's own tests keeps it trusted.
 - Any change to the files makes the plugin `changed`, and you must trust it again.
+- Removing `~/.multiverse/trusted-plugins.json` starts trust over: every plugin you trusted needs `mv2 plugins trust` again. If the file is there but can't be read (damaged, or a link), the plugins mv2 would check against it don't run, path plugins included, `mv2 plugins` names the file to fix or remove, and `mv2 plugins trust` won't write over it, so you can still restore it.
 - mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`. If that copy's files are edited, the plugin is listed as changed and doesn't run; the problem names the copy to remove, and mv2 then makes it again from the trusted plugin.
 - Only universe plugins need trust. The other sources hold code that you or mv2 installed.
 

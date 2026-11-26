@@ -27,12 +27,17 @@ SCREENS = (("claude", FIXTURES / "claude/screens-2.1.314.json"), ("claude", FIXT
            ("codex", FIXTURES / "codex/screens-0.167.0.json"),
            ("codex", FIXTURES / "codex/refusal-0.167.1.json"),
            ("codex", FIXTURES / "codex/refusal-0.167.2.json"),
-           ("codex", FIXTURES / "codex/screens-0.166.0.json"))
+           ("codex", FIXTURES / "codex/refusal-0.172.0.json"),
+           ("codex", FIXTURES / "codex/upstream-screens-0.172.0.json"),
+           ("codex", FIXTURES / "codex/screens-0.166.0.json"),
+           ("agy", FIXTURES / "agy/screens-1.5.14.json"),
+           ("agy", FIXTURES / "agy/screens-1.5.16.json"))
 # Screens that stay exactly as they are: dialogs, which the person answers in the pane, and screens whose end the
 # harness can't be sure is its input.
 UNCHANGED = {"model dialog", "trust dialog", "permission dialog", "question dialog", "command approval",
              "permissions selection", "config dialog", "warning dialog", "reconnecting with draft", "history search",
-             "expanded patch approval stays visible", "ownership refusal command center", "ownership refusal remapped keymap"}
+             "expanded patch approval stays visible", "ownership refusal command center", "ownership refusal remapped keymap",
+             "slash argument completion"}
 # Built from Codex 0.164.0's source and its reviewers' probes, not captured: the end of the screen under a reply, and
 # what is left of the screen, None when it stays unchanged.
 CONVERSATION = "• Previous conversation\n\n"
@@ -105,6 +110,17 @@ class PaneDisplayTest(BaseTest):
         for name, (end, shown) in CODEX_BUILT.items():
             with self.subTest(harness="codex", screen=name):
                 self.assertEqual(codex.display_pane(CONVERSATION + end), shown or CONVERSATION + end)
+        agy = harnesses.load(self.root, "agy")
+        rule40 = "─" * 40
+        for name, end, kept in (
+            ("no footer under rules", f"{rule40}\n> hello\n{rule40}\n", True),
+            ("dialog bar under rules", f"{rule40}\n> 1. Allow\n{rule40}\n  ↑/↓ Navigate · enter Confirm\n", True),
+            ("mismatched rule widths", f"{'─' * 30}\n> hello\n{rule40}\nmv2:worker · phase working\n", True),
+            ("empty prompt with esc footer", f"{rule40}\n>\n{rule40}\nesc to cancel · auto · Gemini 4 Neon · medium\n", False),
+        ):
+            with self.subTest(harness="agy", screen=name):
+                full = CONVERSATION + end
+                self.assertEqual(agy.display_pane(full), full if kept else CONVERSATION.rstrip("\n"))
 
     def test_a_broken_adapter_never_blanks_or_rewrites_the_pane(self):
         """The inspector shows the raw capture whatever the adapter returns or raises; a break would blank the pane or

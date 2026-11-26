@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from multiverse.runtime import lifecycle
-from multiverse.runtime import attachments, recovery
+from multiverse.runtime import attachments, listen_proof, recovery
 from multiverse.runtime.process import process_snapshot, start_matches
 from multiverse.harnesses.types import AttachmentSpec, NativeActivity, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity, RpcSpec
 from multiverse.store import read, write
@@ -225,6 +225,34 @@ class LegacyAttachmentTest(TerminalBase):
         self.assertFalse((launch / 'cleanup.json').exists(), 'Old runners never gain a marker')
         resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket)
         self.assertNotEqual(resumed['runtime']['launch_id'], launch.name)
+
+    def test_resume_clears_only_the_recorded_proof_of_a_stopped_launch(self):
+        """A leftover listen file should disappear on resume only if it still belongs to the stopped launch."""
+        result, directory = self.spawn()
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced):
+                facts = read(directory / 'runtime.json')
+                launch = directory / 'launches' / facts['launch_id']
+                proof = launch / listen_proof.NAME
+                proof.write_text('leftover')
+                proof.chmod(0o600)
+                info = proof.stat()
+                lifecycle.update_runtime(directory, launch.name, runner_listen_file=[info.st_dev, info.st_ino])
+                with self.assertRaisesRegex(ValueError, 'Agent is running'):
+                    lifecycle.start(self.root, resume=result['id'], socket_path=self.socket)
+                self.assertEqual(proof.read_text(), 'leftover')
+                self.assertEqual(lifecycle.kill(self.root, result['id'])['state'], 'dormant')
+                if replaced:
+                    proof.rename(launch / 'original-probe')
+                    proof.write_text('replacement')
+                    proof.chmod(0o600)
+                resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket, wait=True)
+                self.assertNotEqual(resumed['runtime']['launch_id'], launch.name)
+                self.assertTrue((launch / 'request.json').is_file())
+                if replaced:
+                    self.assertEqual(proof.read_text(), 'replacement')
+                else:
+                    self.assertFalse(proof.exists())
 
 
 class AttachmentTeardownTest(BaseTest):

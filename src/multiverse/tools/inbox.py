@@ -50,6 +50,9 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
     seconds = timeout_seconds(timeout)
     deadline = time.monotonic() + seconds if seconds is not None else None
     root, directory, launch_id = callback(root, agent, agent_scoped=True)
+    if launch_id:
+        from ..runtime import native
+        native.try_shell_callback(root, directory, launch_id)
     def public_result(result):
         if all_messages:
             return result
@@ -67,15 +70,6 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
             raise NoUnread()
         if _present:
             _present(root, result)
-    def signature():
-        stamps = []
-        for name in ('inbox.jsonl', 'inbox.cursor', 'inbox-state.json', 'inbox-read.json'):
-            try:
-                facts = (directory / name).stat()
-                stamps.append((facts.st_size, facts.st_mtime_ns))
-            except FileNotFoundError:
-                stamps.append(None)
-        return tuple(stamps)
     while True:
         # Serialize output/read position with launch replacement, but release
         # both locks between polls so senders and resume can make progress.
@@ -85,7 +79,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
                 raise ValueError('Outdated launch')
             if wait and not store.is_file_replaced(directory / 'properties.json'):
                 raise ValueError('Agent is no longer available at this location')
-            current = signature() if wait else None
+            current = mailbox.inbox_signature(directory) if wait else None
             if not wait or current != previous:
                 try:
                     value = mailbox.inbox(directory, limit=limit, after=after, all_messages=all_messages, peek=peek,

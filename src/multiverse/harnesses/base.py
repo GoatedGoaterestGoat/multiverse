@@ -6,10 +6,11 @@ import re
 from string import Formatter
 
 from .types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeResult, SessionHandle, Message, Executor
-from .types import normalize_session_id
+from .types import RestartRequired, normalize_session_id
 
 FIELDS = {'name', 'agent_id', 'session_id', 'bootstrap', 'bootstrap_json', 'task', 'agent_dir',
-          'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir'}
+          'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir',
+          'launch_dir'}
 # A bare TOML key as well, so Codex can forward the variable to its tools unquoted.
 ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 # mv2 sets PATH for every launch, always removes the parent markers, and resolves
@@ -19,7 +20,8 @@ RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
 # from one: its identity, which a Claude reads at startup (CLAUDECODE, the child-session marker that turns
 # transcript saving off, the session, attended and bridge IDs, the entry point and worktree, and since 2.1.328 the
 # sessions that launched it and their notes folder), its IDE port and inbox, its tool shells' own values (since
-# 2.1.330 also the mark that the host starting it may hold a connector file) and a Chrome tools denial. Claude
+# 2.1.330 also the mark that the host starting it may hold a connector file), a Chrome tools denial, and since
+# 2.1.332 the Remote Control bridge's hold to auto mode, which drops any other permission mode. Claude
 # Code removes that identity when it starts a fresh Claude itself (2.1.303, 2.1.328). Also the project-folder name and
 # scratchpad folder a host sets for a session, which Claude keeps for a fresh Claude: with CLAUDE_CONFIG_DIR set, the
 # name moves its transcripts to projects/<name>/, where mv2 never looks (2.1.329). And what Claude's background-session
@@ -31,6 +33,7 @@ PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION
                  'CLAUDE_CODE_BRIDGE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_HOST_WORKTREE',
                  'CLAUDE_CODE_HOST_WORKTREE_FENCE', 'CLAUDE_CODE_EVAL_INTERVIEW_SESSION',
                  'CLAUDE_CODE_CHROME_MCP_ORG_DENIED', 'CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE',
+                 'CLAUDE_CODE_BRIDGE_CHILD_HELD_TO_AUTO',
                  'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
                  'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_CODE_EXECPATH',
                  'CLAUDE_CODE_INVOKED_SKILLS', 'CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS', 'CLAUDE_CODE_CHILD_NOTES_DIR',
@@ -40,6 +43,14 @@ PARENT_CLAUDE = ('CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION
                  'CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR', 'CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR',
                  'CLAUDE_BG_SESSION_PERMISSION_RULES', 'CLAUDE_BG_MEMORY_TOGGLED_OFF', 'CLAUDE_BG_AUTO_MEMORY_OFF',
                  'CLAUDE_BG_GATEWAY_WITHHELD', 'CLAUDE_BG_GATEWAY_ROUTED')
+# What a parent Antigravity CLI session leaves in its subprocesses' environment (observed via `env` inside an
+# agy 1.5.14 agent's tool shell): its session identity, embedded language-server address and CSRF token.
+# ANTIGRAVITY_APP_DATA_DIR is output-only (agy ignores an inherited value at startup and overwrites it), so
+# dropping it never relocates a child's storage. Always scrubbed so spawned child agents never inherit them.
+PARENT_AGY = ('ANTIGRAVITY_AGENT', 'ANTIGRAVITY_AGENTAPI_EXE', 'ANTIGRAVITY_APP_DATA_DIR',
+              'ANTIGRAVITY_CONVERSATION_ID', 'ANTIGRAVITY_CSRF_TOKEN', 'ANTIGRAVITY_LS_ADDRESS',
+              'ANTIGRAVITY_LS_VERSION', 'ANTIGRAVITY_PROJECT_ID', 'ANTIGRAVITY_SOURCE_METADATA',
+              'ANTIGRAVITY_TRAJECTORY_ID')
 
 
 def arguments(value, label, required=False):
@@ -177,9 +188,10 @@ class ConfiguredAdapter:
                 prompt_args = prompt_args[1:]
             argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
         # Scrubbing parent identity is a core invariant, including legacy definitions, and so is Claude's
-        # child-session marker, which turns transcript saving off, and a parent Claude's IDE port and inbox path
-        # and secret (an agent spawned from inside Claude inherits them): a harness replacing unset_env keeps them.
-        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', *PARENT_CLAUDE, *self.spec.get('unset_env', [])]))
+        # child-session marker, which turns transcript saving off, a parent Claude's IDE port and inbox path and
+        # secret, and a parent Antigravity session's server address and CSRF token (an agent spawned from inside
+        # Claude or Antigravity inherits them): a harness replacing unset_env keeps them.
+        unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', *PARENT_CLAUDE, *PARENT_AGY, *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 
     def spawn(self, context: LaunchContext) -> CommandSpec:
@@ -211,7 +223,7 @@ class ConfiguredAdapter:
             return NativeResult('ok', 'No native process was running')
         return NativeResult('ok', 'Core stops the owned terminal process')
 
-    def connection_problem(self, session: SessionHandle) -> str | None:
+    def connection_problem(self, session: SessionHandle) -> str | RestartRequired | None:
         """Optional cheap, read-only diagnostic for this exact live launch."""
         return None
 

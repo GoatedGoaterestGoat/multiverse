@@ -180,6 +180,91 @@ class DiscoveryTest(PluginTestCase):
 
 
 class RegistryTest(PluginTestCase):
+    def test_a_trust_map_that_isnt_there_pins_nothing(self):
+        """A missing trusted-plugins.json is no pins, though its lock stays (untrust leaves one): read as unsure, every
+        path plugin was stuck untrusted with a remedy that refuses, and the plugin host held back every event."""
+        from multiverse.plugins import host
+        home = self.work / "dev"
+        self.write_plugin("relay", {}, {}, where=home)
+        universe = self.write_plugin("uplug", {}, {}, where=self.root / "plugins")
+        pin_map = trust.user_directory() / trust.FILE
+        lock = trust.user_directory() / ".trusted-plugins.lock"
+        with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(home)}):
+            for case in ("its lock left by an untrust that wrote nothing", "removed after a trust"):
+                with self.subTest(case):
+                    if pin_map.exists():
+                        pin_map.unlink()
+                    if case.startswith("removed"):
+                        trust.trust(universe)
+                        pin_map.unlink()
+                    else:
+                        tool.run(self.root, plugin_action="untrust", name="uplug")
+                    self.assertTrue(lock.exists())
+                    self.assertEqual(trust.pins_now(), {})
+                    self.assertEqual(self.entry("relay").state, "off")  # an ordinary path plugin, not untrusted
+                    self.assertEqual(self.entry("uplug").state, "untrusted")  # a reset: trusted again by hand
+                    self.assertIsNotNone(host._observe(self.root, "relay"))  # the host's check isn't left unsure
+                    plugins.set_enabled(self.root, "relay", True)  # turned on, recorded and pinned
+                    self.assertEqual(trust.state(self.entry("relay").directory), "trusted")
+                    plugins.set_enabled(self.root, "relay", False)
+            from multiverse.plugins import installer
+            if pin_map.exists():
+                pin_map.unlink()
+            self.assertEqual(self.entry("relay").state, "off")  # listed with nothing there, so cached that way
+            for case, spoil in (("damaged", lambda: pin_map.write_text("{")),
+                                ("a dangling link", lambda: pin_map.symlink_to(self.work / "nowhere.json"))):
+                with self.subTest(f"there but {case}: no path plugin runs unverified, and the file is named"):
+                    spoil()
+                    try:
+                        self.assertIsNone(trust.pins_now())
+                        with self.assertRaises(installer.InstallError):
+                            installer._pins()  # discovery's reader agrees with the host's
+                        entry = self.entry("relay")  # not the listing cached while nothing was there
+                        self.assertEqual(entry.state, "untrusted")
+                        self.assertIn(str(pin_map), entry.problem)
+                        self.assertNotIn("mv2 plugins trust relay", entry.problem)  # trust refuses an unrecorded one
+                        self.assertNotIn("is on here", entry.problem)  # it's off
+                    finally:
+                        pin_map.unlink()
+                    self.assertEqual(self.entry("relay").state, "off")  # nothing there again: not the cached one
+            with self.subTest("replaced by unreadable bytes of the same size and time: no listing kept from before"):
+                trust.trust(universe)
+                config.set_enabled(self.root, "uplug", True)
+                try:
+                    self.assertEqual(self.entry("uplug").state, "on")
+                    status = pin_map.stat()
+                    text = pin_map.read_bytes()
+                    spare = pin_map.with_name("spare.json")
+                    spare.write_bytes(b"[" + text[1:])  # the same size, not JSON
+                    spare.chmod(status.st_mode & 0o777)
+                    os.utime(spare, ns=(status.st_atime_ns, status.st_mtime_ns))
+                    os.replace(spare, pin_map)
+                    self.assertIsNone(trust.pins_now())
+                    self.assertEqual(self.entry("uplug").state, "untrusted")
+                finally:
+                    pin_map.unlink()
+                    config.set_enabled(self.root, "uplug", False)
+            with self.subTest("a recorded folder, the map damaged: the file is named, and trust writes nothing over it"):
+                plugins.set_enabled(self.root, "relay", True)
+                copy = trust.cache_directory(trust.current(self.entry("relay").directory))
+                self.assertEqual(self.entry("relay").state, "on")  # runs from its copy
+                self.assertTrue(copy.is_dir())
+                kept = pin_map.read_bytes().replace(b'"plugins"', b'"plugins" ', 1)[:-2]  # its approvals, damaged
+                pin_map.write_bytes(kept)
+                try:
+                    with mock.patch.object(trust, "UNUSED_DAYS", 0):
+                        trust.prune_cache()
+                    self.assertTrue(copy.is_dir())  # which copies are trusted can't be told: none is removed
+                    entry = self.entry("relay")
+                    self.assertIn(str(pin_map), entry.problem)
+                    self.assertNotIn("mv2 plugins trust relay", entry.problem)
+                    with self.assertRaises(trust.MapUnreadable):
+                        tool.run(self.root, plugin_action="trust", name="relay")
+                    self.assertEqual(pin_map.read_bytes(), kept)  # what someone could restore is still there
+                finally:
+                    pin_map.unlink()
+                    plugins.set_enabled(self.root, "relay", False)
+
     def test_a_package_of_mv2s_own_python_runs_its_upgrade_and_only_another_pythons_is_pinned(self):
         """A pip upgrade of a plugin in mv2's own Python runs at once, a PYTHONPATH one is pinned; else it's off."""
         from multiverse.plugins import registry

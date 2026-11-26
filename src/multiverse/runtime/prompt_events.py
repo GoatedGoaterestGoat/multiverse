@@ -526,10 +526,10 @@ def _project_pending_turns(agent_dir, rows, *, indexed_only=False):
                 if edge.ref is not None and not row['data'].get('unresolved')]
     references = {}
     try:
-        joined = turn_events.attribution(agent_dir, session, scope['generation'], edges,
-                                         deadline=time.monotonic() + _TURN_ROW_WAIT)
+        attributions = turn_events.attribution(agent_dir, session, scope['generation'], edges,
+                                               deadline=time.monotonic() + _TURN_ROW_WAIT)
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
-        joined = {}
+        attributions = {}
     if eligible and (root := events.root_of(agent_dir)) is not None:
         try:
             proved = transcripts.turn_references(root, agent_dir, session.launch_id, session.native_id,
@@ -540,7 +540,7 @@ def _project_pending_turns(agent_dir, rows, *, indexed_only=False):
         except (OSError, ValueError, TypeError, AttributeError, KeyError, RuntimeError):
             proved = ()  # Keep the observed lifecycle event even if this transcript cannot be proved.
         references.update(zip(eligible, proved))
-    return {row['key']: (edge, references.get(index, transcripts.TurnReference()), index in joined, joined.get(index))
+    return {row['key']: (edge, references.get(index, transcripts.TurnReference()), attributions.get(index))
             for index, (row, edge) in enumerate(zip(rows, edges))}
 
 
@@ -586,10 +586,12 @@ def _resolve_turn_prefix(agent_dir, *, indexed_only=False):
                     turns['task_seen'] = True
                 made = () if ended is None else (('turn.ended', ended),)
             elif key in projections:
-                edge, reference, mv2, message = projections[key]
+                edge, reference, attribution = projections[key]
                 if row['data'].get('unresolved'):
                     reference = TurnReference()  # A concurrent writer may have downgraded this entry.
-                made = turn_events.reduce(turns, edge, reference, mv2=mv2, message=message,
+                made = turn_events.reduce(turns, edge, reference, mv2=attribution is not None,
+                                          message=attribution.message if attribution is not None else None,
+                                          wake=attribution.wake if attribution is not None else False,
                                           task_launch=row['data']['task_launch'])
             else:
                 pending.append(row)

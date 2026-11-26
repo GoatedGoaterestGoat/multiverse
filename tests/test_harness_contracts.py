@@ -58,7 +58,7 @@ class HarnessContracts(unittest.TestCase):
     def values(self):
         values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                       bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
-                      agent_dir=str(self.work / 'agent'), harness_dir='/local/harness',
+                      agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', launch_dir='/launch',
                       session_file=str(self.work / 'agent/session.jsonl'), bootstrap_file='/launch/bootstrap.md',
                       task_file='/launch/task.md', workspace=str(self.work), model='chosen',
                       control_socket='/tmp/owned/rpc.sock')
@@ -72,22 +72,34 @@ class HarnessContracts(unittest.TestCase):
             saved = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'projects' / '-workspace' / f"{values['session_id']}.jsonl"
             saved.parent.mkdir(parents=True, exist_ok=True)
             saved.write_text('{"type": "user"}\n')
+        elif name == 'agy':
+            saved = Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'conversations' / f"{values['session_id']}.db"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_bytes(b'SQLite format 3\x00')
         return SessionHandle(values['agent_id'], name, values['workspace'],
                              native_id=values['session_id'], session_file=values['session_file'])
 
     def test_resume_targets_the_recorded_native_session_for_every_adapter(self):
-        """Resume through lifecycle.start targets the recorded session for Codex (id), Claude (id) and Pi (session
-        file), never the latest or the template's, and refuses when it cannot be exact, naming the file or the way out
-        (Pi: --start-fresh, a damaged header's file; qa PR #26); fragile because each adapter
+        """Resume through lifecycle.start targets the recorded session for Codex (id), Claude (id), Pi (session
+        file) and Antigravity (id), never the latest or the template's, and refuses when it cannot be exact, naming
+        the file or the way out (Pi: --start-fresh, a damaged header's file; qa PR #26); fragile because each adapter
         builds resume differently, and a wrong target silently resumes another conversation."""
-        for harness in ('codex', 'claude', 'pi'):
+        for harness in ('codex', 'claude', 'pi', 'agy'):
             with self.subTest('through lifecycle.start', harness=harness):
+                if harness == 'agy':
+                    agy_settings = Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'settings.json'
+                    agy_settings.parent.mkdir(parents=True, exist_ok=True)
+                    write(agy_settings, {'trustedWorkspaces': [str(self.work.resolve())]})
                 row = self.start(name=f'offline-{harness}', harness=harness)
                 directory = self.root / 'state/agents' / row['id']
                 native = row.get('native_session_id')
-                if harness == 'codex':
+                if harness in ('codex', 'agy'):
                     native = str(uuid4())
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
+                if harness == 'agy':
+                    saved = Path(os.environ['HOME']) / '.gemini' / 'antigravity-cli' / 'conversations' / f'{native}.db'
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    saved.write_bytes(b'SQLite format 3\x00')
                 if harness == 'pi':
                     (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
                 with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}):
@@ -155,7 +167,7 @@ class HarnessContracts(unittest.TestCase):
                         caller = {} if shell is None else {'PI_CODING_AGENT_DIR': shell}
                         effective = {} if recorded is None else {'PI_CODING_AGENT_DIR': recorded}
                         self.assertEqual(adapter.resume_notice(session, caller, effective), notice)
-            if name in ('codex', 'claude'):
+            if name in ('codex', 'claude', 'agy'):
                 with self.subTest('a saved id that is not a lowercase UUID', name=name):
                     context = LaunchContext('resume', values)
                     command = adapter.resume(replace(session, native_id=session.native_id.upper()), context)

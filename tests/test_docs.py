@@ -134,7 +134,8 @@ class VersionBadgeTest(unittest.TestCase):
         """
         table = (ROOT / "docs" / "reference" / "compatibility.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for harness, label in (("Claude Code", "Claude%20Code"), ("Codex CLI", "Codex")):
+        for harness, label in (("Claude Code", "Claude%20Code"), ("Codex CLI", "Codex"),
+                               ("Antigravity CLI", "Antigravity%20CLI")):
             with self.subTest(harness=harness):
                 checked = re.search(rf"^\| {harness} \| ([^ |]+) \|", table, re.MULTILINE).group(1)
                 badge = re.search(rf"img\.shields\.io/badge/{label}-([^-]+)-", readme).group(1)

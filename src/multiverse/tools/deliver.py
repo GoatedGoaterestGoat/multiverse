@@ -4,8 +4,8 @@ from ..plugins import access
 from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
-from ._common import delivery_summary
-from ._messaging import delivery_line
+from ._common import delivery_summary, delivery_waits_for_restart
+from ._messaging import delivery_line, running_for_delivery_advice
 
 
 def configure(parser):
@@ -35,8 +35,14 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
 def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=None, _present_error=None):
     properties = store.read(directory / 'properties.json')
     name = properties['name']
-    launch_id = agents.runtime(directory).get('launch_id')
+    facts = agents.runtime(directory)
+    launch_id = facts.get('launch_id')
     native_id = properties.get('native_session_id')
+    restart = None
+    if check and not dismiss:
+        problem = native.connection_problem(root, properties, facts, directory=directory, restart_only=True)
+        if problem is not None:
+            restart = display.restart_required_line(name, problem.reason)
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
     if dismiss:
         history = [message for message in history if mailbox.dismissible(message, message['tracking'])]
@@ -45,25 +51,56 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                  and message.get('delivery') in ('steer', 'follow-up')
                  and not message['tracking'].get('uncheckable_reported_at')
                  and not message['tracking'].get('dismissed_at')
+                 and not mailbox.failed_copy_read(message['tracking'])
                  and message['tracking']['submission_state'] in ('failed', 'launch-only')] if held else []
     # A focus holds only agents' messages: a person's or a plugin's is retried, an agent's waits for the unfocus.
     # An agent running the retry is an agent sending: everything waits.
     from ..runtime.agent_identity import runs_in_agent
     by_agent = runs_in_agent(root=root)
     holds = (lambda message: True) if by_agent else (lambda message: focus.holds(message.get('from')))
-    if retryable and all(holds(message) for message in retryable):
+    if (retryable and all(holds(message) for message in retryable)
+            and not any(mailbox.failed_copy_read(message['tracking'])
+                        and not message['tracking'].get('inbox_read_reported_at')
+                        and not message['tracking'].get('dismissed_at') for message in history)):
         return _focused(name, held, [], _present_error or _present, waiting=len(retryable), by_agent=by_agent)
     waiting = 0
     results = []
     finalized = 0
     counts = {}
     details = []
+    running = None
+
+    def report_inbox_read(message):
+        nonlocal finalized
+        if dismiss:
+            return
+        if not mailbox.claim_inbox_read_report(directory, message['id']):
+            finalized += int(retry)
+            return
+        receipt = native.inbox_read_receipt(message['id'], retry=retry)
+        results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message},
+                        **delivery_summary(receipt)})
+        if check:
+            counts['read in inbox'] = counts.get('read in inbox', 0) + 1
+        if _present:
+            line = delivery_line(name, receipt, retry=retry)
+            if check:
+                details.append((_present, line))
+            else:
+                _present(line)
+
     for message in history:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']
         if tracking.get('dismissed_at'):
             finalized += int(retry)
+            continue
+        if mailbox.failed_copy_read(tracking):
+            if tracking.get('inbox_read_reported_at'):
+                finalized += int(retry)
+            else:
+                report_inbox_read(message)
             continue
         final_lineage = bool(tracking.get('uncheckable_reported_at'))
         state = tracking['submission_state']
@@ -74,6 +111,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
             continue
         if check and tracking.get('uncheckable_reported_at'):
             continue
+        cancelled_copy = (retry and state == 'cancelled' and not tracking.get('cancelled_reported_at')
+                          and mailbox.failed_inbox_status(directory, message, tracking) == 'waiting')
         accepted = False
         outside_lineage = False
         try:
@@ -101,17 +140,17 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                     old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
                 accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
             accepted = accepted or started_wake
-            if not outside_lineage and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+            if not outside_lineage and not accepted and not cancelled_copy and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
                 continue
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
-            if final is not None and retry:
+            if final is not None and final.get('state') != 'read' and retry:
                 finalized += 1
                 continue
             if outside_lineage:
                 # Recheck the pointer under the launch lock before claiming a
                 # once-only diagnostic; this history snapshot can predate a rebind.
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
-            elif check and state == 'cancelled':
+            elif state == 'cancelled':
                 claimed = mailbox.claim_cancelled_report(directory, message['id'])
                 if claimed is None:
                     continue
@@ -144,6 +183,9 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False, 'value': {'check_error': True,
                        **({'repair_journal': str(error.file)} if isinstance(error, agents.sessions.JournalError) else {})}}
+        if receipt.get('state') == 'read':
+            report_inbox_read(message)
+            continue
         if check and state != 'cancelled' and receipt.get('state') == 'cancelled':
             # Another checker may have selected the same still-accepted snapshot.
             if mailbox.claim_cancelled_report(directory, message['id']) is None:
@@ -152,6 +194,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         if uncheckable and mailbox.claim_uncheckable_report(directory, message['id']) is None:
             continue
         summary = delivery_summary(receipt)
+        if cancelled_copy and receipt.get('state') == 'cancelled':
+            summary['ok'] = True  # Reporting the final copy does not attempt a retry.
         if retry and uncheckable:
             # Reporting a final is not a failed submission. Keep its original
             # delivery evidence, but count it with previously reported finals.
@@ -170,9 +214,16 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         historical = isinstance(receipt.get('value'), dict) and receipt['value'].get('historical_conversation') is True
         if _present and (category != 'confirmed' or historical) and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
             _, current = mailbox.message_record(directory, message['id'])
+            failed_inbox = (mailbox.failed_inbox_status(directory, message, current)
+                            if receipt.get('state') in ('error', 'unavailable', 'cancelled') else None)
             present = _present_error if summary.get('ok') is False and _present_error else _present
+            # A check can share one observation. A retry may have started a new launch before the next failure.
+            if not restart and receipt.get('state') in ('error', 'unavailable') and (retry or running is None):
+                running = running_for_delivery_advice(directory)
             line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
-                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt)
+                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text'],
+                                  failed_inbox=failed_inbox,
+                                  running=running, restart_reported=bool(restart)), receipt)
             if check:
                 details.append((present, line))
             else:
@@ -189,7 +240,11 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 _present(f'{name}: {confirmed} {"message" if confirmed == 1 else "messages"} confirmed in '
                          f'{"its conversation" if confirmed == 1 else "their conversations"}; not dismissed.')
             if failures:
-                _present(f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.')
+                line = f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.'
+                if inbox_count := len(dismissed['inbox']):
+                    line += (f" {inbox_count} of the messages just dismissed {'is' if inbox_count == 1 else 'are'} "
+                             f"still waiting in {name}'s inbox.")
+                _present(line)
             if unconfirmed:
                 _present(f'{name}: {unconfirmed} unconfirmed {"message" if unconfirmed == 1 else "messages"} dismissed; '
                          f'{"it" if unconfirmed == 1 else "they"} may still have arrived. Kept in history. Nothing resent.')
@@ -199,8 +254,11 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 _present(f'{name}: no failed or unconfirmed messages to dismiss.')
         return {'messages': results, 'confirmed': confirmed, 'dismissed': failures + unconfirmed,
                 'dismissed_failures': failures, 'dismissed_unconfirmed': unconfirmed, 'ok': True}
+    if _present and restart:
+        _present(f'{name}: {restart}')
     if _present and check and results:
-        order = ('confirmed', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain', 'could not check')
+        order = ('confirmed', 'read in inbox', 'accepted without confirmation', 'waiting for restart', 'pending',
+                 'not delivered', 'uncertain', 'could not check')
         _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
         for present, line in details:
             present(line)
@@ -213,7 +271,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
     elif _present and not results:
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results),
-            **({'finalized': finalized} if finalized else {})}
+            **({'finalized': finalized} if finalized else {}), **({'restart_required': restart} if restart else {})}
 
 
 def _check_state(receipt, *, accepted):
@@ -228,6 +286,8 @@ def _check_state(receipt, *, accepted):
         return 'could not check'
     if state in ('cancelled', 'error', 'unavailable'):
         return 'not delivered'
+    if delivery_waits_for_restart(receipt):
+        return 'waiting for restart'
     if accepted or state in ('ok', 'native_queued'):
         return 'accepted without confirmation'
     if state == 'pending':

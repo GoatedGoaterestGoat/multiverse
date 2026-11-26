@@ -1,0 +1,38 @@
+[
+  {
+    "name": "idle after reply",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__single_line_final_answer_hides_working_status.snap at rust-v0.172.0 (3d86e43b075a), sha256 cbca1553c1a3c49eb40dd32f7726e4ea4a60170dad5dc0cfb9291f2bb823a698; not a tmux capture",
+    "text": "› count to 1\n\n\n• 1\n\n\n› Ask Codex to do anything\n\n  gpt-5 default · /tmp/project\n  ? for shortcuts\n",
+    "shown": "› count to 1\n\n\n• 1\n\n"
+  },
+  {
+    "name": "queued followup",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__tests__status_and_queued_messages_snapshot.snap at rust-v0.172.0 (3d86e43b075a), sha256 fa11ba4c8bd158431a70319adfb2353fafe94b6e85bd0960dbe0b129c484c1ae; not a tmux capture",
+    "text": "• Working (0s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up question\n    ⇧← edit last queued message\n\n› Ask Codex to do anything\n\n  ? for shortcuts            100% context left\n",
+    "shown": "• Working (0s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ Queued follow-up question\n    ⇧← edit last queued message\n"
+  },
+  {
+    "name": "status line with fast mode",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__status_line_fast_mode_footer.snap at rust-v0.172.0 (3d86e43b075a), sha256 fafc7a1a19e93419b4158467e339961f5828c92a7557b9cf3639d7d798bf21f8; not a tmux capture",
+    "text": "\n\n› Ask Codex to do anything\n\n  gpt-5.2 high · Standard\n  ? for shortcuts\n",
+    "shown": "\n"
+  },
+  {
+    "name": "slash argument completion",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/chat_composer/snapshots/codex_tui__bottom_pane__chat_composer__slash_argument__tests__slash_argument_popup.snap at rust-v0.172.0 (3d86e43b075a), sha256 7ac55a9214b9e4f38f7dd4d3fa3354183c79aafa1a916f71a3d16d906bc32d96; not a tmux capture",
+    "text": "› on\n  off\n",
+    "shown": "› on\n  off\n"
+  },
+  {
+    "name": "question dialog",
+    "source": "upstream renderer snapshot codex-rs/tui/src/bottom_pane/async_questions/snapshots/codex_tui__bottom_pane__async_questions__tests__question_wrapped_selected_option.snap at rust-v0.172.0 (3d86e43b075a), sha256 44a711a046f91a3fedbdc048b6e608cb58a1f06203d0846823514de10a87c45d; not a tmux capture",
+    "text": "\n  Second\n\n  › 2. A suggested answer that is\n       long enough to wrap across\n       multiple rows\n\n  enter submit   ⌃] skip\n  option 2/3   ⇧→ main prompt\n",
+    "shown": "\n  Second\n\n  › 2. A suggested answer that is\n       long enough to wrap across\n       multiple rows\n\n  enter submit   ⌃] skip\n  option 2/3   ⇧→ main prompt\n"
+  },
+  {
+    "name": "command approval",
+    "source": "upstream renderer snapshot codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__approval_modal_exec.snap at rust-v0.172.0 (3d86e43b075a), sha256 6d1120d5645c6f8ce7bea849e59e49440638de19d66661ffef49c498045fca2d; not a tmux capture",
+    "text": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n",
+    "shown": "\n\n  Would you like to run the following command?\n\n  Reason: this is a test reason such as one that would be produced by the model\n\n  $ echo hello world\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with `echo hello world` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+  }
+]

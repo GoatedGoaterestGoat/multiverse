@@ -15,7 +15,9 @@ from multiverse.harnesses.codex import prompt_files, usage
 from multiverse.harnesses.codex import plugins as codex_plugins
 from multiverse.harnesses.types import CommandSpec, LaunchContext, SessionHandle
 from multiverse.terminal import recovery, statusline
-from multiverse.tools import inbox, send
+from multiverse.runtime import native
+from multiverse.tools import _messaging, inbox
+from multiverse.universe import agents
 from multiverse.ui import views
 
 
@@ -279,9 +281,9 @@ class NetworkEdgeRecordsTest(BaseTest):
 
         path = self.directory / 'properties.json'
         store.write(path, {'name': 'reader'})
-        with patch.object(send.agents, 'runtime', return_value={}), \
-                patch.object(send.native, 'observe', return_value={'live': 'alive'}):
-            self.assert_gaps(path, lambda: send._running(self.directory), True, False)
+        with patch.object(agents, 'runtime', return_value={}), \
+                patch.object(native, 'observe', return_value={'live': 'alive'}):
+            self.assert_gaps(path, lambda: _messaging.running_for_delivery_advice(self.directory), True, False)
         with patch.object(inbox, 'callback', return_value=(self.root, self.directory, None)), \
                 patch.object(inbox.mailbox, 'inbox', return_value={'messages': [{'text': 'ready'}], 'cursor': 0}):
             self.assert_gaps(path, lambda: inbox.run(self.root, wait=True)['messages'][0]['text'], 'ready', ValueError)

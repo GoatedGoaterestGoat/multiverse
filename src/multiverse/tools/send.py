@@ -6,11 +6,11 @@ from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime, queued_prompts
 from ..terminal.recovery import Unreachable
-from ..store import lock, read, retry_missing
+from ..store import lock, read
 from ..universe import agents, blocked, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
-from ._messaging import delivery_line, failure_reason
+from ._messaging import delivery_line, failure_reason, inbox_reminder, running_for_delivery_advice
 
 def configure(parser):
     parser.add_argument("agent", help="Agent name, or comma-separated names")
@@ -54,6 +54,14 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     # host, have none.
     from ..runtime.agent_identity import runs_in_agent
     in_agent = runs_in_agent(root=root)
+    if (in_agent and os.environ.get('MV2_SHELL_CALLBACK') == '1'
+            and os.environ.get('MV2_LAUNCH_ID') and os.environ.get('MV2_AGENT_ID')):
+        try:
+            own_root = universe.resolve(os.environ.get('MV2_UNIVERSE') or root)
+            own_directory = agents.directory(own_root, os.environ['MV2_AGENT_ID'], allow_damaged=True)
+            native.try_shell_callback(own_root, own_directory, os.environ['MV2_LAUNCH_ID'])
+        except Exception:
+            pass
     sender = _normalized(sender, in_agent)  # saved as it will be shown, live and in the inbox
     from ..plugins import manifest
     from ..runtime.native import _plugin_as_user
@@ -117,8 +125,9 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 unread_senders = _unread_senders(caller) if _present or _present_error else set()
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds,
                                         as_user)
+            failed_inbox = result.pop('failed_inbox', None)
             running = bool(_present and result.get('delivery') != 'inbox-only'
-                           and receipt.get('state') in ('error', 'unavailable') and _running(directory))
+                           and receipt.get('state') in ('error', 'unavailable') and running_for_delivery_advice(directory))
             if result.get('upgrade_damaged'):
                 reason = failure_reason(receipt.get('reason'), result['text'], preserve_details=True)
                 line = f'Original text is saved, but its inbox cannot be read: {reason}. Repair the inbox ledger before reading it.'
@@ -129,7 +138,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             elif result['delivery'] == 'inbox-only':
                 line = f"Saved to {name}'s inbox; it sees it at its next check."
             else:
-                line = display.with_notices(delivery_line(name, receipt, delivery=result['delivery'], text=result['text'], running=running), receipt)
+                line = display.with_notices(delivery_line(name, receipt, delivery=result['delivery'], text=result['text'],
+                                          running=running, failed_inbox=failed_inbox), receipt)
             if result.get('upgraded_from'):
                 if result['state'] in ('held', 'pending'):
                     prefix = 'Your message was scheduled as a follow-up instead'
@@ -150,7 +160,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             elif result.get('upgrade_unavailable'):
                 line = (f"{name} is blocked on you, but cannot take a follow-up in its current session. " + line)
             if recipient_id in unread_senders:
-                line += ('\n' if '\n' in line else ' ') + f'Reminder: you have unread messages from {name}.'
+                line += ('\n' if '\n' in line else ' ') + inbox_reminder(name)
             if (force and queue_check is not None and queue_check.state == 'ok'
                     and queue_check.coverage == 'complete' and recipient_id not in queued_senders):
                 note = f"You have no queued follow-ups from {display.clean(name)}, so you don't need --force."
@@ -212,15 +222,6 @@ def _normalized(sender, in_agent):
 def _unread_senders(caller):
     """Optional output advice: peek once before sending, outside every delivery lock."""
     return mailbox.unread_senders(caller.directory) if caller is not None else set()
-
-
-def _running(directory):
-    """Observe only for readable failure advice; uncertainty never changes delivery evidence."""
-    try:
-        properties = retry_missing(lambda: read(directory / 'properties.json'))
-        return native.observe(properties, agents.runtime(directory))['live'] == 'alive'
-    except (OSError, ValueError, KeyError, RuntimeError):
-        return False
 
 
 def _skipped(sender, text, delivery, reason):
@@ -342,6 +343,8 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, 
         receipt = {'state': 'error', 'ok': False, 'reason': reason,
                    'value': {'pre_submission_failure': True}}
         return ({**result, 'state': 'error', 'saved': True, 'ok': False,
+                 'failed_inbox': mailbox.failed_inbox_status(directory, message, {
+                     'submission_state': 'failed', 'failed_inbox_copy': True}),
                  'native_delivery': delivery_summary(receipt)}, receipt)
     if binding_error:
         receipt = {'state': 'error', 'reason': str(binding_error),
@@ -370,13 +373,18 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, 
 
 def _completed(directory, message, receipt, *, upgraded):
     result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
-    if upgraded:
+    if upgraded or receipt['state'] in ('error', 'unavailable', 'cancelled'):
         try:
             _, tracking = message_record(directory, message['id'])
         except (OSError, ValueError, TypeError) as error:
-            receipt = {'state': 'unknown', 'ok': False, 'reason': str(error)}
-            return ({**result, 'state': 'unknown', 'saved': True, 'ok': False, 'upgrade_damaged': True,
-                     'native_delivery': delivery_summary(receipt)}, receipt)
+            if upgraded:
+                receipt = {'state': 'unknown', 'ok': False, 'reason': str(error)}
+                return ({**result, 'state': 'unknown', 'saved': True, 'ok': False, 'upgrade_damaged': True,
+                         'native_delivery': delivery_summary(receipt)}, receipt)
+        else:
+            if failed_inbox := mailbox.failed_inbox_status(directory, message, tracking):
+                result['failed_inbox'] = failed_inbox
+    if upgraded:
         if (receipt.get('state') in ('error', 'unavailable')
                 and tracking.get('submission_state') in ('accepted', 'unknown', 'submitting')):
             receipt = {**receipt, 'state': 'unknown', 'ok': False,

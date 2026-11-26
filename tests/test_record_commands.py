@@ -50,22 +50,47 @@ class RecordCommandsTest(BaseTest):
         write(directory / 'harness.json', definition)
 
     def test_record_commands_report_their_facts_and_fail_honestly(self):
-        """kill and stop say when cancellation is unconfirmed or startup messages were dropped, ask exits 1 without an
+        """kill and stop say when cancellation is unconfirmed or startup delivery failed, ask exits 1 without an
         answer and get-usage without a measurement, capabilities --probe marks a harness with a missing executable unavailable, and --json and the Python
         functions keep returning records; kept for the qa findings these fixed, since agents act on this output and the
         exit code (LC-4, LC-6, CLAUDE-7, e2dafba)."""
         for name in ('kill', 'stop'):
             with self.subTest(command=name):
-                with patch.object(lifecycle, 'kill', return_value=self.killed(cancelled_startup_messages=2)):
+                with patch.object(lifecycle, 'kill', return_value=self.killed(
+                        failed_startup_messages=2, retryable_startup_messages=2)):
                     out, _, code = self.command(name, 'worker')
                 self.assertEqual(code, 0)
-                self.assertRegex(out, r'\b2 messages\b.*not delivered')
+                self.assertIn('2 messages waiting for it to start were not delivered. '
+                              'Run mv2 deliver worker --retry to send them.', out)
+                with patch.object(lifecycle, 'kill', return_value=self.killed(
+                        failed_startup_messages=1, retryable_startup_messages=1,
+                        startup_messages_in_inbox=1, cancelled_messages_in_inbox=1)):
+                    self.assertEqual(self.command(name, 'worker'), (
+                        "Stopped worker. This stop left 2 undelivered messages waiting in worker's inbox. "
+                        "1 message waiting for it to start was not delivered. "
+                        "Run mv2 deliver worker --retry to send it as a prompt if unread.", '', 0))
+                for counts, hint in (
+                    ({'failed_startup_messages': 2, 'retryable_startup_messages': 1},
+                     'Run mv2 deliver worker --retry to send the retryable messages.'),
+                    ({'failed_startup_messages': 2, 'retryable_startup_messages': 0}, None),
+                    ({'cancelled_startup_messages': 2}, None),
+                ):
+                    with patch.object(lifecycle, 'kill', return_value=self.killed(**counts)):
+                        out, _, code = self.command(name, 'worker')
+                    self.assertEqual(code, 0)
+                    self.assertIn('2 messages waiting for it to start were not delivered.', out)
+                    if hint:
+                        self.assertIn(hint, out)
+                    else:
+                        self.assertNotIn('--retry', out)
                 unconfirmed = self.killed('unknown', 'Native cancellation unconfirmed: socket closed. Retry stop '
-                                          'when the native service is reachable.', cancelled_startup_messages=1)
+                                          'when the native service is reachable.', failed_startup_messages=1,
+                                          retryable_startup_messages=1)
                 with patch.object(lifecycle, 'kill', return_value=unconfirmed):
                     out, _, code = self.command(name, 'worker')
                     self.assertIn("couldn't confirm", out)
                     self.assertIn('socket closed', out)
+                    self.assertIn('Run mv2 deliver worker --retry to send it.', out)
                     self.assertEqual(json.loads(self.command(name, 'worker', '--json')[0]), unconfirmed)
                 attachment = self.killed(reason='Only this terminal attachment was closed; conversation work was not '
                                                 'cancelled')

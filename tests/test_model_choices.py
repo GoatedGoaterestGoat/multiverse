@@ -69,7 +69,7 @@ class ModelChoicesTest(BaseTest):
 
     def test_real_catalogs_keep_defaults_until_a_complete_valid_subset_is_set(self):
         """Catalog and default eligibility must match the current subset or a picker can offer forbidden choices."""
-        for name in ('claude', 'codex'):
+        for name in ('claude', 'codex', 'agy'):
             with self.subTest(name):
                 self.configure(name, {})
                 original = lifecycle.model_choices(self.root, name)

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import secrets as tokens
+import shlex
 import shutil
 import subprocess
 import time
@@ -31,7 +32,7 @@ from ..store import lock, now, read, retry_missing, write
 RECORD = "plugin-installs.json"
 STAGING = "plugin-staging"
 MARKER = ".mv2-installed.json"  # inside an installed plugin: which install placed it (part of its fingerprint)
-STALE_HOURS = 24  # a staged preview nobody confirmed or cancelled, and a removal a process left behind
+STALE_HOURS = 24  # a staged preview nobody confirmed or cancelled, and a removed-* folder older versions left
 FETCH_SECONDS = 600
 SCHEMES = ("https://", "ssh://", "git://", "file://")
 # git URL protocols the installer lets git use: never ext:: (runs a command) or others a URL could name.
@@ -39,7 +40,8 @@ PROTOCOLS = ("https", "ssh", "git", "file")
 KEY = re.compile(r"[0-9a-f]{16}")
 SCRATCH = re.compile(r"(?:look-|removed-)?[0-9a-f]{16}")  # what the installer itself makes in staging, and sweeps
 BUSY = re.compile(r"busy-[0-9a-f]{16}-[0-9a-f]{8}")  # a preview a confirm or cancel claimed
-RECOVERY = "plugin-recovery"  # an old version a failed rollback couldn't put back: never swept
+RECOVERY = "plugin-recovery"  # an old version a failed rollback, or a removal, couldn't put back: never swept
+KEPT = "kept-"  # a folder remove set aside until it commits: matches neither SCRATCH nor BUSY, so never swept
 MARKER_BYTES = 4096
 BLOBS = {"100644": 0o644, "100755": 0o755}
 
@@ -354,27 +356,20 @@ def read_map(path, written):
 
 
 def _pins():
-    """The paths trusted-plugins.json pins, read as read_map reads."""
-    path = trust.user_directory() / trust.FILE
-    try:
-        data = read_map(path, trust.user_directory() / ".trusted-plugins.lock")
-    except FileNotFoundError:
-        return {}
-    except InstallError:
-        raise
-    except (OSError, ValueError):
-        raise InstallError(f"{path} can't be read") from None
-    plugins = data.get("plugins") if isinstance(data, dict) else None
-    if not isinstance(plugins, dict):
-        raise InstallError(f"{path} can't be read: its plugins aren't a map")
-    return plugins
+    """The paths trusted-plugins.json pins, read as trust._records reads. A map that isn't there pins nothing, even
+    one written before (every trust writer reads it so too); a gap while it's replaced is retried only when its
+    writers' lock is there. One that's there but can't be read: InstallError."""
+    try:  # a map never written is never waited for
+        return trust._records(strict=True, wait=trust.written_before())
+    except trust.MapUnreadable as error:
+        raise InstallError(str(error)) from None
 
 
 def managed_personal(candidates=None):
     """(directories, certain): the personal plugin directories the installer placed, by any of its three marks
     (its record, its pin in trusted-plugins.json, the marker inside the plugin), so losing the others never
     leaves an installed plugin running unpinned. The maps are read here, directly. When either can't be read for
-    sure (damaged, or missing though written before), every personal folder counts as installed, so each is
+    sure (damaged, or the record missing though written before), every personal folder counts as installed, so each is
     verified rather than run as placed by hand, and `certain` is False: nothing may keep that answer. With
     `candidates` (the directories a listing found), nothing is read unless one is in the personal plugins
     folder: then nothing there can be an install."""
@@ -864,22 +859,69 @@ def remove(name, root=None, here=False, placement=None, expected=None):
         records = where.records()
         if records.get(name) != record:
             raise InstallError(f"{name} changed meanwhile: look at it again")
+        aside = None
         if target.exists() or target.is_symlink():
             if not _owned(target, record):
                 raise InstallError(f"{target} isn't the folder mv2 plugins install placed (moved or replaced "
                                    f"since): nothing was removed")
-            aside = where.staging / ("removed-" + tokens.token_hex(8))
-            os.replace(target, aside)
-            shutil.rmtree(aside, ignore_errors=True)
+            # Out of the way under a name no sweep matches, whole until the removal commits (an interrupted
+            # remove, or one that can't drop the pin nor put it back, never loses it to a later sweep).
+            aside = where.staging / f"{KEPT}{name}-{tokens.token_hex(4)}"
+            try:
+                os.replace(target, aside)
+            except OSError as error:
+                raise InstallError(f"its folder couldn't be moved out of the way ({visible(str(error))})") from None
         else:
             gone = True
-        trust.forget(target)
+        try:
+            trust.forget(target)
+        except OSError as error:  # its pin can't be dropped (trusted-plugins.json can't be read): remove nothing
+            if aside is not None:
+                try:
+                    os.replace(aside, target)
+                except OSError:
+                    kept = _keep_unswept(where, name, aside)
+                    raise InstallError(f"its pin couldn't be dropped ({visible(str(error))}), and its folder "
+                                       f"couldn't be put back: it is in {kept}") from None
+            raise InstallError(f"its pin couldn't be dropped: {visible(str(error))}") from None
         del records[name]
-        where.save(records)
+        try:
+            where.save(records)
+        except OSError as error:  # its pin is gone but its record stays: put the folder back for that record
+            # The same removal, wherever it is run from: a bare one takes a personal install first.
+            again = (f"mv2 -u {shlex.quote(str(where.root))} plugins remove {name} --here" if where.kind == "universe"
+                     else f"mv2 plugins remove {name}")
+            cause = f"its record couldn't be saved ({visible(str(error))})"
+            if aside is None:
+                raise InstallError(f"{cause}; its folder was already gone: run {again} again to drop the "
+                                   f"record") from None
+            try:
+                os.replace(aside, target)
+            except OSError:
+                kept = _keep_unswept(where, name, aside)
+                raise InstallError(f"{cause}; its files are kept in {kept}: to keep {name}, move them back to "
+                                   f"{target} (unpinned until you approve it again); to finish removing it, run "
+                                   f"{again} (the files stay)") from None
+            raise InstallError(f"{cause}; its folder is back in {target}, unpinned, so it doesn't run: run {again} "
+                               f"again") from None
+        if aside is not None:
+            shutil.rmtree(aside, ignore_errors=True)  # committed: only now is the folder gone
     from . import loader
     loader._changed()
     return {"name": name, "removed": str(target), "placement": where.kind, "already_gone": gone,
             "left": leftovers(name, root, folder)}
+
+
+def _keep_unswept(where, name, folder):
+    """Move `folder` (already under a staging name no sweep matches) to plugin-recovery, where a failed update's
+    old version goes too; where it ends up, `folder` itself when that move can't be made."""
+    try:
+        where.recovery.mkdir(parents=True, exist_ok=True)
+        moved = where.recovery / f"{name}-{tokens.token_hex(4)}"
+        os.replace(folder, moved)
+        return moved
+    except OSError:
+        return folder
 
 
 def leftovers(name, root, folder):

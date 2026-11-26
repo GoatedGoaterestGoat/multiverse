@@ -283,10 +283,21 @@ def _recorded(root, directory, name=None, source=None, pinned=None):
     return paths is None or folder in paths
 
 
+def _unreadable_registry(root, source):
+    """For a plugin of a source another process may lack, verified because the universe's registry can't be read
+    (nothing proves it isn't recorded): that file, else None. Trust is no remedy there: mv2 plugins trust refuses a
+    path plugin the universe doesn't record."""
+    if root is None or source in (None, "recorded"):
+        return None
+    from . import registry
+    path = registry.path(root)
+    return path if registry.known(root) is None and os.path.lexists(path) else None
+
+
 def _pinned_paths():
-    """A reader of the paths trusted-plugins.json pins: read the first time it's asked, once (no wait when it was
-    never written), None when it can't be read (then every plugin of a source another process may lack is
-    verified)."""
+    """A reader of the paths trusted-plugins.json pins: read the first time it's asked, once, never waited for ({}
+    when it isn't there), None when it's there but can't be read (then every plugin of a source another process may
+    lack is verified)."""
     found = []
 
     def paths():
@@ -495,10 +506,21 @@ def _stat(path):
         return None
 
 
+def _lstat(path):
+    """The entry itself, never what a link leads to (a dangling link there differs from nothing there), by its
+    identity and change time too: a same-sized replacement that kept the old time still differs."""
+    try:
+        status = os.lstat(path)
+        return (status.st_dev, status.st_ino, status.st_mode, status.st_mtime_ns, status.st_ctime_ns,
+                status.st_size)
+    except OSError:
+        return None
+
+
 def _signature(root, pins=None, sources=None):
     """Everything entries() depends on, by file times and sizes: cheap enough for every refresh. `pins`, the
     installer's classification entries() read for this call (_pinned)."""
-    parts = [os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(), _generation, _stat(trust.user_directory() / trust.FILE)]
+    parts = [os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(), _generation, _lstat(trust.user_directory() / trust.FILE)]
     if root is not None:
         parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
         parts.append(tuple((path.name, _stat(path)) for path in sorted((Path(root) / settings_files.DIRECTORY).glob("*.json"))))
@@ -724,6 +746,14 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None,
     recorded = recorded or source == "recorded"
     if source == "universe" or recorded or pinned:
         trusted = "trusted" if fingerprint else trust.state(directory)
+        if trusted == "untrusted" and trust.pins_now() is None:
+            # Every approval is unknown while trusted-plugins.json can't be read, so trust is no remedy: it would
+            # write over approvals someone could still restore.
+            where = f"{name} is on here from {directory}" if on else f"{name} from {directory}"
+            entry.state = "untrusted"
+            entry.problem = (f"{where} can't run while {trust.user_directory() / trust.FILE} can't be read; fix it, "
+                             f"or remove it to start over (each plugin you trusted then needs mv2 plugins trust again)")
+            return entry
         if trusted != "trusted" and pinned:
             entry.state = "changed" if trusted == "changed" else "untrusted"
             entry.problem = (f"{name}'s files changed since mv2 plugins install put them in {directory}; review "
@@ -734,9 +764,14 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None,
             return entry
         if trusted != "trusted" and recorded and not pinned:
             entry.state = trusted
-            entry.problem = (f"{name} is on here from {directory}, which changed since it was trusted" if
-                             trusted == "changed" else f"{name} is on here from {directory}, which isn't trusted") + (
-                f"; review it, then run mv2 plugins trust {name}")
+            unreadable = _unreadable_registry(root, source) if trusted == "untrusted" else None
+            where = f"{name} is on here from {directory}" if on else f"{name} from {directory}"
+            if unreadable is not None:
+                entry.problem = f"{where} can't run while {unreadable} can't be read; fix it, or remove it and list " \
+                                f"the plugins again"
+                return entry
+            entry.problem = (f"{where}, which changed since it was trusted" if trusted == "changed" else
+                             f"{where}, which isn't trusted") + f"; review it, then run mv2 plugins trust {name}"
             return entry
         if trusted != "trusted":
             entry.state = trusted

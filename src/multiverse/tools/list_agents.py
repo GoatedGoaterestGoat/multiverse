@@ -1,7 +1,7 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import (error_text, model_label, phase_label, shorten, startup_prompt_line, state, summary_label,
-                       live_label)
+from ..display import (error_text, model_label, paused_queue_line, phase_label, shorten, startup_prompt_line, state,
+                       summary_label, live_label)
 from ..runtime import lifecycle
 from ..universe import focus
 from .. import universe
@@ -108,6 +108,8 @@ def problems(row, wide):
     error = (f"{damage['file']}: {damage['reason']}" if damage else None) or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
     if error:
         lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide or damage else error_text(error)))
+    if row.get('restart_required'):
+        lines.append('  ! ' + row['restart_required'])
     if row.get('delivery_problem'):
         lines.append('  ! ' + row['delivery_problem'])
     asked = startup_prompt_line(row, (row.get('runtime') or {}).get('startup_prompt')) if row.get('live') == 'alive' else None
@@ -115,6 +117,9 @@ def problems(row, wide):
         lines.append('  ' + asked)
     if row.get('recovery_note'):
         lines.append('  Note: Reconnected automatically.')
+    paused = paused_queue_line(row)
+    if paused:
+        lines.append('  Note: ' + paused)
     if row.get('focus'):
         lines.append(f"  Focused {focus.ends(row['focus'])}: agents' messages to it wait in its inbox.")
     return lines

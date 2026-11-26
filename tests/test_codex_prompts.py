@@ -613,6 +613,8 @@ class PromptRelayTest(unittest.TestCase):
                                       ('0.170.0', '0.169.0', False), ('0.169.0', '0.170.0', False),
                                       ('0.171.0', '0.171.0', True), ('0.171.0', '0.170.0', False),
                                       ('0.170.0', '0.171.0', False), ('0.170.1', '0.170.1', False),
+                                      ('0.172.0', '0.172.0', True), ('0.172.0', '0.171.0', False),
+                                      ('0.171.0', '0.172.0', False), ('0.172.1', '0.172.1', False),
                                       ('0.171.1', '0.171.1', False)):
             with self.subTest(prompt_versions=(cli, daemon)):
                 self.assertEqual(prompts.available(replace(self.session,

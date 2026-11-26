@@ -15,7 +15,7 @@ EFFECTS: Mapping[str, Effect] = {
         'agent_identity_policy', 'agent_identity_problem', 'allow_recorded_launch',
         'attachment_ready', 'attachment_recovery', 'retained_usage', 'navigation_target',
         'connection_problem', 'status_watch', 'supports_launch_refusal',
-        'launch_started', 'launch_refusal', 'launch_prompt', 'startup_retryable',
+        'launch_started', 'launch_refusal', 'launch_prompt', 'startup_retryable', 'workspace_trust',
         'startup_prompt_evidence', 'startup_prompt_evidence_reason',
         'accepted_message_evidence', 'message_id_evidence',
         'transcript_view', 'transcript_bodies', 'transcript_readable', 'transcript_index',
@@ -25,12 +25,23 @@ EFFECTS: Mapping[str, Effect] = {
     ), 'observe'),
     'ask': 'spend',
     'run_plan': 'spend',
-    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash', 'answer_prompt'), 'act'),
+    **dict.fromkeys(('spawn', 'resume', 'stop', 'send', 'continue_queued', 'launch_proxy', 'run_slash', 'answer_prompt', 'shell_callback'), 'act'),
 }
 
 
 class BridgeUnavailable(ValueError):
     """Preparation failed before a native child or conversation was started."""
+
+
+class LaunchRefused(ValueError):
+    """Decline launch preparation with an actionable reason and let core preserve the spawn task."""
+
+
+@dataclass(frozen=True)
+class RestartRequired:
+    """A connection problem proved by the current launch record that needs a fresh launch."""
+
+    reason: str  # Human-readable cause. Core adds the commands for this agent.
 
 
 class LocalProtocolError(Exception):
@@ -195,6 +206,24 @@ class CommandSpec:
     # Presentation for this selected candidate, including a late plain fallback.
     notices: tuple[str, ...] = ()
     startup_retry: StartupRetrySpec | None = None
+    # Relative paths and UTF-8 contents core writes into launches/<launch_id>/ (0600); never outside it.
+    launch_files: Mapping[str, str] = field(default_factory=dict)
+    # Relative paths inside launches/<launch_id>/ that core unlinks when this launch ends or fails before release.
+    cleanup_files: tuple[str, ...] = ()
+    # Opt in to core's in-session tool-shell callback (`shell_callback` hook) for this launch.
+    shell_callback: bool = False
+    # Opt in to session-scoped tmux mouse mode without declaring an AttachmentSpec.
+    mouse: bool = False
+    # Let a sandboxed listener ask this launch's runner to verify its own child.
+    runner_listen: bool = False
+
+
+@dataclass(frozen=True)
+class ShellCallbackResult:
+    """Adapter-prepared launch handoff from an in-session tool shell; core owns locks, binding and writes."""
+    native_id: str | None = None
+    bridge: str | None = None
+    launch_files: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -679,7 +708,11 @@ class TurnCursorProjection:
 
 @dataclass(frozen=True, kw_only=True)
 class TurnStarted:
-    """The first input of a native turn, observed by its owning conversation."""
+    """The first input of a native turn, observed by its owning conversation.
+
+    Set first_task only with proof that this was the launch's starting prompt.
+    Core decides whether the prompt was a task or a wake message.
+    """
     turn: str
     kind: Literal['prompt', 'command']
     ref: str | None

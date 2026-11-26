@@ -858,7 +858,7 @@ class LaunchIsolationTest(unittest.TestCase):
     def adapter_values(self):
         values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                       bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
-                      agent_dir=str(self.work / 'agent'), harness_dir='/local/harness',
+                      agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', launch_dir='/launch',
                       session_file=str(self.work / 'agent/session.jsonl'), bootstrap_file='/launch/bootstrap.md',
                       task_file='/launch/task.md', workspace=str(self.work), model='chosen',
                       control_socket='/tmp/owned/rpc.sock')
@@ -1108,7 +1108,7 @@ class LaunchIsolationTest(unittest.TestCase):
         fresh and usage reads nothing, or one holding the parent's inbox secret (a6a7628, a81fed1, 74887d9,
         CLAUDE-5)."""
         manifests = sorted(templates.TEMPLATES.glob("*/harnesses/*/harness.json"))
-        self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi'})
+        self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi', 'agy'})
         markers = ("CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT",
                    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
                    # A parent Claude session's identity, which a Claude reads at startup, and its tool shells' own
@@ -1116,11 +1116,16 @@ class LaunchIsolationTest(unittest.TestCase):
                    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_BRIDGE_SESSION_ID",
                    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_HOST_WORKTREE", "CLAUDE_CODE_HOST_WORKTREE_FENCE",
                    "CLAUDE_CODE_EVAL_INTERVIEW_SESSION", "CLAUDE_CODE_CHROME_MCP_ORG_DENIED",
-                   "CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
+                   "CLAUDE_CODE_STARTER_MAY_HOLD_CONNECTOR_FILE", "CLAUDE_CODE_BRIDGE_CHILD_HELD_TO_AUTO", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CODE_EXECPATH",
                    "CLAUDE_CODE_INVOKED_SKILLS", "CLAUDE_CODE_LAUNCHED_BY_SESSION_IDS", "CLAUDE_CODE_CHILD_NOTES_DIR",
                    "CLAUDE_CODE_PROJECT_DIR_NAME", "CLAUDE_CODE_SCRATCHPAD_DIR",
                    # What Claude's background-session host gives a session: its credential, token pipes, rules.
-                   "CLAUDE_BG_SESSION_CREDENTIAL", "CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR", "CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_BG_SESSION_PERMISSION_RULES", "CLAUDE_BG_MEMORY_TOGGLED_OFF", "CLAUDE_BG_AUTO_MEMORY_OFF", "CLAUDE_BG_GATEWAY_WITHHELD", "CLAUDE_BG_GATEWAY_ROUTED")
+                   "CLAUDE_BG_SESSION_CREDENTIAL", "CLAUDE_BG_AUTH_SNAPSHOT_PATH", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR", "CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_BG_SESSION_PERMISSION_RULES", "CLAUDE_BG_MEMORY_TOGGLED_OFF", "CLAUDE_BG_AUTO_MEMORY_OFF", "CLAUDE_BG_GATEWAY_WITHHELD", "CLAUDE_BG_GATEWAY_ROUTED",
+                   # A parent Antigravity CLI session's identity, embedded server address and CSRF token.
+                   "ANTIGRAVITY_AGENT", "ANTIGRAVITY_AGENTAPI_EXE", "ANTIGRAVITY_APP_DATA_DIR",
+                   "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_CSRF_TOKEN", "ANTIGRAVITY_LS_ADDRESS",
+                   "ANTIGRAVITY_LS_VERSION", "ANTIGRAVITY_PROJECT_ID", "ANTIGRAVITY_SOURCE_METADATA",
+                   "ANTIGRAVITY_TRAJECTORY_ID")
         # CLAUDE_CODE_TMPDIR is the user's own choice, which Claude's errors tell them to make: it passes through. So
         # does a CLAUDE_CONFIG_DIR the parent session shares with its agents: it is where their transcripts are. And
         # so do the plugin folders and claude.ai Project a person names for their Claude sessions, although Claude

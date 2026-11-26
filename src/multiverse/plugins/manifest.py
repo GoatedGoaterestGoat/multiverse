@@ -40,7 +40,7 @@ CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status",
                "message.failed", "message.read", "universe.created", "refresh.applied", "prompt.opened",
                "prompt.closed", "agent.prompt", "turn.started", "turn.joined", "turn.ended")
 EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
-FAMILIES = ("claude", "codex", "pi")
+FAMILIES = ("claude", "codex", "pi", "agy")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
 CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context"})
 # Core items added after 1.8, which keeps 1.x manifests valid: a plugin's item with one of these names
@@ -61,6 +61,7 @@ PERMISSIONS = {
     "harness.claude": "add to Claude Code launches",
     "harness.codex": "add to Codex launches",
     "harness.pi": "add to Pi launches",
+    "harness.agy": "add to Antigravity CLI launches",
 }
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
 # Needs act, but no level carries it (1.17): approving an agent's commands is more than the act grants made before
@@ -97,7 +98,7 @@ class Settings:
 
 @dataclass(frozen=True)
 class HarnessEntry:
-    """One harness extension: for Claude a plugin directory (`dir`), for Pi an extension file
+    """One harness extension: for Claude and Antigravity a directory (`dir`), for Pi an extension file
     (`extension`), for Codex the fields of its contract (`fields`, checked by the Codex adapter).
     Versions are inclusive bounds on the harness executable's (major, minor, patch)."""
     family: str
@@ -447,11 +448,11 @@ def _harnesses(directory, value, permissions):
                 found.append(HarnessEntry(family, *bounds, fields={key: item for key, item in entry.items()
                                                                      if key not in ("min_version", "max_version")}))
                 continue
-            key = "dir" if family == "claude" else "extension"
+            key = "dir" if family in ("claude", "agy") else "extension"
             unknown = set(entry) - {key, "min_version", "max_version", "needs_bridge"}
             if unknown:
                 raise ValueError(f"{where}: unknown fields: {', '.join(sorted(unknown))}")
-            # A Claude plugin's hooks load only with the bridge's function hooks; a Pi extension loads either way.
+            # A Claude plugin's hooks load only with the bridge's function hooks; Pi and Antigravity load either way.
             needs_bridge = entry.get("needs_bridge", family == "claude")
             if not isinstance(needs_bridge, bool):
                 raise ValueError(f"{where}.needs_bridge must be true or false")

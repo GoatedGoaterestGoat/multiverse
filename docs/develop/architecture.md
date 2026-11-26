@@ -11,9 +11,9 @@ Everything lives in `src/multiverse/`.
 | `cli.py` | The `mv2` command line. `COMMANDS` lists every command, and each maps to a module in `tools/`. |
 | `tools/` | One module per command, each with `configure(parser)` and `run(...)`. The dashboard calls the same `run` functions. `runtime_update.py` is for harness integrations, not a command. |
 | `universe/` | Everything on disk. The package resolves universes and walks subverses. Its modules are `agents` (agent records), `mailbox` (inbox, read position, delivery tracking), `focus` (whether agents' steer and follow-up messages to an agent wait in its inbox, and until when), `templates` (install and refresh), `catalog` (skills, commands, workflows, bootstrap), `relocate` and `trash`. |
-| `runtime/` | Everything that runs. Its modules are `lifecycle` (spawn, resume, wake, readiness, listing, kill), `native` (runs adapter specs, delivers messages, keeps receipts), `rpc` (JSON-RPC transport and launch relay), `recovery` (reconnecting idle Codex terminals) and `runner` (the process in each agent's pane). |
+| `runtime/` | Everything that runs. Its modules are `lifecycle` (spawn, resume, wake, readiness, listing, kill), `launch_files` (anchored private launch-file writes and cleanup), `native` (runs adapter specs, shell callbacks, delivers messages, keeps receipts), `rpc` (JSON-RPC transport and launch relay), `recovery` (reconnecting idle Codex terminals) and `runner` (the process in each agent's pane). |
 | `terminal/` | tmux: commands, pane tags, liveness from panes, and the status line script tmux runs. |
-| `harnesses/` | Adapters. `types.py` is the contract and `base.py` holds the shared argv rendering. There is one package each for `claude`, `codex` and `pi`, plus `legacy` for schema-1 definitions. See [harness adapters](harness-adapters.md). |
+| `harnesses/` | Adapters. `types.py` is the contract and `base.py` holds the shared argv rendering. There is one package each for `claude`, `codex`, `pi` and `agy`, plus `legacy` for schema-1 definitions. See [harness adapters](harness-adapters.md). |
 | `plugins/` | The plugin system: discovery, manifests, trust, `plugins.json` and per-plugin settings, the loader and its failure boundaries, the `mv` API, launch contributions (`harness.py`), the event journal (`events.py`) and the plugin host (`host.py`). Bundled plugins live in `plugins/builtin/`. See [plugins](plugins.md). |
 | `ui/` | The dashboard. See [below](#how-the-dashboard-is-built). |
 | `templates/` | The bundled `base` template. See [templates](templates.md). |
@@ -50,7 +50,7 @@ mv2 has no daemon of its own. State is kept in files in the universe. Processes 
 | `mv2 COMMAND` | You, a script or an agent's shell | Runs one tool and exits. `spawn` and `resume` return once the pane is set up, or wait with `--wait`. |
 | Dashboard (`mv2`, `mv2 tui`) | You | Reads the universe and tmux every 1.5 s, and again within about a quarter of a second when an agent's records change, and calls tools. Agents keep running when it quits. |
 | Runner (`runtime/runner.py LAUNCH_DIR`) | `lifecycle.start`, as the command of a new tmux pane | One per launch. Starts the native process and any relay, delivers held messages, watches status, and records the exit. |
-| Native process (`claude`, `codex`, `pi`) | The runner | The agent. The Claude mod and the Pi extension run inside it. |
+| Native process (`claude`, `codex`, `agy`, `pi`) | The runner | The agent. The Claude mod, Antigravity hooks/`statusLine` and Pi extension run inside it. |
 | Codex app-server daemon | `codex app-server daemon start`, from `lifecycle` | Shared by Codex agents using the same Codex home. mv2 starts or reuses it, and never stops or restarts it. |
 | Status line (`terminal/statusline.py`) | tmux, while a client is attached | Renders the agent's tmux bar; a bounded helper uses core's nonblocking inbox peek. |
 | Wrapper cleanup and recovery worker | The runner, detached | The cleanup removes the pane after the native process exits. The worker reconnects an idle Codex terminal after a relay loss. |
@@ -104,14 +104,17 @@ mv2 send AGENT                                      tools/send.py, under .send.l
   4. the result becomes the message's submission_state in inbox-state.json
 
 adapter.send, per harness
-  Claude  JSON lines to the session's peer inbox socket; the mod injects the text
-  Codex   JSON-RPC to the app-server: steer or queue on the exact thread
-  Pi      a JSON request to the extension's Unix socket
+  Claude       JSON lines to the session's peer inbox socket; the mod injects the text
+  Codex        JSON-RPC to the app-server: steer or queue on the exact thread
+  Antigravity  a launch queue the hooks inject as user messages; an idle agent is woken by an agentapi ping
+  Pi           a JSON request to the extension's Unix socket
 
 mv2 deliver AGENT --check -> adapter.get_delivery -> receipt
 ```
 
 An inbox-only send upgraded because of a blocked-on dependency also saves its original text. A definite `failed` or `launch-only` result commits an inbox fallback and a retry dismissal together in the delivery ledger. The original message ID and native evidence stay in history; no replacement message is appended. Inbox reads include that fallback even if their cursor already passed the native row, and mark it read only after successful output. Deferred startup failures use the same transition. For this tagged upgrade only, pending, accepted, submitting, unknown or otherwise unconfirmed input also has an inbox view with a possible-duplicate note. This view neither changes native tracking nor starts another submission. `native_receipt.transcript_confirmed` equal to true or a valid timezone-bearing `transcript_confirmed_at` suppresses an unread copy; acceptance alone does not. One per-message copy read timestamp survives later native state changes, including deferred failure or proved loss. The original remains a single history row; the copy can overlap delivery in the conversation by design. Waiters and cached counters watch the delivery ledger as well as the log and cursor. The dashboard, inbox command and tmux counter share the mailbox's unread rules. Dashboard and tmux reads request nonblocking inbox locks; the CLI retains its normal launch and inbox locks. The standalone counter forks a short-lived reader with a one-second deadline, without loading the CLI or starting another interpreter. History and ledgers have no size cap. Missing history with saved inbox evidence is damage in every reader. Native retry checks the final disposition after each evidence refresh; a failed tagged upgrade written by a pre-update runner is final even without the new dismissal marker.
+
+Explicit steers and follow-ups gain an unread inbox view when a writer records a new `failed` or `cancelled` delivery with the inbox-copy marker and there is no positive delivery evidence. Pre-submission failures carry the same marker in their separate proof record. The inbox checks the lineage journal to keep retired input out after `--start-fresh`. The copy read timestamp prevents another unread view and makes explicit retry skip that failure under the launch lock. `listen` checks the same unread view after any active focus ends and watches the delivery ledger, pre-submission proof directory and lineage journal.
 
 The recipient sees `Message from NAME:` followed by the message, as built by `native.framed_text`. The attempt is saved as `submitting` before the native call, so a crash can't turn an uncertain send into a resend. [Harness adapters](harness-adapters.md#delivery-results-and-receipts) lists the states.
 

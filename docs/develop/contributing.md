@@ -82,6 +82,8 @@ MV2_TMUX_SOCKET=/tmp/mv2-try/tmux.sock PYTHONPATH="$PWD/src" "$MV2_PYTHON" bin/m
 
 Inside an mv2 agent, clear the agent's identity first with `env -u MV2_AGENT_ID -u MV2_LAUNCH_ID -u MV2_UNIVERSE ...`. Keep socket paths short, because Unix socket paths are limited to about 100 bytes.
 
+Antigravity CLI keeps its sign-in, settings and conversations under `$HOME/.gemini/antigravity-cli`. To try an Antigravity agent without touching yours, set `HOME` to a separate folder for the scratch universe's commands, and sign `agy` in there once.
+
 The dashboard and each agent's runner keep the code they loaded. After your change lands in the main checkout, restart the dashboard, and kill and resume each agent so it picks up the change. To bring template changes into a universe, run `mv2 refresh --apply`.
 
 ## Commits

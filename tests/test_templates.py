@@ -35,9 +35,14 @@ class BaseTemplateTest(unittest.TestCase):
             self.assertEqual(list((clone / "state" / "agents").iterdir()), [])
             self.assertFalse((clone / "state" / "private-session.json").exists())
             self.assertEqual(universe.workspace(clone), work)
-            for harness in ("claude", "codex", "pi"):
+            for harness in ("claude", "codex", "pi", "agy"):
                 self.assertEqual(read(clone / "harnesses" / harness / "harness.json"),
                                  read(templates.TEMPLATES / "base" / "harnesses" / harness / "harness.json"))
+            s23 = templates.create(work / "s23", "s23", "Silicon23", work)
+            self.assertEqual(read(s23 / "harnesses" / "agy" / "harness.json"),
+                             read(templates.TEMPLATES / "Silicon23" / "harnesses" / "agy" / "harness.json"))
+            self.assertIn("--dangerously-skip-permissions",
+                          read(s23 / "harnesses" / "agy" / "harness.json")["settings"]["args"])
             self.assertFalse(any(path.is_symlink() for path in clone.rglob("*")))
         with self.subTest("a recursive clone, its subverses included"):
             child = templates.create(root / "subverses" / "review", "review", workdir=work)
@@ -84,7 +89,7 @@ class BaseTemplateTest(unittest.TestCase):
         """Silicon23 names its models briefly; a key that's misspelled or no longer in mv2's tables silently stops
         applying, and the Model column shows the long name again with nothing to say why."""
         root = templates.create(self.work / "team", "Silicon23", "Silicon23", self.work)
-        for harness in ("claude", "codex"):
+        for harness in ("claude", "codex", "agy"):
             with self.subTest(harness):
                 names, overrides = model_choices.display_names(root, harness)
                 self.assertTrue(overrides)
@@ -94,6 +99,11 @@ class BaseTemplateTest(unittest.TestCase):
                     for model, expected in (("gpt-6.2-sol", "Sol"), ("gpt-6.2-astra", "Astra"),
                                             ("gpt-6.1-sol", "GPT 6.1 Sol"), ("gpt-6-astra", "GPT 6 Astra")):
                         self.assertEqual(model_choices.model_name(root, {"harness": harness}, model, {}), expected)
+                elif harness == "agy":
+                    for model, expected in (("gemini-4-neon", "Neon"), ("gemini-4-carbon", "Carbon"), ("gemini-4-argon", "Argon"),
+                                            ("gemini-4-hydrogen", "Hydrogen"), ("gemini-3.8-flash", "Flash"),
+                                            ("gemini-4-neon-xhigh", "Gemini 4 Neon (xhigh)")):
+                        self.assertEqual(model_choices.model_name(root, {"harness": harness}, model, {}), expected)
 
     def test_bundled_default_models_are_ones_their_subsets_allow(self):
         """A bundled template's default model outside its subset would get every launch from that template refused."""
@@ -102,10 +112,11 @@ class BaseTemplateTest(unittest.TestCase):
         environment = dict(os.environ)
         allowed = {"claude": ({"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"},
                               ("fable", "opus", "sonnet", "haiku"), "claude-opus-4-7"),
-                   "codex": ({"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"}, (), "gpt-6-sol")}
+                   "codex": ({"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"}, (), "gpt-6-sol"),
+                   "agy": ({"gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen", "gemini-3.8-flash"}, (), "gpt-oss-120b")}
         for template in ("base", "Silicon23"):
             root = templates.create(self.work / template, template, template, self.work)
-            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.2-sol")):
+            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.2-sol"), ("agy", "gemini-4-neon")):
                 with self.subTest(f"{template} {harness}"):
                     adapter = harnesses.load(root, harness)
                     self.assertEqual(adapter.default_model, default)

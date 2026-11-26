@@ -442,3 +442,95 @@ class NativeBackendTest(BaseTest):
              patch.object(recovery, 'RecoveryMonitor') as monitor:
             self.assertEqual(runner.main(), 0)
         monitor.assert_not_called()
+
+    def test_command_mouse_enables_session_option_without_changing_readiness_and_fallback_restores(self):
+        """CommandSpec.mouse enables session-scoped tmux mouse mode without declaring an AttachmentSpec (preserving
+        adapter.attachment_ready), honours AttachmentSpec.mouse for Codex/legacy requests, and toggles or restores
+        (-u) on fallback; fragile because setting AttachmentSpec(mouse=True) silently switches readiness to process."""
+        # 1. Codex (AttachmentSpec.mouse=True) still sets session mouse on and records mouse=True.
+        codex_spec = CommandSpec((sys.executable,), attachment=AttachmentSpec(mouse=True))
+        codex_adapter = ConfiguredAdapter('codex', {'spawn': [sys.executable], 'resume': [sys.executable, '{session_id}']})
+        self.backend.run.reset_mock()
+        with patch.object(lifecycle.harnesses, 'load', return_value=codex_adapter), \
+             patch.object(codex_adapter, 'spawn', return_value=codex_spec):
+            codex_started = lifecycle.start(self.root, name='codex-mouse', harness='codex')
+        self.backend.run.assert_any_call('set-option', '-t', '$1', 'mouse', 'on')
+        codex_req = read(self.root / 'state' / 'agents' / codex_started['id'] / 'launches'
+                         / codex_started['runtime']['launch_id'] / 'request.json')
+        self.assertTrue(codex_req['mouse'])
+
+        # 2. CommandSpec(mouse=True, attachment=None) enables session mouse while holding readiness until
+        # adapter.attachment_ready(session) returns True.
+        ready_flag = {'ready': False}
+        class MouseHookAdapter(ConfiguredAdapter):
+            def attachment_ready(self, session):
+                return bool(ready_flag['ready'])
+        hook_adapter = MouseHookAdapter('hooked', {'spawn': [sys.executable], 'resume': [sys.executable, '{session_id}']})
+        hook_spec = CommandSpec(
+            (sys.executable,),
+            control_endpoint=NativeEndpoint('unix-json', str(self.work / 'hooked.sock')),
+            mouse=True,
+        )
+        self.backend.run.reset_mock()
+        with patch.object(lifecycle.harnesses, 'load', return_value=hook_adapter), \
+             patch.object(hook_adapter, 'spawn', return_value=hook_spec):
+            hook_started = lifecycle.start(self.root, name='hooked-mouse', harness='hooked')
+        self.backend.run.assert_any_call('set-option', '-t', '$1', 'mouse', 'on')
+        hook_dir = self.root / 'state' / 'agents' / hook_started['id']
+        hook_launch = hook_started['runtime']['launch_id']
+        hook_req = read(hook_dir / 'launches' / hook_launch / 'request.json')
+        self.assertTrue(hook_req['mouse'])
+        self.assertIsNone(hook_req['attachment'])
+        write(hook_dir / 'runtime.json', {
+            **read(hook_dir / 'runtime.json'),
+            'state': 'running', 'pid': 999, 'startup_checked': True, 'startup_delivery': 'ready',
+        })
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            self.assertFalse(lifecycle.wait_ready(self.root, hook_dir, hook_launch, hook_adapter, .01)['ready'])
+            ready_flag['ready'] = True
+            self.assertTrue(lifecycle.wait_ready(self.root, hook_dir, hook_launch, hook_adapter, .01)['ready'])
+
+        # 3. Late plain fallback in runner toggles mouse on, restores inherited mouse with -u, and honours legacy requests.
+        original_request = read(self.directory / 'launches' / self.launch / 'request.json')
+        cases = (
+            # (req_mouse, attach_mouse, fb_mouse, fb_attach_mouse, expected_tmux_args, expected_saved)
+            (True, False, False, False, ('set-option', '-u', '-t', '%1', 'mouse'), False),
+            (False, False, True, False, ('set-option', '-t', '%1', 'mouse', 'on'), True),
+            (True, False, True, False, None, True),
+            (None, True, False, False, ('set-option', '-u', '-t', '%1', 'mouse'), False),  # legacy request without 'mouse'
+        )
+        for req_mouse, attach_mouse, fb_mouse, fb_attach_mouse, expected_call, expected_saved in cases:
+            with self.subTest(req_mouse=req_mouse, attach_mouse=attach_mouse, fb_mouse=fb_mouse):
+                write(self.directory / 'runtime.json', self.facts)
+                launch = self.directory / 'launches' / self.launch
+                req = {**original_request, 'attachment': {**original_request['attachment'], 'mouse': attach_mouse}}
+                if req_mouse is None:
+                    req.pop('mouse', None)
+                else:
+                    req['mouse'] = req_mouse
+                fb_spec = CommandSpec(
+                    ('plain',),
+                    attachment=AttachmentSpec(mouse=fb_attach_mouse) if fb_attach_mouse else None,
+                    mouse=fb_mouse,
+                )
+                req['fallback'] = asdict(fb_spec)
+                write(launch / 'request.json', req)
+                proxy = Mock()
+                proxy.protocol.bound = False
+                proxy.start.side_effect = RuntimeError('relay unavailable')
+                process = Mock(pid=321)
+                process.poll.return_value = process.wait.return_value = 0
+                self.backend.run.reset_mock()
+                with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                     patch.object(rpc, 'LaunchProxy', return_value=proxy), \
+                     patch.object(runner, 'process_started', return_value=None), \
+                     patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
+                     patch.object(runner, 'launch_diagnostic', return_value={}), \
+                     patch.object(native, 'flush_startup'):
+                    self.assertEqual(runner.main(), 0)
+                if expected_call is None:
+                    self.backend.run.assert_not_called()
+                else:
+                    self.backend.run.assert_called_once_with(*expected_call)
+                self.assertEqual(read(launch / 'request.json')['mouse'], expected_saved)

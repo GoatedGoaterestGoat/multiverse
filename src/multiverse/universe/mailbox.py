@@ -5,10 +5,10 @@ import errno
 import json
 import os
 from pathlib import Path
-from functools import partial
+from functools import cache, partial
 
 from ..store import lock, now, open_regular, open_replaced, exists_replaced, missing_records, read, uid, write
-from . import records
+from . import records, sessions
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None, intended=None, focus=None,
@@ -113,6 +113,18 @@ def _messages(agent_dir, *, observed_missing=(), max_bytes=None):
 
 # These files can attest earlier messages even when their parsed value is empty.
 INBOX_EVIDENCE = ('inbox.cursor', 'inbox-read.json', 'inbox-state.json', 'native-delivery.json')
+
+
+def inbox_signature(agent_dir):
+    """A polling hint that includes failures recorded without an append or cursor move."""
+    stamps = []
+    for name in ('inbox.jsonl', *INBOX_EVIDENCE, 'inbox-unsubmitted', 'properties.json', 'sessions.jsonl'):
+        try:
+            info = (agent_dir / name).stat()
+            stamps.append((info.st_ino, info.st_size, info.st_mtime_ns))
+        except FileNotFoundError:
+            stamps.append(None)
+    return tuple(stamps)
 
 
 def _empty_history(agent_dir, *, observed_missing=()):
@@ -271,8 +283,7 @@ def _states(agent_dir, *, observed_missing=None, budget=None):
             states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                 'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
     for state in states.values():
-        last = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
-        value = last.get('value') if isinstance(last, dict) else None
+        value = _last_receipt_value(state)
         final = isinstance(value, dict) and value.get('launch_only') is True and value.get('final') is True
         if state.get('submission_state') == 'failed' and final:
             state.update(submission_state='launch-only', final_reason='launch-only')
@@ -292,34 +303,85 @@ def _states(agent_dir, *, observed_missing=None, budget=None):
             receipt = {'state': 'error', 'ok': False, 'reason': failed['reason'],
                        'value': {'pre_submission_failure': True}}
             states[identifier] = {**previous, 'submission_state': 'failed',
-                                  'attempts': previous.get('attempts') or [receipt]}
+                                  'attempts': previous.get('attempts') or [receipt],
+                                  **({'failed_inbox_copy': True} if failed.get('failed_inbox_copy') is True else {})}
     return states
 
 
 def delivery_problem(agent_dir, name, *, is_final=None, observed_missing=None):
-    """Count reported failures in real inbox messages, without native queries.
+    """Describe failed delivery in a real inbox, without native queries."""
+    problem, _ = delivery_indicators(agent_dir, name, is_final=is_final, observed_missing=observed_missing)
+    return problem
 
-    Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
-    rather than making the agent's identity or terminal record unusable.
+
+def _accepted_queued(identifier, state, native_id, launch_id, held):
+    if (state.get('submission_state') != 'accepted' or state.get('dismissed_at')
+            or state.get('uncheckable_reported_at') or state.get('transcript_confirmed_at')):
+        return False
+    attempt = (state.get('attempts') or [{}])[-1]
+    if held is not None:
+        submitted = attempt.get('native_message_id', identifier)
+        if not isinstance(submitted, str) or submitted not in held:
+            return False
+    last = state.get('last_receipt') or attempt
+    last_value = last.get('value') if isinstance(last, dict) else None
+    receipt = state.get('native_receipt')
+    if receipt is None:
+        receipt = last_value
+    if (not isinstance(receipt, dict) or receipt.get('transcript_confirmed') is True
+            or isinstance(last_value, dict) and last_value.get('transcript_confirmed') is True):
+        return False
+    if attempt.get('native_session_id') not in (None, native_id):
+        return False
+    if launch_id is not None and attempt.get('launch_id') != launch_id:
+        return False
+    if receipt.get('queued') is False:
+        return False
+    queued_id = receipt.get('queued_submission_id')
+    return (receipt.get('paused') is True or receipt.get('queued') is True
+            or isinstance(queued_id, str) and bool(queued_id))
+
+
+def delivery_indicators(agent_dir, name, *, is_final=None, observed_missing=None,
+                        paused_native_id=None, paused_launch_id=None, paused_message_ids=None):
+    """Count failures and accepted, unconfirmed receipts in the current paused queue in one inbox read.
+
+    The caller supplies the scope only when the runtime snapshot says its queue is paused. A launch-scoped queue
+    requires a receipt from that launch. A conversation-scoped native queue can survive resuming the same session.
+    When the snapshot names its held submissions, an older acceptance cannot count towards the current pause.
     """
     ledgers = tuple(agent_dir / entry for entry in ('inbox-state.json', 'native-delivery.json'))
     if observed_missing is None:
         observed_missing = missing_records(ledgers)
     if (not any(path not in observed_missing and exists_replaced(path) for path in ledgers)
             and not (agent_dir / 'inbox-unsubmitted').exists()):
-        return None
+        return None, 0
     with lock(agent_dir / '.inbox.lock'):
         states = _states(agent_dir, observed_missing=observed_missing)
         failed = {identifier for identifier, state in states.items()
-                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at') and not state.get('dismissed_at')}
-        if not failed:
-            return None
+                  if state.get('submission_state') == 'failed' and not state.get('uncheckable_reported_at')
+                  and not state.get('dismissed_at') and not failed_copy_read(state)}
+        queued = ({identifier for identifier, state in states.items()
+                   if _accepted_queued(identifier, state, paused_native_id, paused_launch_id, paused_message_ids)}
+                  if paused_native_id else set())
+        if not failed and not queued:
+            return None, 0
         _, _, messages = _messages(agent_dir)
-        count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
-                    and message.get('id') in failed
-                    and not (is_final and is_final(message, states[message['id']]))
-                    for _, message in messages)
-    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry or --dismiss' if count else None
+        failures = paused = 0
+        for _, message in messages:
+            if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
+                continue
+            identifier = message.get('id')
+            if identifier in failed and not (is_final and is_final(message, states[identifier])):
+                failures += 1
+            if identifier in queued:
+                target = states[identifier].get('target_session') or message.get('target_session')
+                if target == paused_native_id:
+                    paused += 1
+                    queued.remove(identifier)
+    problem = (f'{failures} {"message" if failures == 1 else "messages"} not delivered: '
+               f'mv2 deliver {name} --retry or --dismiss') if failures else None
+    return problem, paused
 
 
 def preflight_delivery(agent_dir):
@@ -339,7 +401,7 @@ def record_unsubmitted(agent_dir, message_id, reason):
         if not any(message.get('id') == message_id for _, message in messages):
             raise ValueError('Message does not belong to this recipient inbox')
         write(agent_dir / 'inbox-unsubmitted' / (message_id + '.json'),
-              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason})
+              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason, 'failed_inbox_copy': True})
 
 
 def inbox_problem(agent_dir, *, observed_missing=None):
@@ -384,21 +446,101 @@ def _dated(value):
         return False
 
 
+def _confirmed_receipt(value):
+    return isinstance(value, dict) and value.get('transcript_confirmed') is True
+
+
+def _delivery_confirmed(state):
+    if _dated(state.get('transcript_confirmed_at')) or _confirmed_receipt(state.get('native_receipt')):
+        return True
+    last = state.get('last_receipt')
+    if isinstance(last, dict) and _confirmed_receipt(last.get('value')):
+        return True
+    for attempt in state.get('attempts', ()):
+        evidence = attempt.get('delivery_receipt')
+        if (_confirmed_receipt(attempt.get('value'))
+                or isinstance(evidence, dict) and _confirmed_receipt(evidence.get('value'))):
+            return True  # A positive can belong to a retained, older attempt.
+    return False
+
+
+def _failed_copy(message, state):
+    """Expose definite native failures without reopening accepted or confirmed input."""
+    if (state.get('failed_inbox_copy') is not True or message.get('schema') != 2
+            or message.get('delivery') not in ('steer', 'follow-up')
+            or state.get('submission_state') not in ('failed', 'cancelled') or _delivery_confirmed(state)):
+        return False
+    value = _last_receipt_value(state)
+    return not (isinstance(value, dict) and value.get('launch_only') is True)
+
+
+def _retired_targets(directory):
+    # The append is the retirement, even if writing the new properties was interrupted.
+    retired, current = set(), set()
+    try:
+        properties = records.properties(directory / 'properties.json', harness_optional=True)
+        rows = sessions.journal(directory)
+    except records.RecordError:
+        return None  # An unreadable journal cannot prove a copy still belongs here.
+    retirement = properties.get('native_session_transition')
+    if retirement and not any(row['id'] == retirement and row.get('kind') == 'fresh-start' for row in rows):
+        return None  # A missing or truncated journal cannot undo a recorded retirement.
+    for row in rows:
+        if row['from'] is not None:
+            current.add(row['from'])
+        if row.get('kind') == 'fresh-start':
+            retired.update(current)
+            current.clear()
+        if row['to'] is not None:
+            current.add(row['to'])
+    return retired - current
+
+
+def _copy_in_lineage(message, state, retired):
+    target = state.get('target_session') or message.get('target_session')
+    if not target:
+        return True
+    excluded = retired()
+    return isinstance(target, str) and excluded is not None and target not in excluded
+
+
+def _failed_inbox_status(message, state, retired):
+    if _failed_copy(message, state) and _copy_in_lineage(message, state, retired):
+        return 'read' if _dated(state.get('inbox_copy_read_at')) else 'waiting'
+    return None
+
+
+def failed_inbox_status(directory, message, state):
+    """The recipient's read state for an eligible definite failure."""
+    return _failed_inbox_status(message, state, lambda: _retired_targets(directory))
+
+
+def _last_receipt_value(state):
+    receipt = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
+    return receipt.get('value') if isinstance(receipt, dict) else None
+
+
+def failed_copy_read(state):
+    """A definite failure whose saved input the recipient already read."""
+    return state.get('submission_state') == 'failed' and _dated(state.get('inbox_copy_read_at'))
+
+
 def inbox_copy(message, state):
     """Only blocked-on upgrades retain manual input without positive delivery confirmation.
 
     Queue acceptance is not confirmation. The copy shares the saved message ID and can overlap a native
     delivery; it neither retries nor cancels that attempt. A successful inbox read consumes only the copy.
     """
-    receipt = state.get('native_receipt') or {}
     return (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
             and isinstance(message.get('inbox_only_text'), str)
-            and not _dated(state.get('transcript_confirmed_at')) and receipt.get('transcript_confirmed') is not True)
+            and not _delivery_confirmed(state))
 
 
-def _copy_text(message, state):
-    original = message['inbox_only_text']
-    if inbox_fallback(message, state) or state.get('final_reason') == 'lost':
+def _copy_text(message, state, *, failed):
+    original = message.get('inbox_only_text')
+    if not isinstance(original, str):
+        return message['text']
+    if failed or inbox_fallback(message, state) or state.get('final_reason') == 'lost':
         return original
     return 'This message may also have arrived as a follow-up.\n\n' + original
 
@@ -413,7 +555,7 @@ def inbox_fallback(message, state):
 
 def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
           last=None, since=None, present=None, blocking=True, unread=False):
-    """Read unread manual messages; peek and full history do not consume them.
+    """Read unread manual and undelivered messages; peek and full history do not consume them.
 
     blocking=False raises BlockingIOError on contention so a waiter can check
     its own deadline and lifetime without keeping another lock while waiting.
@@ -472,9 +614,13 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
     cursor = start
     messages, cursors = [], []
     copies = []
+    retired = cache(lambda: _retired_targets(agent_dir))
     for offset, message in records:
         state = states.get(message['id'], {})
-        unread_copy = inbox_copy(message, state) and not _dated(state.get('inbox_copy_read_at'))
+        upgraded = inbox_copy(message, state)
+        failed = _failed_copy(message, state)
+        unread_copy = ((not all_messages or unread) and (upgraded or failed) and not _dated(state.get('inbox_copy_read_at'))
+                       and _copy_in_lineage(message, state, retired))
         # Native rows may have been skipped before their evidence changed. Their original inbox input
         # remains unread independently of the cursor; no second message or native attempt is created.
         if offset <= start and (all_messages or not unread_copy):
@@ -487,12 +633,13 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
         if all_messages:
             messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state,
                                                      **({'read_at': marks[message['id']]} if message['id'] in marks else {})}})
-            if unread:  # what an ordinary inbox read would show now: an unread blocked-on copy, or an inbox-only
+            if unread:  # what an ordinary inbox read would show now: an unread copy, or an inbox-only
                 # message past the read position that mv2 held hasn't read ahead
                 messages[-1]['unread'] = bool(unread_copy or (_manual(message) and offset > read_cursor
                                                               and message['id'] not in marks))
         elif unread_copy:
-            messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state)})
+            messages.append({**message, 'delivery': 'inbox-only', 'text': _copy_text(message, state, failed=failed),
+                             **({'delivery_failed': True} if failed else {})})
             copies.append(message['id'])
         elif _manual(message) and message['id'] not in marks:
             messages.append(message)
@@ -648,6 +795,12 @@ def update_message(agent_dir, message_id, **changes):
         states = _states(agent_dir, observed_missing=observed_missing)
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
+        if 'submission_state' in changes:
+            terminal = ('failed', 'cancelled')
+            if after['submission_state'] not in terminal:
+                after.pop('failed_inbox_copy', None)
+            elif before.get('submission_state') not in terminal:
+                after['failed_inbox_copy'] = True
         if (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
                 and isinstance(message.get('inbox_only_text'), str)
                 and after.get('submission_state') in ('failed', 'launch-only') and not after.get('dismissed_at')):
@@ -770,6 +923,7 @@ def dismissible(message, state):
                  or isinstance(receipt, dict) and receipt.get('transcript_confirmed') is True)
     return (message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
             and state.get('submission_state') in ('failed', 'launch-only', 'accepted', 'unknown', 'submitting')
+            and not failed_copy_read(state)
             and not (confirmed or state.get('dismissed_at') or state.get('uncheckable_reported_at')))
 
 
@@ -781,7 +935,8 @@ def dismiss_messages(agent_dir, message_ids):
                                            ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
         _, _, messages = _messages(agent_dir, observed_missing=observed_missing)
         states = _states(agent_dir, observed_missing=observed_missing)
-        dismissed = {'failures': [], 'unconfirmed': []}
+        dismissed = {'failures': [], 'unconfirmed': [], 'inbox': []}
+        retired = cache(lambda: _retired_targets(agent_dir))
         for _, message in messages:
             state = states.get(message['id'], {})
             if message['id'] not in message_ids or not dismissible(message, state):
@@ -789,9 +944,24 @@ def dismiss_messages(agent_dir, message_ids):
             states[message['id']] = {**state, 'dismissed_at': now()}
             category = 'failures' if state['submission_state'] in ('failed', 'launch-only') else 'unconfirmed'
             dismissed[category].append(message['id'])
+            if _failed_inbox_status(message, state, retired) == 'waiting':
+                dismissed['inbox'].append(message['id'])
         if any(dismissed.values()):
             write(agent_dir / 'inbox-state.json', states)
     return dismissed
+
+
+def claim_inbox_read_report(agent_dir, message_id):
+    """Report a failed copy read in the inbox once, leaving the native receipt intact."""
+    agent_dir = Path(agent_dir)
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        current = states.get(message_id, {})
+        if not failed_copy_read(current) or current.get('inbox_read_reported_at') or current.get('dismissed_at'):
+            return False
+        states[message_id] = {**current, 'inbox_read_reported_at': now()}
+        write(agent_dir / 'inbox-state.json', states)
+        return True
 
 
 def claim_cancelled_report(agent_dir, message_id):
@@ -840,19 +1010,38 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
                        **({'wake_prompt_context': prompt_context} if prompt_context is not None else {}))
 
 
-def end_startup_messages(directory, launch_id, reason, cancelled=False):
-    """Caller holds .launch.lock; these messages have never reached a harness."""
-    if launch_id is None:
-        return 0
-    count = 0
-    for message in inbox(directory, all_messages=True, limit=None)['messages']:
-        tracking = message['tracking']
-        if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
-            receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
-            update_message(directory, message['id'], submission_state='cancelled' if cancelled else 'failed',
-                           attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
-            count += 1
-    return count
+def end_startup_messages(directory, launch_id, reason):
+    """Fail never-submitted input and count what can be retried. Caller holds .launch.lock."""
+    failed = retryable = waiting = 0
+    retired = cache(lambda: _retired_targets(directory))
+    if launch_id is not None:
+        for message in inbox(directory, all_messages=True, limit=None)['messages']:
+            tracking = message['tracking']
+            if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
+                receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
+                saved = update_message(directory, message['id'], submission_state='failed',
+                                       attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
+                failed += 1
+                waiting += int(_failed_inbox_status(message, saved, retired) == 'waiting')
+                if not saved.get('dismissed_at') and not saved.get('uncheckable_reported_at'):
+                    retryable += 1
+    return {'failed_startup_messages': failed, 'retryable_startup_messages': retryable,
+            **({'startup_messages_in_inbox': waiting} if waiting else {})}
+
+
+def cancel_delivery_messages(directory, message_ids):
+    """Record exact local cancellations and count the unread copies they leave."""
+    waiting = 0
+    retired = cache(lambda: _retired_targets(directory))
+    for message_id in dict.fromkeys(message_ids):
+        try:
+            message, _ = message_record(directory, message_id)
+        except ValueError:
+            continue  # Native input from another client is not a core inbox record.
+        saved = update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
+                               last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+        waiting += int(_failed_inbox_status(message, saved, retired) == 'waiting')
+    return {'cancelled_messages_in_inbox': waiting} if waiting else {}
 
 
 def unread_senders(directory):

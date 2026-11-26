@@ -20,7 +20,7 @@ import time
 from types import MappingProxyType
 from uuid import uuid4
 
-from ..harnesses.base import PARENT_CLAUDE
+from ..harnesses.base import PARENT_AGY, PARENT_CLAUDE
 from ..harnesses.types import (CommandSpec, ModelCheck, RunDirectory, RunFailure, RunFile, RunImage, RunLink,
                               RunMessage, RunOptions, RunOutcome, RunPlan, RunReply, RunRequest, RunRow, RunText)
 from ..plugins import access, agent_files
@@ -31,7 +31,7 @@ from .process import process_started
 INPUT_BYTES = 32 << 20
 IMAGE_BYTES = 5 << 20
 ENV_BYTES = 1 << 20
-IDENTITY = frozenset((*PARENT_CLAUDE, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', 'CODEX_THREAD_ID'))
+IDENTITY = frozenset((*PARENT_CLAUDE, *PARENT_AGY, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', 'CODEX_THREAD_ID'))
 
 
 def _environment(environment):
