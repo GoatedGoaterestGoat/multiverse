@@ -1136,7 +1136,7 @@ class FocusCommandTest(BaseTest):
         self.assertEqual(len(self.calls), 1)
         # --check is not held back: it reports the definite failure (exit 1) instead of the focus.
         self.output('deliver', 'asker', '--check', code=1)
-        self.assertIn('Not delivered to asker', self.stderr)
+        self.assertIn('asker: message not delivered:', self.stderr)
         self.assertNotIn('focused', self.stderr)
         # One an agent's process sent before the focus, naming another sender, still waits (reviewer, f105bd85).
         self.output('unfocus', 'asker')

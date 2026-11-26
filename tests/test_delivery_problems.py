@@ -64,7 +64,8 @@ class DeliveryProblemTest(BaseTest):
 
     def test_a_recorded_bridge_restart_is_visible_before_sending_and_while_input_waits(self):
         """A launch-local restart diagnosis must reach every inspection surface without a native probe."""
-        facts = self.running()
+        facts = {**self.running(), 'native_mode': {'mode': 'bridge', 'policy': 'auto'},
+                 'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'bridge.sock')}}
         properties = read(self.directory / 'properties.json')
         write(self.directory / 'properties.json', {**properties, 'restart_required': 'stale property'})
         write(self.directory / 'runtime.json', facts)
@@ -116,9 +117,59 @@ class DeliveryProblemTest(BaseTest):
             self.assertIn('recipient: 1 waiting for restart.', lines)
             self.assertIn('recipient: message waiting for restart.', lines)
             self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before)
-        adapter.get_delivery.assert_called_once()
+
+            refused = mailbox.append_message(self.directory, 'refused input', {}, delivery='steer',
+                                             target_session=properties['native_session_id'])
+            mailbox.update_message(self.directory, refused['id'], submission_state='failed', attempts=[{
+                'state': 'unavailable', 'ok': False, 'reason': reason,
+            }])
+            lines.clear()
+            errors = []
+            result = deliver.run(self.root, agent='recipient', check=True, _present=lines.append,
+                                 _present_error=errors.append)
+            self.assertFalse(result['ok'])
+            self.assertEqual(lines, [f'recipient: {expected}',
+                                     'recipient: 1 waiting for restart, 1 not delivered.',
+                                     'recipient: message waiting for restart.'])
+            self.assertEqual(errors, [f'recipient: message not delivered: {reason}. '
+                                      'After the restart, run mv2 deliver recipient --retry.'])
+        self.assertEqual(adapter.get_delivery.call_count, 2)  # Only the queued message was checked.
         adapter.capabilities.assert_not_called()
         adapter.send.assert_not_called()
+
+    def test_delivery_failure_advice_distinguishes_running_and_stopped_agents(self):
+        """Resume alone cannot restore a running agent's connection after a check or retry fails."""
+        write(self.directory / 'runtime.json', self.running())
+        message = self.message('pending')
+        self.message('pending')  # A check shares one live observation across its failure lines.
+        failure = {'state': 'unavailable', 'reason': 'Bridge refused connection', 'ok': False}
+        name = 'recipient'
+        with patch.object(native, 'deliver', return_value=failure), \
+                patch.object(native, 'send_or_wake', return_value=failure), \
+                patch.object(native, 'finalize_launch_only', return_value=None), \
+                patch.object(native, 'connection_problem', return_value=None):
+            for check in (True, False):
+                if not check:
+                    mailbox.update_message(self.directory, message['id'], submission_state='failed')
+                for live in ('alive', 'stopped'):
+                    with self.subTest(check=check, live=live), \
+                            patch.object(native, 'observe', return_value={'live': live}) as observed:
+                        lines = []
+                        deliver.run(self.root, agent=name, check=check, retry=not check, _present=lines.append)
+                        observed.assert_called_once()
+                        if check and live == 'alive':
+                            self.assertEqual(lines[-1], 'recipient: could not check delivery: Bridge refused connection. '
+                                             'Saved. Restart it with mv2 kill recipient, then mv2 resume recipient. '
+                                             'Then run mv2 deliver recipient --check.')
+                        elif not check and live == 'alive':
+                            self.assertEqual(lines[-1], 'Not delivered to recipient: Bridge refused connection. Saved; '
+                                             'restart it with mv2 kill recipient, then mv2 resume recipient, '
+                                             'then mv2 deliver recipient --retry or --dismiss.')
+                        else:
+                            self.assertIn('Saved; resume it', lines[-1])
+                with patch.object(deliver, 'running_for_delivery_advice') as observed:
+                    deliver.run(self.root, agent=name, check=check, retry=not check, json=True)
+                    observed.assert_not_called()
 
     def test_dismissed_messages_stay_in_history_and_can_never_be_resent(self):
         """Dismissal must close uncertainty without replaying it, hiding confirmation, or cancelling pending startup input."""

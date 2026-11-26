@@ -5,7 +5,7 @@ from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
 from ._common import delivery_summary, delivery_waits_for_restart
-from ._messaging import delivery_line
+from ._messaging import delivery_line, running_for_delivery_advice
 
 
 def configure(parser):
@@ -68,6 +68,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
     finalized = 0
     counts = {}
     details = []
+    running = None
 
     def report_inbox_read(message):
         nonlocal finalized
@@ -210,8 +211,12 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         if _present and (category != 'confirmed' or historical) and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
             _, current = mailbox.message_record(directory, message['id'])
             present = _present_error if summary.get('ok') is False and _present_error else _present
+            # A check can share one observation. A retry may have started a new launch before the next failure.
+            if not restart and receipt.get('state') in ('error', 'unavailable') and (retry or running is None):
+                running = running_for_delivery_advice(directory)
             line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
-                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt)
+                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text'],
+                                  running=running, restart_reported=bool(restart)), receipt)
             if check:
                 details.append((present, line))
             else:

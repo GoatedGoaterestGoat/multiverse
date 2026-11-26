@@ -136,6 +136,10 @@ When a running launch needs a restart to deliver messages, `mv2 list`,
 `mv2 inspect`, `mv2 doctor`, `mv2 deliver NAME --check` and the dashboard inspector show
 the reason and the commands `mv2 kill NAME` and `mv2 resume NAME`. A queued
 message held by that launch can appear as `waiting for restart` in `--check`.
+When a check or retry cannot reach a running session and advises a restart,
+it gives both commands before asking you to check or retry the saved message.
+
+When a saved send was refused, `--check` reports it as `not delivered`. After fixing the cause, run `mv2 deliver NAME --retry` to send it. If the launch needs a restart, the kill and resume commands appear once above the messages.
 
 `--check` reports a cancellation once as not delivered and exits nonzero, with
 advice to send a new message if you still want it delivered. Later checks omit

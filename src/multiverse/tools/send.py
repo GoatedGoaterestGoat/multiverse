@@ -6,11 +6,11 @@ from ..plugins import access
 from .. import universe, display
 from ..runtime import native, missing_runtime, queued_prompts
 from ..terminal.recovery import Unreachable
-from ..store import lock, read, retry_missing
+from ..store import lock, read
 from ..universe import agents, blocked, focus, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
-from ._messaging import delivery_line, failure_reason, inbox_reminder
+from ._messaging import delivery_line, failure_reason, inbox_reminder, running_for_delivery_advice
 
 def configure(parser):
     parser.add_argument("agent", help="Agent name, or comma-separated names")
@@ -126,7 +126,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds,
                                         as_user)
             running = bool(_present and result.get('delivery') != 'inbox-only'
-                           and receipt.get('state') in ('error', 'unavailable') and _running(directory))
+                           and receipt.get('state') in ('error', 'unavailable') and running_for_delivery_advice(directory))
             if result.get('upgrade_damaged'):
                 reason = failure_reason(receipt.get('reason'), result['text'], preserve_details=True)
                 line = f'Original text is saved, but its inbox cannot be read: {reason}. Repair the inbox ledger before reading it.'
@@ -220,15 +220,6 @@ def _normalized(sender, in_agent):
 def _unread_senders(caller):
     """Optional output advice: peek once before sending, outside every delivery lock."""
     return mailbox.unread_senders(caller.directory) if caller is not None else set()
-
-
-def _running(directory):
-    """Observe only for readable failure advice; uncertainty never changes delivery evidence."""
-    try:
-        properties = retry_missing(lambda: read(directory / 'properties.json'))
-        return native.observe(properties, agents.runtime(directory))['live'] == 'alive'
-    except (OSError, ValueError, KeyError, RuntimeError):
-        return False
 
 
 def _skipped(sender, text, delivery, reason):
