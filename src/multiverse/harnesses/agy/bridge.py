@@ -4,7 +4,7 @@ Runs both as an imported module (from AgyAdapter) and as a direct CLI helper inv
 Antigravity's `statusLine` and `.agents/hooks.json` handlers:
 
     python bridge.py statusline
-    python bridge.py hook SessionStart|PreInvocation|Stop
+    python bridge.py hook SessionStart|PreInvocation|PostInvocation|Stop
 """
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -31,7 +31,8 @@ from multiverse.harnesses.types import TurnEnded, TurnStarted, normalize_session
 from multiverse.store import lock, now, read, retry_missing, write
 
 
-BRIDGE = 'agy-bridge-v1'
+BRIDGE = 'agy-bridge-v2'  # hook-injected user messages; launches record it in native_mode['bridge']
+LEGACY_BRIDGES = ('agy-bridge-v1',)  # Stop-hook and agentapi text delivery; such a launch needs a restart
 LS_FILE = 'agy-ls.json'
 FOLLOWUPS_FILE = 'agy-followups.json'
 FOLLOWUPS_LOCK = '.agy-followups.lock'
@@ -42,13 +43,15 @@ MAX_RECORD_BYTES = 1 << 16
 MAX_QUEUE_BYTES = 256 << 10
 MAX_FOLLOWUPS = 128
 MAX_HANDED_OFF_RETAINED = 64
-MAX_STOP_CONTINUATIONS = 8
+MAX_POST_CONTINUATIONS = 15  # chained force_continue proven live on 1.5.17 up to 15
 MAX_RECEIPTS_SCAN = 100_000
 IDLE_FLUSH_GRACE_SECONDS = 5.0
 TURN_ACTIVE_IDLE_CONFIRMATIONS = 2
 TURN_ACTIVE_IDLE_GRACE_SECONDS = 1.5
 TURN_ACTIVE_MAX_IDLE_SECONDS = 5.0
 SUBMITTING_TIMEOUT_SECONDS = 20.0
+WAKE_PING = storage.WAKE_PING
+VALID_RECEIPT_ROUTES = frozenset(('agentapi', 'stop-hook', 'hook-user-input'))
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 _LOOPBACK_HOSTS = frozenset(('127.0.0.1', 'localhost', '::1'))
@@ -446,7 +449,8 @@ def _load_followups_record_locked(path: Path) -> dict:
             'pending_idle_attempt': None,
             'pending_idle_attempt_at': None,
             'last_init_steps': None,
-            'stop_continue_streak': 0,
+            'post_continue_streak': 0,
+            'last_post_end_step': None,
         }
     except OSError as error:
         detail = error.strerror or str(error)
@@ -464,6 +468,8 @@ def _load_followups_record_locked(path: Path) -> dict:
     raw_source = record.get('pending_turn_source')
     raw_last_steps = record.get('last_init_steps')
     last_steps = (raw_last_steps if type(raw_last_steps) is int and raw_last_steps >= 1 else None)
+    raw_last_post_step = record.get('last_post_end_step')
+    last_post_step = (raw_last_post_step if type(raw_last_post_step) is int and raw_last_post_step >= 0 else None)
     return {
         'entries': list(record['entries']),
         'idle_flushed': bool(record.get('idle_flushed')),
@@ -480,7 +486,8 @@ def _load_followups_record_locked(path: Path) -> dict:
         'pending_idle_attempt': _opt_str(record.get('pending_idle_attempt')),
         'pending_idle_attempt_at': _opt_timestamp(record.get('pending_idle_attempt_at')),
         'last_init_steps': last_steps,
-        'stop_continue_streak': _nonneg_int(record.get('stop_continue_streak'), 0),
+        'post_continue_streak': _nonneg_int(record.get('post_continue_streak'), 0),
+        'last_post_end_step': last_post_step,
     }
 
 
@@ -513,7 +520,8 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
                            pending_idle_attempt: str | None = None,
                            pending_idle_attempt_at: str | None = None,
                            last_init_steps: int | None = None,
-                           stop_continue_streak: int = 0) -> None:
+                           post_continue_streak: int = 0,
+                           last_post_end_step: int | None = None) -> None:
     canonical_launch = normalize_session_id(launch_id)
     # Never keep message text on already handed-off entries so delivered prompts cannot exhaust the queue budget.
     cleaned = []
@@ -552,7 +560,8 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
         'pending_idle_attempt': pending_idle_attempt if has_idle_attempt else None,
         'pending_idle_attempt_at': idle_attempt_at,
         'last_init_steps': last_init_steps if type(last_init_steps) is int and last_init_steps >= 1 else None,
-        'stop_continue_streak': max(0, int(stop_continue_streak)),
+        'post_continue_streak': max(0, int(post_continue_streak)),
+        'last_post_end_step': last_post_end_step if type(last_post_end_step) is int and last_post_end_step >= 0 else None,
         'entries': entries,
     }
     _write_private_json(path, payload, max_bytes=MAX_QUEUE_BYTES)
@@ -575,7 +584,8 @@ def _save_record_locked(path: Path, launch_id: str, rec: dict) -> None:
         pending_idle_attempt=rec.get('pending_idle_attempt'),
         pending_idle_attempt_at=rec.get('pending_idle_attempt_at'),
         last_init_steps=rec.get('last_init_steps'),
-        stop_continue_streak=rec.get('stop_continue_streak', 0),
+        post_continue_streak=rec.get('post_continue_streak', 0),
+        last_post_end_step=rec.get('last_post_end_step'),
     )
 
 
@@ -627,12 +637,27 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
         rec['pending_idle_attempt_at'] = None
         changed = True
 
-    # 2. Stale agentapi_submitting claim reaper (e.g., SIGKILL / crash mid-flush).
+    # 2. Stale wake_pending / legacy agentapi_submitting claim reaper (e.g., SIGKILL / crash mid-flush).
     for entry in rec['entries']:
-        if entry.get('state') != 'agentapi_submitting':
+        entry_state = entry.get('state')
+        if entry_state not in ('wake_pending', 'agentapi_submitting'):
             continue
         claimed_dt = storage.moment(entry.get('claimed_at'))
         if claimed_dt is not None and (now_dt - claimed_dt).total_seconds() < SUBMITTING_TIMEOUT_SECONDS:
+            continue
+        if entry_state == 'wake_pending':
+            # PreInvocation never handed off this entry (only WAKE_PING was sent over agentapi),
+            # so returning it to queued can never double-deliver its text.
+            entry['state'] = 'queued'
+            entry.pop('claimed_at', None)
+            entry.pop('claim_token', None)
+            entry.pop('wake_sent_at', None)
+            if rec.get('pending_idle_attempt') == entry.get('id'):
+                rec['idle_flushed'] = False
+                rec['idle_flushed_at'] = None
+                rec['pending_idle_attempt'] = None
+                rec['pending_idle_attempt_at'] = None
+            changed = True
             continue
         entry_id = entry.get('id')
         receipt = None
@@ -706,8 +731,15 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
     return changed, cancelled_by_idle, closed_turn_id
 
 
-def enqueue_followup(agent_dir, launch_id: str, message_id: str, native_id: str, text: str) -> None:
-    """Append one follow-up message to this launch's Stop-hook queue."""
+def _entry_mode(entry: dict) -> str:
+    return 'steer' if entry.get('mode') == 'steer' else 'follow-up'
+
+
+def enqueue_message(agent_dir, launch_id: str, message_id: str, native_id: str, text: str, *,
+                    mode: str = 'follow-up') -> None:
+    """Append one message (`steer` or `follow-up`) to this launch's hook delivery queue."""
+    if mode not in ('steer', 'follow-up'):
+        raise ValueError(f'Unknown Antigravity queue mode: {mode}')
     queue_path, lock_path = _followups_paths(agent_dir, launch_id)
     canonical_msg = normalize_session_id(message_id)
     canonical_conv = normalize_session_id(native_id)
@@ -718,12 +750,13 @@ def enqueue_followup(agent_dir, launch_id: str, message_id: str, native_id: str,
                and entry.get('state', 'queued') == 'queued' for entry in entries):
             return
         entries = [entry for entry in entries if entry.get('id') != canonical_msg]
-        queued_count = sum(1 for entry in entries if entry.get('state', 'queued') == 'queued')
+        queued_count = sum(1 for entry in entries if entry.get('state', 'queued') in ('queued', 'wake_pending'))
         if queued_count >= MAX_FOLLOWUPS:
             raise ValueError('Antigravity follow-up queue is full')
         entries.append({
             'id': canonical_msg,
             'native_id': canonical_conv,
+            'mode': mode,
             'text': text,
             'text_sha256': storage.message_hash(text),
             'state': 'queued',
@@ -733,37 +766,63 @@ def enqueue_followup(agent_dir, launch_id: str, message_id: str, native_id: str,
         _save_record_locked(queue_path, launch_id, rec)
 
 
-def release_followup_claim(agent_dir, launch_id: str, message_id: str, *,
-                           reset_idle_flush: bool = False, claim_token: str | None = None,
-                           restore_receipt: dict | None = None, drop_receipt: bool = False) -> bool:
-    """Revert an unsubmitted `agentapi_submitting` claim back to `queued` before any native I/O."""
+def enqueue_followup(agent_dir, launch_id: str, message_id: str, native_id: str, text: str) -> None:
+    """Append one follow-up message to this launch's hook delivery queue."""
+    enqueue_message(agent_dir, launch_id, message_id, native_id, text, mode='follow-up')
+
+
+def release_wake_claim(agent_dir, launch_id: str, message_id: str, *,
+                       claim_token: str, remove_entry: bool = False,
+                       drop_receipt: bool = False, reset_idle_flush: bool = True) -> bool:
+    """Atomically revert or remove an unhanded `wake_pending` claim matching `claim_token`.
+
+    Returns True when released/removed, False if `PreInvocation` already handed the entry off.
+    """
+    queue_path, lock_path = _followups_paths(agent_dir, launch_id)
+    canonical_msg = normalize_session_id(message_id)
+    with lock(lock_path):
+        rec = _load_followups_record_locked(queue_path)
+        for idx, entry in enumerate(rec['entries']):
+            if entry.get('id') == canonical_msg:
+                if entry.get('state') != 'wake_pending' or entry.get('claim_token') != claim_token:
+                    return False
+                if remove_entry:
+                    rec['entries'].pop(idx)
+                    if drop_receipt:
+                        remove_receipt(agent_dir, canonical_msg)
+                else:
+                    entry['state'] = 'queued'
+                    entry.pop('claimed_at', None)
+                    entry.pop('claim_token', None)
+                    entry.pop('wake_sent_at', None)
+                if reset_idle_flush:
+                    rec['idle_flushed'] = False
+                    rec['idle_flushed_at'] = None
+                    if rec.get('pending_idle_attempt') == canonical_msg:
+                        rec['pending_idle_attempt'] = None
+                        rec['pending_idle_attempt_at'] = None
+                _save_record_locked(queue_path, launch_id, rec)
+                return True
+    return False
+
+
+def mark_wake_sent(agent_dir, launch_id: str, message_id: str, *, claim_token: str) -> str:
+    """Stamp `wake_sent_at` on a live `wake_pending` claim; returns `'wake_pending'`, `'handed_off'`, or `'other'`."""
     queue_path, lock_path = _followups_paths(agent_dir, launch_id)
     canonical_msg = normalize_session_id(message_id)
     with lock(lock_path):
         rec = _load_followups_record_locked(queue_path)
         for entry in rec['entries']:
             if entry.get('id') == canonical_msg:
-                if entry.get('state') != 'agentapi_submitting':
-                    return False
-                if claim_token is not None and entry.get('claim_token') != claim_token:
-                    return False
-                if isinstance(restore_receipt, dict):
-                    try:
-                        _write_private_json(receipt_path(agent_dir, canonical_msg), restore_receipt)
-                    except (OSError, ValueError):
-                        pass
-                elif drop_receipt:
-                    remove_receipt(agent_dir, canonical_msg)
-                entry['state'] = 'queued'
-                entry.pop('claimed_at', None)
-                entry.pop('claim_token', None)
-                if reset_idle_flush:
-                    rec['idle_flushed'] = False
-                    rec['idle_flushed_at'] = None
-                    rec['pending_idle_attempt'] = None
-                _save_record_locked(queue_path, launch_id, rec)
-                return True
-    return False
+                state = entry.get('state', 'queued')
+                if state == 'handed_off':
+                    return 'handed_off'
+                if state == 'wake_pending' and entry.get('claim_token') == claim_token:
+                    entry['wake_sent_at'] = now()
+                    _save_record_locked(queue_path, launch_id, rec)
+                    return 'wake_pending'
+                return 'other'
+    return 'other'
 
 
 def remove_followup(agent_dir, launch_id: str, message_id: str, *,
@@ -812,92 +871,52 @@ def _clear_idle_flushed(agent_dir, launch_id: str) -> None:
         pass
 
 
-def begin_idle_turn(agent_dir, launch_id: str, *, message_id: str | None = None) -> int | None:
-    """Stamp `idle_flushed` BEFORE an idle agentapi send and return `turn_seq` for rollback if unconfirmed."""
-    try:
-        queue_path, lock_path = _followups_paths(agent_dir, launch_id)
-        canonical_msg = normalize_session_id(message_id) if message_id else None
-        with lock(lock_path):
-            rec = _load_followups_record_locked(queue_path)
-            stamped = now()
-            rec['idle_flushed'] = True
-            rec['idle_flushed_at'] = stamped
-            rec['pending_idle_attempt'] = canonical_msg
-            rec['pending_idle_attempt_at'] = stamped if canonical_msg else None
-            _save_record_locked(queue_path, launch_id, rec)
-            return rec['turn_seq']
-    except (OSError, ValueError):
-        return None
-
-
-def cancel_idle_turn_if_unstarted(agent_dir, launch_id: str, expected_seq: int | None) -> None:
-    """Clear a pre-submission `idle_flushed` stamp when agentapi did not confirm and no turn began."""
-    if expected_seq is None:
-        return
-    try:
-        queue_path, lock_path = _followups_paths(agent_dir, launch_id)
-        if not queue_path.exists():
-            return
-        with lock(lock_path, create_parent=False):
-            rec = _load_followups_record_locked(queue_path)
-            if (rec['idle_flushed'] or rec.get('pending_idle_attempt')) and rec['turn_seq'] == expected_seq and not rec['turn_active']:
-                rec['idle_flushed'] = False
-                rec['idle_flushed_at'] = None
-                rec['pending_idle_attempt'] = None
-                rec['pending_idle_attempt_at'] = None
-                _save_record_locked(queue_path, launch_id, rec)
-    except (OSError, ValueError):
-        pass
-
-
-def should_queue_idle_followup(agent_dir, launch_id: str, native_id: str, *,
-                               live_facts: dict | None = None) -> bool:
-    """True when an idle follow-up should queue (re-checking bounded/live state under lock first)."""
-    try:
-        queue_path, lock_path = _followups_paths(agent_dir, launch_id)
-        canonical_conv = normalize_session_id(native_id)
-    except ValueError:
-        return True
-    if not queue_path.exists():
-        return False
-    try:
-        with lock(lock_path, create_parent=False):
-            rec = _load_followups_record_locked(queue_path)
-            reaped, cancelled, closed_turn = _reap_followups_locked(
-                agent_dir, rec, live_facts=live_facts, conv_id=canonical_conv,
-            )
-            if reaped:
-                _save_record_locked(queue_path, launch_id, rec)
-            if cancelled:
-                _sync_runtime_queue_state_locked(
-                    agent_dir, launch_id, canonical_conv, rec['entries'],
-                    root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
-                )
-    except (OSError, ValueError):
-        return True
-    if rec['turn_active'] or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at']):
-        return True
-    return any(
-        entry.get('state', 'queued') in ('queued', 'agentapi_submitting')
-        and entry.get('native_id') == canonical_conv
-        for entry in rec['entries']
-    )
-
-
-def _fifo_head_queued(entries: list[dict], canonical_conv: str) -> dict | None:
+def _fifo_head_queued(entries: list[dict], canonical_conv: str, *, mode: str | None = None) -> dict | None:
     for entry in entries:
         if (entry.get('state', 'queued') == 'queued'
                 and entry.get('native_id') == canonical_conv
-                and isinstance(entry.get('text'), str)):
+                and isinstance(entry.get('text'), str)
+                and (mode is None or _entry_mode(entry) == mode)):
             return entry
     return None
 
 
-def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: str, *,
-                       claim_token: str | None = None) -> str:
-    """Atomically recheck idle state under the queue lock and claim `message_id` if it is the unpaused FIFO head.
+def _hook_delivery_live(facts: dict, props: dict, canonical_launch: str, canonical_conv: str | None) -> bool:
+    """True while this launch may hand message text to agy: still running, not ending, bound to `canonical_conv`,
+    and made for hook-injected user messages (an older launch's hooks.json and agy may not inject them)."""
+    return (isinstance(facts, dict) and isinstance(props, dict)
+            and canonical_conv is not None
+            and facts.get('launch_id') == canonical_launch
+            and facts.get('state') in ('starting', 'running')
+            and not facts.get('ending_at')
+            and not facts.get('cleanup_retired')
+            and not facts.get('binding_conflict')
+            and facts.get('native_bridge') == BRIDGE
+            and props.get('native_session_id') == canonical_conv)
 
-    Returns `'claimed'`, `'queued'` (stay queued for Stop/pause/FIFO), `'handed_off'`, `'submitting'`, or `'missing'`.
+
+def _wake_in_flight(entries: list[dict], canonical_conv: str) -> bool:
+    """True while a wake for `canonical_conv` (or a legacy agentapi submission) waits for its PreInvocation."""
+    return any(entry.get('state') in ('wake_pending', 'agentapi_submitting')
+               and entry.get('native_id') == canonical_conv for entry in entries)
+
+
+def _next_queued_entry(entries: list[dict], canonical_conv: str) -> dict | None:
+    """Return the next eligible queued head for `canonical_conv`: unpaused FIFO `steer` first, else unpaused FIFO `follow-up`."""
+    steer_head = _fifo_head_queued(entries, canonical_conv, mode='steer')
+    if steer_head is not None:
+        return None if steer_head.get('paused') is True else steer_head
+    followup_head = _fifo_head_queued(entries, canonical_conv, mode='follow-up')
+    if followup_head is not None:
+        return None if followup_head.get('paused') is True else followup_head
+    return None
+
+
+def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: str, *,
+                       claim_token: str | None = None, mode: str = 'follow-up') -> str:
+    """Atomically recheck idle state under the queue lock and claim `message_id` as `wake_pending` if it is the next head.
+
+    Returns `'claimed'`, `'queued'` (stay queued for hooks/pause/FIFO), `'handed_off'`, `'submitting'`, or `'missing'`.
     """
     queue_path, lock_path = _followups_paths(agent_dir, launch_id)
     canonical_launch = normalize_session_id(launch_id)
@@ -914,6 +933,9 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
         reaped, cancelled, closed_turn = _reap_followups_locked(
             agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv,
         )
+        if cancelled:
+            # This send is a new idle send: it resumes what the reaper just paused, as resume_paused_for_new_send does.
+            _resume_paused_locked(rec, canonical_conv, mode)
         entries = rec['entries']
         target = None
         for entry in entries:
@@ -939,7 +961,7 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
                     root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
                 )
             return 'handed_off'
-        if state == 'agentapi_submitting':
+        if state in ('wake_pending', 'agentapi_submitting'):
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
@@ -974,7 +996,7 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
             return 'queued'
         if (rec['turn_active']
                 or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
-                or any(entry.get('state') == 'agentapi_submitting' for entry in entries)):
+                or _wake_in_flight(entries, canonical_conv)):
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
@@ -983,8 +1005,8 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
                     root=_universe_root(agent_dir), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
                 )
             return 'queued'
-        head = _fifo_head_queued(entries, canonical_conv)
-        if head is None or head.get('id') != canonical_msg or head.get('paused') is True:
+        head = _next_queued_entry(entries, canonical_conv)
+        if head is None or head.get('id') != canonical_msg:
             if reaped:
                 _save_record_locked(queue_path, canonical_launch, rec)
             if cancelled:
@@ -994,7 +1016,7 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
                 )
             return 'queued'
         stamped = now()
-        target['state'] = 'agentapi_submitting'
+        target['state'] = 'wake_pending'
         target['claimed_at'] = stamped
         target['claim_token'] = token
         rec['idle_flushed'] = True
@@ -1007,56 +1029,6 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
         rec['idle_after_turn_at'] = None
         _save_record_locked(queue_path, canonical_launch, rec)
         return 'claimed'
-
-
-def commit_followup_agentapi_receipt(agent_dir, launch_id: str, message_id: str, *,
-                                     claim_token: str, native_id: str,
-                                     submitted_at: str, text_sha256: str) -> str:
-    """Compare-and-set under the queue lock: write the `agentapi` receipt only if our claim still holds.
-
-    Prevents a stalled claimer from submitting after the stale-claim reaper already returned the entry
-    to `queued` (or Stop already handed it off). Returns `'committed'`, `'handed_off'`, `'queued'`,
-    `'submitting'` (re-claimed by another worker), or `'missing'`.
-    """
-    queue_path, lock_path = _followups_paths(agent_dir, launch_id)
-    canonical_launch = normalize_session_id(launch_id)
-    canonical_msg = normalize_session_id(message_id)
-    canonical_conv = normalize_session_id(native_id)
-    if not queue_path.exists():
-        return 'missing'
-    with lock(lock_path, create_parent=False):
-        rec = _load_followups_record_locked(queue_path)
-        target = None
-        for entry in rec['entries']:
-            if entry.get('id') == canonical_msg:
-                target = entry
-                break
-        if target is None:
-            return 'missing'
-        state = target.get('state', 'queued')
-        if state != 'agentapi_submitting' or target.get('claim_token') != claim_token:
-            if state == 'handed_off':
-                return 'handed_off'
-            if state == 'queued':
-                return 'queued'
-            if state == 'agentapi_submitting':
-                return 'submitting'
-            return 'missing'
-        # Write the agentapi receipt WHILE holding the queue lock so the reaper can never revert this claim to queued.
-        write_receipt(
-            agent_dir,
-            canonical_msg,
-            launch_id=canonical_launch,
-            native_id=canonical_conv,
-            route='agentapi',
-            submitted_at=submitted_at,
-            text_sha256=text_sha256,
-            delivered_at=None,
-            acknowledged=False,
-        )
-        target['claimed_at'] = now()
-        _save_record_locked(queue_path, canonical_launch, rec)
-        return 'committed'
 
 
 def _sync_runtime_queue_state_locked(agent_dir, launch_id: str, native_id: str | None, entries: list[dict], *,
@@ -1179,7 +1151,7 @@ def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, 
                 rec['idle_after_turn_at'] = None
                 rec['turn_open'] = False
                 rec['turn_id'] = None
-                rec['stop_continue_streak'] = 0
+                rec['post_continue_streak'] = 0
                 if next_source in ('person', 'harness'):
                     rec['pending_turn_source'] = next_source
                 _save_record_locked(queue_path, canonical_launch, rec)
@@ -1192,8 +1164,27 @@ def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, 
         pass
 
 
-def resume_paused_for_new_send(agent_dir, launch_id: str, native_id: str) -> bool:
-    """Unpause cancel/error-paused follow-ups when a new mv2 follow-up arrives on an idle session (FIFO head runs first)."""
+def _resume_paused_locked(rec: dict, canonical_conv: str, mode: str) -> bool:
+    """Unpause cancel/error-paused queued entries for a new idle send (`follow-up` unpauses all; `steer` unpauses steers)."""
+    unpaused = False
+    for entry in rec['entries']:
+        if (entry.get('state', 'queued') == 'queued'
+                and entry.get('native_id') == canonical_conv
+                and entry.get('paused') is True
+                and entry.get('paused_reason') in ('cancel', 'error')
+                and (mode != 'steer' or _entry_mode(entry) == 'steer')):
+            entry.pop('paused', None)
+            entry.pop('paused_reason', None)
+            unpaused = True
+    return unpaused
+
+
+def resume_paused_for_new_send(agent_dir, launch_id: str, native_id: str, *, mode: str = 'follow-up') -> bool:
+    """Reap a turn that ended without `Stop`, then unpause cancel/error-paused entries for a new idle send.
+
+    Reaping first matters: the reaper pauses every queued entry of a cancelled turn, including the message
+    this send just queued, so resuming before reaping would leave the new message paused.
+    """
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
         canonical_launch = normalize_session_id(launch_id)
@@ -1212,34 +1203,113 @@ def resume_paused_for_new_send(agent_dir, launch_id: str, native_id: str) -> boo
                     or current_props.get('native_session_id') != canonical_conv):
                 return False
             rec = _load_followups_record_locked(queue_path)
-            unpaused = False
-            for entry in rec['entries']:
-                if (entry.get('state', 'queued') == 'queued'
-                        and entry.get('native_id') == canonical_conv
-                        and entry.get('paused') is True
-                        and entry.get('paused_reason') in ('cancel', 'error')):
-                    entry.pop('paused', None)
-                    entry.pop('paused_reason', None)
-                    unpaused = True
-            if not unpaused:
+            reaped, cancelled, closed_turn = _reap_followups_locked(
+                agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv,
+            )
+            unpaused = _resume_paused_locked(rec, canonical_conv, mode)
+            if not unpaused and not reaped:
                 return False
-            rec['idle_flushed'] = False
-            rec['idle_flushed_at'] = None
-            rec['turn_active'] = False
-            rec['turn_active_at'] = None
-            rec['idle_after_turn'] = 0
-            rec['idle_after_turn_at'] = None
+            if unpaused:
+                rec['idle_flushed'] = False
+                rec['idle_flushed_at'] = None
+                rec['turn_active'] = False
+                rec['turn_active_at'] = None
+                rec['idle_after_turn'] = 0
+                rec['idle_after_turn_at'] = None
             _save_record_locked(queue_path, canonical_launch, rec)
-            _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
-            return True
+            edges = _turn_end_edges(closed_turn, 'interrupted') if cancelled else ()
+            _sync_runtime_queue_state_locked(
+                agent_dir, canonical_launch, canonical_conv, rec['entries'],
+                root=_universe_root(agent_dir), turn_edges=edges,
+            )
+            return unpaused
     except (OSError, ValueError):
         return False
 
 
+def _read_transcript_tail(agent_dir: Path, conv_id: str | None, env: Mapping[str, str] | None = None, *,
+                          limit_bytes: int = 65536, covers=None) -> list[dict] | None:
+    """Read the tail JSONL rows of `conv_id`'s recorded transcript safely without following symlinks.
+
+    When `covers(rows)` is false for a truncated window (the needed row is larger than it), reread enough to hold
+    one maximal row.
+    """
+    if not conv_id:
+        return None
+    try:
+        canonical_conv = normalize_session_id(conv_id)
+    except ValueError:
+        return None
+    home = None
+    try:
+        props = retry_missing(lambda: read(agent_dir / 'properties.json'))
+        raw_home = props.get('native_session_home') if isinstance(props, dict) else None
+        if isinstance(raw_home, str) and os.path.isabs(raw_home):
+            home = raw_home
+    except (OSError, ValueError):
+        home = None
+    if not home:
+        home = os.path.realpath(storage.agy_home(env))
+    try:
+        _, handle, info = transcripts._open_transcript_file(home, canonical_conv)
+    except transcripts.Unreadable:
+        return None
+    if handle is None or info is None:
+        return None
+    try:
+        with handle:
+            offset = max(0, info.st_size - limit_bytes)
+            rows = _parse_transcript_window(handle, offset)
+            if covers is not None and offset > 0 and not covers(rows or []):
+                rows = _parse_transcript_window(handle, max(0, info.st_size - storage.MAX_TRANSCRIPT_LINE - limit_bytes))
+            return rows
+    except OSError:
+        return None
+
+
+def _is_human_opener_at_step(rows: list[dict] | None, target_step: int | None) -> bool:
+    """True when `rows` proves `step-{target_step}` is a human `USER_EXPLICIT` `USER_INPUT`."""
+    if not rows or target_step is None or target_step < 0:
+        return False
+    for row in reversed(rows):
+        if row.get('step_index') == target_step:
+            return row.get('type') == 'USER_INPUT' and row.get('source') == 'USER_EXPLICIT'
+    return False
+
+
+def _last_non_system_row(rows: list[dict] | None) -> dict | None:
+    if not rows:
+        return None
+    for row in reversed(rows):
+        if row.get('type') != 'SYSTEM_MESSAGE':
+            return row
+    return None
+
+
+def _is_turn_ending_planner_response(rows: list[dict] | None, initial_num_steps=None) -> tuple[bool, int | None]:
+    """True with `step_index` when the last non-system step is a completed `PLANNER_RESPONSE` without tool calls.
+
+    With `initial_num_steps` (PostInvocation's payload), the response must belong to this invocation
+    (`step_index >= initialNumSteps`), never an earlier turn's reply read before agy wrote this one.
+    """
+    row = _last_non_system_row(rows)
+    if not isinstance(row, dict) or row.get('type') != 'PLANNER_RESPONSE':
+        return False, None
+    if str(row.get('status') or '').upper() != 'DONE':
+        return False, None
+    tools = row.get('tool_calls')
+    if isinstance(tools, list) and len(tools) > 0:
+        return False, None
+    step_idx = row.get('step_index')
+    if type(initial_num_steps) is int and initial_num_steps >= 1 and not (type(step_idx) is int and step_idx >= initial_num_steps):
+        return False, None
+    return True, (step_idx if type(step_idx) is int and step_idx >= 0 else None)
+
+
 def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                    invocation_num=None, initial_num_steps=None,
-                   env: Mapping[str, str] | None = None) -> tuple[TurnStarted, ...]:
-    """Advance `turn_seq`, mark `turn_active=True`, clear `idle_flushed`, unpause follow-ups, and return TurnStarted."""
+                   env: Mapping[str, str] | None = None) -> tuple[tuple[TurnStarted, ...], list[str]]:
+    """Advance `turn_seq`, handle `PreInvocation` `userMessage` injections, and return `(TurnStarted..., injected_texts)`."""
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
         canonical_launch = normalize_session_id(launch_id)
@@ -1260,8 +1330,21 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                 startup_proof = _prove_startup_input(
                     Path(agent_dir), canonical_conv, init_steps, startup_expectation[2], env=env,
                 )
+        tail_rows = None
+        if canonical_conv is not None and inv_num == 0 and init_steps is not None:
+            tail_rows = _read_transcript_tail(
+                Path(agent_dir), canonical_conv, env,
+                covers=lambda rows: any(row.get('step_index') == init_steps - 1 for row in rows),
+            )
         with lock(lock_path):
             rec = _load_followups_record_locked(queue_path)
+            # Recheck under the lock: once mv2 kill or a rebind starts, a handoff would be reported failed and resent.
+            try:
+                live_facts = retry_missing(lambda: read(Path(agent_dir) / 'runtime.json'))
+                live_props = retry_missing(lambda: read(Path(agent_dir) / 'properties.json'))
+            except (OSError, ValueError):
+                live_facts, live_props = {}, {}
+            can_hand_off = _hook_delivery_live(live_facts, live_props, canonical_launch, canonical_conv)
             for entry in rec['entries']:
                 if (entry.get('state', 'queued') == 'queued'
                         and (canonical_conv is None or entry.get('native_id') == canonical_conv)):
@@ -1287,6 +1370,61 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
             rec['turn_active_at'] = now()
             rec['idle_after_turn'] = 0
             rec['idle_after_turn_at'] = None
+
+            injected_texts: list[str] = []
+            wake_handed_off_id: str | None = None
+            human_opener = (
+                inv_num == 0
+                and init_steps is not None
+                and _is_human_opener_at_step(tail_rows, init_steps - 1)
+            )
+            if can_hand_off:
+                # 1. Resolve any wake_pending entry on invocationNum == 0.
+                if inv_num == 0:
+                    for entry in rec['entries']:
+                        if (entry.get('state') == 'wake_pending'
+                                and entry.get('native_id') == canonical_conv
+                                and isinstance(entry.get('text'), str)):
+                            if human_opener:
+                                # A person typed this turn's prompt before the wake ping arrived: the turn is theirs.
+                                idle_attempt_active = False
+                                rec['pending_idle_attempt'] = None
+                                rec['pending_idle_attempt_at'] = None
+                            if _entry_mode(entry) == 'follow-up' and human_opener:
+                                # The follow-up waits for the person's turn to end (PostInvocation injects it then).
+                                entry['state'] = 'queued'
+                                entry.pop('claimed_at', None)
+                                entry.pop('claim_token', None)
+                                entry.pop('wake_sent_at', None)
+                            else:
+                                wake_text = entry['text']
+                                mark_receipt_delivered(agent_dir, entry['id'])
+                                entry['state'] = 'handed_off'
+                                entry['handed_off_at'] = now()
+                                entry.pop('text', None)
+                                entry.pop('claimed_at', None)
+                                entry.pop('claim_token', None)
+                                entry.pop('wake_sent_at', None)
+                                injected_texts.append(wake_text)
+                                if not human_opener:
+                                    wake_handed_off_id = entry['id']
+                            break
+                # 2. Drain any queued steer entries via PreInvocation userMessage injection.
+                for entry in rec['entries']:
+                    if (entry.get('state', 'queued') == 'queued'
+                            and entry.get('native_id') == canonical_conv
+                            and _entry_mode(entry) == 'steer'
+                            and entry.get('paused') is not True
+                            and isinstance(entry.get('text'), str)):
+                        steer_text = entry['text']
+                        mark_receipt_delivered(agent_dir, entry['id'])
+                        entry['state'] = 'handed_off'
+                        entry['handed_off_at'] = now()
+                        entry.pop('text', None)
+                        injected_texts.append(steer_text)
+                        if wake_handed_off_id is None and starting_new and not human_opener and not rec.get('pending_turn_attempt'):
+                            wake_handed_off_id = entry['id']
+
             edges: tuple[TurnStarted, ...] = ()
             if starting_new:
                 attempt = rec.get('pending_turn_attempt')
@@ -1295,13 +1433,21 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                 first_task = False
                 if attempt:
                     source = 'harness'
+                elif wake_handed_off_id is not None:
+                    attempt = wake_handed_off_id
+                    source = 'harness'
+                    is_post_logged = True
+                    rec['post_continue_streak'] = 0
                 elif idle_attempt_active and rec.get('pending_idle_attempt'):
                     attempt = rec.get('pending_idle_attempt')
                     source = 'harness'
                     is_post_logged = True
-                    rec['stop_continue_streak'] = 0
+                    rec['post_continue_streak'] = 0
                 else:
-                    rec['stop_continue_streak'] = 0
+                    rec['post_continue_streak'] = 0
+                    if human_opener:
+                        # A typed prompt beats the harness hint a background Stop left for its task notification.
+                        source = 'person'
                     if rec['turn_seq'] == 1 and startup_expectation is not None:
                         kind_exp, wake_msg, _ = startup_expectation
                         if kind_exp == 'wake' and wake_msg is not None:
@@ -1315,8 +1461,9 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                     source = source if source in ('person', 'harness') else 'person'
                 last_steps = rec.get('last_init_steps')
                 if init_steps is not None:
-                    # Antigravity appends USER_INPUT and Stop-hook prompts before PreInvocation (step-{K-1}),
-                    # but appends agentapi and background task-notification messages after PreInvocation (step-{K}).
+                    # Antigravity appends human USER_INPUT and PostInvocation-injected USER_INPUT before
+                    # PreInvocation (step-{K-1}), but appends PreInvocation-injected USER_INPUT and
+                    # background task notifications after PreInvocation (step-{K}).
                     # Also use post:{K} if K <= last_init_steps (the previous turn ended with zero extra steps).
                     if is_post_logged or (last_steps is not None and init_steps <= last_steps):
                         turn_id = f'post:{init_steps}:{rec["turn_seq"]}'
@@ -1341,9 +1488,9 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
             rec['pending_idle_attempt_at'] = None
             _save_record_locked(queue_path, canonical_launch, rec)
             _sync_runtime_queue_state_locked(agent_dir, canonical_launch, canonical_conv, rec['entries'])
-            return edges
+            return edges, injected_texts
     except (OSError, ValueError):
-        return ()
+        return (), []
 
 
 def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None = None) -> None:
@@ -1356,7 +1503,8 @@ def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None
                 if (rec['idle_flushed'] or rec['turn_active'] or rec['idle_after_turn'] > 0
                         or rec.get('turn_open') or rec.get('pending_turn_attempt')
                         or rec.get('pending_turn_source') or rec.get('pending_idle_attempt')
-                        or rec.get('last_init_steps') is not None):
+                        or rec.get('last_init_steps') is not None
+                        or rec.get('post_continue_streak') or rec.get('last_post_end_step') is not None):
                     rec['idle_flushed'] = False
                     rec['idle_flushed_at'] = None
                     rec['turn_seq'] = rec['turn_seq'] + 1
@@ -1371,7 +1519,8 @@ def _on_conversation_switch(agent_dir, launch_id: str, departed_conv: str | None
                     rec['pending_idle_attempt'] = None
                     rec['pending_idle_attempt_at'] = None
                     rec['last_init_steps'] = None
-                    rec['stop_continue_streak'] = 0
+                    rec['post_continue_streak'] = 0
+                    rec['last_post_end_step'] = None
                     _save_record_locked(queue_path, launch_id, rec)
                 _sync_runtime_queue_state_locked(agent_dir, launch_id, departed_conv, [])
         else:
@@ -1503,7 +1652,7 @@ def read_receipt(agent_dir, message_id: str):
     if record is None or record is False:
         return record
     if (record.get('schema') != 1 or record.get('id') != canonical_msg
-            or record.get('route') not in ('agentapi', 'stop-hook')
+            or record.get('route') not in VALID_RECEIPT_ROUTES
             or not isinstance(record.get('launch_id'), str)
             or not isinstance(record.get('native_id'), str)):
         return False
@@ -1539,7 +1688,7 @@ def _read_receipt_at(dir_fd: int, name: str, canonical_msg: str):
         return False
     if (not isinstance(record, dict)
             or record.get('schema') != 1 or record.get('id') != canonical_msg
-            or record.get('route') not in ('agentapi', 'stop-hook')
+            or record.get('route') not in VALID_RECEIPT_ROUTES
             or not isinstance(record.get('launch_id'), str)
             or not isinstance(record.get('native_id'), str)):
         return False
@@ -1673,10 +1822,13 @@ def receipt_cohort(agent_dir, target_id: str, *, native_id: str, route: str,
         return None
     cohort = []
     for r_submitted, r_launch, r_id in matches:
-        if (r_id != canonical_target and route == 'stop-hook'
-                and followup_state(agent_dir, r_launch, r_id) == 'queued'):
-            # A follow-up still sitting un-handed-off in its launch's queue has not produced a transcript row.
-            continue
+        if r_id != canonical_target:
+            if route == 'hook-user-input' and followup_state(agent_dir, r_launch, r_id) in ('queued', 'wake_pending'):
+                # A queued or wake-pending entry has not yet been injected into the transcript by hooks.
+                continue
+            if route == 'stop-hook' and followup_state(agent_dir, r_launch, r_id) == 'queued':
+                # A follow-up still sitting un-handed-off in its launch's queue has not produced a transcript row.
+                continue
         cohort.append((r_submitted, r_id))
     cohort.sort()
     times = [submitted_at for submitted_at, _ in cohort]
@@ -2161,34 +2313,12 @@ def _status_line_text(directory: Path, properties: dict, facts: dict) -> str:
     return ' · '.join(parts)
 
 
-def _mark_followup_handed_off(agent_dir: Path, launch_id: str, message_id: str, *,
-                              claim_token: str | None = None) -> None:
-    """Transition a claimed follow-up to `handed_off` and drop its text so it no longer consumes queue budget."""
-    queue_path, lock_path = _followups_paths(agent_dir, launch_id)
-    canonical_msg = normalize_session_id(message_id)
-    with lock(lock_path):
-        rec = _load_followups_record_locked(queue_path)
-        for entry in rec['entries']:
-            if entry.get('id') == canonical_msg:
-                if claim_token is not None and (
-                        entry.get('state') != 'agentapi_submitting' or entry.get('claim_token') != claim_token):
-                    return
-                entry['state'] = 'handed_off'
-                entry['handed_off_at'] = now()
-                entry.pop('text', None)
-                entry.pop('claimed_at', None)
-                entry.pop('claim_token', None)
-                _save_record_locked(queue_path, launch_id, rec)
-                return
-
-
 def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv_id: str) -> bool:
-    """Deliver at most one stranded Stop-hook follow-up per idle period once the session is confirmed idle.
+    """Wake an idle session via a hidden `agentapi` ping so `PreInvocation` injects the queued head as `USER_INPUT`.
 
-    Re-checks and reaps bounded delivery state (`idle_flushed`, stale `agentapi_submitting`, sticky `turn_active`
-    and subagent pause) under the queue lock before claiming. Sets a self-expiring `idle_flushed` marker on claim
-    so consecutive idle statusLine callbacks cannot flush a second queued entry before the flushed turn runs, and
-    respects entries paused by `USER_CANCELED`.
+    Re-checks and reaps bounded delivery state (`idle_flushed`, stale `wake_pending` / `agentapi_submitting`,
+    and sticky `turn_active`) under the queue lock before claiming. Sets a self-expiring `idle_flushed` marker
+    on claim so consecutive idle statusLine callbacks cannot send a second wake ping before the turn starts.
     """
     from multiverse.runtime import launch_files
     queue_path, lock_path = _followups_paths(directory, launch_id)
@@ -2215,10 +2345,9 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                 )
             if (rec['turn_active']
                     or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
-                    or any(entry.get('state') == 'agentapi_submitting' for entry in rec['entries'])):
+                    or _wake_in_flight(rec['entries'], conv_id)):
                 return False
-            head = _fifo_head_queued(rec['entries'], conv_id)
-            if head is None or head.get('paused') is True:
+            if _next_queued_entry(rec['entries'], conv_id) is None:
                 return False
 
         try:
@@ -2227,21 +2356,12 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
             return False
 
         claimed_id = None
-        claimed_text = None
-        claimed_hash = None
         claim_token = str(uuid4())
-        prior_receipt = None
-        submitted_at = now()
         with lock(lock_path, create_parent=False):
             current_facts = retry_missing(lambda: read(directory / 'runtime.json'))
             current_props = retry_missing(lambda: read(directory / 'properties.json'))
-            if (current_facts.get('launch_id') != launch_id
-                    or current_facts.get('state') not in ('starting', 'running')
-                    or current_facts.get('status') != 'idle'
-                    or current_facts.get('ending_at')
-                    or current_facts.get('cleanup_retired')
-                    or current_facts.get('binding_conflict')
-                    or current_props.get('native_session_id') != conv_id):
+            if (current_facts.get('status') != 'idle'
+                    or not _hook_delivery_live(current_facts, current_props, launch_id, conv_id)):
                 return False
             rec = _load_followups_record_locked(queue_path)
             reaped, cancelled, closed_turn = _reap_followups_locked(
@@ -2249,7 +2369,7 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
             )
             if (rec['turn_active']
                     or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
-                    or any(entry.get('state') == 'agentapi_submitting' for entry in rec['entries'])):
+                    or _wake_in_flight(rec['entries'], conv_id)):
                 if reaped:
                     _save_record_locked(queue_path, launch_id, rec)
                 if cancelled:
@@ -2258,8 +2378,8 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                         root=_universe_root(directory), turn_edges=_turn_end_edges(closed_turn, 'interrupted'),
                     )
                 return False
-            head = _fifo_head_queued(rec['entries'], conv_id)
-            if head is None or head.get('paused') is True:
+            head = _next_queued_entry(rec['entries'], conv_id)
+            if head is None:
                 if reaped:
                     _save_record_locked(queue_path, launch_id, rec)
                 if cancelled:
@@ -2269,19 +2389,10 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                     )
                 return False
             claimed_id = head['id']
-            claimed_text = head['text']
-            claimed_hash = head.get('text_sha256') or storage.message_hash(claimed_text)
-            prior_receipt = read_receipt(directory, claimed_id)
-            submitted_at = (prior_receipt.get('submitted_at') if isinstance(prior_receipt, dict)
-                            and isinstance(prior_receipt.get('submitted_at'), str) else now())
             stamped = now()
-            head['state'] = 'agentapi_submitting'
+            head['state'] = 'wake_pending'
             head['claimed_at'] = stamped
             head['claim_token'] = claim_token
-            prev_flushed = rec['idle_flushed']
-            prev_flushed_at = rec['idle_flushed_at']
-            prev_idle_attempt = rec.get('pending_idle_attempt')
-            prev_idle_attempt_at = rec.get('pending_idle_attempt_at')
             rec['idle_flushed'] = True
             rec['idle_flushed_at'] = stamped
             rec['pending_idle_attempt'] = claimed_id
@@ -2291,24 +2402,7 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
             rec['idle_after_turn'] = 0
             rec['idle_after_turn_at'] = None
             _save_record_locked(queue_path, launch_id, rec)
-            try:
-                # Commit the agentapi receipt INSIDE the queue lock so no stale-claim reaper can revert this claim to queued.
-                write_receipt(
-                    directory, claimed_id, launch_id=launch_id, native_id=conv_id,
-                    route='agentapi', submitted_at=submitted_at, text_sha256=claimed_hash,
-                    delivered_at=None, acknowledged=False,
-                )
-            except (OSError, ValueError):
-                head['state'] = 'queued'
-                head.pop('claimed_at', None)
-                head.pop('claim_token', None)
-                rec['idle_flushed'] = prev_flushed
-                rec['idle_flushed_at'] = prev_flushed_at
-                rec['pending_idle_attempt'] = prev_idle_attempt
-                rec['pending_idle_attempt_at'] = prev_idle_attempt_at
-                _save_record_locked(queue_path, launch_id, rec)
-                return False
-        if claimed_id is None or claimed_text is None:
+        if claimed_id is None:
             return False
 
         executable = 'agy'
@@ -2328,44 +2422,25 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
         cwd = workspace if isinstance(workspace, str) and os.path.isdir(workspace) else None
         try:
             completed = subprocess.run(
-                [executable, 'agentapi', 'send-message', conv_id, claimed_text],
+                [executable, 'agentapi', 'send-message', conv_id, WAKE_PING],
                 cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, timeout=10,
             )
         except OSError:
-            release_followup_claim(
-                directory, launch_id, claimed_id,
-                reset_idle_flush=True, claim_token=claim_token,
-                restore_receipt=prior_receipt if isinstance(prior_receipt, dict) else None,
-                drop_receipt=not isinstance(prior_receipt, dict),
-            )
+            release_wake_claim(directory, launch_id, claimed_id, claim_token=claim_token, reset_idle_flush=True)
             return False
         except subprocess.SubprocessError:
-            _mark_followup_handed_off(directory, launch_id, claimed_id, claim_token=claim_token)
+            mark_wake_sent(directory, launch_id, claimed_id, claim_token=claim_token)
             return True
 
         if completed.returncode != 0:
             if is_pre_connect_agentapi_error(completed.stdout, completed.stderr):
-                release_followup_claim(
-                    directory, launch_id, claimed_id,
-                    reset_idle_flush=True, claim_token=claim_token,
-                    restore_receipt=prior_receipt if isinstance(prior_receipt, dict) else None,
-                    drop_receipt=not isinstance(prior_receipt, dict),
-                )
+                release_wake_claim(directory, launch_id, claimed_id, claim_token=claim_token, reset_idle_flush=True)
                 return False
-            _mark_followup_handed_off(directory, launch_id, claimed_id, claim_token=claim_token)
+            mark_wake_sent(directory, launch_id, claimed_id, claim_token=claim_token)
             return True
 
-        if agentapi_recipient(completed.stdout) == conv_id:
-            try:
-                write_receipt(
-                    directory, claimed_id, launch_id=launch_id, native_id=conv_id,
-                    route='agentapi', submitted_at=submitted_at, text_sha256=claimed_hash,
-                    delivered_at=now(), acknowledged=True,
-                )
-            except (OSError, ValueError):
-                pass
-        _mark_followup_handed_off(directory, launch_id, claimed_id, claim_token=claim_token)
+        mark_wake_sent(directory, launch_id, claimed_id, claim_token=claim_token)
         return True
     except Exception:
         return False
@@ -2397,10 +2472,9 @@ def _inspect_idle_followup(directory: Path, launch_id: str, conv_id: str, *,
         return False, False, None
     if rec['turn_active'] or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at']):
         return False, cancelled, closed_turn
-    if any(entry.get('state') == 'agentapi_submitting' for entry in rec['entries']):
+    if _wake_in_flight(rec['entries'], conv_id):
         return False, cancelled, closed_turn
-    head = _fifo_head_queued(rec['entries'], conv_id)
-    if head is None or head.get('paused') is True:
+    if _next_queued_entry(rec['entries'], conv_id) is None:
         return False, cancelled, closed_turn
     if read_ls_info(directory, launch_id) is None:
         return False, cancelled, closed_turn
@@ -2495,6 +2569,7 @@ def _ensure_bridge_ready(directory: Path, launch_id: str, facts: dict) -> None:
     """Mark a bridged Antigravity launch ready once hooks or statusLine bind its conversation."""
     if (facts.get('native_bridge') == BRIDGE
             or (facts.get('native_mode') or {}).get('mode') != 'bridge'
+            or (facts.get('native_mode') or {}).get('bridge') != BRIDGE
             or not facts.get('control_endpoint')
             or facts.get('binding_conflict')):
         return
@@ -2506,6 +2581,7 @@ def _ensure_bridge_ready(directory: Path, launch_id: str, facts: dict) -> None:
                 {'native_bridge': BRIDGE}
                 if (cur.get('native_bridge') != BRIDGE
                     and (cur.get('native_mode') or {}).get('mode') == 'bridge'
+                    and (cur.get('native_mode') or {}).get('bridge') == BRIDGE
                     and cur.get('control_endpoint')
                     and not cur.get('binding_conflict'))
                 else None
@@ -2643,7 +2719,7 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                 _sync_runtime_queue_state_locked(directory, launch_id, conv_id, [], clear_stale_launch=True)
         if outcome == 'ok' and event == 'PreInvocation':
             target_conv = conv_id or retry_missing(lambda: read(directory / 'properties.json')).get('native_session_id')
-            start_edges = _on_turn_start(
+            start_edges, injected_texts = _on_turn_start(
                 directory, launch_id, target_conv,
                 invocation_num=payload.get('invocationNum'),
                 initial_num_steps=payload.get('initialNumSteps'),
@@ -2658,7 +2734,80 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                     status_observed=True,
                     turn_batch=turn_batch,
                 )
+            if injected_texts:
+                return {'injectSteps': [{'userMessage': text} for text in injected_texts]}
         return {}
+
+    if event == 'PostInvocation':
+        if facts.get('binding_conflict'):
+            return {}
+        target_conv = conv_id or properties.get('native_session_id')
+        if not target_conv or properties.get('native_session_id') != target_conv:
+            return {}
+        initial_steps = payload.get('initialNumSteps')
+        initial_steps = initial_steps if type(initial_steps) is int and initial_steps >= 1 else None
+        tail_rows = _read_transcript_tail(
+            directory, target_conv, source,
+            covers=(lambda rows: any(row.get('type') != 'SYSTEM_MESSAGE' and type(row.get('step_index')) is int
+                                     and row['step_index'] >= initial_steps for row in rows))
+            if initial_steps is not None else None,
+        )
+        turn_ending, end_step = _is_turn_ending_planner_response(tail_rows, initial_steps)
+        if not turn_ending:
+            return {}
+        queue_path, lock_path = _followups_paths(directory, launch_id)
+        if not queue_path.exists():
+            return {}
+        with lock(lock_path):
+            current_facts = retry_missing(lambda: read(directory / 'runtime.json'))
+            current_props = retry_missing(lambda: read(directory / 'properties.json'))
+            if not _hook_delivery_live(current_facts, current_props, launch_id, target_conv):
+                return {}
+            rec = _load_followups_record_locked(queue_path)
+            if end_step is not None and rec.get('last_post_end_step') == end_step:
+                return {}
+            reaped, _, _ = _reap_followups_locked(
+                directory, rec, live_facts=current_facts, conv_id=target_conv, pause_on_idle_reap=False,
+            )
+            post_streak = rec.get('post_continue_streak', 0)
+            chosen = _next_queued_entry(rec['entries'], target_conv) if post_streak < MAX_POST_CONTINUATIONS else None
+            if chosen is None:
+                if reaped:
+                    _save_record_locked(queue_path, launch_id, rec)
+                return {}
+            text = chosen['text']
+            # Persist receipt delivery BEFORE transitioning the queue entry so an OSError keeps it queued.
+            mark_receipt_delivered(directory, chosen['id'])
+            chosen['state'] = 'handed_off'
+            chosen['handed_off_at'] = now()
+            chosen.pop('text', None)
+            closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
+            end_edges = _turn_end_edges(closed_turn, 'finished')
+            rec['idle_flushed'] = False
+            rec['idle_flushed_at'] = None
+            rec['pending_idle_attempt'] = None
+            rec['pending_idle_attempt_at'] = None
+            rec['turn_seq'] = rec['turn_seq'] + 1
+            rec['turn_active'] = True
+            rec['turn_active_at'] = now()
+            rec['idle_after_turn'] = 0
+            rec['idle_after_turn_at'] = None
+            rec['turn_open'] = False
+            rec['turn_id'] = None
+            rec['pending_turn_attempt'] = chosen['id']
+            rec['pending_turn_source'] = 'harness'
+            rec['post_continue_streak'] = post_streak + 1
+            if end_step is not None:
+                rec['last_post_end_step'] = end_step
+            _save_record_locked(queue_path, launch_id, rec)
+            _sync_runtime_queue_state_locked(
+                directory, launch_id, target_conv, rec['entries'],
+                root=root, turn_edges=end_edges,
+            )
+            return {
+                'injectSteps': [{'userMessage': text}],
+                'terminationBehavior': 'force_continue',
+            }
 
     if event == 'Stop':
         if facts.get('binding_conflict'):
@@ -2679,17 +2828,11 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                 root=root, end_state='error',
             )
             return {}
-        if payload.get('fullyIdle') is False:
-            _pause_followups(
-                directory, launch_id, target_conv, reason='subagent', turn_active=False,
-                root=root, end_state='finished', next_source='harness',
-            )
-            return {}
         queue_path, lock_path = _followups_paths(directory, launch_id)
         if not queue_path.exists():
             return {}
+        should_flush = False
         with lock(lock_path):
-            # Recheck launch liveness and binding under the queue lock so kill + get_delivery cannot race Stop handoff.
             current_facts = retry_missing(lambda: read(directory / 'runtime.json'))
             current_props = retry_missing(lambda: read(directory / 'properties.json'))
             if (current_facts.get('launch_id') != launch_id
@@ -2705,69 +2848,45 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
             )
             closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
             end_edges = _turn_end_edges(closed_turn, 'finished')
-            entries = rec['entries']
-            chosen = None
-            unpaused = False
-            for entry in entries:
-                if (entry.get('state', 'queued') == 'queued'
-                        and entry.get('native_id') == target_conv):
-                    if entry.pop('paused', None) is not None:
-                        unpaused = True
-                    entry.pop('paused_reason', None)
-                    if chosen is None and isinstance(entry.get('text'), str):
-                        chosen = entry
-            # Antigravity stops honoring Stop-hook continuations after 10 consecutive blocks in one cascade,
-            # silently dropping any further `decision: continue`. Yield to idle at MAX_STOP_CONTINUATIONS so
-            # the queued message stays intact and idle `statusLine` -> `flush-idle` delivers it via `agentapi`
-            # as a fresh turn with a reset Stop-hook counter.
-            stop_streak = rec.get('stop_continue_streak', 0)
-            if chosen is None or stop_streak >= MAX_STOP_CONTINUATIONS:
-                if (reaped or rec['idle_flushed'] or unpaused or rec['turn_active']
-                        or rec['idle_after_turn'] > 0 or rec.get('turn_open') or stop_streak > 0):
-                    rec['idle_flushed'] = False
-                    rec['idle_flushed_at'] = None
-                    rec['pending_idle_attempt'] = None
-                    rec['pending_idle_attempt_at'] = None
-                    rec['turn_seq'] = rec['turn_seq'] + 1
-                    rec['turn_active'] = False
-                    rec['turn_active_at'] = None
-                    rec['idle_after_turn'] = 0
-                    rec['idle_after_turn_at'] = None
-                    rec['turn_open'] = False
-                    rec['turn_id'] = None
-                    rec['stop_continue_streak'] = 0
-                    _save_record_locked(queue_path, launch_id, rec)
-                _sync_runtime_queue_state_locked(
-                    directory, launch_id, target_conv, rec['entries'],
-                    root=root, turn_edges=end_edges,
-                )
-                return {}
-            text = chosen['text']
-            # Persist receipt delivery BEFORE transitioning the queue entry so an OSError keeps it queued.
-            mark_receipt_delivered(directory, chosen['id'])
-            chosen['state'] = 'handed_off'
-            chosen['handed_off_at'] = now()
-            chosen.pop('text', None)
-            rec['idle_flushed'] = False
-            rec['idle_flushed_at'] = None
-            rec['pending_idle_attempt'] = None
-            rec['pending_idle_attempt_at'] = None
-            rec['turn_seq'] = rec['turn_seq'] + 1
-            rec['turn_active'] = True
-            rec['turn_active_at'] = now()
-            rec['idle_after_turn'] = 0
-            rec['idle_after_turn_at'] = None
-            rec['turn_open'] = False
-            rec['turn_id'] = None
-            rec['pending_turn_attempt'] = chosen['id']
-            rec['pending_turn_source'] = 'harness'
-            rec['stop_continue_streak'] = stop_streak + 1
-            _save_record_locked(queue_path, launch_id, rec)
+            # Background work still running (fullyIdle false) does not hold messages back, but the next turn
+            # it starts on its own is a task notification, so it is the harness's turn, not the person's.
+            background = payload.get('fullyIdle') is False and rec.get('pending_turn_source') != 'harness'
+            if background:
+                rec['pending_turn_source'] = 'harness'
+            # A continuation that never reached PreInvocation must not claim the next turn.
+            stale_attempt = rec.get('pending_turn_attempt') is not None
+            if stale_attempt:
+                rec['pending_turn_attempt'] = None
+                if payload.get('fullyIdle') is not False:
+                    rec['pending_turn_source'] = None
+            if (reaped or background or stale_attempt or rec['idle_flushed'] or rec['turn_active']
+                    or rec['idle_after_turn'] > 0 or rec.get('turn_open')
+                    or rec.get('post_continue_streak', 0) > 0):
+                rec['idle_flushed'] = False
+                rec['idle_flushed_at'] = None
+                rec['pending_idle_attempt'] = None
+                rec['pending_idle_attempt_at'] = None
+                rec['turn_seq'] = rec['turn_seq'] + 1
+                rec['turn_active'] = False
+                rec['turn_active_at'] = None
+                rec['idle_after_turn'] = 0
+                rec['idle_after_turn_at'] = None
+                rec['turn_open'] = False
+                rec['turn_id'] = None
+                rec['post_continue_streak'] = 0
+                _save_record_locked(queue_path, launch_id, rec)
             _sync_runtime_queue_state_locked(
                 directory, launch_id, target_conv, rec['entries'],
                 root=root, turn_edges=end_edges,
             )
-            return {'decision': 'continue', 'reason': text}
+            should_flush = (
+                not _wake_in_flight(rec['entries'], target_conv)
+                and _next_queued_entry(rec['entries'], target_conv) is not None
+                and read_ls_info(directory, launch_id) is not None
+            )
+        if should_flush:
+            _spawn_idle_flush(source)
+        return {}
 
     return {}
 

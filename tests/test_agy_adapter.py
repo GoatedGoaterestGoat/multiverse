@@ -21,13 +21,42 @@ from multiverse.harnesses.agy import bridge as agy_bridge
 from multiverse.harnesses.agy import storage as agy_storage
 from multiverse.harnesses.base import PARENT_AGY
 from multiverse.harnesses.types import (CommandSpec, LaunchContext, LaunchRefused, Message, NativeEndpoint,
-                                        SessionHandle, ShellCallbackResult)
+                                        RestartRequired, SessionHandle, ShellCallbackResult)
 from multiverse.runtime import launch_files, lifecycle, native, runner
 from multiverse.store import now, read, write
 from multiverse.tools import _messaging
 from multiverse.universe import agents
 from native_cli import forbidden_python, mv2_launcher
 from test_multiverse import BaseTest, TerminalBase, until
+
+
+_POST_STEP = [1000]
+
+
+def user_message(text):
+    """The `PreInvocation` reply that delivers `text` as a real user message before the model call."""
+    return {'injectSteps': [{'userMessage': text}]}
+
+
+def inject(text):
+    """The `PostInvocation` reply that delivers `text` as a real user message and keeps the loop going."""
+    return {'injectSteps': [{'userMessage': text}], 'terminationBehavior': 'force_continue'}
+
+
+def post_invocation(agent_dir, conv_id, env, *, tool_calls=False, status='DONE', expected_launch_id=None, **payload):
+    """Append a finished model step to the recorded transcript, then fire `PostInvocation` as agy does."""
+    props = read(Path(agent_dir) / 'properties.json')
+    log = Path(props['native_session_home']) / 'brain' / conv_id / '.system_generated' / 'logs' / 'transcript.jsonl'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    _POST_STEP[0] += 1
+    row = {'step_index': _POST_STEP[0], 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': status,
+           'created_at': now(), 'content': 'done'}
+    if tool_calls:
+        row['tool_calls'] = [{'name': 'run_command', 'args': {}}]
+    with log.open('a') as handle:
+        handle.write(json.dumps(row) + '\n')
+    return agy_bridge.handle_hook('PostInvocation', {'conversationId': conv_id, **payload}, env=env,
+                                  expected_launch_id=expected_launch_id)
 
 
 class _LoopbackListener:
@@ -324,7 +353,7 @@ class AgyAdapterUnitTest(BaseTest):
             self.assertNotIn(f'write_file({self.root.resolve()})', merged['permissions']['allow'])
             self.assertTrue(merged['statusLine']['stack_with_default'])
             hooks = json.loads(cmd.launch_files['.agents/hooks.json'])
-            self.assertEqual(set(hooks['mv2-bridge']), {'SessionStart', 'PreInvocation', 'Stop'})
+            self.assertEqual(set(hooks['mv2-bridge']), {'SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'})
             expected_hook_launch = Path(values['launch_dir']).name
             for event_name, entries in hooks['mv2-bridge'].items():
                 self.assertIn(f'--launch-id {expected_hook_launch}', entries[0]['command'], event_name)
@@ -873,7 +902,8 @@ class AgyAdapterUnitTest(BaseTest):
         })
         write(agent_dir / 'runtime.json', {
             'launch_id': launch_id, 'state': 'running', 'status': 'unknown',
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
+            'native_bridge': BRIDGE,
         })
         env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_id}
 
@@ -926,15 +956,13 @@ class AgyAdapterUnitTest(BaseTest):
         # A subsequent idle statusLine with unchanged usage must still flip runtime status back from working to idle.
         agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
         self.assertEqual(read(agent_dir / 'runtime.json')['status'], 'idle')
-        # fullyIdle=False also pauses queued entries against idle statusLine flush, and a normal Stop still pops them.
+        # A follow-up delivers when the turn ends even while background work runs (fullyIdle=False never pauses it):
+        # Stop injects nothing, and PostInvocation at the end of the turn injects the FIFO head as a real user message.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv1}, env=env)
-        self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'terminationReason': 'model_stop', 'fullyIdle': False}, env=env), {})
-        self.assertEqual(agy_bridge.followup_status(agent_dir, launch_id, m1), ('queued', 'subagent'))
-        with patch.object(agy_bridge, '_spawn_idle_flush') as spawn_flush:
-            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
-        spawn_flush.assert_not_called()
-        self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'terminationReason': 'model_stop', 'fullyIdle': True}, env=env),
-                         {'decision': 'continue', 'reason': 'first'})
+        with patch.object(agy_bridge, '_spawn_idle_flush'):
+            self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'terminationReason': 'model_stop', 'fullyIdle': False}, env=env), {})
+        self.assertEqual(agy_bridge.followup_status(agent_dir, launch_id, m1), ('queued', None))
+        self.assertEqual(post_invocation(agent_dir, conv1, env, fullyIdle=False), inject('first'))
         self.assertIsNotNone(agy_bridge.read_receipt(agent_dir, m1)['delivered_at'])
         self.assertEqual(agy_bridge.followup_status(agent_dir, launch_id, m2), ('queued', None))
 
@@ -981,7 +1009,7 @@ class AgyAdapterUnitTest(BaseTest):
             'launch_id': launch_id, 'state': 'running', 'status': 'idle',
             'started_at': now(),
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
         })
 
         registered = native.shell_callback(self.root, agent_dir, launch_id, environment={
@@ -1014,41 +1042,40 @@ class AgyAdapterUnitTest(BaseTest):
             stdout=json.dumps({'response': {'sendMessage': {'recipientId': conv_id}}}), stderr='',
         )
 
-        # Steer submits via executor.command with token only in env, never in argv (zero HTTP/ConversationService calls).
+        # An idle steer wakes the session with a fixed hidden ping (token only in env, never in argv); the real text is
+        # injected as a user message by PreInvocation, so it never travels over agentapi.
         msg_steer = str(uuid4())
         sent = adapter.send(session, Message(msg_steer, 'check logs', delivery='steer', framed='Message from user:\ncheck logs'), executor)
         self.assertEqual(sent.state, 'native_queued')
         called_spec = executor.command.call_args.args[0]
-        self.assertEqual(called_spec.argv[-2:], (conv_id, 'Message from user:\ncheck logs'))
+        self.assertEqual(called_spec.argv[-2:], (conv_id, agy_bridge.WAKE_PING))
+        self.assertNotIn('check logs', ' '.join(called_spec.argv))
         self.assertNotIn('tok-abc-123', ' '.join(called_spec.argv))
         self.assertEqual(called_spec.environment['ANTIGRAVITY_CSRF_TOKEN'], 'tok-abc-123')
         self.assertNotIn('check logs', agy_bridge.receipt_path(agent_dir, msg_steer).read_text())
 
-        # An immediate follow-up right after an idle agentapi send queues for Stop until the turn begins and finishes.
+        # An immediate follow-up right after an idle wake queues behind it until the turn begins and finishes.
         executor.command.reset_mock()
         msg_after_idle_steer = str(uuid4())
         queued_immediate = adapter.send(
             session, Message(msg_after_idle_steer, 'wait for steer turn', delivery='follow-up'), executor,
         )
         self.assertEqual(queued_immediate.state, 'native_queued')
-        self.assertEqual(queued_immediate.value['route'], 'stop-hook')
+        self.assertEqual(queued_immediate.value['route'], 'hook-user-input')
         executor.command.assert_not_called()
         agy_bridge.remove_followup(agent_dir, launch_id, msg_after_idle_steer, reset_idle_flush=True)
 
-        # Before transcript row appears, delivery is unconfirmed; after SYSTEM_MESSAGE appears, confirmed.
-        self.assertEqual(adapter.get_delivery(session, msg_steer).state, 'unknown')
+        # Before the injected user message reaches the transcript the wake is still pending; afterwards it is confirmed.
+        waking = adapter.get_delivery(session, msg_steer)
+        self.assertEqual((waking.state, waking.value['transcript_confirmed'], waking.value['queued']), ('native_queued', False, True))
         transcript = home / 'brain' / conv_id / '.system_generated' / 'logs' / 'transcript.jsonl'
         transcript.parent.mkdir(parents=True, exist_ok=True)
-        wrapped_steer = (
-            'The following is a <SYSTEM_MESSAGE> not actually sent by the user. '
-            'It is provided by the system as important information to pay attention to.\n\n'
-            '<SYSTEM_MESSAGE>\n'
-            '[Message] timestamp=2026-11-22T13:35:46Z sender=system priority=MESSAGE_PRIORITY_NORMAL '
-            'content=Message from user:\ncheck logs\n'
-            '</SYSTEM_MESSAGE>'
+        injected_steer = (
+            '<USER_REQUEST>\nMessage from user:\ncheck logs\n</USER_REQUEST>\n'
+            '<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-22T13:35:46-08:00.\n</ADDITIONAL_METADATA>'
         )
         transcript.write_text(
-            json.dumps({'type': 'SYSTEM_MESSAGE', 'created_at': now(), 'content': wrapped_steer}) + '\n'
+            json.dumps({'type': 'USER_INPUT', 'source': 'SYSTEM_SDK', 'created_at': now(), 'content': injected_steer}) + '\n'
             + json.dumps({'type': 'PLANNER_RESPONSE', 'model': 'gemini-3.8-flash-low', 'input_tokens': 500,
                           'cache_read_tokens': 2500, 'output_tokens': 300, 'created_at': now()}) + '\n'
         )
@@ -1056,13 +1083,16 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(confirmed.state, 'native_queued')
         self.assertTrue(confirmed.value['transcript_confirmed'])
 
-        # Busy follow-up queues for Stop hook; while running get_delivery shows queued, after stopped shows definite failure.
+        # PreInvocation would have handed the woken steer off by now; drop its pending claim so later sends see a clean queue.
+        agy_bridge.remove_followup(agent_dir, launch_id, msg_steer, reset_idle_flush=True)
+
+        # Busy follow-up queues for hook delivery; while running get_delivery shows queued, after stopped shows definite failure.
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'working'}, env=cb_env)
         msg_busy = str(uuid4())
         executor.command.reset_mock()
         queued = adapter.send(session, Message(msg_busy, 'after turn', delivery='follow-up', framed='Message from user:\nafter turn'), executor)
         self.assertEqual(queued.state, 'native_queued')
-        self.assertEqual(queued.value['route'], 'stop-hook')
+        self.assertEqual(queued.value['route'], 'hook-user-input')
         executor.command.assert_not_called()
         still_running = adapter.get_delivery(session, msg_busy)
         self.assertEqual(still_running.state, 'native_queued')
@@ -1071,31 +1101,29 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(ended_check.state, 'error')
         self.assertTrue(ended_check.value['definite_failure'])
 
-        # Stop-hook delivery written with Antigravity's "Stop hook blocked termination:" wrapper confirms cleanly.
-        wrapped_stop = (
-            'The following is a <SYSTEM_MESSAGE> not actually sent by the user. '
-            'It is provided by the system as important information to pay attention to.\n\n'
-            '<SYSTEM_MESSAGE>\n'
-            'Stop hook blocked termination: Message from user:\nafter turn\n'
-            '</SYSTEM_MESSAGE>'
-        )
+        # A hook-injected user message confirms cleanly, while a person's own USER_EXPLICIT prompt with the same text never does.
+        human_same_text = '<USER_REQUEST>\nMessage from user:\nafter turn\n</USER_REQUEST>'
         with transcript.open('a') as handle:
-            handle.write(json.dumps({'type': 'SYSTEM_MESSAGE', 'created_at': now(), 'content': wrapped_stop}) + '\n')
+            handle.write(json.dumps({'type': 'USER_INPUT', 'source': 'USER_EXPLICIT', 'created_at': now(), 'content': human_same_text}) + '\n')
+        self.assertFalse(adapter.get_delivery(session, msg_busy).value['transcript_confirmed'])
+        injected_after = human_same_text + '\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-22T13:36:46-08:00.\n</ADDITIONAL_METADATA>'
+        with transcript.open('a') as handle:
+            handle.write(json.dumps({'type': 'USER_INPUT', 'source': 'SYSTEM_SDK', 'created_at': now(), 'content': injected_after}) + '\n')
         agy_bridge.remove_followup(agent_dir, launch_id, msg_busy, reset_idle_flush=True)
         stop_confirmed = adapter.get_delivery(session, msg_busy)
         self.assertEqual(stop_confirmed.state, 'native_queued')
         self.assertTrue(stop_confirmed.value['transcript_confirmed'])
 
-        # Idle-transition race: runtime status is working when send starts, flips idle as enqueue completes -> claims and sends via agentapi.
-        real_enqueue = agy_bridge.enqueue_followup
+        # Idle-transition race: runtime status is working when send starts, flips idle as enqueue completes -> claims and wakes via agentapi.
+        real_enqueue = agy_bridge.enqueue_message
         def flip_idle_on_enqueue(*args, **kwargs):
             real_enqueue(*args, **kwargs)
             write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'status': 'idle'})
         msg_race = str(uuid4())
-        with patch.object(agy_bridge, 'enqueue_followup', side_effect=flip_idle_on_enqueue):
+        with patch.object(agy_bridge, 'enqueue_message', side_effect=flip_idle_on_enqueue):
             raced = adapter.send(session, Message(msg_race, 'raced msg', delivery='follow-up', framed='Message from user:\nraced msg'), executor)
         self.assertEqual(raced.state, 'native_queued')
-        self.assertEqual(raced.value['route'], 'agentapi')
+        self.assertEqual(raced.value['route'], 'hook-user-input')
         executor.command.assert_called_once()
         self.assertFalse(agy_bridge.has_queued_followup(agent_dir, launch_id, msg_race))
 
@@ -1167,7 +1195,7 @@ class AgyAdapterUnitTest(BaseTest):
         write(agent_dir / 'runtime.json', {
             'launch_id': launch_id, 'state': 'running', 'status': 'working',
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
             'native_bridge': BRIDGE,
         })
         write(launch_dir / 'request.json', {
@@ -1324,14 +1352,16 @@ class AgyAdapterUnitTest(BaseTest):
         agy_bridge.enqueue_followup(agent_dir, launch_id, m_keep, conv2, 'keep me')
         with patch.object(agy_bridge, 'mark_receipt_delivered', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
-                agy_bridge.handle_hook('Stop', {'conversationId': conv2, 'fullyIdle': True}, env=cb_env)
+                post_invocation(agent_dir, conv2, cb_env)
         self.assertTrue(agy_bridge.has_queued_followup(agent_dir, launch_id, m_keep))
-        # After successful Stop handoff, a second Stop hook does not replay the same entry.
-        self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv2, 'fullyIdle': True}, env=cb_env),
-                         {'decision': 'continue', 'reason': 'keep me'})
-        self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv2, 'fullyIdle': True}, env=cb_env), {})
+        # After a successful handoff, a second PostInvocation does not replay the same entry.
+        self.assertEqual(post_invocation(agent_dir, conv2, cb_env), inject('keep me'))
+        self.assertEqual(post_invocation(agent_dir, conv2, cb_env), {})
 
-        # 7. agentapi exit 0 without recipientId returns unknown (not native_queued); exit 1 removes its pre-written receipt.
+        # 7. An idle wake whose agentapi exit 0 lacks a recipientId returns unknown (not native_queued); a proved
+        #    pre-connect failure removes both its pre-written receipt and its queue entry, so nothing can double-deliver.
+        agy_bridge.handle_hook('Stop', {'conversationId': conv2, 'fullyIdle': True}, env=cb_env)
+        write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'status': 'idle'})
         server = _LoopbackListener()
         self.addCleanup(server.close)
         agy_bridge.write_ls_info(agent_dir, launch_id, server.address, 'tok-ok', conv2)
@@ -1342,7 +1372,10 @@ class AgyAdapterUnitTest(BaseTest):
         m_unack = str(uuid4())
         uncertain = adapter.send(session, Message(m_unack, 'maybe', delivery='steer', framed='Message from user:\nmaybe'), executor)
         self.assertEqual(uncertain.state, 'unknown')
-        self.assertFalse(agy_bridge.read_receipt(agent_dir, m_unack)['acknowledged'])
+        self.assertEqual(agy_bridge.read_receipt(agent_dir, m_unack)['route'], 'hook-user-input')
+        # The wake carries only the fixed ping, never the message text.
+        self.assertEqual(executor.command.call_args.args[0].argv[-1], agy_bridge.WAKE_PING)
+        agy_bridge.remove_followup(agent_dir, launch_id, m_unack, reset_idle_flush=True)
         # Ambiguous non-zero exit (e.g., DeadlineExceeded) keeps the receipt and returns unknown;
         # a proved pre-connect failure returns definite error and removes the pre-written receipt.
         executor.command.return_value = subprocess.CompletedProcess(
@@ -1353,8 +1386,8 @@ class AgyAdapterUnitTest(BaseTest):
         deadline_res = adapter.send(session, Message(m_deadline, 'deadline body', delivery='steer', framed='Message from user:\ndeadline body'), executor)
         self.assertEqual(deadline_res.state, 'unknown')
         self.assertIsNotNone(agy_bridge.read_receipt(agent_dir, m_deadline))
-        self.assertFalse(agy_bridge.read_receipt(agent_dir, m_deadline)['acknowledged'])
         agy_bridge.remove_receipt(agent_dir, m_deadline)
+        agy_bridge.remove_followup(agent_dir, launch_id, m_deadline, reset_idle_flush=True)
         executor.command.return_value = subprocess.CompletedProcess(
             args=['agy'], returncode=1,
             stdout=json.dumps({'error': 'rpc error: code = Unavailable desc = transport: Error while dialing: connect: connection refused'}),
@@ -1364,6 +1397,7 @@ class AgyAdapterUnitTest(BaseTest):
         failed_send = adapter.send(session, Message(m_err, 'same body', delivery='steer', framed='Message from user:\nsame body'), executor)
         self.assertEqual(failed_send.state, 'error')
         self.assertIsNone(agy_bridge.read_receipt(agent_dir, m_err))
+        self.assertIsNone(agy_bridge.followup_state(agent_dir, launch_id, m_err))
         # agentapi CommandSpec strips sender ANTIGRAVITY_* identity markers via unset_env=PARENT_AGY.
         self.assertEqual(executor.command.call_args.args[0].unset_env, PARENT_AGY)
 
@@ -1540,21 +1574,22 @@ class AgyAdapterUnitTest(BaseTest):
         for _ in range(4):
             big_id = str(uuid4())
             agy_bridge.enqueue_followup(agent_dir, launch_id, big_id, conv_race, 'z' * 60_000)
-            ans = agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'fullyIdle': True}, env=cb_env)
-            self.assertEqual(ans.get('decision'), 'continue')
+            ans = post_invocation(agent_dir, conv_race, cb_env)
+            self.assertEqual(ans.get('terminationBehavior'), 'force_continue')
         agy_bridge.enqueue_followup(agent_dir, launch_id, str(uuid4()), conv_race, 'still fits ' * 2000)
         qpath.unlink()
 
-        # 3. Stop hook rechecks runtime.json under the queue lock (ending_at stops handoff).
+        # 3. PostInvocation rechecks runtime.json under the queue lock (ending_at stops handoff).
         m_end = str(uuid4())
         agy_bridge.enqueue_followup(agent_dir, launch_id, m_end, conv_race, 'ending race')
         write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'ending_at': now()})
-        self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'fullyIdle': True}, env=cb_env), {})
+        self.assertEqual(post_invocation(agent_dir, conv_race, cb_env), {})
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_end), 'queued')
         write(agent_dir / 'runtime.json', saved_runtime_before_clear)
         qpath.unlink()
 
-        # 4. Idle statusLine flushes AT MOST ONE stranded follow-up per idle period (second waits for next active->idle).
+        # 4. An idle statusLine wakes the session for AT MOST ONE queued message per idle period: the wake carries
+        #    only a fixed hidden ping, and PreInvocation injects the real text as a user message.
         flush_log = self.work / 'flush-agentapi.jsonl'
         fake_flush_agy = self.work / 'fake-flush-agy'
         fake_flush_agy.write_text(
@@ -1570,10 +1605,12 @@ class AgyAdapterUnitTest(BaseTest):
             **json.loads(saved_req_raw), 'argv': [str(fake_flush_agy), '--conversation', conv1],
         })
         m_stranded_1, m_stranded_2 = str(uuid4()), str(uuid4())
-        for mid, body in ((m_stranded_1, 'stranded first'), (m_stranded_2, 'stranded second')):
-            agy_bridge.write_receipt(agent_dir, mid, launch_id=launch_id, native_id=conv_race, route='stop-hook',
-                                     submitted_at=now(), text_sha256=agy_storage.message_hash(body))
-            agy_bridge.enqueue_followup(agent_dir, launch_id, mid, conv_race, body)
+        def _queue_stranded():
+            for mid, body in ((m_stranded_1, 'stranded first'), (m_stranded_2, 'stranded second')):
+                agy_bridge.write_receipt(agent_dir, mid, launch_id=launch_id, native_id=conv_race, route='hook-user-input',
+                                         submitted_at=now(), text_sha256=agy_storage.message_hash(body))
+                agy_bridge.enqueue_followup(agent_dir, launch_id, mid, conv_race, body)
+        _queue_stranded()
         def _wait_followup(mid: str, expected: str, timeout: float = 5.0) -> None:
             end = time.monotonic() + timeout
             while time.monotonic() < end:
@@ -1582,56 +1619,75 @@ class AgyAdapterUnitTest(BaseTest):
                 time.sleep(0.02)
             self.fail(f'Follow-up {mid} stayed {agy_bridge.followup_state(agent_dir, launch_id, mid)!r} instead of {expected!r}')
 
+        def _wait_rows(count: int, timeout: float = 5.0) -> list[dict]:
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if flush_log.exists():
+                    rows = [json.loads(line) for line in flush_log.read_text().splitlines() if line.strip()]
+                    if len(rows) >= count:
+                        return rows
+                time.sleep(0.02)
+            self.fail(f'Only {len(rows) if flush_log.exists() else 0} wake pings were sent instead of {count}')
+
         with patch.dict(os.environ, {'ANTIGRAVITY_CONVERSATION_ID': str(uuid4()), 'ANTIGRAVITY_TRAJECTORY_ID': 'sender-t'}):
-            # Paused entries (after Esc / USER_CANCELED) must NOT be flushed by idle statusLine.
+            # Paused entries (after Esc / USER_CANCELED) must NOT be woken by idle statusLine.
             agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'terminationReason': 'USER_CANCELED', 'fullyIdle': True}, env=cb_env)
             agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
             time.sleep(0.15)
             self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_1), 'queued')
             self.assertFalse(flush_log.exists())
-            # A late idle statusLine after PreInvocation (before Stop) must NOT flush queued follow-ups mid-turn.
+            # A late idle statusLine after PreInvocation (before Stop) must NOT wake the session mid-turn.
             agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race}, env=cb_env)
             agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
             time.sleep(0.15)
             self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_1), 'queued')
             self.assertFalse(flush_log.exists())
-            # Once Stop finishes (clearing turn_active), idle statusLine flushes AT MOST ONE stranded post-Stop follow-up.
+            # Once Stop finishes (clearing turn_active), idle statusLine wakes for AT MOST ONE queued message.
             qpath.unlink()
             agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race}, env=cb_env)
             agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'fullyIdle': True}, env=cb_env)
-            for mid, body in ((m_stranded_1, 'stranded first'), (m_stranded_2, 'stranded second')):
-                agy_bridge.write_receipt(agent_dir, mid, launch_id=launch_id, native_id=conv_race, route='stop-hook',
-                                         submitted_at=now(), text_sha256=agy_storage.message_hash(body))
-                agy_bridge.enqueue_followup(agent_dir, launch_id, mid, conv_race, body)
+            _queue_stranded()
             agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
-            _wait_followup(m_stranded_1, 'handed_off')
-            # Second consecutive idle statusLine (even with status cache deleted) must NOT flush the second entry.
+            _wait_followup(m_stranded_1, 'wake_pending')
+            # Second consecutive idle statusLine (even with status cache deleted) must NOT wake for the second entry.
             (launch_dir / agy_bridge.STATUS_CACHE_FILE).unlink(missing_ok=True)
             agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
             time.sleep(0.15)
-        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_1), 'handed_off')
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_1), 'wake_pending')
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_2), 'queued')
         flushed_rows = [json.loads(line) for line in flush_log.read_text().splitlines() if line.strip()]
         self.assertEqual(len(flushed_rows), 1)
-        self.assertEqual(flushed_rows[0]['argv'], ['agentapi', 'send-message', conv_race, 'stranded first'])
+        self.assertEqual(flushed_rows[0]['argv'], ['agentapi', 'send-message', conv_race, agy_bridge.WAKE_PING])
         self.assertEqual(flushed_rows[0]['leaked'], [])
-        self.assertEqual(agy_bridge.read_receipt(agent_dir, m_stranded_1)['route'], 'agentapi')
-        self.assertTrue(agy_bridge.read_receipt(agent_dir, m_stranded_1)['acknowledged'])
-        # Transitioning through working -> idle clears the idle_flushed gate and flushes the second queued entry.
+        self.assertEqual(agy_bridge.read_receipt(agent_dir, m_stranded_1)['route'], 'hook-user-input')
+        # The woken turn's PreInvocation injects the real text as a user message and hands the entry off exactly once.
+        self.assertEqual(
+            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race, 'invocationNum': 0, 'initialNumSteps': 7}, env=cb_env),
+            {'injectSteps': [{'userMessage': 'stranded first'}]},
+        )
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_stranded_1), 'handed_off')
+        self.assertIsNotNone(agy_bridge.read_receipt(agent_dir, m_stranded_1)['delivered_at'])
+        self.assertEqual(agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race, 'invocationNum': 1}, env=cb_env), {})
+        # Transitioning through working -> idle clears the idle_flushed gate and wakes for the second queued entry.
+        with patch.object(agy_bridge, '_spawn_idle_flush'):
+            agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'fullyIdle': True}, env=cb_env)
         agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'working'}, env=cb_env)
         agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
-        _wait_followup(m_stranded_2, 'handed_off')
-        flushed_rows = [json.loads(line) for line in flush_log.read_text().splitlines() if line.strip()]
+        _wait_followup(m_stranded_2, 'wake_pending')
+        flushed_rows = _wait_rows(2)
         self.assertEqual(len(flushed_rows), 2)
-        self.assertEqual(flushed_rows[1]['argv'], ['agentapi', 'send-message', conv_race, 'stranded second'])
+        self.assertEqual(flushed_rows[1]['argv'], ['agentapi', 'send-message', conv_race, agy_bridge.WAKE_PING])
+        # The detached helper's last queue write is wake_sent_at; wait for it so it can't rewrite 4b's queue.
+        until(lambda: any(entry.get('id') == m_stranded_2 and entry.get('wake_sent_at')
+                          for entry in read(qpath)['entries']), 5)
 
-        # 4b. Fast turn finishing BEFORE agentapi returns, ambiguous DeadlineExceeded exit, and expired idle_flushed_at
-        # must never strand later follow-ups on an idle agent.
+        # 4b. A fast turn finishing BEFORE the wake returns, an ambiguous DeadlineExceeded exit, and an expired
+        # wake claim must never strand later messages on an idle agent.
         qpath.unlink(missing_ok=True)
         write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'status': 'idle'})
         race_session = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         def fast_turn_exec(spec, timeout=15):
-            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race}, env=cb_env)
+            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_race, 'invocationNum': 0, 'initialNumSteps': 3}, env=cb_env)
             agy_bridge.handle_hook('Stop', {'conversationId': conv_race, 'fullyIdle': True}, env=cb_env)
             agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
             return subprocess.CompletedProcess(
@@ -1639,39 +1695,46 @@ class AgyAdapterUnitTest(BaseTest):
             )
         fast_exec = Mock()
         fast_exec.command.side_effect = fast_turn_exec
-        fast_res = adapter.send(race_session, Message(str(uuid4()), 'fast steer', delivery='steer'), fast_exec)
+        m_fast = str(uuid4())
+        fast_res = adapter.send(race_session, Message(m_fast, 'fast steer', delivery='steer'), fast_exec)
         self.assertEqual(fast_res.state, 'native_queued')
-        # Subsequent follow-up on the now-idle agent submits immediately instead of stranding in queue.
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_fast), 'handed_off')
+        # A subsequent follow-up on the now-idle agent wakes it immediately instead of stranding in the queue.
         next_exec = Mock()
         next_exec.command.return_value = subprocess.CompletedProcess(
             ['agy'], 0, json.dumps({'response': {'sendMessage': {'recipientId': conv_race}}}), '',
         )
         m_after_fast = str(uuid4())
         after_fast = adapter.send(race_session, Message(m_after_fast, 'after fast steer', delivery='follow-up'), next_exec)
-        self.assertEqual(after_fast.value['route'], 'agentapi')
-        self.assertIsNone(agy_bridge.followup_state(agent_dir, launch_id, m_after_fast))
-        # Ambiguous DeadlineExceeded exit on idle send must also roll back idle_flushed so later follow-ups do not strand.
+        self.assertEqual(after_fast.value['route'], 'hook-user-input')
+        self.assertEqual(next_exec.command.call_args.args[0].argv[-1], agy_bridge.WAKE_PING)
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_after_fast), 'wake_pending')
+        agy_bridge.remove_followup(agent_dir, launch_id, m_after_fast, reset_idle_flush=True)
+        # An ambiguous DeadlineExceeded exit keeps its wake claim; a later follow-up queues behind it rather than
+        # stranding, and an expired claim returns to the queue for the next idle statusLine to wake again.
         qpath.unlink(missing_ok=True)
         ambig_exec = Mock()
         ambig_exec.command.return_value = subprocess.CompletedProcess(
             ['agy'], 1, '', 'rpc error: code = DeadlineExceeded desc = context deadline exceeded',
         )
-        self.assertEqual(adapter.send(race_session, Message(str(uuid4()), 'ambig', delivery='follow-up'), ambig_exec).state, 'unknown')
+        m_ambig = str(uuid4())
+        self.assertEqual(adapter.send(race_session, Message(m_ambig, 'ambig', delivery='follow-up'), ambig_exec).state, 'unknown')
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_ambig), 'wake_pending')
         m_after_ambig = str(uuid4())
         after_ambig = adapter.send(race_session, Message(m_after_ambig, 'after ambig', delivery='follow-up'), next_exec)
-        self.assertEqual(after_ambig.value['route'], 'agentapi')
-        # An expired idle_flushed_at marker (> grace period) self-clears on idle statusLine and flushes queued follow-ups.
-        m_expired = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_expired, launch_id=launch_id, native_id=conv_race, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('expired flush'))
-        agy_bridge.enqueue_followup(agent_dir, launch_id, m_expired, conv_race, 'expired flush')
+        self.assertEqual((after_ambig.state, after_ambig.value['queued']), ('native_queued', True))
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_after_ambig), 'queued')
         expired_doc = read(qpath)
-        expired_doc['idle_flushed'] = True
+        for entry in expired_doc['entries']:
+            if entry['id'] == m_ambig:
+                entry['claimed_at'] = '2020-01-01T00:00:00+00:00'
         expired_doc['idle_flushed_at'] = '2020-01-01T00:00:00+00:00'
-        expired_doc['turn_active'] = False
+        expired_doc['pending_idle_attempt_at'] = '2020-01-01T00:00:00+00:00'
         agy_bridge._write_private_json(qpath, expired_doc)
         agy_bridge.handle_statusline({'conversation_id': conv_race, 'agent_state': 'idle'}, env=cb_env)
-        _wait_followup(m_expired, 'handed_off')
+        _wait_followup(m_ambig, 'wake_pending')
+        flushed_rows = _wait_rows(3)
+        self.assertEqual(flushed_rows[-1]['argv'], ['agentapi', 'send-message', conv_race, agy_bridge.WAKE_PING])
         (launch_dir / 'request.json').write_text(saved_req_raw)
         qpath.unlink()
 
@@ -1818,18 +1881,19 @@ class AgyAdapterUnitTest(BaseTest):
         )
         self.assertTrue(_screen_ready(padded_active))
 
-        # 9. Older agy (< 1.5.0) falls back to plain on auto and refuses on inbox_bridge=True; --settings rejects dirs/FIFOs.
-        old_agy = self.work / 'agy-149'
-        old_agy.write_text('#!/bin/sh\necho "agy 1.4.9"\n')
+        # 9. Older agy (< 1.5.17, no hook injectSteps) falls back to plain on auto and refuses on inbox_bridge=True;
+        #    --settings rejects dirs/FIFOs.
+        old_agy = self.work / 'agy-1516'
+        old_agy.write_text('#!/bin/sh\necho "agy 1.5.16"\n')
         old_agy.chmod(0o755)
         auto_old = AgyAdapter.configured('agy', {'executable': str(old_agy)})
         fallback_cmd = auto_old.spawn(LaunchContext('spawn', self._values(task='hi'), environment={'HOME': str(self.work)}))
         self.assertEqual(fallback_cmd.native_mode['mode'], 'plain')
-        self.assertIn('1.4.9', fallback_cmd.native_mode['fallback_reason'])
+        self.assertIn('1.5.16', fallback_cmd.native_mode['fallback_reason'])
         self.assertFalse(fallback_cmd.shell_callback)
         self.assertNotIn('--settings', fallback_cmd.argv)
         req_old = AgyAdapter.configured('agy', {'executable': str(old_agy), 'inbox_bridge': True})
-        with self.assertRaisesRegex(ValueError, 'older than 1.5.0'):
+        with self.assertRaisesRegex(ValueError, 'older than 1.5.17'):
             req_old.spawn(LaunchContext('spawn', self._values(task='hi'), environment={'HOME': str(self.work)}))
 
         fifo = self.work / 'settings.fifo'
@@ -1858,10 +1922,7 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertIn('switched', switched_stopped.reason)
         # Retrying that same follow-up ID on the new conversation replaces the stale pre-/clear queue entry.
         agy_bridge.enqueue_followup(agent_dir, launch_id, q_id, conv4, 'after clear')
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv4, 'fullyIdle': True}, env=cb_env),
-            {'decision': 'continue', 'reason': 'after clear'},
-        )
+        self.assertEqual(post_invocation(agent_dir, conv4, cb_env), inject('after clear'))
         # Retrying a failed stop-hook follow-up (lost at kill or stranded by /clear) on a stopped agent wakes directly
         # with an interactive prompt (never _queue_wake / promptless resume).
         from multiverse.tools import deliver as deliver_tool
@@ -1906,18 +1967,19 @@ class AgyAdapterUnitTest(BaseTest):
                                  submitted_at=now(), text_sha256=agy_storage.message_hash('never arrived'))
         ev_absent = adapter.accepted_message_evidence(old_session, missing_id, 'never arrived', now(), os.path.realpath(home))
         self.assertEqual((ev_absent.state, ev_absent.value['delivered']), ('ok', False))
-        no_log_id = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, no_log_id, launch_id=launch_id, native_id=conv4, route='agentapi',
+        no_log_id, conv_nolog = str(uuid4()), str(uuid4())
+        agy_bridge.write_receipt(agent_dir, no_log_id, launch_id=launch_id, native_id=conv_nolog, route='agentapi',
                                  submitted_at=now(), text_sha256=agy_storage.message_hash('no transcript yet'))
         ev_unknown = adapter.accepted_message_evidence(
-            replace(session, native_id=conv4, launch_id=launch_id), no_log_id, 'no transcript yet', now(), os.path.realpath(home),
+            replace(session, native_id=conv_nolog, launch_id=launch_id), no_log_id, 'no transcript yet', now(), os.path.realpath(home),
         )
         self.assertEqual(ev_unknown.state, 'unknown')
 
     def test_delivery_state_recovery_across_missed_stop_crashed_hook_stale_claim_kill_and_resume(self):
-        """Missed Stop hooks, crashed hooks, stale agentapi_submitting claims, mid-turn kills and resumes on a new
-        launch must never strand follow-ups: every queued follow-up is either delivered once or reported failed and
-        retryable; fragile because sticky launch flags silently deadlock every subsequent follow-up."""
+        """Missed Stop hooks, crashed hooks, stale wake claims (and legacy agentapi_submitting ones), mid-turn kills
+        and resumes on a new launch must never strand messages or send their text twice: every queued message is
+        injected once by a hook or reported failed and retryable; fragile because sticky launch flags silently
+        deadlock every later message."""
         server = _LoopbackListener()
         self.addCleanup(server.close)
         agent_id, launch1, launch2, conv_id = str(uuid4()), str(uuid4()), str(uuid4()), str(uuid4())
@@ -1944,7 +2006,7 @@ class AgyAdapterUnitTest(BaseTest):
         write(agent_dir / 'runtime.json', {
             'launch_id': launch1, 'state': 'running', 'status': 'working', 'started_at': now(),
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
             'native_bridge': BRIDGE,
         })
         agy_bridge.write_ls_info(agent_dir, launch1, server.address, 'tok-class', conv_id)
@@ -1960,58 +2022,65 @@ class AgyAdapterUnitTest(BaseTest):
                 time.sleep(0.02)
             self.fail(f'{mid} stayed {agy_bridge.followup_state(agent_dir, lid, mid)!r} != {expected!r}')
 
-        def _delivered_texts() -> list[str]:
+        def _sent() -> list[str]:
             if not flush_log.exists():
                 return []
             return [json.loads(line)['text'] for line in flush_log.read_text().splitlines() if line.strip()]
 
-        # 1. Esc without Stop hook (agy 1.5.16 skips Stop on Esc during tool calls and text generation):
-        #    PreInvocation sets turn_active; 1st late idle statusLine does NOT flush or pause mid-turn,
-        #    and the 2nd consecutive idle statusLine pauses the queued follow-up with reason='cancel' and
-        #    records runtime.json['queue_state']. Further idle statusLine renders / keystrokes never release it;
-        #    a new terminal turn (PreInvocation -> Stop) resumes and delivers it once.
+        def _wait_pings(count: int, timeout: float = 5.0) -> None:
+            end = time.monotonic() + timeout
+            while time.monotonic() < end and len(_sent()) < count:
+                time.sleep(0.02)
+            # agentapi only ever carries the fixed wake ping, never a message's text.
+            self.assertEqual(_sent(), [agy_bridge.WAKE_PING] * count)
+
+        def _queue(lid, mid, text, *, route='hook-user-input'):
+            agy_bridge.write_receipt(agent_dir, mid, launch_id=lid, native_id=conv_id, route=route,
+                                     submitted_at=now(), text_sha256=agy_storage.message_hash(text),
+                                     acknowledged=route != 'agentapi')
+            agy_bridge.enqueue_message(agent_dir, lid, mid, conv_id, text)
+
+        def _wake(env, text):
+            self.assertEqual(
+                agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env),
+                user_message(text),
+            )
+
+        # 1. Esc without Stop (agy skips Stop on Esc during tool calls and text generation): PreInvocation sets
+        #    turn_active; a 1st late idle statusLine neither wakes nor pauses mid-turn, the 2nd pauses the queued
+        #    message with reason='cancel' and records runtime.json['queue_state']. Further idle renders never release
+        #    it; a new turn resumes it and its turn-ending PostInvocation injects it once.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
         m_no_stop = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_no_stop, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('esc without stop'))
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_no_stop, conv_id, 'esc without stop')
+        _queue(launch1, m_no_stop, 'esc without stop')
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
         time.sleep(0.1)
         self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_no_stop), ('queued', None))
-        # 2nd idle statusLine confirms missing-Stop return to idle -> pause as cancel, never flush.
         for _ in range(4):
             agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
         time.sleep(0.1)
         self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_no_stop), ('queued', 'cancel'))
-        self.assertEqual(_delivered_texts().count('esc without stop'), 0)
-        qs_after_esc = read(agent_dir / 'runtime.json').get('queue_state')
-        self.assertEqual(qs_after_esc, {
+        _wait_pings(0)
+        self.assertEqual(read(agent_dir / 'runtime.json').get('queue_state'), {
             'native_session_id': conv_id, 'launch_id': launch1,
             'state': 'paused', 'reason': 'cancel', 'paused_count': 1,
             'paused_message_ids': [m_no_stop],
         })
-        # get_delivery reports paused after turn cancellation.
         live_after_esc = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         esc_check = adapter.get_delivery(live_after_esc, m_no_stop)
         self.assertEqual((esc_check.state, esc_check.value.get('paused'), esc_check.value.get('paused_reason')),
                          ('native_queued', True, 'cancel'))
-        # A new prompt (PreInvocation) resumes the paused queue, and Stop delivers it once.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
         self.assertIsNone(read(agent_dir / 'runtime.json').get('queue_state'))
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1),
-            {'decision': 'continue', 'reason': 'esc without stop'},
-        )
+        self.assertEqual(post_invocation(agent_dir, conv_id, env1), inject('esc without stop'))
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
 
-        # 1b. Single idle statusLine + elapsed grace (no further statusLine renders): a new follow-up arrival
-        #     reaps turn_active via live runtime.json (pausing then resuming for the new idle send), queues behind
-        #     the FIFO head, and wakes flush-idle for the head.
+        # 1b. One idle statusLine, then silence past the grace period: a new idle send reaps turn_active from
+        #     runtime.json before resuming, so neither it nor the head stays paused; it queues behind the FIFO head
+        #     and wakes the session for the head.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
         m_silent_head, m_silent_tail = str(uuid4()), str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_silent_head, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('silent head'))
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_silent_head, conv_id, 'silent head')
+        _queue(launch1, m_silent_head, 'silent head')
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
         doc = read(qpath1)
         doc['turn_active_at'] = '2020-01-01T00:00:00+00:00'
@@ -2024,34 +2093,31 @@ class AgyAdapterUnitTest(BaseTest):
         })
         live_session1 = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         tail_res = adapter.send(live_session1, Message(m_silent_tail, 'silent tail', delivery='follow-up'), Mock())
-        self.assertEqual((tail_res.state, tail_res.value['route']), ('native_queued', 'stop-hook'))
-        _wait_state(launch1, m_silent_head, 'handed_off')
-        self.assertEqual(_delivered_texts().count('silent head'), 1)
-        self.assertEqual(agy_bridge.followup_state(agent_dir, launch1, m_silent_tail), 'queued')
-        # Normal Stop delivers the queued tail once.
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1),
-            {'decision': 'continue', 'reason': 'silent tail'},
-        )
+        self.assertEqual((tail_res.state, tail_res.value['route'], tail_res.value.get('queued')),
+                         ('native_queued', 'hook-user-input', True))
+        _wait_state(launch1, m_silent_head, 'wake_pending')
+        _wait_pings(1)
+        self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_silent_tail), ('queued', None))
+        _wake(env1, 'silent head')
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch1, m_silent_head), 'handed_off')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env1), inject('silent tail'))
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
 
-        # 2. Subagent/background pause (Stop fullyIdle=False) + missing/crashed final Stop hook:
-        #    idle statusLine renders while background work runs must NOT flush the paused follow-up; once the
-        #    wakeup turn starts (PreInvocation) and its final Stop does not run, unbroken idle pauses it as
-        #    cancel rather than auto-flushing, and a new idle follow-up resumes the FIFO head cleanly.
-        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
-        m_crash_hook = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_crash_hook, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('after hook crash'))
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_crash_hook, conv_id, 'after hook crash')
-        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': False}, env=env1)
-        for _ in range(4):
-            agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
-        time.sleep(0.1)
-        self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_crash_hook), ('queued', 'subagent'))
-        self.assertEqual(_delivered_texts().count('after hook crash'), 0)
-        # Background task finishes -> wakeup turn fires PreInvocation, then Stop crashes -> idle pauses as cancel.
-        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
+        # 2. Stop with fullyIdle=False (background work still running) ends the turn without pausing: a message
+        #    queued after the last PostInvocation wakes the session at once. Then a crashed final Stop leaves
+        #    unbroken idle, which pauses the next message as cancel instead of waking for it.
+        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env1)
+        m_bg, m_crash_hook = str(uuid4()), str(uuid4())
+        _queue(launch1, m_bg, 'after background turn')
+        with patch.object(agy_bridge, '_spawn_idle_flush', return_value=True) as spawn_mock:
+            self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': False}, env=env1), {})
+        spawn_mock.assert_called_once()
+        self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_bg), ('queued', None))
+        agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
+        _wait_state(launch1, m_bg, 'wake_pending')
+        _wait_pings(2)
+        _wake(env1, 'after background turn')
+        _queue(launch1, m_crash_hook, 'after hook crash')
         with patch.object(agy_bridge, 'handle_hook', side_effect=RuntimeError('hook crash')), \
                 patch('sys.stdin') as fake_stdin:
             fake_stdin.read.return_value = json.dumps({'conversationId': conv_id, 'fullyIdle': True})
@@ -2060,72 +2126,61 @@ class AgyAdapterUnitTest(BaseTest):
             agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
         time.sleep(0.1)
         self.assertEqual(agy_bridge.followup_status(agent_dir, launch1, m_crash_hook), ('queued', 'cancel'))
-        self.assertEqual(_delivered_texts().count('after hook crash'), 0)
+        _wait_pings(2)
         # A new idle follow-up resumes the paused FIFO head first and stays queued behind it.
         m_resume_tail = str(uuid4())
         live_after_crash = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         adapter.send(live_after_crash, Message(m_resume_tail, 'resume after crash', delivery='follow-up'), Mock())
-        _wait_state(launch1, m_crash_hook, 'handed_off')
-        self.assertEqual(_delivered_texts().count('after hook crash'), 1)
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1),
-            {'decision': 'continue', 'reason': 'resume after crash'},
-        )
+        _wait_state(launch1, m_crash_hook, 'wake_pending')
+        _wait_pings(3)
+        _wake(env1, 'after hook crash')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env1), inject('resume after crash'))
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
 
-        # 3. Stale agentapi_submitting claim (crashed helper):
-        #    (a) receipt still stop-hook -> reverted to queued and delivered once;
-        #    (b) receipt already agentapi -> transitioned to handed_off (not resent) so a later follow-up flushes once.
-        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env1)
-        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
-        m_pre_crash = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_pre_crash, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('pre-io crash'))
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_pre_crash, conv_id, 'pre-io crash')
+        # 3. Stale claims from a crashed waker: (a) a stale wake_pending returns to queued (only the ping ever left)
+        #    and is woken again; (b) legacy agentapi_submitting claims from the old bridge: a stop-hook receipt
+        #    means no send began, so it re-queues; an agentapi receipt may have sent its text, so it is handed off
+        #    and never resent, and the entry behind it still goes out.
+        m_stale = str(uuid4())
+        _queue(launch1, m_stale, 'stale wake')
         doc = read(qpath1)
         for item in doc['entries']:
-            if item['id'] == m_pre_crash:
-                item['state'] = 'agentapi_submitting'
-                item['claimed_at'] = '2020-01-01T00:00:00+00:00'
+            if item['id'] == m_stale:
+                item.update(state='wake_pending', claimed_at='2020-01-01T00:00:00+00:00', claim_token='crashed')
         agy_bridge._write_private_json(qpath1, doc)
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
-        _wait_state(launch1, m_pre_crash, 'handed_off')
-        self.assertEqual(_delivered_texts().count('pre-io crash'), 1)
+        _wait_pings(4)
+        _wake(env1, 'stale wake')
+        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
 
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'working'}, env=env1)
-        m_mid_crash, m_behind = str(uuid4()), str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_mid_crash, launch_id=launch1, native_id=conv_id, route='agentapi',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('mid-io crash'),
-                                 acknowledged=False)
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_mid_crash, conv_id, 'mid-io crash')
-        agy_bridge.write_receipt(agent_dir, m_behind, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('unblocked behind'))
-        agy_bridge.enqueue_followup(agent_dir, launch1, m_behind, conv_id, 'unblocked behind')
+        m_pre_crash, m_mid_crash, m_behind = str(uuid4()), str(uuid4()), str(uuid4())
+        _queue(launch1, m_pre_crash, 'pre-io crash', route='stop-hook')
+        _queue(launch1, m_mid_crash, 'mid-io crash', route='agentapi')
+        _queue(launch1, m_behind, 'unblocked behind')
         doc = read(qpath1)
         for item in doc['entries']:
-            if item['id'] == m_mid_crash:
-                item['state'] = 'agentapi_submitting'
-                item['claimed_at'] = '2020-01-01T00:00:00+00:00'
+            if item['id'] in (m_pre_crash, m_mid_crash):
+                item.update(state='agentapi_submitting', claimed_at='2020-01-01T00:00:00+00:00')
         agy_bridge._write_private_json(qpath1, doc)
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env1)
-        _wait_state(launch1, m_behind, 'handed_off')
+        _wait_state(launch1, m_pre_crash, 'wake_pending')
+        _wait_pings(5)
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch1, m_mid_crash), 'handed_off')
-        self.assertEqual(_delivered_texts().count('mid-io crash'), 0)
-        self.assertEqual(_delivered_texts().count('unblocked behind'), 1)
+        _wake(env1, 'pre-io crash')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env1), inject('unblocked behind'))
+        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env1)
 
-        # 4. Agent killed mid-turn (with both queued and pre-IO agentapi_submitting entries): both report failed & retryable.
+        # 4. Agent killed mid-turn (with queued and wake_pending entries): both report failed and retryable.
         m_kill_q, m_kill_sub = str(uuid4()), str(uuid4())
-        for mid, body in ((m_kill_q, 'killed queued'), (m_kill_sub, 'killed claiming')):
-            agy_bridge.write_receipt(agent_dir, mid, launch_id=launch1, native_id=conv_id, route='stop-hook',
-                                     submitted_at=now(), text_sha256=agy_storage.message_hash(body))
-            agy_bridge.enqueue_followup(agent_dir, launch1, mid, conv_id, body)
+        for mid, body in ((m_kill_q, 'killed queued'), (m_kill_sub, 'killed waking')):
+            _queue(launch1, mid, body)
         doc = read(qpath1)
         doc['turn_active'] = True
         doc['turn_active_at'] = now()
         for item in doc['entries']:
             if item['id'] == m_kill_sub:
-                item['state'] = 'agentapi_submitting'
-                item['claimed_at'] = now()
+                item.update(state='wake_pending', claimed_at=now(), claim_token='killed')
         agy_bridge._write_private_json(qpath1, doc)
         write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'state': 'stopped'})
         stopped_session = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
@@ -2134,86 +2189,60 @@ class AgyAdapterUnitTest(BaseTest):
             self.assertEqual(res.state, 'error', mid)
             self.assertTrue(res.value.get('definite_failure'), mid)
 
-        # 5. Resume on a new launch: old launch's sticky turn_active/submitting never blocks the new launch,
-        #    and a follow-up on the resumed launch delivers immediately via agentapi while old-launch items stay retryable.
+        # 5. Resume on a new launch: the old launch's sticky turn_active and claims never block it; an idle
+        #    follow-up there sends one wake ping (never its text) while old-launch items stay retryable.
         launch_files.write_request(agent_dir, launch2, {'expected_native_id': conv_id, 'argv': [str(fake_agy)]})
         write(agent_dir / 'runtime.json', {
             'launch_id': launch2, 'state': 'running', 'status': 'idle', 'started_at': now(),
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
             'native_bridge': BRIDGE,
         })
         agy_bridge.write_ls_info(agent_dir, launch2, server.address, 'tok-class-2', conv_id)
+        env2 = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch2}
+        qpath2 = agent_dir / 'launches' / launch2 / agy_bridge.FOLLOWUPS_FILE
         resumed_session = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
+        recipient_ok = json.dumps({'response': {'sendMessage': {'recipientId': conv_id}}})
         send_exec = Mock()
-        send_exec.command.return_value = subprocess.CompletedProcess(
-            [str(fake_agy)], 0, json.dumps({'response': {'sendMessage': {'recipientId': conv_id}}}), '',
-        )
+        send_exec.command.return_value = subprocess.CompletedProcess([str(fake_agy)], 0, recipient_ok, '')
         m_resumed = str(uuid4())
         sent_resumed = adapter.send(resumed_session, Message(m_resumed, 'resumed follow-up', delivery='follow-up'), send_exec)
-        self.assertEqual(sent_resumed.state, 'native_queued')
-        self.assertEqual(sent_resumed.value['route'], 'agentapi')
+        self.assertEqual((sent_resumed.state, sent_resumed.value['route']), ('native_queued', 'hook-user-input'))
         send_exec.command.assert_called_once()
-        # Old-launch undelivered entries remain definite_failure (retryable) even while launch2 is running.
+        self.assertEqual(send_exec.command.call_args[0][0].argv[-2:], (conv_id, agy_bridge.WAKE_PING))
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch2, m_resumed), 'wake_pending')
         for mid in (m_kill_q, m_kill_sub):
             res = adapter.get_delivery(resumed_session, mid)
             self.assertEqual(res.state, 'error', mid)
             self.assertTrue(res.value.get('definite_failure'), mid)
-
-        # 6a. Stalled claimer CAS protection — BEFORE reaper (< 20 s): claim_token still matches, so
-        #     commit_followup_agentapi_receipt commits under lock and submits once via agentapi.
-        env2 = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch2}
-        # Finish the idle turn that Step 5 started so launch2's idle_flushed flag is cleared.
+        _wake(env2, 'resumed follow-up')
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2)
-        qpath2 = agent_dir / 'launches' / launch2 / agy_bridge.FOLLOWUPS_FILE
-        m_cas_before = str(uuid4())
-        before_calls = {'n': 0}
+        agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env2)
 
-        def _brief_stall_before_reap():
-            before_calls['n'] += 1
-            if before_calls['n'] == 2:
-                # Reap runs while claim is still fresh (< 20 s): must leave claim intact.
-                agy_bridge.should_queue_idle_followup(agent_dir, launch2, conv_id)
+        # 6. A waker that stalls past the claim timeout: the reaper re-queues its claim and a later wake
+        #    re-claims it; the stalled sender's late success changes nothing and the text is injected once.
+        m_stall = str(uuid4())
 
-        before_exec = Mock()
-        before_exec.check_session.side_effect = _brief_stall_before_reap
-        before_exec.command.return_value = subprocess.CompletedProcess(
-            [str(fake_agy)], 0, json.dumps({'response': {'sendMessage': {'recipientId': conv_id}}}), '',
-        )
-        with patch.object(agy_bridge, 'should_queue_idle_followup', return_value=True):
-            before_res = adapter.send(resumed_session, Message(m_cas_before, 'cas before reap', delivery='follow-up'), before_exec)
-        self.assertEqual((before_res.state, before_res.value['route']), ('native_queued', 'agentapi'))
-        self.assertEqual(before_exec.command.call_count, 1)
-        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2)
+        def _stalled_send(command, timeout=None):
+            doc2 = read(qpath2)
+            for item in doc2['entries']:
+                if item['id'] == m_stall:
+                    item['claimed_at'] = '2020-01-01T00:00:00+00:00'
+            agy_bridge._write_private_json(qpath2, doc2)
+            self.assertTrue(agy_bridge._flush_idle_followup(agent_dir, launch2, read(agent_dir / 'properties.json'), conv_id))
+            return subprocess.CompletedProcess([str(fake_agy)], 0, recipient_ok, '')
 
-        # 6b. Stalled claimer CAS protection — AFTER reaper (> 20 s): if send() claims the idle head and stalls
-        #     past 20 s before commit_followup_agentapi_receipt, so the reaper reverts it and Stop hands it off,
-        #     send() backs out cleanly without calling agentapi send-message (never double-delivered).
-        m_cas = str(uuid4())
-        stop_cas = []
-        cas_calls = {'n': 0}
-
-        def _stall_during_check():
-            cas_calls['n'] += 1
-            if cas_calls['n'] == 2:
-                doc2 = read(qpath2)
-                for item in doc2['entries']:
-                    if item['id'] == m_cas:
-                        item['claimed_at'] = '2020-01-01T00:00:00+00:00'
-                agy_bridge._write_private_json(qpath2, doc2)
-                stop_cas.append(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2))
-
-        cas_exec = Mock()
-        cas_exec.check_session.side_effect = _stall_during_check
-        with patch.object(agy_bridge, 'should_queue_idle_followup', return_value=True):
-            cas_res = adapter.send(resumed_session, Message(m_cas, 'cas protected', delivery='follow-up'), cas_exec)
-        self.assertEqual(stop_cas, [{'decision': 'continue', 'reason': 'cas protected'}])
-        self.assertEqual(cas_exec.command.call_count, 0)
-        self.assertEqual((cas_res.state, cas_res.value['route']), ('native_queued', 'stop-hook'))
-        self.assertNotIn('queued', cas_res.value)
+        stall_exec = Mock()
+        stall_exec.command.side_effect = _stalled_send
+        stall_res = adapter.send(resumed_session, Message(m_stall, 'stalled wake', delivery='follow-up'), stall_exec)
+        self.assertEqual(stall_res.state, 'native_queued')
+        _wait_pings(6)
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch2, m_stall), 'wake_pending')
+        _wake(env2, 'stalled wake')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env2), {})
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2)
 
-        # 7. Stop with terminationReason=ERROR pauses queued follow-ups, records runtime.json queue_state,
+        # 7. Stop with terminationReason=ERROR pauses queued messages, records runtime.json queue_state,
         #    reports paused=True + paused_reason='error' on deliver --check (never restarted by deliver --retry),
         #    resists idle statusLine renders, and resumes FIFO when a new mv2 follow-up arrives while idle.
         from multiverse.tools import deliver as deliver_tool
@@ -2221,9 +2250,7 @@ class AgyAdapterUnitTest(BaseTest):
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env2)
         err_msg = append_message(agent_dir, 'after error', {'name': 'user'}, 'follow-up', target_session=conv_id)
         m_err = err_msg['id']
-        agy_bridge.write_receipt(agent_dir, m_err, launch_id=launch2, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('after error'))
-        agy_bridge.enqueue_followup(agent_dir, launch2, m_err, conv_id, 'after error')
+        _queue(launch2, m_err, 'after error')
         update_message(agent_dir, m_err, submission_state='accepted', delivery_method='native', attempts=[{
             'state': 'native_queued', 'mode': 'follow-up', 'message_id': m_err,
             'native_session_id': conv_id, 'launch_id': launch2, 'at': now(),
@@ -2240,45 +2267,36 @@ class AgyAdapterUnitTest(BaseTest):
             'state': 'paused', 'reason': 'error', 'paused_count': 1,
             'paused_message_ids': [m_err],
         })
-        # Historical handed-off follow-ups (like m_cas earlier on launch2) must never appear in paused_message_ids.
-        self.assertNotIn(m_cas, qs_err['paused_message_ids'])
+        self.assertNotIn(m_stall, qs_err['paused_message_ids'])
         err_deliv = adapter.get_delivery(resumed_session, m_err)
         self.assertEqual(err_deliv.state, 'native_queued')
         self.assertTrue(err_deliv.value.get('paused'))
         self.assertEqual(err_deliv.value.get('paused_reason'), 'error')
-        # deliver --retry does NOT restart an accepted paused follow-up.
         with patch.object(native, 'send_or_wake', side_effect=AssertionError('retry must not restart paused queue')):
             retried_paused = deliver_tool.run(self.root, agent=agent_id, retry=True)
         self.assertEqual(retried_paused['messages'], [])
         for _ in range(4):
             agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env2)
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch2, m_err), 'queued')
-        self.assertEqual(_delivered_texts().count('after error'), 0)
-        # A new mv2 follow-up on an idle agent unpauses the ERROR-paused queue, clears queue_state,
-        # flushes the paused FIFO head first via agentapi, and leaves the new follow-up queued behind it.
+        _wait_pings(6)
         m_err_new = str(uuid4())
         idle_session2 = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         new_fu_res = adapter.send(idle_session2, Message(m_err_new, 'resume via followup', delivery='follow-up'), Mock())
-        self.assertEqual((new_fu_res.state, new_fu_res.value['route']), ('native_queued', 'stop-hook'))
+        self.assertEqual((new_fu_res.state, new_fu_res.value['route']), ('native_queued', 'hook-user-input'))
         self.assertTrue(new_fu_res.value.get('queued'))
         self.assertIsNone(read(agent_dir / 'runtime.json').get('queue_state'))
-        _wait_state(launch2, m_err, 'handed_off')
-        self.assertEqual(_delivered_texts().count('after error'), 1)
+        _wait_state(launch2, m_err, 'wake_pending')
+        _wait_pings(7)
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch2, m_err_new), 'queued')
-        # Normal Stop delivers the new tail follow-up next in FIFO order.
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2),
-            {'decision': 'continue', 'reason': 'resume via followup'},
-        )
+        _wake(env2, 'after error')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env2), inject('resume via followup'))
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2)
 
-        # 8. USER_CANCELED pause stamps queue_state with reason='cancel', clears on terminal PreInvocation,
+        # 8. USER_CANCELED pause stamps queue_state with reason='cancel', clears on the next PreInvocation,
         #    and a stale paused queue_state copied onto a new launch clears at SessionStart.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env2)
         m_cancel = str(uuid4())
-        agy_bridge.write_receipt(agent_dir, m_cancel, launch_id=launch2, native_id=conv_id, route='stop-hook',
-                                 submitted_at=now(), text_sha256=agy_storage.message_hash('after cancel'))
-        agy_bridge.enqueue_followup(agent_dir, launch2, m_cancel, conv_id, 'after cancel')
+        _queue(launch2, m_cancel, 'after cancel')
         self.assertEqual(
             agy_bridge.handle_hook(
                 'Stop', {'conversationId': conv_id, 'fullyIdle': True, 'terminationReason': 'USER_CANCELED'}, env=env2,
@@ -2290,17 +2308,13 @@ class AgyAdapterUnitTest(BaseTest):
             'state': 'paused', 'reason': 'cancel', 'paused_count': 1,
             'paused_message_ids': [m_cancel],
         })
-        # Real send -> old handed-off receipt + new paused send: only the currently paused mv2 message ID is projected.
         self.assertNotIn(m_err, read(agent_dir / 'runtime.json')['queue_state']['paused_message_ids'])
         self.assertNotIn(m_err_new, read(agent_dir / 'runtime.json')['queue_state']['paused_message_ids'])
         cancel_deliv = adapter.get_delivery(idle_session2, m_cancel)
         self.assertEqual((cancel_deliv.value.get('paused'), cancel_deliv.value.get('paused_reason')), (True, 'cancel'))
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id}, env=env2)
         self.assertIsNone(read(agent_dir / 'runtime.json').get('queue_state'))
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env2),
-            {'decision': 'continue', 'reason': 'after cancel'},
-        )
+        self.assertEqual(post_invocation(agent_dir, conv_id, env2), inject('after cancel'))
         # New launch SessionStart clears stale queue_state carried over from an earlier launch.
         launch3 = str(uuid4())
         (agent_dir / 'launches' / launch3).mkdir(parents=True)
@@ -2322,6 +2336,202 @@ class AgyAdapterUnitTest(BaseTest):
             write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'queue_state': live_pause})
             agy_bridge._sync_runtime_queue_state_locked(agent_dir, launch3, stale_old_conv, stale_entries)
             self.assertEqual(read(agent_dir / 'runtime.json').get('queue_state'), live_pause)
+
+    def test_hook_injection_steers_turn_endings_human_race_and_receipts(self):
+        """Hooks must deliver each mv2 message as a real user message at the right point: a busy steer before the
+        next model call, a follow-up only after a turn-ending response (steers first), a wake never taking over a
+        turn the person typed, and receipts confirmed only by hook-injected rows; a break silently delays, reorders
+        or misreports messages."""
+        server = _LoopbackListener()
+        self.addCleanup(server.close)
+        agent_id, launch_id, conv_id = str(uuid4()), str(uuid4()), str(uuid4())
+        home = self._create_saved_conversation(conv_id)
+        agent_dir = self.root / 'state' / 'agents' / agent_id
+        (agent_dir / 'launches' / launch_id).mkdir(parents=True)
+        fake_agy = self.work / 'fake-agy-inject'
+        fake_agy.write_text(f'#!{sys.executable}\nimport json, sys\n'
+                            'print(json.dumps({"response": {"sendMessage": {"recipientId": sys.argv[3]}}}))\n')
+        fake_agy.chmod(0o755)
+        launch_files.write_request(agent_dir, launch_id, {'expected_native_id': None, 'argv': [str(fake_agy)]})
+        write(agent_dir / 'properties.json', {
+            'id': agent_id, 'name': 'injected', 'harness': 'agy', 'workspace': str(self.work),
+            'universe_id': read(self.root / 'universe.json')['id'],
+            'native_session_provider': 'agy', 'native_session_id': conv_id,
+            'native_session_home': os.path.realpath(home),
+        })
+        write(agent_dir / 'runtime.json', {
+            'launch_id': launch_id, 'state': 'running', 'status': 'working', 'started_at': now(),
+            'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
+            'native_bridge': BRIDGE,
+        })
+        agy_bridge.write_ls_info(agent_dir, launch_id, server.address, 'tok-inject', conv_id)
+        env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_id}
+        adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy)})
+        log = Path(os.path.realpath(home)) / 'brain' / conv_id / '.system_generated' / 'logs' / 'transcript.jsonl'
+
+        def session():
+            return SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
+
+        def send(text, delivery):
+            mid = str(uuid4())
+            idle_exec = Mock()
+            res = adapter.send(session(), Message(mid, text, delivery=delivery), idle_exec)
+            self.assertEqual((res.state, res.value['route'], res.value.get('queued')), ('native_queued', 'hook-user-input', True))
+            idle_exec.command.assert_not_called()
+            return mid
+
+        def append(source, text):
+            _POST_STEP[0] += 1
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open('a') as handle:
+                handle.write(json.dumps({'step_index': _POST_STEP[0], 'source': source, 'type': 'USER_INPUT',
+                                         'status': 'DONE', 'created_at': now(),
+                                         'content': f'<USER_REQUEST>\n{text}\n</USER_REQUEST>'}) + '\n')
+            return _POST_STEP[0]
+
+        def pre(num, **extra):
+            return agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': num, **extra}, env=env)
+
+        # 1. A busy steer waits through a tool step's PostInvocation and goes in before the next model call, but
+        #    never once mv2 kill has started, even when the kill lands after the hook's entry check.
+        pre(0)
+        m_steer = send('steer now', 'steer')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env, tool_calls=True), {})
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_steer), 'queued')
+        load = agy_bridge._load_followups_record_locked
+
+        def kill_lands(path):
+            write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'ending_at': now()})
+            return load(path)
+
+        with patch.object(agy_bridge, '_load_followups_record_locked', side_effect=kill_lands):
+            self.assertEqual(pre(1), {})
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_steer), 'queued')
+        write(agent_dir / 'runtime.json', {k: v for k, v in read(agent_dir / 'runtime.json').items() if k != 'ending_at'})
+        self.assertEqual(pre(1), user_message('steer now'))
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_steer), 'handed_off')
+
+        # 2. A busy follow-up never goes in on a tool step or an unfinished response; on the turn-ending step a
+        #    steer that arrived meanwhile goes first, a repeated PostInvocation for that step pops nothing, and the
+        #    follow-up goes in on the next turn-ending step.
+        m_follow = send('after turn', 'follow-up')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env, tool_calls=True), {})
+        self.assertEqual(post_invocation(agent_dir, conv_id, env, status='RUNNING'), {})
+        send('late steer', 'steer')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), inject('late steer'))
+        self.assertEqual(agy_bridge.handle_hook('PostInvocation', {'conversationId': conv_id}, env=env), {})
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_follow), 'queued')
+        pre(2)
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), inject('after turn'))
+        pre(3)
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), {})
+        # PostInvocation's initialNumSteps: an earlier step's reply never counts as this invocation's turn end.
+        m_early = send('not mid-turn', 'follow-up')
+        self.assertEqual(agy_bridge.handle_hook(
+            'PostInvocation', {'conversationId': conv_id, 'initialNumSteps': _POST_STEP[0] + 1}, env=env), {})
+        self.assertEqual(post_invocation(agent_dir, conv_id, env, initialNumSteps=_POST_STEP[0] + 1), inject('not mid-turn'))
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_early), 'handed_off')
+
+        # 3. Receipts: a hook-injected (SYSTEM_SDK) row confirms the message; a typed row with the same text
+        #    (USER_EXPLICIT) never does, and the wake ping is never read as an mv2 message.
+        append('SYSTEM_SDK', 'steer now')
+        self.assertTrue(adapter.get_delivery(session(), m_steer).value['transcript_confirmed'])
+        m_typed = send('typed text', 'follow-up')
+        append('USER_EXPLICIT', 'typed text')
+        typed_check = adapter.get_delivery(session(), m_typed)
+        self.assertEqual((typed_check.value['transcript_confirmed'], typed_check.value.get('queued')), (False, True))
+        ping = {'step_index': 0, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE', 'created_at': now(),
+                'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp={now()} sender=system '
+                           f'priority=MESSAGE_PRIORITY_HIGH content={agy_bridge.WAKE_PING}\n</SYSTEM_MESSAGE>'}
+        self.assertEqual(agy_storage._extracted_candidates(ping, route='agentapi'), ())
+        _POST_STEP[0] += 1
+        with log.open('a') as handle:
+            handle.write(json.dumps({**ping, 'step_index': _POST_STEP[0]}) + '\n')
+        rows = {row.ref: row.label for row in adapter.transcript_view(session()).rows}
+        self.assertEqual(rows[f'step-{_POST_STEP[0]}'], 'injected')
+
+        # 4. A person types while a wake for a follow-up is in flight: the typed turn runs first and the follow-up
+        #    goes back to the queue (to go in when that turn ends); a steer in the same race still goes in.
+        #    Stop kicks a wake for the follow-up still queued; the test claims that wake itself, so no detached
+        #    helper may run here (one claims it first whenever the test process is descheduled).
+        with patch.object(agy_bridge, '_spawn_idle_flush', return_value=True) as kick:
+            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env)
+            self.assertEqual(kick.call_count, 1)
+            agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
+        self.assertEqual(agy_bridge.claim_if_idle_head(agent_dir, launch_id, m_typed, conv_id), 'claimed')
+        # The typed prompt is longer than the hooks' 64 KB transcript tail, which must still find it.
+        typed_step = append('USER_EXPLICIT', 'a person typed this ' + 'x' * (70 << 10))
+
+        def typed_turn():
+            # The person's turn: never attributed to the woken mv2 message, anchored at the typed row (init:).
+            edges, injected = agy_bridge._on_turn_start(
+                agent_dir, launch_id, conv_id, invocation_num=0, initial_num_steps=typed_step + 1, env=env,
+            )
+            self.assertEqual([(edge.source, edge.attempt, edge.turn.split(':')[0]) for edge in edges],
+                             [('person', None, 'init')])
+            return injected
+
+        self.assertEqual(typed_turn(), [])
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_typed), 'queued')
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), inject('typed text'))
+        # A Stop before that continuation's PreInvocation leaves no stale attempt to steal the next typed turn.
+        agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env)
+        with patch.object(agy_bridge, '_spawn_idle_flush', return_value=True):
+            agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
+        m_race_steer, wake_exec = str(uuid4()), Mock()
+        wake_exec.command.return_value = subprocess.CompletedProcess(
+            ['agy'], 0, json.dumps({'response': {'sendMessage': {'recipientId': conv_id}}}), '',
+        )
+        adapter.send(session(), Message(m_race_steer, 'race steer', delivery='steer'), wake_exec)
+        self.assertEqual(wake_exec.command.call_args[0][0].argv[-1], agy_bridge.WAKE_PING)
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_race_steer), 'wake_pending')
+        typed_step = append('USER_EXPLICIT', 'typed again')
+        self.assertEqual(typed_turn(), ['race steer'])
+
+        # 5. A launch an older mv2 made (agy-bridge-v1, no bridge in native_mode: no PostInvocation hook, maybe an
+        #    agy that ignores injectSteps) is never upgraded by these hooks, never gets text, and says to restart.
+        write(agent_dir / 'runtime.json', {
+            **read(agent_dir / 'runtime.json'), 'native_bridge': 'agy-bridge-v1',
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+        })
+        m_old, m_old_follow = str(uuid4()), str(uuid4())
+        agy_bridge.enqueue_message(agent_dir, launch_id, m_old, conv_id, 'queued before the update', mode='steer')
+        agy_bridge.write_receipt(agent_dir, m_old_follow, launch_id=launch_id, native_id=conv_id, route='stop-hook',
+                                 submitted_at=now(), text_sha256=agy_storage.message_hash('old follow-up'))
+        agy_bridge.enqueue_message(agent_dir, launch_id, m_old_follow, conv_id, 'old follow-up')
+        self.assertEqual(adapter.connection_problem(session()), RestartRequired(agy.OLDER_BRIDGE))
+        self.assertEqual(pre(1), {})
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), {})
+        self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_old), 'queued')
+        self.assertEqual(read(agent_dir / 'runtime.json')['native_bridge'], 'agy-bridge-v1')
+        # Nor does its agent's next mv2 command (the shell callback) record the new bridge for it.
+        self.assertIsNone(adapter.shell_callback(session(), {
+            'ANTIGRAVITY_LS_ADDRESS': server.address, 'ANTIGRAVITY_CSRF_TOKEN': 'tok-new',
+            'ANTIGRAVITY_CONVERSATION_ID': conv_id,
+        }))
+        old_send = adapter.send(session(), Message(str(uuid4()), 'after the update', delivery='steer'), Mock())
+        self.assertEqual((old_send.state, old_send.reason), ('unavailable', agy.OLDER_BRIDGE))
+        # The exact lines for this running agent: the cause once, then core's kill-then-resume advice once.
+        cause = "This launch's Antigravity bridge predates hook-injected user messages"
+        refused = (f'Not delivered to injected: {cause}. Saved; restart it with mv2 kill injected, then mv2 resume injected, '
+                   'then mv2 deliver injected --retry or --dismiss.')
+        for options in ({}, {'retry': True}):  # send and deliver --retry
+            self.assertEqual(_messaging.delivery_line('injected', old_send.to_dict(), delivery='steer', running=True,
+                                                      **options), refused)
+        self.assertEqual(
+            _messaging.delivery_line('injected', old_send.to_dict(), delivery='steer', running=True, check=True),
+            f'injected: could not check delivery: {cause}. Saved. Restart it with mv2 kill injected, then mv2 resume '
+            'injected. Then run mv2 deliver injected --check.',
+        )
+        # Its queued follow-up can't go in any more: it waits for the restart (not "queued for its next turn"),
+        # and once that launch ends it settles as failed so --retry resends it.
+        stranded = adapter.get_delivery(session(), m_old_follow)
+        self.assertEqual((stranded.state, stranded.reason, stranded.value.get('restart_required')),
+                         ('pending', agy.OLDER_BRIDGE, True))
+        write(agent_dir / 'runtime.json', {**read(agent_dir / 'runtime.json'), 'state': 'stopped'})
+        settled = adapter.get_delivery(session(), m_old_follow)
+        self.assertEqual((settled.state, settled.value.get('definite_failure')), ('error', True))
 
     def test_model_catalog_launch_effort_and_display_names(self):
         """Antigravity's offline model table, --effort argv placement, suffixed transcript splitting and Silicon23
@@ -2437,7 +2647,7 @@ class AgyAdapterUnitTest(BaseTest):
         write(agent_dir / 'runtime.json', {
             'launch_id': launch_id, 'state': 'running', 'status': 'working',
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
             'native_bridge': BRIDGE,
         })
         write(peer_dir / 'properties.json', {
@@ -2700,7 +2910,8 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertIsNone(adapter.transcript_readable(session))
 
     def test_turn_events_from_hooks_and_esc_cancel(self):
-        """Antigravity PreInvocation, Stop (finished, continue, error) and Esc-without-Stop idle transitions must
+        """Antigravity PreInvocation, PostInvocation continuations, Stop (finished, error), idle wakes and Esc-without-Stop
+        idle transitions must
         publish ordered, transcript-resolved turn.started and turn.ended events, including wake turns followed by
         Antigravity's low-priority server-restart notice, because a broken emission or projection leaves plugins
         blind to live Antigravity turns."""
@@ -2760,7 +2971,8 @@ class AgyAdapterUnitTest(BaseTest):
                 drained.extend(batch)
                 return batch
 
-            # 1. Initial task turn: PreInvocation(0, initialNumSteps=1) -> tool loop PreInvocation(1, 3) -> Stop(continue).
+            # 1. Initial task turn: PreInvocation(0, initialNumSteps=1) -> tool loop PreInvocation(1, 3) -> the
+            #    turn-ending PostInvocation injects a queued mv2 follow-up and forces another invocation.
             append_rows(
                 {'step_index': 0, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
                  'created_at': '2026-11-24T10:00:00Z', 'content': '<USER_REQUEST>\nfirst task\n</USER_REQUEST>'},
@@ -2782,18 +2994,18 @@ class AgyAdapterUnitTest(BaseTest):
                 {'step_index': 3, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:00:03Z', 'content': 'first done'},
             )
-            # Enqueue a Stop-hook follow-up with a recorded mailbox attempt so turn 2 attributes source='mv2' + message ID.
+            # Queue an mv2 follow-up with a recorded mailbox attempt so turn 2 attributes source='mv2' + message ID.
             fu_msg = append_message(agent_dir, 'follow-up task', {'name': 'lead'}, 'follow-up', target_session=conv1)
             fu_id = fu_msg['id']
             update_message(agent_dir, fu_id, submission_state='accepted', delivery_method='native', attempts=[{
                 'state': 'native_queued', 'mode': 'follow-up', 'message_id': fu_id,
                 'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
             }])
-            agy_bridge.write_receipt(agent_dir, fu_id, launch_id=launch_id, native_id=conv1, route='stop-hook',
+            agy_bridge.write_receipt(agent_dir, fu_id, launch_id=launch_id, native_id=conv1, route='hook-user-input',
                                      submitted_at=now(), text_sha256=agy_storage.message_hash('follow-up task'))
-            agy_bridge.enqueue_followup(agent_dir, launch_id, fu_id, conv1, 'follow-up task')
-            stop1 = agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env)
-            self.assertEqual(stop1, {'decision': 'continue', 'reason': 'follow-up task'})
+            agy_bridge.enqueue_message(agent_dir, launch_id, fu_id, conv1, 'follow-up task')
+            post1 = agy_bridge.handle_hook('PostInvocation', {'conversationId': conv1}, env=env)
+            self.assertEqual(post1, inject('follow-up task'))
             b1 = drain_all()
             self.assertEqual([k for k, _ in b1], ['turn.started', 'agent.status', 'turn.ended'])
             self.assertTrue(b1[0][1]['resolved'])
@@ -2804,11 +3016,11 @@ class AgyAdapterUnitTest(BaseTest):
             self.assertEqual(b1[2][1]['state'], 'finished')
             self.assertEqual(b1[2][1]['turn'], b1[0][1]['turn'])
 
-            # 2. Stop-hook continuation turn (invocationNum keeps incrementing to 2) ends on ERROR.
+            # 2. The forced continuation turn (its injected USER_INPUT is logged before PreInvocation(2, 5), and
+            #    invocationNum keeps counting) ends on ERROR.
             append_rows(
-                {'step_index': 4, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
-                 'created_at': '2026-11-24T10:00:04Z',
-                 'content': '<SYSTEM_MESSAGE>\nStop hook blocked termination: follow-up task\n</SYSTEM_MESSAGE>'},
+                {'step_index': 4, 'source': 'SYSTEM_SDK', 'type': 'USER_INPUT', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:00:04Z', 'content': '<USER_REQUEST>\nfollow-up task\n</USER_REQUEST>'},
             )
             agy_bridge.handle_hook('PreInvocation', {
                 'conversationId': conv1, 'invocationNum': 2, 'initialNumSteps': 5,
@@ -2819,6 +3031,7 @@ class AgyAdapterUnitTest(BaseTest):
             b2 = drain_all()
             self.assertEqual([k for k, _ in b2], ['turn.started', 'turn.ended'])
             self.assertTrue(b2[0][1]['resolved'])
+            self.assertEqual(b2[0][1]['turn'], 'step-4')
             self.assertFalse(b2[0][1]['first_task'])
             self.assertEqual((b2[0][1]['source'], b2[0][1]['message']), ('mv2', fu_id))
             self.assertTrue(b2[1][1]['resolved'])
@@ -2857,29 +3070,46 @@ class AgyAdapterUnitTest(BaseTest):
             self.assertEqual(b3[2][1]['ref'], rows_after[6].cursor)
             self.assertNotEqual(b3[0][1]['turn'], b2[0][1]['turn'])
 
-            # 4. Post-logged idle agentapi turn after a completed/cancelled response (PreInvocation fires BEFORE
-            #    Antigravity appends step-8, and statusLine(working) beats PreInvocation): must still correlate
-            #    message ID and resolve to step-8.
+            # 4. Idle wake turn after a cancelled response: mv2 claims KITE and sends the wake ping, statusLine
+            #    (working) beats PreInvocation, and PreInvocation injects KITE. Here agy logs the ping (step-8)
+            #    before the injected message (step-9); the turn must still resolve to KITE with its message ID.
             append_rows(
                 {'step_index': 7, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'CANCELLED',
                  'created_at': '2026-11-24T10:01:05Z', 'content': ''},
             )
-            kite_msg = append_message(agent_dir, 'KITE', {'name': 'lead'}, 'follow-up', target_session=conv1)
-            kite_id = kite_msg['id']
-            update_message(agent_dir, kite_id, submission_state='accepted', delivery_method='native', attempts=[{
-                'state': 'native_submitted', 'mode': 'follow-up', 'message_id': kite_id,
-                'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
-            }])
-            agy_bridge.begin_idle_turn(agent_dir, launch_id, message_id=kite_id)
+
+            def wake_message(text):
+                msg = append_message(agent_dir, text, {'name': 'lead'}, 'follow-up', target_session=conv1)
+                update_message(agent_dir, msg['id'], submission_state='accepted', delivery_method='native', attempts=[{
+                    'state': 'native_queued', 'mode': 'follow-up', 'message_id': msg['id'],
+                    'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+                }])
+                agy_bridge.write_receipt(agent_dir, msg['id'], launch_id=launch_id, native_id=conv1,
+                                         route='hook-user-input', submitted_at=now(),
+                                         text_sha256=agy_storage.message_hash(text))
+                agy_bridge.enqueue_message(agent_dir, launch_id, msg['id'], conv1, text)
+                self.assertEqual(agy_bridge.claim_if_idle_head(agent_dir, launch_id, msg['id'], conv1), 'claimed')
+                return msg['id']
+
+            def ping_row(step, at):
+                return {'step_index': step, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                        'created_at': at,
+                        'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp={at} sender=system '
+                                   f'priority=MESSAGE_PRIORITY_HIGH content={agy_bridge.WAKE_PING}\n</SYSTEM_MESSAGE>'}
+
+            def injected_row(step, at, text):
+                return {'step_index': step, 'source': 'SYSTEM_SDK', 'type': 'USER_INPUT', 'status': 'DONE',
+                        'created_at': at, 'content': f'<USER_REQUEST>\n{text}\n</USER_REQUEST>'}
+
+            kite_id = wake_message('KITE')
             agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'working'}, env=env)
-            agy_bridge.handle_hook('PreInvocation', {
+            self.assertEqual(agy_bridge.handle_hook('PreInvocation', {
                 'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 8,
-            }, env=env)
+            }, env=env), user_message('KITE'))
             append_rows(
-                {'step_index': 8, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
-                 'created_at': '2026-11-24T10:02:00Z',
-                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:02:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=KITE\n</SYSTEM_MESSAGE>'},
-                {'step_index': 9, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                ping_row(8, '2026-11-24T10:02:00Z'),
+                injected_row(9, '2026-11-24T10:02:00Z', 'KITE'),
+                {'step_index': 10, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:02:01Z', 'content': 'KITE'},
             )
             agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': False}, env=env)
@@ -2887,61 +3117,54 @@ class AgyAdapterUnitTest(BaseTest):
             b4_turns = [(k, d) for k, d in b4 if k.startswith('turn.')]
             self.assertEqual([k for k, _ in b4_turns], ['turn.started', 'turn.ended'])
             self.assertTrue(b4_turns[0][1]['resolved'])
-            self.assertEqual(b4_turns[0][1]['turn'], 'step-8')
+            self.assertEqual(b4_turns[0][1]['turn'], 'step-9')
             self.assertEqual((b4_turns[0][1]['source'], b4_turns[0][1]['message']), ('mv2', kite_id))
             self.assertTrue(b4_turns[1][1]['resolved'])
-            self.assertEqual(b4_turns[1][1]['turn'], 'step-8')
+            self.assertEqual(b4_turns[1][1]['turn'], 'step-9')
 
-            # 5. Post-logged task-notification turn right after KITE (step-9 is PLANNER_RESPONSE):
-            #    PreInvocation(0, initialNumSteps=10) fires before step-10 is appended; must resolve to step-10,
-            #    never walking back across PLANNER_RESPONSE step-9 into previous turn step-8 (F6b regression).
+            # 5. Post-logged task-notification turn right after KITE (step-10 is PLANNER_RESPONSE):
+            #    PreInvocation(0, initialNumSteps=11) fires before step-11 is appended; must resolve to step-11,
+            #    never walking back across PLANNER_RESPONSE step-10 into the previous turn (F6b regression).
             agy_bridge.handle_hook('PreInvocation', {
-                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 10,
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 11,
             }, env=env)
             append_rows(
-                {'step_index': 10, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                {'step_index': 11, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:02:10Z',
                  'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:02:10Z sender={conv1}/task-1 priority=MESSAGE_PRIORITY_HIGH content=done\n</SYSTEM_MESSAGE>'},
-                {'step_index': 11, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                {'step_index': 12, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:02:11Z', 'tool_calls': [{'name': 'run_command', 'args': {}}]},
             )
-            # Cancelled tool call omits step-12; idle statusLine ends turn step-10 as interrupted.
+            # Cancelled tool call omits step-13; idle statusLine ends turn step-11 as interrupted.
             agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
             agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
             b5 = drain_all()
             b5_turns = [(k, d) for k, d in b5 if k.startswith('turn.')]
             self.assertEqual([k for k, _ in b5_turns], ['turn.started', 'turn.ended'])
             self.assertTrue(b5_turns[0][1]['resolved'])
-            self.assertEqual(b5_turns[0][1]['turn'], 'step-10')
+            self.assertEqual(b5_turns[0][1]['turn'], 'step-11')
             self.assertEqual(b5_turns[0][1]['source'], 'harness')
             self.assertTrue(b5_turns[1][1]['resolved'])
-            self.assertEqual(b5_turns[1][1]['turn'], 'step-10')
+            self.assertEqual(b5_turns[1][1]['turn'], 'step-11')
 
-            # 6. Post-logged agentapi turn G1 after an Esc-cancelled tool call (step-12 omitted -> step-13):
-            #    step-index gap closes prior open tool turn so step-13 classifies as prompt and resolves cleanly.
-            g1_msg = append_message(agent_dir, 'G1', {'name': 'lead'}, 'follow-up', target_session=conv1)
-            g1_id = g1_msg['id']
-            update_message(agent_dir, g1_id, submission_state='accepted', delivery_method='native', attempts=[{
-                'state': 'native_submitted', 'mode': 'follow-up', 'message_id': g1_id,
-                'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
-            }])
-            agy_bridge.begin_idle_turn(agent_dir, launch_id, message_id=g1_id)
-            agy_bridge.handle_hook('PreInvocation', {
-                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 13,
-            }, env=env)
+            # 6. Idle wake turn G1 after an Esc-cancelled tool call (step-13 omitted): the step-index gap closes the
+            #    open tool turn, so G1 injected at step-14 (logged here before its wake ping) is the turn's prompt.
+            g1_id = wake_message('G1')
+            self.assertEqual(agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 14,
+            }, env=env), user_message('G1'))
             append_rows(
-                {'step_index': 13, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
-                 'created_at': '2026-11-24T10:03:00Z',
-                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:03:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=G1\n</SYSTEM_MESSAGE>'},
+                injected_row(14, '2026-11-24T10:03:00Z', 'G1'),
+                ping_row(15, '2026-11-24T10:03:00Z'),
             )
             agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
             agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
             b6 = drain_all()
             b6_turns = [(k, d) for k, d in b6 if k.startswith('turn.')]
             self.assertEqual([k for k, _ in b6_turns], ['turn.started', 'turn.ended'])
-            self.assertEqual(b6_turns[0][1]['turn'], 'step-13')
+            self.assertEqual(b6_turns[0][1]['turn'], 'step-14')
             self.assertEqual((b6_turns[0][1]['source'], b6_turns[0][1]['message']), ('mv2', g1_id))
-            self.assertEqual((b6_turns[1][1]['turn'], b6_turns[1][1]['state']), ('step-13', 'interrupted'))
+            self.assertEqual((b6_turns[1][1]['turn'], b6_turns[1][1]['state']), ('step-14', 'interrupted'))
 
             # 7. Direct project_turn_event on a PLANNER_RESPONSE step must never walk back into the preceding prompt.
             adapter = AgyAdapter.configured('agy', {})
@@ -2950,7 +3173,7 @@ class AgyAdapterUnitTest(BaseTest):
             view_now = adapter.transcript_view(sess_obj)
             from multiverse.harnesses.types import TurnStarted as _TurnStarted
             proj_resp = adapter.project_turn_event(
-                sess_obj, view_now, _TurnStarted(turn='step-9', kind='prompt', ref='step-9', source='harness'),
+                sess_obj, view_now, _TurnStarted(turn='step-10', kind='prompt', ref='step-10', source='harness'),
             )
             self.assertIsNone(proj_resp.turn_position)
 
@@ -2969,16 +3192,16 @@ class AgyAdapterUnitTest(BaseTest):
                 'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': wake_msg['id'],
             })
             append_rows(
-                {'step_index': 14, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                {'step_index': 16, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:00Z', 'content': '<USER_REQUEST>\nwake up\n</USER_REQUEST>'},
             )
             env2 = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch2}
             agy_bridge.handle_hook('PreInvocation', {
-                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 15,
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 17,
             }, env=env2)
-            # Duplicate PreInvocation(0, initialNumSteps=15) arrives as Antigravity logs the PRIORITY_LOW restart notice.
+            # Duplicate PreInvocation(0, initialNumSteps=17) arrives as Antigravity logs the PRIORITY_LOW restart notice.
             append_rows(
-                {'step_index': 15, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                {'step_index': 17, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:01Z',
                  'content': (
                      '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:04:01Z sender=system '
@@ -2987,10 +3210,10 @@ class AgyAdapterUnitTest(BaseTest):
                  )},
             )
             agy_bridge.handle_hook('PreInvocation', {
-                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 15,
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 17,
             }, env=env2)
             append_rows(
-                {'step_index': 16, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                {'step_index': 18, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:02Z', 'content': 'AWAKE'},
             )
             agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env2)
@@ -2998,11 +3221,11 @@ class AgyAdapterUnitTest(BaseTest):
             b8_turns = [(k, d) for k, d in b8 if k.startswith('turn.')]
             self.assertEqual([k for k, _ in b8_turns], ['turn.started', 'turn.ended'])
             self.assertTrue(b8_turns[0][1]['resolved'])
-            self.assertEqual(b8_turns[0][1]['turn'], 'step-14')
+            self.assertEqual(b8_turns[0][1]['turn'], 'step-16')
             self.assertEqual(b8_turns[0][1]['source'], 'harness')
             self.assertFalse(b8_turns[0][1]['first_task'])
             self.assertTrue(b8_turns[1][1]['resolved'])
-            self.assertEqual(b8_turns[1][1]['turn'], 'step-14')
+            self.assertEqual(b8_turns[1][1]['turn'], 'step-16')
             self.assertEqual(b8_turns[1][1]['state'], 'finished')
 
             # 8b. Exact startup-input witness gate (F6a): an unrelated first prompt on a wake launch or spawn
@@ -3022,26 +3245,26 @@ class AgyAdapterUnitTest(BaseTest):
                 'env': {'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_unrel},
             })
             append_rows(
-                {'step_index': 17, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                {'step_index': 19, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:10Z', 'content': '<USER_REQUEST>\nunrelated typed prompt\n</USER_REQUEST>'},
-                {'step_index': 18, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                {'step_index': 20, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:11Z', 'content': 'ok'},
             )
             env_unrel = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_unrel}
-            unrel_edges = agy_bridge._on_turn_start(
-                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=18, env=env_unrel,
+            unrel_edges, _ = agy_bridge._on_turn_start(
+                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=20, env=env_unrel,
             )
             self.assertEqual(len(unrel_edges), 1)
             self.assertEqual((unrel_edges[0].source, unrel_edges[0].attempt, unrel_edges[0].first_task),
                              ('person', None, False))
             # Even if turn 2 later repeats the exact wake text, the one-shot startup gate does not attribute it.
             append_rows(
-                {'step_index': 19, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                {'step_index': 21, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:12Z', 'content': '<USER_REQUEST>\nexpected wake text\n</USER_REQUEST>'},
             )
             agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env_unrel)
-            turn2_edges = agy_bridge._on_turn_start(
-                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=20, env=env_unrel,
+            turn2_edges, _ = agy_bridge._on_turn_start(
+                agent_dir, launch_unrel, conv1, invocation_num=0, initial_num_steps=22, env=env_unrel,
             )
             self.assertEqual(len(turn2_edges), 1)
             self.assertEqual((turn2_edges[0].source, turn2_edges[0].attempt, turn2_edges[0].first_task),
@@ -3060,7 +3283,7 @@ class AgyAdapterUnitTest(BaseTest):
                 'argv': ['agy', '--prompt-interactive=expected spawn task'],
                 'expected_native_id': None, 'task_launch': True, 'resume_message_id': None,
             })
-            unrel_spawn_edges = agy_bridge._on_turn_start(
+            unrel_spawn_edges, _ = agy_bridge._on_turn_start(
                 agent_dir, launch_unrel_spawn, conv_unrel_spawn, invocation_num=0, initial_num_steps=1,
             )
             self.assertEqual(len(unrel_spawn_edges), 1)
@@ -3075,7 +3298,7 @@ class AgyAdapterUnitTest(BaseTest):
                 'argv': ['agy', '--conversation', conv_missing, '--prompt-interactive=expected wake text'],
                 'expected_native_id': conv_missing, 'task_launch': False, 'resume_message_id': unrel_wake['id'],
             })
-            missing_edges = agy_bridge._on_turn_start(
+            missing_edges, _ = agy_bridge._on_turn_start(
                 agent_dir, launch_missing, conv_missing, invocation_num=0, initial_num_steps=1,
             )
             self.assertEqual(len(missing_edges), 1)
@@ -3087,13 +3310,13 @@ class AgyAdapterUnitTest(BaseTest):
                 'argv': ['agy', '--conversation', conv1, '--prompt-interactive=expected wake text'],
                 'expected_native_id': conv1, 'task_launch': False, 'resume_message_id': unrel_wake['id'],
             })
-            nosteps_edges = agy_bridge._on_turn_start(
+            nosteps_edges, _ = agy_bridge._on_turn_start(
                 agent_dir, launch_nosteps, conv1, invocation_num=0, initial_num_steps=None,
             )
             self.assertEqual(len(nosteps_edges), 1)
             self.assertEqual((nosteps_edges[0].source, nosteps_edges[0].attempt, nosteps_edges[0].first_task),
                              ('harness', None, False))
-            # Real wake opener WITH a trailing PRIORITY_LOW restart notice before PreInvocation proves step-20
+            # Real wake opener WITH a trailing PRIORITY_LOW restart notice before PreInvocation proves step-22
             # and emits source='harness', attempt=real_wake['id'], first_task=False.
             launch_real_wake = str(uuid4())
             (agent_dir / 'launches' / launch_real_wake).mkdir(parents=True)
@@ -3104,22 +3327,22 @@ class AgyAdapterUnitTest(BaseTest):
                 'env': {'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': launch_real_wake},
             })
             append_rows(
-                {'step_index': 20, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                {'step_index': 22, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:20Z',
                  'content': '<USER_REQUEST>\nreal wake opener\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime\n</ADDITIONAL_METADATA>'},
-                {'step_index': 21, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                {'step_index': 23, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:20Z',
                  'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:04:20Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>'},
             )
-            real_wake_edges = agy_bridge._on_turn_start(
-                agent_dir, launch_real_wake, conv1, invocation_num=0, initial_num_steps=22,
+            real_wake_edges, _ = agy_bridge._on_turn_start(
+                agent_dir, launch_real_wake, conv1, invocation_num=0, initial_num_steps=24,
             )
             self.assertEqual(len(real_wake_edges), 1)
             self.assertEqual((real_wake_edges[0].source, real_wake_edges[0].attempt, real_wake_edges[0].first_task),
                              ('harness', real_wake['id'], False))
-            # Close step-20's wake turn and restore runtime.json to launch2 before step 9.
+            # Close step-22's wake turn and restore runtime.json to launch2 before step 9.
             append_rows(
-                {'step_index': 22, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                {'step_index': 24, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:04:22Z', 'content': 'REAL_AWAKE'},
             )
             write(agent_dir / 'runtime.json', {
@@ -3130,29 +3353,29 @@ class AgyAdapterUnitTest(BaseTest):
             # 9. Batched SYSTEM_MESSAGE rows delivered together with omitted odd steps between them (e.g. steps
             #    24, 26, 28 before one response at 29) must stay one turn: ['prompt', 'mid_turn', 'mid_turn'].
             append_rows(
-                {'step_index': 24, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
-                 'created_at': '2026-11-24T10:05:00Z',
-                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch1\n</SYSTEM_MESSAGE>'},
                 {'step_index': 26, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:05:00Z',
-                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch2\n</SYSTEM_MESSAGE>'},
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch1\n</SYSTEM_MESSAGE>'},
                 {'step_index': 28, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:05:00Z',
+                 'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch2\n</SYSTEM_MESSAGE>'},
+                {'step_index': 30, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:05:00Z',
                  'content': '<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:05:00Z sender=system priority=MESSAGE_PRIORITY_HIGH content=batch3\n</SYSTEM_MESSAGE>'},
-                {'step_index': 29, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                {'step_index': 31, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
                  'created_at': '2026-11-24T10:05:02Z', 'content': 'BATCH_DONE'},
             )
             batch_view = adapter.transcript_view(sess_obj)
             by_step = {r.ref: r.label for r in batch_view.rows}
             self.assertEqual(
-                [by_step['step-24'], by_step['step-26'], by_step['step-28'], by_step['step-29']],
+                [by_step['step-26'], by_step['step-28'], by_step['step-30'], by_step['step-31']],
                 ['prompt', 'mid_turn', 'mid_turn', 'response'],
             )
 
-    def test_stop_hook_pins_launch_id_and_yields_to_idle_before_continuation_cap(self):
-        """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's
-        follow-up queue, and Stop must yield to idle after MAX_STOP_CONTINUATIONS so Antigravity's 10-block
-        cap cannot silently drop the next queued message."""
+    def test_hooks_pin_launch_id_and_post_invocation_yields_to_idle_at_continuation_cap(self):
+        """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's queue,
+        and PostInvocation must yield to Stop and an idle wake after MAX_POST_CONTINUATIONS chained messages, so an
+        unproven force_continue limit can never drop a message already marked handed off."""
         agent_id = str(uuid4())
         old_launch = str(uuid4())
         cur_launch = str(uuid4())
@@ -3162,6 +3385,7 @@ class AgyAdapterUnitTest(BaseTest):
         write(agent_dir / 'properties.json', {
             'id': agent_id, 'name': 'agy-stop-cap', 'harness': 'agy',
             'workspace': str(self.work), 'native_session_id': conv_id,
+            'native_session_home': os.path.realpath(agy_storage.agy_home()),
         })
         write(agent_dir / 'runtime.json', {
             'launch_id': cur_launch, 'state': 'running', 'status': 'working',
@@ -3170,58 +3394,44 @@ class AgyAdapterUnitTest(BaseTest):
         launch_files.write_request(agent_dir, cur_launch, {'expected_native_id': None})
         agy_bridge.write_ls_info(agent_dir, cur_launch, '127.0.0.1:4242', 'csrf-tok', conv_id)
         env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': agent_id, 'MV2_LAUNCH_ID': cur_launch}
-        # Enqueue MAX_STOP_CONTINUATIONS + 2 follow-ups.
-        total = agy_bridge.MAX_STOP_CONTINUATIONS + 2
+        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env)
+        total = agy_bridge.MAX_POST_CONTINUATIONS + 2
         msg_ids = []
         for idx in range(total):
             mid = str(uuid4())
             msg_ids.append(mid)
             agy_bridge.write_receipt(agent_dir, mid, launch_id=cur_launch, native_id=conv_id,
-                                     route='stop-hook', submitted_at=now(),
+                                     route='hook-user-input', submitted_at=now(),
                                      text_sha256=agy_storage.message_hash(f'msg-{idx}'))
-            agy_bridge.enqueue_followup(agent_dir, cur_launch, mid, conv_id, f'msg-{idx}')
-        # 1. Stale prior launch's hook invocation (pinned --launch-id != MV2_LAUNCH_ID) is an instant no-op.
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True},
-                                   env=env, expected_launch_id=old_launch),
-            {},
-        )
+            agy_bridge.enqueue_message(agent_dir, cur_launch, mid, conv_id, f'msg-{idx}')
+        # 1. A stale prior launch's hook (pinned --launch-id != MV2_LAUNCH_ID) is an instant no-op, from main() too.
+        self.assertEqual(post_invocation(agent_dir, conv_id, env, expected_launch_id=old_launch), {})
         self.assertEqual(agy_bridge.followup_status(agent_dir, cur_launch, msg_ids[0]), ('queued', None))
-        # Also verify CLI main() parses --launch-id and ignores mismatched launch IDs.
+        self.assertEqual(agy_bridge.handle_hook('PostInvocation', {'conversationId': conv_id}, env=env), inject('msg-0'))
         import io
         with patch.dict(os.environ, env, clear=False), \
-                patch('sys.stdin', io.StringIO(json.dumps({'conversationId': conv_id, 'fullyIdle': True}))), \
+                patch('sys.stdin', io.StringIO(json.dumps({'conversationId': conv_id}))), \
                 patch('sys.stdout', new_callable=io.StringIO) as out:
-            self.assertEqual(agy_bridge.main(['hook', 'Stop', '--launch-id', old_launch]), 0)
+            self.assertEqual(agy_bridge.main(['hook', 'PostInvocation', '--launch-id', old_launch]), 0)
             self.assertEqual(json.loads(out.getvalue()), {})
-        self.assertEqual(agy_bridge.followup_status(agent_dir, cur_launch, msg_ids[0]), ('queued', None))
-        # 2. First MAX_STOP_CONTINUATIONS stops continue via Stop hook in FIFO order.
-        for idx in range(agy_bridge.MAX_STOP_CONTINUATIONS):
-            reply = agy_bridge.handle_hook(
-                'Stop', {'conversationId': conv_id, 'fullyIdle': True},
-                env=env, expected_launch_id=cur_launch,
-            )
-            self.assertEqual(reply, {'decision': 'continue', 'reason': f'msg-{idx}'})
+        self.assertEqual(agy_bridge.followup_status(agent_dir, cur_launch, msg_ids[1]), ('queued', None))
+        # 2. Chained continuations (each followed by agy's next PreInvocation) inject in FIFO order up to the cap.
+        for idx in range(1, agy_bridge.MAX_POST_CONTINUATIONS):
+            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': idx}, env=env)
+            self.assertEqual(post_invocation(agent_dir, conv_id, env), inject(f'msg-{idx}'))
             self.assertEqual(agy_bridge.followup_status(agent_dir, cur_launch, msg_ids[idx]), ('handed_off', None))
-        # 3. Next Stop hits the cap and yields `{}` without popping msg[MAX_STOP_CONTINUATIONS], resetting
-        #    turn_active=False and stop_continue_streak=0 so idle statusLine can flush it via agentapi.
-        yield_idx = agy_bridge.MAX_STOP_CONTINUATIONS
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True},
-                                   env=env, expected_launch_id=cur_launch),
-            {},
-        )
+        # 3. The next turn-ending step yields without popping; Stop closes the turn and kicks the idle wake.
+        yield_idx = agy_bridge.MAX_POST_CONTINUATIONS
+        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': yield_idx}, env=env)
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), {})
         self.assertEqual(agy_bridge.followup_status(agent_dir, cur_launch, msg_ids[yield_idx]), ('queued', None))
-        # Idle statusLine sees the queued message as immediately flushable.
         with patch.object(agy_bridge, '_spawn_idle_flush', return_value=True) as spawn_mock:
-            agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
+            self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env), {})
         spawn_mock.assert_called_once()
-        # Once a fresh turn finishes normally after streak reset, Stop-hook continuations work again.
-        reply_after = agy_bridge.handle_hook(
-            'Stop', {'conversationId': conv_id, 'fullyIdle': True},
-            env=env, expected_launch_id=cur_launch,
-        )
-        self.assertEqual(reply_after, {'decision': 'continue', 'reason': f'msg-{yield_idx}'})
+        self.assertEqual(read(agent_dir / 'launches' / cur_launch / agy_bridge.FOLLOWUPS_FILE)['post_continue_streak'], 0)
+        # 4. A fresh turn chains PostInvocation continuations again.
+        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env)
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), inject(f'msg-{yield_idx}'))
 
     def test_agy_mouse_mode_on_task_and_wake_keeps_bridge_readiness(self):
         """Bridged agy --task and wake launches enable session-scoped tmux mouse via CommandSpec.mouse while keeping
@@ -3229,7 +3439,7 @@ class AgyAdapterUnitTest(BaseTest):
         and promptless launches also request mouse and runner_listen."""
         self._trust_workspace()
         fake_agy = self.work / 'agy-mouse-stub'
-        fake_agy.write_text('#!/bin/sh\necho "agy 1.5.16"\n')
+        fake_agy.write_text('#!/bin/sh\necho "agy 1.5.17"\n')
         fake_agy.chmod(0o755)
         adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy)})
         plain_adapter = AgyAdapter.configured('agy', {'executable': str(fake_agy), 'inbox_bridge': False})
@@ -3301,7 +3511,7 @@ class AgyAdapterUnitTest(BaseTest):
         flush_log = self.work / 'f2-flush.jsonl'
         fake_agy.write_text(
             f'#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n'
-            'if sys.argv[1:] == ["--version"]:\n    print("agy 1.5.16"); sys.exit(0)\n'
+            'if sys.argv[1:] == ["--version"]:\n    print("agy 1.5.17"); sys.exit(0)\n'
             'if sys.argv[1:3] == ["agentapi", "send-message"]:\n'
             f'    with Path({str(flush_log)!r}).open("a") as f: f.write(json.dumps({{"id": sys.argv[3], "text": sys.argv[4]}}) + "\\n")\n'
             '    print(json.dumps({"response": {"sendMessage": {"recipientId": sys.argv[3]}}})); sys.exit(0)\n'
@@ -3611,7 +3821,7 @@ class AgyAdapterUnitTest(BaseTest):
             'launch_id': launch_id, 'state': 'running', 'status': 'unknown', 'pid': 4242,
             'startup_checked': True, 'startup_delivery': 'ready',
             'control_endpoint': {'transport': 'unix-json', 'address': str(self.work / 'rpc.sock')},
-            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None},
+            'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
             'native_bridge': None,
         })
         launch_files.write_request(agent_dir, launch_id, {
@@ -3634,23 +3844,20 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertIsNotNone(adapter.connection_problem(sess))
         bad_ls.unlink()
 
-        # Busy follow-up BEFORE agy-ls.json queues for Stop hook and delivers once at Stop.
+        # Busy follow-up BEFORE agy-ls.json queues for the hooks and the turn-ending PostInvocation injects it once.
         agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0, 'initialNumSteps': 1}, env=env)
         busy_sess = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         m_busy = str(uuid4())
         busy_exec = Mock()
         busy_res = adapter.send(busy_sess, Message(m_busy, 'busy before ls', delivery='follow-up'), busy_exec)
-        self.assertEqual((busy_res.state, busy_res.value['route']), ('native_queued', 'stop-hook'))
+        self.assertEqual((busy_res.state, busy_res.value['route']), ('native_queued', 'hook-user-input'))
         self.assertNotIn('idle_start_error', busy_res.value)
         busy_exec.command.assert_not_called()
-        self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env),
-            {'decision': 'continue', 'reason': 'busy before ls'},
-        )
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), inject('busy before ls'))
         agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env)
 
         # Idle send (steer or follow-up) BEFORE agy-ls.json queues visibly with idle_start_error=True (never fails),
-        # delivers once via Stop when a new turn runs, and delivers once via agentapi once agy-ls.json connects.
+        # is injected once by the next turn's PreInvocation, and wakes the session once agy-ls.json connects.
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
         idle_sess = SessionHandle.from_records(read(agent_dir / 'properties.json'), read(agent_dir / 'runtime.json'), agent_dir)
         m_idle_stop = str(uuid4())
@@ -3664,16 +3871,16 @@ class AgyAdapterUnitTest(BaseTest):
         # Idle statusLine before agy-ls.json does not fail or spawn flush-idle.
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_idle_stop), 'queued')
-        # Next turn's Stop hook delivers it once (and a second Stop never resends it).
-        agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0, 'initialNumSteps': 3}, env=env)
+        # The next turn's PreInvocation injects it once, and its PostInvocation never resends it.
         self.assertEqual(
-            agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env),
-            {'decision': 'continue', 'reason': 'queued while idle 1'},
+            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0, 'initialNumSteps': 3}, env=env),
+            user_message('queued while idle 1'),
         )
+        self.assertEqual(post_invocation(agent_dir, conv_id, env), {})
         self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env), {})
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
 
-        # Second idle message before agy-ls.json flushes automatically once agy-ls.json connects, and never twice.
+        # Second idle message before agy-ls.json wakes the session once agy-ls.json connects, and never twice.
         m_idle_ls = str(uuid4())
         res_idle_ls = adapter.send(idle_sess, Message(m_idle_ls, 'queued until agentapi', delivery='follow-up'), Mock())
         self.assertTrue(res_idle_ls.value.get('idle_start_error'))
@@ -3682,10 +3889,15 @@ class AgyAdapterUnitTest(BaseTest):
         self.addCleanup(server.close)
         agy_bridge.write_ls_info(agent_dir, launch_id, server.address, 'tok-prels', conv_id)
         agy_bridge.handle_statusline({'conversation_id': conv_id, 'agent_state': 'idle'}, env=env)
-        until(lambda: agy_bridge.followup_state(agent_dir, launch_id, m_idle_ls) == 'handed_off', 5)
+        until(lambda: agy_bridge.followup_state(agent_dir, launch_id, m_idle_ls) == 'wake_pending', 5)
+        until(lambda: flush_log.exists() and flush_log.read_text().strip(), 5)
+        self.assertEqual(
+            agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env),
+            user_message('queued until agentapi'),
+        )
         self.assertEqual(agy_bridge.handle_hook('Stop', {'conversationId': conv_id, 'fullyIdle': True}, env=env), {})
         delivered = [json.loads(line)['text'] for line in flush_log.read_text().splitlines() if line.strip()]
-        self.assertEqual(delivered, ['queued until agentapi'])
+        self.assertEqual(delivered, [agy_bridge.WAKE_PING])
 
 
 class AgyTmuxLaunchTest(TerminalBase):
@@ -3712,8 +3924,9 @@ class AgyTmuxLaunchTest(TerminalBase):
 
     def test_tmux_bridge_shell_handoff_drains_startup_queue_and_cleans_ls_file(self):
         """A real tmux launch with a fake agy binary scrubs PARENT_AGY, writes 0600 launch_files, activates the bridge
-        via mv2 report, flushes a held startup message through agentapi, and unlinks agy-ls.json on exit; fragile
-        because runner StartupDelivery, shell callback handoff and exit cleanup span three separate processes."""
+        via mv2 report, wakes the idle session for a held startup message with an agentapi ping, and unlinks
+        agy-ls.json on exit; fragile because runner StartupDelivery, shell callback handoff and exit cleanup span
+        three separate processes."""
         self._trust_workspace()
         server = _LoopbackListener()
         self.addCleanup(server.close)
@@ -3726,7 +3939,7 @@ class AgyTmuxLaunchTest(TerminalBase):
             "import json, os, subprocess, sys, time\nfrom pathlib import Path\n"
             "args = sys.argv[1:]\n"
             "if args == ['--version']:\n"
-            "    print('agy 1.5.14', flush=True)\n"
+            "    print('agy 1.5.17', flush=True)\n"
             "    sys.exit(0)\n"
             "if args[:2] == ['agentapi', 'send-message']:\n"
             f"    Path({str(delivered_log)!r}).write_text(json.dumps({{'conv': args[2], 'text': args[3], 'addr': os.environ.get('ANTIGRAVITY_LS_ADDRESS'), 'has_tok': bool(os.environ.get('ANTIGRAVITY_CSRF_TOKEN'))}}))\n"
@@ -3740,7 +3953,12 @@ class AgyTmuxLaunchTest(TerminalBase):
             f"'ANTIGRAVITY_CONVERSATION_ID': {conv_id!r}}}\n"
             "subprocess.run([os.environ['MV2_CLI'], 'report', '--phase', 'working', '--summary', 'ready'], env=child_env, check=True)\n"
             "print('? for shortcuts', flush=True)\n"
-            "while True: time.sleep(0.5)\n"
+            # Like agy, keep rendering the idle statusLine, which is what wakes an idle session for queued messages.
+            f"bridge = {str(Path(agy_bridge.__file__).resolve())!r}\n"
+            f"idle = json.dumps({{'conversation_id': {conv_id!r}, 'agent_state': 'idle'}})\n"
+            "while True:\n"
+            "    subprocess.run([sys.executable, bridge, 'statusline'], input=idle, text=True, env=child_env, capture_output=True)\n"
+            "    time.sleep(0.5)\n"
         )
         fake_agy.chmod(0o755)
         spec = read(self.root / 'harnesses' / 'agy' / 'harness.json')
@@ -3780,13 +3998,18 @@ class AgyTmuxLaunchTest(TerminalBase):
 
         delivered = read(delivered_log)
         self.assertEqual(delivered['conv'], conv_id)
-        self.assertIn('held startup ping', delivered['text'])
+        self.assertEqual(delivered['text'], agy_bridge.WAKE_PING)
         self.assertEqual(delivered['addr'], server.address)
         self.assertTrue(delivered['has_tok'])
         self.assertEqual(read(agent_dir / 'properties.json')['native_session_id'], conv_id)
         self.assertEqual(read(agent_dir / 'runtime.json')['native_bridge'], BRIDGE)
+        # The wake turn's PreInvocation (fired here as agy would) injects the held message itself.
+        env = {'MV2_UNIVERSE': str(self.root), 'MV2_AGENT_ID': started['id'], 'MV2_LAUNCH_ID': launch_id}
+        reply = agy_bridge.handle_hook('PreInvocation', {'conversationId': conv_id, 'invocationNum': 0}, env=env)
+        self.assertEqual(len(reply['injectSteps']), 1)
+        self.assertIn('held startup ping', reply['injectSteps'][0]['userMessage'])
 
-        # Queue a busy stop-hook follow-up, kill before Stop fires, --check marks it failed, and --retry wakes
+        # Queue a follow-up, kill before any hook injects it, --check marks it failed, and --retry wakes
         # directly with --prompt-interactive on the first try (not promptless _queue_wake).
         saved_conv = self.work / '.gemini' / 'antigravity-cli' / 'conversations' / f'{conv_id}.db'
         saved_conv.parent.mkdir(parents=True, exist_ok=True)
@@ -3826,7 +4049,7 @@ class AgyTmuxLaunchTest(TerminalBase):
             "import json, os, shlex, subprocess, sys, time\nfrom pathlib import Path\n"
             "args = sys.argv[1:]\n"
             "if args == ['--version']:\n"
-            "    print('agy 1.5.16', flush=True)\n"
+            "    print('agy 1.5.17', flush=True)\n"
             "    sys.exit(0)\n"
             "if '--settings' in args and not any(a.startswith('--prompt-interactive=') for a in args):\n"
             "    settings_path = Path(args[args.index('--settings') + 1])\n"

@@ -158,6 +158,10 @@ def _classify_row(row: dict, *, turn_open: bool) -> tuple[str, str, str | None, 
     raw_source = row.get('source')
 
     if kind == 'USER_INPUT':
+        if raw_source == 'SYSTEM_SDK':
+            if turn_open:
+                return kind, 'mid_turn', 'plugin', None, False, '', True, False
+            return kind, 'prompt', 'plugin', None, False, _extract_user_preview(row), True, True
         src = 'human' if raw_source == 'USER_EXPLICIT' else None
         return kind, 'prompt', src, None, False, _extract_user_preview(row), True, True
 
@@ -315,8 +319,11 @@ def view(session, *, tip: str | None = None, reader=None) -> AgyView:
                     ref = f'step-{step_index}' if type(step_index) is int and step_index >= 0 else None
                     # An omitted step index directly after a PLANNER_RESPONSE with tool_calls (an Esc-cancelled
                     # tool call whose GENERIC step was never logged) ends the prior open turn before the next
-                    # incoming SYSTEM_MESSAGE prompt. Never fire on gaps between batched SYSTEM_MESSAGE rows.
-                    if (turn_open and parsed.get('type') == 'SYSTEM_MESSAGE' and last_was_tool_call
+                    # incoming SYSTEM_MESSAGE or hook-injected SYSTEM_SDK USER_INPUT prompt.
+                    if (turn_open and (
+                            parsed.get('type') == 'SYSTEM_MESSAGE'
+                            or (parsed.get('type') == 'USER_INPUT' and parsed.get('source') == 'SYSTEM_SDK')
+                    ) and last_was_tool_call
                             and type(step_index) is int and last_step_index is not None
                             and step_index > last_step_index + 1):
                         turn_open = False
@@ -565,9 +572,12 @@ def project_turn_event(session, selected_view: TranscriptView, transition, *, re
                             cursor -= 1
                         if cursor >= 0 and rows[cursor].label in ('prompt', 'command') and _is_pre_logged(cursor):
                             return cursor
-            # agentapi follow-ups and background task notifications are appended after PreInvocation at step-{init_steps}.
+            # agentapi messages, background task notifications and PreInvocation-injected user messages are
+            # appended after PreInvocation from step-{init_steps}; an mv2 wake ping there is skipped as injected.
             next_idx = resolve_index(f'step-{init_steps}')
-            if next_idx is not None and rows[next_idx].label in ('prompt', 'command'):
+            while next_idx is not None and next_idx < len(rows) and rows[next_idx].label in ('injected', 'meta'):
+                next_idx += 1
+            if next_idx is not None and next_idx < len(rows) and rows[next_idx].label in ('prompt', 'command'):
                 return next_idx
             return None
 

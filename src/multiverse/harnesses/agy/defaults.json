@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "description": "Antigravity CLI; prompt-led coordination, hooks/statusLine and local agentapi bridge.",
-  "checked_cli_version": "1.5.16",
+  "checked_cli_version": "1.5.17",
   "session": "reported",
   "spawn": [
     "agy",

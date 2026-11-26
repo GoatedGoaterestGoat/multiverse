@@ -9,7 +9,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-cba6f7?labelColor=1e1e2e" alt="MIT license"></a>
   <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.332-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.332"></a>
   <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.172.0-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.172.0"></a>
-  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Antigravity%20CLI-1.5.16-cba6f7?labelColor=1e1e2e" alt="Checked against Antigravity CLI 1.5.16"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Antigravity%20CLI-1.5.17-cba6f7?labelColor=1e1e2e" alt="Checked against Antigravity CLI 1.5.17"></a>
 </p>
 
 **A harness-agnostic, extensible manager for agent teams.**

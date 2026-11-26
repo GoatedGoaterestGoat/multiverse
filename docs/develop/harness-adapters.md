@@ -179,7 +179,7 @@ A **plain** launch is the CLI in its pane. mv2 sees whether it is alive, can sto
 | --- | --- | --- | --- |
 | Claude | `unix-lines`: Claude's peer inbox (`--messaging-socket-path`) | The `multiverse` mod in `claude/mod/`, loaded with `--plugin-dir` | Auto |
 | Codex | `unix-websocket`: a launch relay to the shared app-server | `codex/launch.py` and `codex/protocol.py` | Auto |
-| Antigravity | `unix-json` marker; loopback `agentapi` and `Stop` hook | `agy/bridge.py`, wired by launch-private `--settings`, `.agents/hooks.json` and `shell_callback` | Auto |
+| Antigravity | `unix-json` marker; hooks and a loopback `agentapi` wake | `agy/bridge.py`, wired by launch-private `--settings`, `.agents/hooks.json` and `shell_callback` | Auto |
 | Pi | `unix-json`: a socket the extension listens on | `pi/extension.ts`, loaded with `--extension` | Off |
 
 `settings.inbox_bridge` in `harness.json` picks the mode. Unset means the default above, `true` requires the bridge, and `false` launches plain.
@@ -270,11 +270,11 @@ Plugins can add to a launch: extra plugin directories for Claude Code, extension
 | `wake` | Yes | Yes | Yes | Yes | No |
 | `session_name` | `--name` | Bridge: `thread/name/set` | No | `--name` | No |
 | `stop` | Terminal | Bridge: cancels app-server work, then terminal | Terminal | Terminal | Terminal |
-| `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: `agentapi` (`steer`/idle) and `Stop` hook (busy `follow-up`) | Bridge: extension socket | No |
+| `send_steer`, `send_follow_up` | Bridge: peer inbox and mod | Bridge: app-server | Bridge: hook-injected user messages (`PreInvocation` for steers, `PostInvocation` for follow-ups), woken by an `agentapi` ping when idle | Bridge: extension socket | No |
 | `get_delivery` | Bridge: mod receipt | Bridge: app-server queue and turns | Bridge: `agy-receipts/` and transcript cohort confirmation | Bridge: extension | No |
 | `ask` | Bridge: a model fork over the transcript | [Private tool-free transcript copy](../use/harnesses.md#codexs-questions-and-one-shot-runs), with or without the bridge | No | No | No |
 | `get_usage` | Session transcript; the bridge adds window, cost and rate limits | Bridge: app-server context; plain: the last bridge reading | Session transcript; the bridge adds window, cost and quota | No | No |
-| `queued` | Bridge: mod queue file | Bridge: app-server after-turn queue | Bridge: launch-local `Stop`-hook follow-up queue | No | No |
+| `queued` | Bridge: mod queue file | Bridge: app-server after-turn queue | Bridge: launch-local hook message queue | No | No |
 | `compaction` | Live connection, when the compaction plugin is on | No | No | No | No |
 
 `spawn`, `resume`, `send_steer` and `send_follow_up` are marked `required`. Codex checks its app-server only with an executor, so its message capabilities read `unavailable` without `--probe`.
@@ -323,7 +323,7 @@ Legacy text-allocation cohorts include every scoped acceptance under its native 
 | --- | --- |
 | Claude | The mod writes `claude-receipts/ATTEMPT_ID.json` for delivery and `ATTEMPT_ID.not-delivered.json` for failure. A valid delivery wins when both exist; older records use the message ID. |
 | Codex | The adapter searches the thread's queue (100 entries) and recent turns (20) |
-| Antigravity | `agy-receipts/ATTEMPT_ID.json` stores route, submission time and SHA-256 hash; `get_delivery` confirms against `transcript_full.jsonl` / `transcript.jsonl` with route-specific envelopes and oldest-first cohort allocation |
+| Antigravity | `agy-receipts/ATTEMPT_ID.json` stores route, submission time and SHA-256 hash; `get_delivery` confirms against `transcript_full.jsonl` / `transcript.jsonl` with route-specific rows (hook-injected `SYSTEM_SDK` user input, or the older `agentapi` and `Stop`-hook envelopes) and oldest-first cohort allocation |
 | Pi | The extension answers from its transcript metadata and in-process records |
 
 `message.id` is a private UUID for correlating receipts. Show the model only `message.framed`, which is the sender line and the text. Optional `message.sent_at` carries the original aware ISO send timestamp from the inbox row, never the retry or receipt time. Core frames age at submission preparation when it exceeds 10 minutes; older callers may leave this field `None`. A provider that updates the age when it stores the row must preserve the message body and account for that first-line change when reading delivery evidence.

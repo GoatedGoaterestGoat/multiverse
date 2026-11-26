@@ -4,12 +4,17 @@ Bootstraps each launch via `--add-dir <launch_dir>` containing `AGENTS.md` (and 
 in bridge mode) plus session-only `--settings <launch_dir>/settings.json` for `statusLine` and
 minimal `permissions.allow` rules covering mv2's state/run directories.
 
-Live message delivery activates once the agent runs its first `mv2` shell callback (such as
-`mv2 report`), which captures `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN` into a
-launch-private `0600` file (`launches/<launch_id>/agy-ls.json`, removed when the runner exits normally):
-- `steer` (and idle `follow-up`) submit via `agy agentapi send-message`
-- busy `follow-up` queues into `launches/<launch_id>/agy-followups.json` and delivers via the
-  `Stop` hook (`{"decision": "continue", "reason": ...}`), with an idle-transition recheck.
+mv2 messages queue in `launches/<launch_id>/agy-followups.json` and arrive as real user messages
+(`injectSteps` `userMessage`) from the hooks:
+- a busy `steer` goes in at the next `PreInvocation`, before the agent's next model call;
+- a busy `follow-up` (or a steer during the final text step) goes in at the turn-ending
+  `PostInvocation` with `terminationBehavior: force_continue`;
+- an idle agent is woken by sending the fixed `WAKE_PING` (never the message text) through
+  `agy agentapi send-message`; that turn's `PreInvocation` injects the message.
+The wake needs the live connection, which activates once the agent runs its first `mv2` shell
+callback (such as `mv2 report`): it captures `ANTIGRAVITY_LS_ADDRESS` and `ANTIGRAVITY_CSRF_TOKEN`
+into a launch-private `0600` file (`launches/<launch_id>/agy-ls.json`, removed when the runner exits
+normally).
 """
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -29,7 +34,7 @@ from ...plugins import harness as plugin_harness
 from ...store import now, read, retry_missing
 from ..base import ConfiguredAdapter, PARENT_AGY
 from ..types import (AttachmentSpec, Capability, CommandSpec, LaunchRefused, NativeEndpoint, NativeResult,
-                     ShellCallbackResult, normalize_session_id)
+                     RestartRequired, ShellCallbackResult, normalize_session_id)
 from . import bridge as agy_bridge
 from . import models as agy_models
 from . import pane as agy_pane
@@ -37,7 +42,7 @@ from . import storage
 from . import transcripts as agy_transcripts
 
 
-MIN_BRIDGE_VERSION = (1, 5, 0)
+MIN_BRIDGE_VERSION = (1, 5, 17)  # hook injectSteps (PreInvocation/PostInvocation userMessage) proven here
 BRIDGE = agy_bridge.BRIDGE
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 LAUNCH_ONLY = 'This agent is launch-only'
@@ -46,6 +51,7 @@ NOT_REGISTERED = (
     'Antigravity bridge activates on the first mv2 command inside this session '
     '(or stop the idle agent with mv2 kill so retry wakes it)'
 )
+OLDER_BRIDGE = "This launch's Antigravity bridge predates hook-injected user messages"  # core adds kill-then-resume
 
 _versions = {}
 _RULE = re.compile(r'^\s*[─━]{8,}')
@@ -125,6 +131,9 @@ def bridge_of(enabled, session) -> Bridge:
         reason = f'{LAUNCH_ONLY}: {cause}'
     elif session.state in ('stopped', 'dormant', 'failed'):
         reason = NOT_RUNNING
+    elif launch.get('mode') == 'bridge' and launch.get('bridge') != BRIDGE:
+        # Made by an older mv2: its hooks.json has no PostInvocation and its agy may ignore injectSteps.
+        reason = OLDER_BRIDGE
     else:
         reason = NOT_REGISTERED
     return Bridge(launched, registered, ready, reason, launch_only, final=launch_only and not enabled)
@@ -156,6 +165,9 @@ def _hooks_config(launch_id: str | None = None) -> str:
             ],
             'PreInvocation': [
                 {'type': 'command', 'command': _bridge_command('hook', 'PreInvocation', *extra), 'timeout': 10},
+            ],
+            'PostInvocation': [
+                {'type': 'command', 'command': _bridge_command('hook', 'PostInvocation', *extra), 'timeout': 15},
             ],
             'Stop': [
                 {'type': 'command', 'command': _bridge_command('hook', 'Stop', *extra), 'timeout': 15},
@@ -1659,19 +1671,26 @@ class AgyAdapter(ConfiguredAdapter):
             shell_callback=True,
             mouse=True,
             runner_listen=True,
-            native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
+            native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None, 'bridge': BRIDGE},
         )
 
     def shell_callback(self, session, environment) -> ShellCallbackResult | None:
         if not session.session_file or not session.launch_id:
             return None
         agent_dir = Path(session.session_file).parent
+        native_mode = session.native_mode or {}
         try:
             facts = retry_missing(lambda: read(agent_dir / 'runtime.json'))
             if isinstance(facts, dict) and facts.get('binding_conflict'):
                 return None
+            if isinstance(facts, dict) and facts.get('launch_id') == session.launch_id:
+                native_mode = facts.get('native_mode') or {}
         except (OSError, ValueError):
             pass
+        if native_mode.get('bridge') != BRIDGE:
+            # A launch an older mv2 made (no PostInvocation hook, maybe an agy that ignores injectSteps) must not
+            # become ready for hook delivery when its agent runs an mv2 command; it needs a restart.
+            return None
         req_kind, expected = agy_bridge._launch_expected_id(agent_dir, session.launch_id)
         raw_conv = environment.get('ANTIGRAVITY_CONVERSATION_ID')
         conv_id = None
@@ -1737,9 +1756,13 @@ class AgyAdapter(ConfiguredAdapter):
     def attachment_ready(self, session) -> bool:
         return not session.endpoint or self._bridge(session).ready
 
-    def connection_problem(self, session) -> str | None:
-        if session.state != 'running' or not session.endpoint or not self._bridge(session).launched:
+    def connection_problem(self, session) -> str | RestartRequired | None:
+        bridge = self._bridge(session)
+        if session.state != 'running' or not session.endpoint or not bridge.launched:
             return None
+        if bridge.reason == OLDER_BRIDGE:
+            # From the launch record alone; core shows it with the kill and resume commands before anyone sends.
+            return RestartRequired(OLDER_BRIDGE)
         if session.bridge == BRIDGE and session.session_file and session.launch_id:
             agent_dir = Path(session.session_file).parent
             ls_file = agy_bridge.ls_path(agent_dir, session.launch_id)
@@ -1833,17 +1856,17 @@ class AgyAdapter(ConfiguredAdapter):
             'unavailable', 'Antigravity CLI has no non-interactive conversation rename API',
         )
         result['send_steer'] = (
-            Capability('supported', mechanism='agy-agentapi', required=True) if bridge.ready
+            Capability('supported', mechanism='agy-hooks', required=True) if bridge.ready
             else Capability('unavailable', bridge.reason,
                             mechanism='launch-only' if bridge.final else None, required=True)
         )
         result['send_follow_up'] = (
-            Capability('supported', mechanism='agy-stop-hook', required=True) if bridge.ready
+            Capability('supported', mechanism='agy-hooks', required=True) if bridge.ready
             else Capability('unavailable', bridge.reason,
                             mechanism='launch-only' if bridge.final else None, required=True)
         )
         result['queued'] = (
-            Capability('supported', mechanism='agy-stop-hook') if bridge.ready
+            Capability('supported', mechanism='agy-hooks') if bridge.ready
             else Capability('unavailable', bridge.reason,
                             mechanism='launch-only' if bridge.final else None)
         )
@@ -1866,10 +1889,10 @@ class AgyAdapter(ConfiguredAdapter):
             why = problem and (f'Launches of this harness refuse to start: {problem}' if self.bridge_policy == 'required'
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {
-            'send_steer': 'agy-agentapi',
-            'send_follow_up': 'agy-stop-hook',
+            'send_steer': 'agy-hooks',
+            'send_follow_up': 'agy-hooks',
             'get_delivery': 'agy-transcript',
-            'queued': 'agy-stop-hook',
+            'queued': 'agy-hooks',
         }
         result = {
             name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
@@ -1921,262 +1944,170 @@ class AgyAdapter(ConfiguredAdapter):
         text = message.framed or message.text
         submitted_at = now()
         text_sha256 = storage.message_hash(text)
-        claimed_for_agentapi = False
-        claim_token = None
 
-        should_queue = (ls_info is None) or (
-            mode == 'follow-up' and (
-                current_status != 'idle'
-                or agy_bridge.should_queue_idle_followup(
-                    agent_dir, session.launch_id, session.native_id,
-                    live_facts=current_facts if isinstance(current_facts, dict) else None,
-                )
+        executor.check_session()
+        try:
+            agy_bridge.write_receipt(
+                agent_dir,
+                message.id,
+                launch_id=session.launch_id,
+                native_id=session.native_id,
+                route='hook-user-input',
+                submitted_at=submitted_at,
+                text_sha256=text_sha256,
+                delivered_at=None,
+                acknowledged=True,
             )
-        )
-        if should_queue:
-            executor.check_session()
-            try:
-                agy_bridge.write_receipt(
-                    agent_dir,
-                    message.id,
-                    launch_id=session.launch_id,
-                    native_id=session.native_id,
-                    route='stop-hook',
-                    submitted_at=submitted_at,
-                    text_sha256=text_sha256,
-                    delivered_at=None,
-                    acknowledged=True,
-                )
-            except (OSError, ValueError) as error:
-                detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
-                return NativeResult(
-                    'error',
-                    f'Cannot persist Antigravity delivery receipt before send: {detail}',
-                )
-            try:
-                agy_bridge.enqueue_followup(agent_dir, session.launch_id, message.id, session.native_id, text)
-            except (OSError, ValueError) as error:
-                agy_bridge.remove_receipt(agent_dir, message.id)
-                detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
-                return NativeResult('error', detail)
-            # A new send on an idle session resumes any cancel/error-paused queue in FIFO order
-            # (earlier paused head runs first; this message stays queued behind it).
-            if current_status == 'idle':
-                agy_bridge.resume_paused_for_new_send(agent_dir, session.launch_id, session.native_id)
-            if ls_info is None:
-                # Recheck whether agentapi credentials appeared concurrently before deciding to stay queued.
-                latest_ls = agy_bridge.read_ls_info(agent_dir, session.launch_id)
-                if (latest_ls is not None and latest_ls.get('launch_id') == session.launch_id
-                        and (latest_ls.get('conversation_id') in (None, session.native_id))):
-                    try:
-                        pinned_address = agy_bridge.pin_loopback_endpoint(latest_ls['ls_address'], timeout=5.0)
-                        ls_info = latest_ls
-                    except (ValueError, RuntimeError):
-                        ls_info = None
-            if ls_info is None:
-                latest_status = current_status
+        except (OSError, ValueError) as error:
+            detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+            return NativeResult(
+                'error',
+                f'Cannot persist Antigravity delivery receipt before send: {detail}',
+            )
+        try:
+            agy_bridge.enqueue_message(
+                agent_dir, session.launch_id, message.id, session.native_id, text, mode=mode,
+            )
+        except (OSError, ValueError) as error:
+            agy_bridge.remove_receipt(agent_dir, message.id)
+            detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+            return NativeResult('error', detail)
+
+        # A new send on an idle session resumes any cancel/error-paused queue in FIFO order.
+        if current_status == 'idle':
+            agy_bridge.resume_paused_for_new_send(agent_dir, session.launch_id, session.native_id, mode=mode)
+
+        if ls_info is None:
+            # Recheck whether agentapi credentials appeared concurrently before deciding to stay queued.
+            latest_ls = agy_bridge.read_ls_info(agent_dir, session.launch_id)
+            if (latest_ls is not None and latest_ls.get('launch_id') == session.launch_id
+                    and (latest_ls.get('conversation_id') in (None, session.native_id))):
                 try:
-                    latest_facts = retry_missing(lambda: read(agent_dir / 'runtime.json'))
-                    if isinstance(latest_facts, dict) and latest_facts.get('launch_id') == session.launch_id:
-                        latest_status = latest_facts.get('status')
-                except (OSError, ValueError):
-                    pass
-                if latest_status not in ('working', 'waiting'):
-                    return NativeResult(
-                        'native_queued',
-                        'Queued for next turn; waiting for Antigravity live connection to start a turn while idle',
-                        {'route': 'stop-hook', 'transcript_confirmed': False, 'queued': True, 'idle_start_error': True},
-                    )
+                    pinned_address = agy_bridge.pin_loopback_endpoint(latest_ls['ls_address'], timeout=5.0)
+                    ls_info = latest_ls
+                except (ValueError, RuntimeError):
+                    ls_info = None
+        if ls_info is None:
+            latest_status = current_status
+            try:
+                latest_facts = retry_missing(lambda: read(agent_dir / 'runtime.json'))
+                if isinstance(latest_facts, dict) and latest_facts.get('launch_id') == session.launch_id:
+                    latest_status = latest_facts.get('status')
+            except (OSError, ValueError):
+                pass
+            if latest_status not in ('working', 'waiting'):
                 return NativeResult(
                     'native_queued',
-                    'Queued for end-of-turn delivery by the Antigravity Stop hook',
-                    {'route': 'stop-hook', 'transcript_confirmed': False, 'queued': True},
+                    'Queued for next turn; waiting for Antigravity live connection to start a turn while idle',
+                    {'route': 'hook-user-input', 'transcript_confirmed': False, 'queued': True, 'idle_start_error': True},
                 )
-            # Recheck runtime status under the queue lock to close the race where the turn went idle just before enqueue.
-            claim_token = str(uuid4())
-            claim = agy_bridge.claim_if_idle_head(
-                agent_dir, session.launch_id, message.id, session.native_id, claim_token=claim_token,
+            return NativeResult(
+                'native_queued',
+                'Queued for user-input delivery by Antigravity hooks',
+                {'route': 'hook-user-input', 'transcript_confirmed': False, 'queued': True},
             )
-            if claim == 'queued':
-                agy_bridge.kick_idle_flush_if_ready(agent_dir, session.launch_id, session.native_id)
-                return NativeResult(
-                    'native_queued',
-                    'Queued for end-of-turn delivery by the Antigravity Stop hook',
-                    {'route': 'stop-hook', 'transcript_confirmed': False, 'queued': True},
-                )
-            if claim == 'handed_off':
-                return NativeResult(
-                    'native_queued',
-                    'Handed off to Antigravity at turn end by the Stop hook',
-                    {'route': 'stop-hook', 'transcript_confirmed': False},
-                )
-            if claim == 'submitting':
-                return NativeResult(
-                    'native_queued',
-                    'Handed off for idle delivery via Antigravity agentapi',
-                    {'route': 'agentapi', 'transcript_confirmed': False},
-                )
-            if claim != 'claimed':
-                return NativeResult(
-                    'unknown',
-                    'Queued follow-up state changed before idle handoff; check delivery before retrying',
-                    {'route': 'stop-hook', 'transcript_confirmed': False},
-                )
-            claimed_for_agentapi = True
 
-        # Persist agentapi receipt before submitting so an uncertain exit can still reconcile against transcript.
-        # For a claimed queued follow-up, commit the agentapi receipt via CAS under the queue lock so a stalled
-        # claimer cannot submit after the stale-claim reaper already returned the entry to queued or Stop handed it off.
-        if claimed_for_agentapi:
-            try:
-                executor.check_session()
-                commit = agy_bridge.commit_followup_agentapi_receipt(
-                    agent_dir,
-                    session.launch_id,
-                    message.id,
-                    claim_token=claim_token,
-                    native_id=session.native_id,
-                    submitted_at=submitted_at,
-                    text_sha256=text_sha256,
-                )
-            except Exception:
-                if agy_bridge.release_followup_claim(
-                    agent_dir, session.launch_id, message.id, reset_idle_flush=True, claim_token=claim_token,
-                ):
-                    return NativeResult(
-                        'native_queued',
-                        'Queued for end-of-turn delivery by the Antigravity Stop hook',
-                        {'route': 'stop-hook', 'transcript_confirmed': False, 'queued': True},
-                    )
-                raise
-            if commit == 'handed_off':
-                return NativeResult(
-                    'native_queued',
-                    'Handed off to Antigravity at turn end by the Stop hook',
-                    {'route': 'stop-hook', 'transcript_confirmed': False},
-                )
-            if commit == 'queued':
-                agy_bridge.kick_idle_flush_if_ready(agent_dir, session.launch_id, session.native_id)
-                return NativeResult(
-                    'native_queued',
-                    'Queued for end-of-turn delivery by the Antigravity Stop hook',
-                    {'route': 'stop-hook', 'transcript_confirmed': False, 'queued': True},
-                )
-            if commit == 'submitting':
-                return NativeResult(
-                    'native_queued',
-                    'Handed off for idle delivery via Antigravity agentapi',
-                    {'route': 'agentapi', 'transcript_confirmed': False},
-                )
-            if commit != 'committed':
-                return NativeResult(
-                    'unknown',
-                    'Queued follow-up state changed before idle handoff; check delivery before retrying',
-                    {'route': 'stop-hook', 'transcript_confirmed': False},
-                )
-        else:
-            try:
-                agy_bridge.write_receipt(
-                    agent_dir,
-                    message.id,
-                    launch_id=session.launch_id,
-                    native_id=session.native_id,
-                    route='agentapi',
-                    submitted_at=submitted_at,
-                    text_sha256=text_sha256,
-                    delivered_at=None,
-                    acknowledged=False,
-                )
-            except (OSError, ValueError) as error:
-                detail = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
-                return NativeResult(
-                    'error',
-                    f'Cannot persist Antigravity delivery receipt before send: {detail}',
-                )
+        # Recheck runtime status under the queue lock: if idle and this entry is the next head,
+        # claim it as wake_pending and send a hidden WAKE_PING so PreInvocation injects the real message.
+        claim_token = str(uuid4())
+        claim = agy_bridge.claim_if_idle_head(
+            agent_dir, session.launch_id, message.id, session.native_id, claim_token=claim_token, mode=mode,
+        )
+        if claim == 'queued':
+            agy_bridge.kick_idle_flush_if_ready(agent_dir, session.launch_id, session.native_id)
+            return NativeResult(
+                'native_queued',
+                'Queued for user-input delivery by Antigravity hooks',
+                {'route': 'hook-user-input', 'transcript_confirmed': False, 'queued': True},
+            )
+        if claim == 'handed_off':
+            return NativeResult(
+                'native_queued',
+                'Handed off to Antigravity for user-input injection by hooks',
+                {'route': 'hook-user-input', 'transcript_confirmed': False},
+            )
+        if claim == 'submitting':
+            return NativeResult(
+                'native_queued',
+                'Queued behind an active Antigravity idle wake',
+                {'route': 'hook-user-input', 'transcript_confirmed': False, 'queued': True},
+            )
+        if claim != 'claimed':
+            return NativeResult(
+                'unknown',
+                'Queued message state changed before idle wake; check delivery before retrying',
+                {'route': 'hook-user-input', 'transcript_confirmed': False},
+            )
+
         command = CommandSpec(
-            (self.spec['spawn'][0], 'agentapi', 'send-message', session.native_id, text),
+            (self.spec['spawn'][0], 'agentapi', 'send-message', session.native_id, agy_bridge.WAKE_PING),
             unset_env=PARENT_AGY,
             environment={
                 'ANTIGRAVITY_LS_ADDRESS': pinned_address,
                 'ANTIGRAVITY_CSRF_TOKEN': ls_info['csrf_token'],
             },
         )
-        # Stamp idle_flushed BEFORE submitting so a fast turn that completes before agentapi returns
-        # clears the marker via PreInvocation/Stop instead of having it stamped afterwards.
-        pre_turn_seq = (
-            agy_bridge.begin_idle_turn(agent_dir, session.launch_id, message_id=message.id)
-            if (not claimed_for_agentapi and current_status == 'idle')
-            else None
-        )
         try:
             completed = executor.command(command, timeout=15)
         except BaseException:
-            if pre_turn_seq is not None:
-                agy_bridge.cancel_idle_turn_if_unstarted(agent_dir, session.launch_id, pre_turn_seq)
+            agy_bridge.release_wake_claim(
+                agent_dir, session.launch_id, message.id,
+                claim_token=claim_token, remove_entry=False, reset_idle_flush=True,
+            )
             raise
         if completed.returncode != 0:
             pre_connect = agy_bridge.is_pre_connect_agentapi_error(completed.stdout, completed.stderr)
-            if pre_turn_seq is not None:
-                agy_bridge.cancel_idle_turn_if_unstarted(agent_dir, session.launch_id, pre_turn_seq)
-            if claimed_for_agentapi:
-                try:
-                    agy_bridge.remove_followup(
-                        agent_dir, session.launch_id, message.id,
-                        reset_idle_flush=pre_connect, claim_token=claim_token,
-                    )
-                except (OSError, ValueError):
-                    pass
             detail = (completed.stderr or completed.stdout or '').strip()
             if pre_connect:
-                agy_bridge.remove_receipt(agent_dir, message.id)
+                released = agy_bridge.release_wake_claim(
+                    agent_dir, session.launch_id, message.id,
+                    claim_token=claim_token, remove_entry=True, drop_receipt=True, reset_idle_flush=True,
+                )
+                if not released:
+                    # A hook already took the message, or the reaper put the stale claim back in the queue.
+                    if agy_bridge.followup_state(agent_dir, session.launch_id, message.id) == 'handed_off':
+                        return NativeResult(
+                            'native_queued',
+                            'Handed off to Antigravity for user-input injection by hooks',
+                            {'route': 'hook-user-input', 'transcript_confirmed': False},
+                        )
+                    return NativeResult(
+                        'native_queued',
+                        'Queued for user-input delivery by Antigravity hooks',
+                        {'route': 'hook-user-input', 'transcript_confirmed': False, 'queued': True},
+                    )
                 return NativeResult(
                     'error',
                     f'agy agentapi send-message failed before submission (exit {completed.returncode})'
                     + (f': {detail}' if detail else ''),
                 )
+            agy_bridge.mark_wake_sent(agent_dir, session.launch_id, message.id, claim_token=claim_token)
             return NativeResult(
                 'unknown',
                 f'agy agentapi send-message exited {completed.returncode}; acceptance unknown'
                 + (f': {detail}' if detail else ''),
-                {'route': 'agentapi', 'transcript_confirmed': False},
+                {'route': 'hook-user-input', 'transcript_confirmed': False},
             )
-        if claimed_for_agentapi:
-            try:
-                agy_bridge.remove_followup(agent_dir, session.launch_id, message.id, claim_token=claim_token)
-            except (OSError, ValueError):
-                pass
         recipient = _agentapi_recipient(completed.stdout)
         if recipient is None:
-            if pre_turn_seq is not None:
-                agy_bridge.cancel_idle_turn_if_unstarted(agent_dir, session.launch_id, pre_turn_seq)
+            agy_bridge.mark_wake_sent(agent_dir, session.launch_id, message.id, claim_token=claim_token)
             return NativeResult(
                 'unknown',
                 'agy agentapi send-message exited 0 without confirming recipientId; acceptance unknown',
-                {'route': 'agentapi', 'transcript_confirmed': False},
+                {'route': 'hook-user-input', 'transcript_confirmed': False},
             )
         if recipient != session.native_id:
-            if pre_turn_seq is not None:
-                agy_bridge.cancel_idle_turn_if_unstarted(agent_dir, session.launch_id, pre_turn_seq)
+            agy_bridge.mark_wake_sent(agent_dir, session.launch_id, message.id, claim_token=claim_token)
             return NativeResult(
                 'unknown',
                 f'agy agentapi send-message reported unexpected recipient {recipient!r}',
-                {'route': 'agentapi', 'transcript_confirmed': False},
+                {'route': 'hook-user-input', 'transcript_confirmed': False},
             )
-        agy_bridge.write_receipt(
-            agent_dir,
-            message.id,
-            launch_id=session.launch_id,
-            native_id=session.native_id,
-            route='agentapi',
-            submitted_at=submitted_at,
-            text_sha256=text_sha256,
-            delivered_at=now(),
-            acknowledged=True,
-        )
+        agy_bridge.mark_wake_sent(agent_dir, session.launch_id, message.id, claim_token=claim_token)
         return NativeResult(
             'native_queued',
-            'Submitted to the Antigravity session via agentapi',
-            {'route': 'agentapi', 'transcript_confirmed': False},
+            'Woke Antigravity session for user-input delivery',
+            {'route': 'hook-user-input', 'transcript_confirmed': False},
         )
 
     def get_delivery(self, session, message_id, executor=None) -> NativeResult:
@@ -2219,10 +2150,11 @@ class AgyAdapter(ConfiguredAdapter):
             )
 
         launch_id = receipt['launch_id']
-        if receipt.get('route') == 'stop-hook':
+        route = receipt.get('route')
+        if route in ('stop-hook', 'hook-user-input'):
             state, paused_reason = agy_bridge.followup_status(agent_dir, launch_id, identifier)
-            if state in ('queued', 'agentapi_submitting'):
-                # Receipt route is still stop-hook, so no agentapi receipt write or submission ever ran.
+            if state in ('queued', 'wake_pending', 'agentapi_submitting'):
+                # Receipt is still queued or waking; no user-input or agentapi text delivery completed yet.
                 current_conv = None
                 try:
                     current_conv = retry_missing(lambda: read(agent_dir / 'properties.json')).get('native_session_id')
@@ -2231,34 +2163,41 @@ class AgyAdapter(ConfiguredAdapter):
                 if current_conv and receipt.get('native_id') and current_conv != receipt['native_id']:
                     return NativeResult(
                         'error',
-                        'Queued follow-up was not delivered before the Antigravity conversation switched',
-                        {'transcript_confirmed': False, 'route': 'stop-hook', 'definite_failure': True},
+                        'Queued message was not delivered before the Antigravity conversation switched',
+                        {'transcript_confirmed': False, 'route': route, 'definite_failure': True},
                     )
                 still_running = session.state == 'running' and session.launch_id == launch_id
                 if not still_running:
                     return NativeResult(
                         'error',
-                        'Queued follow-up was not delivered before the Antigravity launch ended',
-                        {'transcript_confirmed': False, 'route': 'stop-hook', 'definite_failure': True},
+                        'Queued message was not delivered before the Antigravity launch ended',
+                        {'transcript_confirmed': False, 'route': route, 'definite_failure': True},
+                    )
+                if self._bridge(session).reason == OLDER_BRIDGE:
+                    # Still held, but this launch's hooks never inject (they gate on agy-bridge-v2): it waits for the
+                    # restart, after which the ended launch settles it as failed and --retry resends it.
+                    return NativeResult(
+                        'pending', OLDER_BRIDGE,
+                        {'transcript_confirmed': False, 'route': route, 'restart_required': True},
                     )
                 if paused_reason == 'cancel':
                     return NativeResult(
                         'native_queued',
-                        'Queued follow-up is paused after turn cancellation; resumes on the next turn',
-                        {'transcript_confirmed': False, 'route': 'stop-hook', 'queued': True,
+                        'Queued message is paused after turn cancellation; resumes on the next turn',
+                        {'transcript_confirmed': False, 'route': route, 'queued': True,
                          'paused': True, 'paused_reason': 'cancel'},
                     )
                 if paused_reason == 'error':
                     return NativeResult(
                         'native_queued',
-                        'Queued follow-up is paused after turn error; resumes on the next turn',
-                        {'transcript_confirmed': False, 'route': 'stop-hook', 'queued': True,
+                        'Queued message is paused after turn error; resumes on the next turn',
+                        {'transcript_confirmed': False, 'route': route, 'queued': True,
                          'paused': True, 'paused_reason': 'error'},
                     )
                 return NativeResult(
                     'native_queued',
-                    'Queued for end-of-turn delivery by the Antigravity Stop hook',
-                    {'transcript_confirmed': False, 'route': 'stop-hook', 'queued': True},
+                    'Queued for user-input delivery by Antigravity hooks',
+                    {'transcript_confirmed': False, 'route': route, 'queued': True},
                 )
 
         return NativeResult(
@@ -2347,7 +2286,7 @@ class AgyAdapter(ConfiguredAdapter):
                             {**asdict(usage), **reported})
 
     def queued_prompts(self, session, executor=None) -> NativeResult:
-        """Read this launch's queued mv2 Stop-hook follow-ups without changing delivery or returning text."""
+        """Read this launch's queued mv2 messages (steers and follow-ups) without changing delivery or returning text."""
         bridge = self._bridge(session)
         if not bridge.ready:
             if bridge.final:
@@ -2384,9 +2323,9 @@ class AgyAdapter(ConfiguredAdapter):
             item_state = item.get('state', 'queued')
             if item_state == 'handed_off':
                 continue
-            if item_state == 'agentapi_submitting':
+            if item_state in ('wake_pending', 'agentapi_submitting'):
                 coverage = 'unknown'
-                note = note or 'A queued follow-up is currently being submitted to Antigravity'
+                note = note or 'A queued message is currently waking Antigravity'
                 continue
             if item_state != 'queued':
                 coverage = 'unknown'
@@ -2405,7 +2344,8 @@ class AgyAdapter(ConfiguredAdapter):
             seen.add(message_id)
             raw_since = item.get('queued_at')
             since = raw_since if storage.moment(raw_since) is not None else None
-            entries.append({'message_id': message_id, 'mode': 'follow-up', 'since': since, 'native_id': None})
+            item_mode = item.get('mode') if item.get('mode') in ('steer', 'follow-up') else 'follow-up'
+            entries.append({'message_id': message_id, 'mode': item_mode, 'since': since, 'native_id': None})
         return NativeResult('ok', value={
             'coverage': coverage, 'reason': note, 'observed_at': observed_at, 'entries': entries,
         })

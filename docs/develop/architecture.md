@@ -106,7 +106,7 @@ mv2 send AGENT                                      tools/send.py, under .send.l
 adapter.send, per harness
   Claude       JSON lines to the session's peer inbox socket; the mod injects the text
   Codex        JSON-RPC to the app-server: steer or queue on the exact thread
-  Antigravity  `agy agentapi send-message` for steer/idle, or `Stop`-hook follow-up queue when busy
+  Antigravity  a launch queue the hooks inject as user messages; an idle agent is woken by an agentapi ping
   Pi           a JSON request to the extension's Unix socket
 
 mv2 deliver AGENT --check -> adapter.get_delivery -> receipt

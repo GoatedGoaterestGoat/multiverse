@@ -204,7 +204,7 @@ class PluginLaunchTest(PluginTestCase):
         self.write_plugin("agy-pack", {
             "module": "plugin", "extends": ["launch"], "permissions": ["harness.agy"],
             "harnesses": {"agy": [
-                {"dir": "agy/common", "min_version": "1.5.10"},
+                {"dir": "agy/common", "min_version": "1.5.20"},
                 {"dir": "agy/bridged", "needs_bridge": True},
             ]},
         }, {
@@ -231,7 +231,7 @@ class PluginLaunchTest(PluginTestCase):
         launch_dir = self.agent_dir / "launches" / "l1"
         launch_dir.mkdir(parents=True)
 
-        def spawn_agy(bridge, version=(1, 5, 14), environment=None):
+        def spawn_agy(bridge, version=(1, 5, 20), environment=None):
             path = self.root / "harnesses" / "agy" / "harness.json"
             data = read(path)
             if bridge is None:
@@ -272,7 +272,7 @@ class PluginLaunchTest(PluginTestCase):
         self.assertEqual(live.environment["MV2_AGY_PACK_BRIDGE"], "1")
         self.assertEqual(live.plugins["plugins"]["agy-pack"]["added"], ["agy_add_dirs", "environment"])
 
-        older_bridged = spawn_agy(True, version=(1, 5, 5))
+        older_bridged = spawn_agy(True, version=(1, 5, 17))
         self.assertNotIn(common, older_bridged.argv)
         self.assertIn(bridged, older_bridged.argv)
 

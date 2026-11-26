@@ -31,6 +31,7 @@ _ENVELOPE_SENDER = re.compile(r'(?:^|\s)sender=(\S+)')
 _ENVELOPE_PRIORITY = re.compile(r'(?:^|\s)priority=(\S+)')
 _RESTART_NOTICE_PREFIX = '[Notice] All your subagents and background tasks have been stopped due to server restart'
 _STOP_HOOK_ENVELOPE = re.compile(r'^Stop hook blocked termination:\s*(.*)$', re.DOTALL)
+WAKE_PING = '[mv2] Check the user message injected in this turn (if none is present, ignore this wake ping).'
 
 
 def agy_home(environment=None) -> Path:
@@ -346,12 +347,15 @@ def _row_content(row: dict) -> str | None:
 
 
 def _is_agentapi_envelope(sender: str | None, priority: str | None, body: str) -> bool:
-    """True only for `agentapi send-message` rows (sender=system, normal/high/unset priority, not a restart notice)."""
+    """True only for `agentapi send-message` rows carrying a message (not restart notices or internal wake pings)."""
     if sender != 'system':
         return False
     if priority not in (None, 'MESSAGE_PRIORITY_HIGH', 'MESSAGE_PRIORITY_NORMAL'):
         return False
-    if body.lstrip().startswith(_RESTART_NOTICE_PREFIX):
+    stripped = body.lstrip()
+    if stripped.startswith(_RESTART_NOTICE_PREFIX):
+        return False
+    if body.strip() == WAKE_PING:
         return False
     return True
 
@@ -382,8 +386,10 @@ def _extract_message_envelopes(row: dict) -> tuple[tuple[str | None, str | None,
 def _extracted_candidates(row: dict, route: str | None = None) -> tuple[str, ...]:
     """Candidate message payloads inside Antigravity's transcript row envelopes, constrained by `route`.
 
+    - `route == 'hook-user-input'`: only `USER_INPUT` rows with `source == 'SYSTEM_SDK'` (injected by
+      `PreInvocation` / `PostInvocation` hooks, never human `USER_EXPLICIT` prompts).
     - `route == 'agentapi'`: only `SYSTEM_MESSAGE` rows carrying `[Message] ... sender=system ... content=<payload>`
-      with high/unset priority (excluding `MESSAGE_PRIORITY_LOW` server-restart notices).
+      with high/unset priority (excluding `MESSAGE_PRIORITY_LOW` server-restart notices and internal wake pings).
     - `route == 'stop-hook'`: only `SYSTEM_MESSAGE` rows carrying `Stop hook blocked termination: <payload>`.
     - `route is None`: any `USER_INPUT` or `SYSTEM_MESSAGE` payload (for route-agnostic inspection).
     """
@@ -391,6 +397,11 @@ def _extracted_candidates(row: dict, route: str | None = None) -> tuple[str, ...
     if content is None:
         return ()
     row_type = row.get('type')
+    if route == 'hook-user-input':
+        if row_type != 'USER_INPUT' or row.get('source') != 'SYSTEM_SDK':
+            return ()
+        blocks = [match.group(1) for match in _USER_REQUEST_BLOCK.finditer(content)]
+        return tuple(blocks) if blocks else (content,)
     if route == 'agentapi':
         return tuple(
             body for sender, priority, body in _extract_message_envelopes(row)
