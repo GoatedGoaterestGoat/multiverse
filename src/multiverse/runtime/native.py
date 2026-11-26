@@ -24,7 +24,7 @@ from . import effects, launch_files
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec,
                                ShellCallbackResult)
-from ..harnesses.types import ObservedBinding, normalize_session_id
+from ..harnesses.types import ObservedBinding, RestartRequired, normalize_session_id
 from ..store import exists_replaced, lock, now, read, retry_missing, write
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
@@ -525,15 +525,28 @@ def missing_socket_problem(root, properties, facts):
         return None
 
 
-def connection_problem(root, properties, facts):
+def connection_problem(root, properties, facts, *, directory=None, restart_only=False):
     """A provider diagnostic cannot erase a valid listing row."""
     try:
-        if problem := missing_socket_problem(root, properties, facts):
-            return problem
+        if not restart_only:
+            if problem := missing_socket_problem(root, properties, facts):
+                return problem
+        elif facts.get('state') != 'running' or facts.get('ending_at'):
+            return None
         adapter = harnesses.load(root, properties['harness'])
         hook = adapter_hook(adapter, 'connection_problem')
-        result = hook(SessionHandle.from_records(properties, facts, root / 'state' / 'agents' / properties['id'])) if hook else None
-        return result if isinstance(result, str) and result else None
+        if hook is None:
+            return None
+        directory = directory if directory is not None else root / 'state' / 'agents' / properties['id']
+        session = SessionHandle.from_records(properties, facts, directory)
+        result = effects.call(adapter, 'connection_problem', session)
+        if isinstance(result, RestartRequired):
+            if (session.state == 'running' and session.launch_id and not facts.get('ending_at')
+                    and isinstance(result.reason, str) and result.reason.strip()
+                    and (not restart_only or observe(properties, facts)['live'] == 'alive')):
+                return result
+            return None
+        return result if not restart_only and isinstance(result, str) and result else None
     except Exception:
         return None
 

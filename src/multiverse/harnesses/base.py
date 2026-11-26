@@ -6,7 +6,7 @@ import re
 from string import Formatter
 
 from .types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeResult, SessionHandle, Message, Executor
-from .types import normalize_session_id
+from .types import RestartRequired, normalize_session_id
 
 FIELDS = {'name', 'agent_id', 'session_id', 'bootstrap', 'bootstrap_json', 'task', 'agent_dir',
           'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir',
@@ -223,7 +223,7 @@ class ConfiguredAdapter:
             return NativeResult('ok', 'No native process was running')
         return NativeResult('ok', 'Core stops the owned terminal process')
 
-    def connection_problem(self, session: SessionHandle) -> str | None:
+    def connection_problem(self, session: SessionHandle) -> str | RestartRequired | None:
         """Optional cheap, read-only diagnostic for this exact live launch."""
         return None
 

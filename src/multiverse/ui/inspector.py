@@ -427,6 +427,11 @@ def paused(state, row):
         state.append("\n" + clean(line), style=theme.YELLOW)
 
 
+def restart_required(state, row):
+    if line := row.get('restart_required'):
+        state.append('\n' + clean(line), style=theme.YELLOW)
+
+
 def versions(state, row):
     found = row.get('runtime', {}).get('native_versions')
     if found:
@@ -436,7 +441,7 @@ def versions(state, row):
 
 
 # What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
-AGENT_FACTS = (identity, damage, launch_error, relay_loss, paused, fallback, plugins_line, progress, focused,
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, restart_required, paused, fallback, plugins_line, progress, focused,
                context, native_mode, versions)
 
 

@@ -4,11 +4,18 @@ The tmux status line keeps its own copies of a few of these: tmux runs it with
 `python -S`, outside this package's imports.
 """
 from datetime import datetime, timezone
+from shlex import quote
 
 
 def clean(value):
     """Printable text only: terminal control characters become spaces."""
     return "".join(c if c.isprintable() else " " for c in str(value))
+
+
+def restart_required_line(name, reason):
+    agent = quote(clean(name))
+    problem = clean(reason).strip().rstrip('.')
+    return f'{problem}. Run mv2 kill {agent}, then mv2 resume {agent}.'
 
 
 # Agents and launches

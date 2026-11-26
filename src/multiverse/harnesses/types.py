@@ -37,6 +37,13 @@ class LaunchRefused(ValueError):
     """Decline launch preparation with an actionable reason and let core preserve the spawn task."""
 
 
+@dataclass(frozen=True)
+class RestartRequired:
+    """A connection problem proved by the current launch record that needs a fresh launch."""
+
+    reason: str  # Human-readable cause. Core adds the commands for this agent.
+
+
 class LocalProtocolError(Exception):
     """Reject one correlated relay frame without changing launch health.
 

@@ -62,6 +62,7 @@ Core also looks for these optional methods and attributes:
 | `resume_notice(session, caller_environment, effective_environment)` | A notice about the selected storage or conversation. If it accepts the optional keyword `fresh_start`, core passes false after announcing its own proven fresh start; other notices still apply. |
 | `allow_recorded_launch(session)` | Explicitly allow core to verify retained bridge-launch identity for data callbacks; exactly `True` opts in, absent/default is false. The current adapter policy must equal the saved policy; this never grants control authority. |
 | `attachment_ready(session)` | Whether a launch is ready to take messages |
+| `connection_problem(session)` | Return a diagnostic string or `None`, or `RestartRequired(reason)` if the current launch record proves a fresh launch is needed. Give only the cause. Core adds the named kill and resume commands. Keep this read cheap and use no native queries. |
 | `launch_proxy(settings)` | The protocol of a launch relay, when the spec has `rpc_proxy` |
 | `status_watch(session)` | A passive status stream the runner follows |
 | `attachment_recovery(session)` | A read-only check that an idle terminal can be reconnected |
@@ -301,6 +302,12 @@ confirmation prevents another submission, and unreadable evidence blocks it.
 A stopped attempt-scoped recipient resumes with no interactive prompt; the durable startup queue submits the retry through `send` after its bridge is ready. This path disables launch fallback and requires a bridge. Nothing retries automatically. Claude also uses this failure result when its
 mod's row-storage deadline expires: this is a deliberate policy exception to
 proof of non-delivery, so a manual retry may duplicate a late stored copy.
+
+For input still held by the current launch that needs a restart, `get_delivery`
+can return `NativeResult('pending', reason, {'restart_required': True})`. Core
+shows that it is waiting for restart and preserves the saved delivery evidence.
+Use this only for a receipt that proves the input is still held. The adapter's
+ordinary stop and delivery logic still owns whether the input can be retried.
 
 Adapters that set `delivery_attempt_ids = True` receive a fresh private UUID in
 `Message.id` for every actual submission. Core persists it as `native_message_id`

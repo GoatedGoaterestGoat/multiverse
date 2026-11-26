@@ -97,6 +97,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
             result['notices'] = notices
         if row.get('delivery_problem'):
             result['delivery_problem'] = row['delivery_problem']
+        if row.get('restart_required'):
+            result['restart_required'] = row['restart_required']
         if live and isinstance(row.get('runtime', {}).get('startup_prompt'), dict):
             result['startup_prompt'] = {key: row['runtime']['startup_prompt'].get(key) for key in ('title', 'detail')}
         if row.get('runtime', {}).get('auto_recovery'):
@@ -113,6 +115,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     if row.get('model'):
         out.append(f"Model: {clean(row['model'])}" + (f" (effort: {clean(row['effort'])})" if row.get('effort') else ''))
     out.extend('Note: ' + notice for notice in notices)
+    if row.get('restart_required'):
+        out.append(row['restart_required'])
     if row.get('delivery_problem'):
         out.append(row['delivery_problem'])
     asked = startup_prompt_line(row, row.get('runtime', {}).get('startup_prompt')) if live else None

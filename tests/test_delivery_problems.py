@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from multiverse.runtime import attachments, lifecycle, native
 from multiverse.store import now, read, uid, write
@@ -12,7 +13,8 @@ from multiverse.tools import deliver, doctor, inspect, list_agents, send
 from multiverse.universe import mailbox, templates
 from multiverse import harnesses
 from multiverse.harnesses.claude import BRIDGE, CONVERSATION_MISSING, FRESH_SESSION, NEVER_USED, NOT_REGISTERED
-from multiverse.harnesses.types import NativeResult, Message, NativeEndpoint, SessionHandle
+from multiverse.harnesses.types import NativeResult, Message, NativeEndpoint, RestartRequired, SessionHandle
+from multiverse.ui.inspector import agent_state
 from test_multiverse import BaseTest
 
 TOO_OLD = 'Claude Code 2.1.279 is older than 2.1.280, which the multiverse mod needs'
@@ -59,6 +61,64 @@ class DeliveryProblemTest(BaseTest):
         row = lifecycle.listing(self.root)[0]
         self.assertEqual(row['delivery_problem'], expected)
         self.assertNotIn('PRIVATE BODY', expected)
+
+    def test_a_recorded_bridge_restart_is_visible_before_sending_and_while_input_waits(self):
+        """A launch-local restart diagnosis must reach every inspection surface without a native probe."""
+        facts = self.running()
+        properties = read(self.directory / 'properties.json')
+        write(self.directory / 'properties.json', {**properties, 'restart_required': 'stale property'})
+        write(self.directory / 'runtime.json', facts)
+        reason = 'This bridge predates queued input delivery'
+        expected = f'{reason}. Run mv2 kill recipient, then mv2 resume recipient.'
+        adapter = SimpleNamespace(
+            connection_problem=Mock(return_value=RestartRequired(reason)),
+            capabilities=Mock(side_effect=AssertionError('inspection must not probe capabilities')),
+            get_delivery=Mock(return_value=NativeResult('pending', reason, {'restart_required': True})),
+            send=Mock(side_effect=AssertionError('a check must never submit')),
+        )
+        with patch.object(harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                patch.object(native, 'usage_snapshot', return_value={}), \
+                patch.object(inspect, 'run', return_value=''):
+            row, = lifecycle.listing(self.root, usage=False)
+            self.assertEqual(row['restart_required'], expected)
+            self.assertIn(expected, list_agents.run(self.root))
+            self.assertIn(expected, inspect.cli_run(self.root, agent='recipient'))
+            self.assertEqual(inspect.cli_run(self.root, agent='recipient', json=True)['restart_required'], expected)
+            self.assertIn(expected, agent_state(row).plain)
+            diagnosis = doctor.run(self.root)
+            self.assertFalse(diagnosis['ok'])
+            self.assertIn(f'recipient: {expected}', diagnosis['problems'])
+
+            lines = []
+            empty = deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+            self.assertEqual(empty, {'messages': [], 'ok': True, 'restart_required': expected})
+            self.assertIn(f'recipient: {expected}', lines)
+            adapter.get_delivery.assert_not_called()
+            with patch.object(native, 'observe', return_value={'live': 'dormant'}):
+                self.assertNotIn('restart_required', deliver.run(self.root, agent='recipient', check=True))
+            with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
+                self.assertIsNone(lifecycle.listing(self.root, usage=False)[0]['restart_required'])
+                self.assertNotIn(f'recipient: {expected}', doctor.run(self.root)['problems'])
+
+            message = mailbox.append_message(self.directory, 'already queued', {}, delivery='follow-up',
+                                             target_session=properties['native_session_id'])
+            mailbox.update_message(self.directory, message['id'], submission_state='accepted', attempts=[{
+                'state': 'native_queued', 'launch_id': facts['launch_id'], 'native_session_id': properties['native_session_id'],
+            }])
+            _, before = mailbox.message_record(self.directory, message['id'])
+            lines.clear()
+            result = deliver.run(self.root, agent='recipient', check=True, _present=lines.append)
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['restart_required'], expected)
+            self.assertTrue(result['messages'][0]['restart_required'])
+            self.assertIn('recipient: 1 waiting for restart.', lines)
+            self.assertIn('recipient: message waiting for restart.', lines)
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1], before)
+        adapter.get_delivery.assert_called_once()
+        adapter.capabilities.assert_not_called()
+        adapter.send.assert_not_called()
 
     def test_dismissed_messages_stay_in_history_and_can_never_be_resent(self):
         """Dismissal must close uncertainty without replaying it, hiding confirmation, or cancelling pending startup input."""

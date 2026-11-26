@@ -132,6 +132,11 @@ that are not confirmed. The counts describe the deliveries checked by this
 invocation; an already recorded confirmation does not need another check.
 `--json` keeps the complete per-message results, including confirmations.
 
+When a running launch needs a restart to deliver messages, `mv2 list`,
+`mv2 inspect`, `mv2 doctor`, `mv2 deliver NAME --check` and the dashboard inspector show
+the reason and the commands `mv2 kill NAME` and `mv2 resume NAME`. A queued
+message held by that launch can appear as `waiting for restart` in `--check`.
+
 `--check` reports a cancellation once as not delivered and exits nonzero, with
 advice to send a new message if you still want it delivered. Later checks omit
 that cancellation, including concurrent checks. It stays in history; neither

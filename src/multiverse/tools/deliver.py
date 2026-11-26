@@ -4,7 +4,7 @@ from ..plugins import access
 from .. import display, harnesses, store, universe
 from ..runtime import native
 from ..universe import agents, focus, mailbox
-from ._common import delivery_summary
+from ._common import delivery_summary, delivery_waits_for_restart
 from ._messaging import delivery_line
 
 
@@ -35,8 +35,14 @@ def run(root=None, *, agent, retry=False, check=False, dismiss=False, json=False
 def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=None, _present_error=None):
     properties = store.read(directory / 'properties.json')
     name = properties['name']
-    launch_id = agents.runtime(directory).get('launch_id')
+    facts = agents.runtime(directory)
+    launch_id = facts.get('launch_id')
     native_id = properties.get('native_session_id')
+    restart = None
+    if check and not dismiss:
+        problem = native.connection_problem(root, properties, facts, directory=directory, restart_only=True)
+        if problem is not None:
+            restart = display.restart_required_line(name, problem.reason)
     history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
     if dismiss:
         history = [message for message in history if mailbox.dismissible(message, message['tracking'])]
@@ -232,9 +238,11 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 _present(f'{name}: no failed or unconfirmed messages to dismiss.')
         return {'messages': results, 'confirmed': confirmed, 'dismissed': failures + unconfirmed,
                 'dismissed_failures': failures, 'dismissed_unconfirmed': unconfirmed, 'ok': True}
+    if _present and restart:
+        _present(f'{name}: {restart}')
     if _present and check and results:
-        order = ('confirmed', 'read in inbox', 'accepted without confirmation', 'pending', 'not delivered', 'uncertain',
-                 'could not check')
+        order = ('confirmed', 'read in inbox', 'accepted without confirmation', 'waiting for restart', 'pending',
+                 'not delivered', 'uncertain', 'could not check')
         _present(f'{name}: ' + ', '.join(f'{counts[state]} {state}' for state in order if counts.get(state)) + '.')
         for present, line in details:
             present(line)
@@ -247,7 +255,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
     elif _present and not results:
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results),
-            **({'finalized': finalized} if finalized else {})}
+            **({'finalized': finalized} if finalized else {}), **({'restart_required': restart} if restart else {})}
 
 
 def _check_state(receipt, *, accepted):
@@ -262,6 +270,8 @@ def _check_state(receipt, *, accepted):
         return 'could not check'
     if state in ('cancelled', 'error', 'unavailable'):
         return 'not delivered'
+    if delivery_waits_for_restart(receipt):
+        return 'waiting for restart'
     if accepted or state in ('ok', 'native_queued'):
         return 'accepted without confirmation'
     if state == 'pending':

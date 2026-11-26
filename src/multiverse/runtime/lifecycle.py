@@ -16,7 +16,7 @@ import tempfile
 from shlex import quote
 
 from .. import display, harnesses, source, universe
-from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, LaunchRefused, ModelCheck
+from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable, LaunchRefused, ModelCheck, RestartRequired
 from ..store import exists_replaced, retry_missing, existing_lock, lock, missing_records, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, blocked, catalog, focus, mailbox, records, storage as storage_records
@@ -187,7 +187,7 @@ ROW_FIELDS = frozenset((
     'native_storage_environment', 'native_environment', 'native_service_identity',
     'agent_identity', 'agent_environment', 'native_fresh_pending',
     'universe', 'live', 'status', 'status_changed_at', 'active_now', 'reason', 'launch_error', 'connection_error', 'identity_error',
-    'recovery_note', 'delivery_problem', 'focus', 'runtime', 'damaged',
+    'recovery_note', 'delivery_problem', 'restart_required', 'focus', 'runtime', 'damaged',
     *USAGE_FIELDS, 'default_model', 'default_model_name',
 ))
 
@@ -312,14 +312,18 @@ def listing_records(root, recursive=False, only=None, *, usage=True, observed_mi
                         paused_message_ids=paused_ids)
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem, paused_count = None, 0  # Doctor reports ledger damage separately.
+                connection = ((facts.get('native_refusal') or {}).get('message') or relay_problem
+                    or facts.get('binding_conflict') or identity_problem
+                    or (native.connection_problem(scope, properties, facts, directory=path.parent)
+                        if observation['live'] == 'alive' else None))
+                restart = (display.restart_required_line(properties['name'], connection.reason)
+                           if isinstance(connection, RestartRequired) else None)
                 rows.append((path.parent, text_defaults({**properties, **identity_fields, **usage_fields, **model_fields, "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": status, "active_now": status == 'working',
                              "status_changed_at": _status_changed_at(facts),
-                             "connection_error": (facts.get('native_refusal') or {}).get('message')
-                                 or relay_problem
-                                 or facts.get('binding_conflict') or identity_problem
-                                 or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
+                             "connection_error": None if restart else connection,
+                             "restart_required": restart,
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "delivery_problem": delivery_problem,
                              **({'paused_queue_count': paused_count} if paused_count else {}),
