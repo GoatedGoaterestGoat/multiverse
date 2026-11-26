@@ -281,10 +281,11 @@ rows through this protocol, with `transcripts.read`.
   plugin's send, an answer, a command run with `mv2 slash`, the launch's task)
   or `harness` (anything else). `message` is the mv2 message ID for a message,
   from which a plugin reads its sender, and null otherwise; mv2 matches the
-  delivery from its own records and never adds the ID to the row or anything
-  the agent sees. `first_task` marks the start of the turn that ran the
-  launch's task, when the harness proves that input was the task; a wake's
-  message is not a task.
+  delivery from its own records, including one the harness took in after
+  moving to a later conversation of the same launch (a `/clear` typed while it
+  was queued), and never adds the ID to the row or anything the agent sees.
+  `first_task` marks the start of the turn that ran the launch's task, when
+  the harness proves that input was the task; a wake's message is not a task.
 - `state` is `finished`, `interrupted`, `error` (a model or harness error
   ended it, where the harness records one) or `unknown` (the harness can't
   tell, or mv2 closed the turn because its end was never reported). A plugin
@@ -297,13 +298,33 @@ can see the end by then. A harness may continue a turn on its own after it
 ended, with no new input; the turn then ends again with a later `ref`, and the
 latest end wins.
 
+**Inputs taken in together.** A harness can take several stored inputs in at
+once, such as ones queued behind a turn. Each is still named as the turns
+above group its row, and none is merged into another: an input whose row opens
+a turn gets its own `turn.started`, with its own `ref` and, for an mv2
+message, its own `message`, and one whose row joins a turn gets `turn.joined`.
+A turn that the next input's turn follows before any reply of its own ends
+`finished`, since a later prompt turn is stored, with `ref` its last stored
+row, usually its input's own. It holds no reply, so its `finished` doesn't
+mean its input was answered: the reply to them all is in the last one's turn,
+whose end says how it went. The harness reports these edges when it takes the
+inputs in, in the order their rows were stored: each such turn's start and end
+come before the next input's start, and all of them before the last turn's end
+and the `idle` after it; against `working` they are like any start. Core keeps
+each start's own message and never matches one input's delivery to another's.
+An end the harness doesn't report is still recorded as `unknown` by the next
+start, as for any missed end.
+
 **Missed ends.** A new turn whose predecessor's end was never reported records
 that end as `unknown` first. A launch's end, a crash noticed later, or a
 conversation switch ends an open turn as `unknown` before `agent.exited`,
-`agent.killed`, the next `agent.launched` or `agent.session`. An end or a join
-whose turn's start mv2 never saw (the in-session part reloaded mid-turn) is
-recorded alone. After a gap the journal no longer holds, a plugin reads the
-turns once.
+`agent.killed`, the next `agent.launched` or `agent.session`. A harness
+reports every edge of a conversation, an input stored there and never taken in
+included, before it records the switch away from it: core takes edges only for
+the agent's recorded conversation, so one reported after the switch is lost,
+and a lost start has nothing to stand in for it. An end or a join whose turn's
+start mv2 never saw (the in-session part reloaded mid-turn) is recorded alone.
+After a gap the journal no longer holds, a plugin reads the turns once.
 
 **How it's kept.** A status report never reads a transcript: the harness's
 report of each edge, with its native row and turn, is staged with the status

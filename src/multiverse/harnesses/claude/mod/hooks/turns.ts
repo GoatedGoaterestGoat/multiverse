@@ -5,6 +5,8 @@
 // a command turn, so `turn` is the opening row's id and `ref` a row's id. Metadata only: never a row's text.
 // A turn Claude continues on its own (turn.start with no new prompt row) has no start, and its end is a later end of
 // the same turn, which supersedes the first.
+// Claude can take several stored prompt rows in at one turn.start (follow-ups queued behind a turn): the reader makes
+// each a turn of its own, so each gets its own start, and each but the last its end, before the next one's start.
 //
 // Rows are ordered by when their append was entered (`seq`), which is the order Claude stores them in; the order the
 // appends finish in can differ, and is never used to rank them.
@@ -18,7 +20,7 @@ export type TurnTransition = { session: string; event?: Record<string, unknown>;
 export const turnTransitions: TurnTransition[] = []
 
 type Source = 'person' | 'harness'
-type Opening = { ref: string; seq: number; source: Source; attempt?: string; firstTask: boolean }
+type Opening = { ref: string; seq: number; session: string | undefined; source: Source; attempt?: string; firstTask: boolean }
 type Row = { id: string; seq: number }
 
 // After a local command's output: the next main row decides whether a report for the model follows (a user note in
@@ -41,19 +43,61 @@ let seq = 0
 let generation = 0                 // /clears so far: a row from before the latest is stale, known session id or not
 let openedTo = 0                   // the newest opening row used so far: an older one noted late opens nothing
 let commandTo = 0                  // the same for a local command's row
-let opening: Opening | undefined  // stored, its turn.start not yet seen
+let openings: Opening[] = []       // stored, their turn.start not yet seen, in storage order
+const arriving = new Set<number>() // opener rows admitted and not yet noted: a turn.start waits for those before it
+let arrival: (() => void) | undefined  // wakes a turn.start waiting for them
+let loose: Row[] = []              // rows noted between turns, before the next turn.start: grouped with the opener before them
+const unowned = new Map<number, Ticket>()  // such rows still being stored
 let current: Owner | undefined     // the prompt turn running, or the last that ran
 let command: { id: string; seq: number; session: string | undefined } | undefined  // a local command awaiting its output
 let awaiting: Decision | undefined // a command's output whose next row hasn't arrived
 let task = false                   // the next person's prompt row is this launch's task
+let span = false                   // after a compaction, until its first real row: the reader's compaction span
 const waiting = new Set<Owner>()   // owners whose end is being proved: a /clear wakes them
 
 const OUTPUT = ['<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>']
 const isOutput = (text: string) => OUTPUT.some((marker) => text.trimStart().startsWith(marker))
+const MARKS = [...OUTPUT, '<command-name>', '/', '[Request interrupted by user']
+
+type Opener = { type: string; door: string; origin: { kind: string }; meta?: boolean; text: string }
+
+// The reader's prompt rule (harnesses/claude/transcripts.py labels), as far as a row's append shows it: a user row
+// Claude stamped with an origin other than its engine's, the model's or a tool's opens a prompt turn; one with no
+// stamp ('unclassified', no origin in the file) only if it is neither meta nor marked as a command, its output, a
+// /compact or an interruption (a typed /reload-plugins stores such rows), and isn't in a compaction's span. The
+// reader also wants an unstamped row's promptId to be new; Claude doesn't show an append its promptId, and the
+// rows that share one with an earlier row come through other doors (tool results, attachments) or are a command's
+// or a compaction's own.
+const stamped = (row: Opener) => row.origin.kind !== 'unclassified' && row.origin.kind !== 'engine'
+  && row.origin.kind !== 'model' && row.origin.kind !== 'tool'
+function opens(row: Opener, inSpan = false): boolean {
+  if (row.type !== 'user' || (row.door !== 'prompt' && row.door !== 'command')) return false
+  if (stamped(row)) return true
+  if (row.origin.kind !== 'unclassified' || inSpan) return false
+  const head = row.text.trimStart()
+  return row.meta !== true && !MARKS.some((mark) => head.startsWith(mark))
+}
+
+// The reader's end of a compaction's span: a stamped user row, a reply or a tool result.
+const real = (row: Opener) => (row.type === 'user' && stamped(row)) || row.door === 'response' || row.door === 'tool-result'
+
+// A row noted between turns that the reader groups with the prompt row before it: neither an opener nor a local
+// command's row, output or report.
+const groups = (row: Opener & { name?: string }, inSpan: boolean) => !opens(row, inSpan) && row.door !== 'command'
+  && !(row.type === 'system' && row.name === 'local_command')
+
+// A compaction began (session.compact): until its first real row, an unstamped row opens nothing.
+export function compacted() {
+  span = true
+}
 
 // On the first load, MV2_FIRST_TASK marks a CLI task or wake prompt. A reload never marks the opener.
 export function loaded(firstTask: boolean) {
-  opening = undefined
+  openings = []
+  span = false
+  arriving.clear()
+  loose = []
+  unowned.clear()
   current = undefined
   command = undefined
   awaiting = undefined
@@ -84,8 +128,9 @@ function source(origin: { kind: string }): Source {
 
 // `session`: the conversation the turn ran in, bound when it started: its end goes under that one, even if a /clear
 // moved the session on while the end waited (core then drops it and closes the old turn at the switch).
+// `unread`: its conversation's file is no longer read (a /clear moved on): the end names its last noted row instead.
 export type Ending = { turn: string; kind: 'prompt' | 'command'; state: string; session: string | undefined; owner: Owner;
-  step?: number }
+  step?: number; unread?: boolean }
 
 // What a row arriving (session.append entered, main conversation only) is: its place in storage order; its owner,
 // held pending until the row is noted, so it lands there even if another turn has started (or a /clear moved on) by
@@ -93,12 +138,19 @@ export type Ending = { turn: string; kind: 'prompt' | 'command'; state: string; 
 // command's output, the decision its next row makes.
 // `session`: the conversation the row arrived in, which a late callback never trades for a newer one's; `generation`:
 // how many /clears there had been, so a row that arrived before its session id was known is judged too.
+// `opens`: an opener row, which a turn.start waits for until it is noted; `loose`: a row between turns that groups
+// with the opener before it.
 export type Ticket = { seq: number; session?: string; generation?: number; owner?: Owner; place?: TurnTransition;
-  output?: Decision; reportOf?: Decision }
+  output?: Decision; reportOf?: Decision; opens?: boolean; loose?: boolean }
 
-export function admit(row: { type: string; name?: string; door: string; text: string }, running: boolean,
-  session: string | undefined): Ticket {
+export function admit(row: Opener & { name?: string }, running: boolean, session: string | undefined): Ticket {
   const ticket: Ticket = { seq: ++seq, session, generation }
+  const inSpan = span
+  if (opens(row, inSpan)) {
+    ticket.opens = true
+    arriving.add(ticket.seq)
+  }
+  if (real(row)) span = false  // decided in storage order, as the reader reads them
   const decision = awaiting
   awaiting = undefined
   if (decision !== undefined) {
@@ -115,7 +167,13 @@ export function admit(row: { type: string; name?: string; door: string; text: st
     awaiting = ticket.output
   }
   const owner = running ? current : undefined
-  if (owner === undefined) return ticket
+  if (owner === undefined) {
+    if (!running && ticket.reportOf === undefined && ticket.output === undefined && groups(row, inSpan)) {
+      ticket.loose = true
+      unowned.set(ticket.seq, ticket)
+    }
+    return ticket
+  }
   owner.pending += 1
   ;(owner.inflight ??= new Set()).add(ticket.seq)
   ticket.owner = owner
@@ -131,6 +189,8 @@ export function admit(row: { type: string; name?: string; door: string; text: st
 // Says whether the queue changed, so index.ts reports what may now be ready.
 export function release(ticket: Ticket): boolean {
   let changed = false
+  if (ticket.opens === true && arriving.delete(ticket.seq)) arrival?.()
+  unowned.delete(ticket.seq)
   if (ticket.place !== undefined && ticket.place.event === undefined) {
     drop(ticket.place)
     ticket.owner?.places.delete(ticket.place)
@@ -161,11 +221,19 @@ export function abandon(end: Ending) {
 
 // A /clear: a command's pending decision has no report (a note now is the new conversation's), and an end still
 // being proved stops (the new file can't hold its rows). The old conversation's edges still go, in their own order:
-// order is kept per conversation (batch), so they never hold up the new one's.
-export function cleared() {
+// order is kept per conversation (batch), so they never hold up the new one's. Prompt rows it stored and never took
+// in are still its turns: each starts under it, each but the last ends finished (returned, with their places, for
+// index.ts, as started() returns them), and the last is left open, for core to close at the switch.
+export function cleared(): { end: Ending; place: TurnTransition | undefined }[] {
+  const ends = inputs(openings, (opening) => opening.session, seq, false)
   generation += 1
+  span = false
   current = undefined  // the old conversation's turn: only the hooks and rows that captured it still reach it
-  opening = undefined  // a prompt row stored but not yet started is the old conversation's
+  openings = []  // prompt rows stored but not yet started are the old conversation's
+  loose = []
+  unowned.clear()
+  arriving.clear()  // and a new turn.start waits for none of its rows
+  arrival?.()
   command = undefined  // as is a local command still waiting for its output
   if (awaiting !== undefined) {
     awaiting.decided = true
@@ -174,13 +242,15 @@ export function cleared() {
     awaiting = undefined
   }
   for (const owner of waiting) poke(owner)
+  return ends
 }
 
 // The next edges ready to send, all one conversation's, in order: from the first known edge with no unknown edge of
 // its conversation before it, its conversation's known edges up to the next unknown one. Core keeps order within a
 // conversation only, so another conversation's waiting edge never holds these back.
-export function batch(limit: number): TurnTransition[] {
-  const blocked = new Set<string>()
+// `held`: conversations whose edges wait (core hasn't recorded the move to them yet, and would drop them).
+export function batch(limit: number, held: ReadonlySet<string> = new Set()): TurnTransition[] {
+  const blocked = new Set<string>(held)
   let session: string | undefined
   const out: TurnTransition[] = []
   for (const edge of turnTransitions) {
@@ -219,8 +289,8 @@ function insert(rows: Row[], row: Row) {
 // moved on from the conversation it arrived in is stale: it still lands in its own turn (its rows, its join), but it
 // opens or ends nothing, so the new conversation's turns never take it; nor does an older row noted late replace a
 // newer one's opening or command.
-export function stored(session: string | undefined, row: { door: string; origin: { kind: string }; type: string;
-  name?: string; uuid: string; text: string }, attempt: string | undefined, ticket: Ticket, slash = false): Ending | undefined {
+export function stored(session: string | undefined, row: Opener & { name?: string; uuid: string }, attempt: string | undefined,
+  ticket: Ticket, slash = false): Ending | undefined {
   const from = (origin: { kind: string }): Source => slash ? 'person' : source(origin)
   if (ticket.reportOf !== undefined) {
     ticket.reportOf.note = row.uuid  // a command's report for the model: its end names it once it is whole in the file
@@ -230,12 +300,18 @@ export function stored(session: string | undefined, row: { door: string; origin:
   if (owner !== undefined) insert(owner.rows, { id: row.uuid, seq: ticket.seq })
   const scope = ticket.session ?? session
   const stale = ticket.generation !== undefined && ticket.generation !== generation
-  if (row.type === 'user' && (row.door === 'prompt' || row.door === 'command') && row.origin.kind !== 'engine'
-      && row.origin.kind !== 'model' && row.origin.kind !== 'tool') {
-    if (stale || ticket.seq <= openedTo || (opening !== undefined && opening.seq > ticket.seq)) return undefined
+  if (ticket.opens === true) {
+    if (stale || ticket.seq <= openedTo) return undefined
     const first = task && row.origin.kind === 'composer'
     task = false
-    opening = { ref: row.uuid, seq: ticket.seq, source: from(row.origin), attempt, firstTask: first }
+    const opening = { ref: row.uuid, seq: ticket.seq, session: scope, source: from(row.origin), attempt, firstTask: first }
+    let at = openings.length
+    while (at > 0 && (openings[at - 1]?.seq ?? 0) > opening.seq) at -= 1
+    openings.splice(at, 0, opening)  // in storage order, whatever order the rows are noted in
+    return undefined
+  }
+  if (ticket.loose === true && owner === undefined && !stale) {
+    insert(loose, { id: row.uuid, seq: ticket.seq })
     return undefined
   }
   if (row.type === 'system' && row.name === 'local_command') {
@@ -266,14 +342,59 @@ export function stored(session: string | undefined, row: { door: string; origin:
   return undefined
 }
 
-// turn.start on the main conversation: the stored opening row starts it; without one Claude continues the last turn.
-export function started(session: string | undefined) {
-  if (opening === undefined) return
-  const { ref, seq: at, source: from, attempt, firstTask } = opening
-  opening = undefined
-  openedTo = Math.max(openedTo, at)
-  current = { id: ref, kind: 'prompt', rows: [{ id: ref, seq: at }], session, pending: 0, places: new Map() }
-  push(session, { type: 'started', turn: ref, kind: 'prompt', ref, source: from, ...(attempt ? { attempt } : {}), first_task: firstTask })
+// Whether every opener row admitted up to `boundary` has been noted (or never will be).
+export function arrived(boundary: number): boolean {
+  for (const at of arriving) if (at <= boundary) return false
+  return true
+}
+
+// Wakes a turn.start waiting for opener rows still arriving (undefined: none waits).
+export function onArrival(wake: (() => void) | undefined) {
+  arrival = wake
+}
+
+// turn.start on the main conversation: the opener rows stored before it (`boundary`, the last row admitted before
+// it), in storage order, are the inputs Claude took in. Each is a turn of its own: each gets its start, and each but
+// the last its end, finished (a later prompt turn is stored), at once after its start and before the next one's,
+// naming its last row (its own, or one stored with it before the next opener). The last runs: it is current. Without
+// one Claude continues the last turn. An opener noted only after its turn.start is never one: a later start would
+// put it out of order. Returns the earlier turns' ends, each with its place taken, for index.ts to prove.
+export function started(session: string | undefined, boundary: number): { end: Ending; place: TurnTransition | undefined }[] {
+  const taken = openings.filter((opening) => opening.seq <= boundary)
+  openings = openings.filter((opening) => opening.seq > boundary)
+  openedTo = Math.max(openedTo, boundary)
+  return inputs(taken, () => session, boundary, true)
+}
+
+// The taken openers' turns, in storage order: each starts, and each but the last gets its end, finished, its place
+// taken at once; the last runs (`runs`), or is left open for core to close (a /clear). `conversation`: each one's.
+function inputs(taken: Opening[], conversation: (opening: Opening) => string | undefined, boundary: number,
+  runs: boolean): { end: Ending; place: TurnTransition | undefined }[] {
+  const ends: { end: Ending; place: TurnTransition | undefined }[] = []
+  taken.forEach((opening, index) => {
+    const { ref, seq: at, source: from, attempt, firstTask } = opening
+    const session = conversation(opening)
+    const next = taken[index + 1]?.seq ?? boundary + 1
+    const owner: Owner = { id: ref, kind: 'prompt', rows: [{ id: ref, seq: at }], session, pending: 0, places: new Map() }
+    for (const row of loose) if (row.seq > at && row.seq < next) insert(owner.rows, row)
+    for (const [held, ticket] of unowned) {
+      if (held <= at || held >= next) continue
+      ticket.owner = owner  // still being stored: it lands in this turn's rows once noted, and its end waits for it
+      owner.pending += 1
+      ;(owner.inflight ??= new Set()).add(held)
+      unowned.delete(held)
+    }
+    push(session, { type: 'started', turn: ref, kind: 'prompt', ref, source: from, ...(attempt ? { attempt } : {}), first_task: firstTask })
+    if (index === taken.length - 1) {
+      if (runs) current = owner
+    } else {
+      const end: Ending = { turn: ref, kind: 'prompt', state: 'finished', session, owner, ...(runs ? {} : { unread: true }) }
+      ends.push({ end, place: reserve(end) })
+    }
+  })
+  loose = loose.filter((row) => row.seq > boundary)
+  for (const held of [...unowned.keys()]) if (held <= boundary) unowned.delete(held)
+  return ends
 }
 
 const STATES: Record<string, string> = { answer: 'finished', refusal: 'finished', aborted: 'interrupted', error: 'error' }
@@ -290,8 +411,10 @@ export function ending(reason: string | undefined, aborted: boolean | undefined,
 
 // turn.start entered on the main conversation: rows admitted from now on are a later step's (a continuation keeps the
 // turn; a new turn takes over current once its start is known).
-export function stepped() {
+// Returns the last row admitted so far: the boundary between this start's inputs and what comes after.
+export function stepped(): number {
   if (current !== undefined) (current.steps ??= []).push(seq)
+  return seq
 }
 
 // The last row admission an end proves: its step's boundary, once a later start has drawn one.
@@ -304,6 +427,36 @@ export function storing(end: Ending): boolean {
   const upTo = limit(end)
   for (const at of end.owner.inflight ?? []) if (at <= upTo) return true
   return false
+}
+
+// Whether an edge of this conversation is still to reach core: queued, or its place still being filled. An edge
+// leaves the queue only once core has taken the report that carried it.
+// A switch is leaving `conversation` (its SessionEnd): no row comes after its last, so a command's end that waits for
+// the next row to say whether a report follows its output goes now, with none. Returns the local command of that
+// conversation still open (started, its output row not noted yet), whose end may yet come, if any.
+export function leaving(conversation: string): string | undefined {
+  const decision = awaiting
+  if (decision !== undefined && decision.session === conversation) {
+    awaiting = undefined
+    decision.decided = true
+    decision.report = false
+    poke(decision.owner)
+  }
+  return command !== undefined && command.session === conversation ? command.id : undefined
+}
+
+// The local command open now (its output row not noted yet), if any.
+export function openCommand(): string | undefined {
+  return command?.id
+}
+
+export function edgesFor(session: string): boolean {
+  return turnTransitions.some((edge) => edge.session === session)
+}
+
+// The owner's last noted row, in storage order.
+export function lastRow(owner: Owner): string | null {
+  return owner.rows[owner.rows.length - 1]?.id ?? null
 }
 
 // The prompt turn running now, or the last that ran.

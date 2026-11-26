@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from multiverse import store
-from multiverse.harnesses.types import PromptClosed, PromptOpened, TurnEnded, TurnJoined, TurnStarted
+from multiverse.harnesses.types import PromptClosed, PromptOpened, SessionHandle, TurnEnded, TurnJoined, TurnStarted
 from multiverse.plugins import agent_files, events, host, projection_wake
 from multiverse.runtime import prompt_events, rpc, runner, transcripts, turn_events
 from multiverse.runtime.transcripts import TurnReference
@@ -908,6 +908,77 @@ class TurnJournalTest(BaseTest):
             attempt['delivery_receipt']['value']['item_id'] = 'item'
             self.assertEqual(turn_events.attribution(self.agent, session, 0, (edge,), deadline=0),
                              {0: turn_events.Attribution('message')})
+
+    def test_a_switch_keeps_each_observed_queued_prompt_attributed_to_its_original_attempt(self):
+        """An adapter can carry a queued prompt forward before its first row is stored in the new conversation."""
+        original, switched, later, stranger = (str(uuid4()) for _ in range(4))
+        launch = str(uuid4())
+        properties = self.agent / 'properties.json'
+        write(properties, {**read(properties), 'native_session_id': original, 'native_session_home': str(self.work)})
+        facts = {**agents.runtime(self.agent), 'launch_id': launch}
+        write(self.agent / 'runtime.json', facts)
+
+        def saved(native=original, launch=launch, *, explicit=True, home=None, mode='follow-up'):
+            message = mailbox.append_message(self.agent, 'private body', {'name': 'user'}, delivery=mode)
+            identifier = message['id']
+            wire = str(uuid4()) if explicit else identifier
+            context = {'launch_id': launch, 'native_id': native, 'home': home or str(self.work),
+                       'workspace': str(self.work)}
+            attempt = {'mode': mode, 'state': 'native_queued', 'agent_id': 'worker', 'launch_id': launch,
+                       'native_session_id': native, 'delivery_context': context}
+            if explicit:
+                attempt['native_message_id'] = context['native_message_id'] = wire
+            mailbox.update_message(self.agent, identifier, submission_state='accepted', attempts=[attempt])
+            return identifier, wire
+
+        b, wire_b = saved()
+        a, wire_a = saved()
+        joined, wire_join = saved(mode='steer')
+        _, without_row = saved()
+        _, from_another_launch = saved(launch='earlier')
+        _, wrong_storage = saved(home=str(self.work / 'elsewhere'))
+        _, unrelated = saved(native=stranger)
+        _, legacy = saved(explicit=False)
+        agents.rebind_session(self.root, self.agent.name, original, switched, 'clear', launch)
+        session = SessionHandle.from_records(read(properties), facts, self.agent)
+        current, wire_current = saved(native=switched)
+
+        def start(name, wire):
+            return TurnStarted(turn=name, ref=name, kind='prompt', source='harness', attempt=wire)
+
+        edges = (start('a', wire_a), TurnJoined(turn='a', ref='join', source='harness', attempt=wire_join),
+                 TurnEnded(turn='a', ref='a', kind='prompt', state='finished'), start('b', wire_b),
+                 TurnEnded(turn='b', ref='b', kind='prompt', state='finished'), start('current', wire_current),
+                 start('earlier-launch', from_another_launch), start('wrong-storage', wrong_storage),
+                 start('unrelated', unrelated), start('legacy', legacy),
+                 TurnStarted(turn='no-row', ref=None, kind='prompt', source='harness', attempt=without_row))
+        before = [mailbox.message_record(self.agent, identifier)[1] for identifier in (a, b)]
+        prompt_events.stage_turns(self.root, self.agent, launch, switched, edges)
+        # The host may project the staged conversation after a second switch.
+        agents.rebind_session(self.root, self.agent.name, switched, later, 'clear', launch)
+        refs = tuple(TurnReference(turn=edge.turn, ref=edge.ref, generation='gen') if edge.ref is not None
+                     else TurnReference() for edge in edges)
+        with patch.object(transcripts, 'turn_references', return_value=refs):
+            published = self.drain()
+        self.assertEqual([(data['turn'], data['source'], data['message'])
+                          for kind, data in published if kind == 'turn.started'],
+                         [('a', 'mv2', a), ('b', 'mv2', b), ('current', 'mv2', current),
+                          ('earlier-launch', 'harness', None), ('wrong-storage', 'harness', None),
+                          ('unrelated', 'harness', None), ('legacy', 'harness', None), (None, 'harness', None)])
+        [join] = [data for kind, data in published if kind == 'turn.joined']
+        self.assertEqual((join['source'], join['message']), ('mv2', joined))
+        self.assertEqual([mailbox.message_record(self.agent, identifier)[1] for identifier in (a, b)], before)
+        with patch.object(sessions, 'journal', side_effect=OSError('unreadable lineage')):
+            self.assertEqual(turn_events.attribution(self.agent, session, 0, edges, deadline=0),
+                             {5: turn_events.Attribution(current)})
+
+        # Even matching launch metadata does not authorize crossing a retirement.
+        fresh = str(uuid4())
+        replacement = {**read(properties), 'native_session_id': fresh, 'native_storage_environment': {}}
+        with lock(self.agent / '.launch.lock'):
+            fresh_properties, _ = sessions.retire(self.root, self.agent, later, replacement, launch)
+        fresh_session = SessionHandle.from_records(fresh_properties, facts, self.agent)
+        self.assertEqual(turn_events.attribution(self.agent, fresh_session, 0, (start('fresh', wire_a),), deadline=0), {})
 
     def test_wake_attribution_requires_witnessed_opener_and_exact_saved_attempt(self):
         """A wake uses a CLI prompt with no native delivery ID, and a later retry can replace its current receipt."""

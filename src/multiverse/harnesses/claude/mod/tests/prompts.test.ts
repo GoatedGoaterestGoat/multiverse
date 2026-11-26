@@ -44,6 +44,12 @@ function world(on: On, options: Options = {}) {
   const waited = new Set<string>()  // the prompt files they were for
   let failReports = options.failReports ?? 0
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
+  on('session.id', async () => ({ value: 's1' }))
+  // Claude's process file, naming its session: after a /clear it names the new one once `processFile.id` says so.
+  const processFile: { id?: string } = {}
+  on('classic.SessionStart', async () => ({}))
+  // The moves mv2 records after a switch; `after`: how many status reports went before it.
+  const moves: { session: string; previous: string; after: number; at: number }[] = []
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
   on('tool.check', async () => ({ decision: check.decision, reason: 'touch in /tmp/x needs approval' }) as never)
@@ -64,6 +70,14 @@ function world(on: On, options: Options = {}) {
   on('fs.list', async ($, e) => ({ value: [...files.keys()].filter((p) => p.startsWith(`${e.path}/`))
     .map((p) => ({ name: p.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: mtimes.get(p) ?? options.now ?? 0, isLink: false })) }) as never)
   on('process.run', async ($, e) => {
+    if (e.argv[0] === 'sh' && String(e.argv[2] ?? '').includes('/sessions/')) {
+      return { value: { ...ok(0).value, stdout: processFile.id === undefined ? '' : JSON.stringify({ sessionId: processFile.id }) } }
+    }
+    if (e.argv[0] === python && e.argv.includes('--native-session-id')) {
+      const flag = (name: string) => e.argv[e.argv.indexOf(name) + 1] ?? ''
+      moves.push({ session: flag('--native-session-id'), previous: flag('--previous-session-id'), after: reports.length, at: clock.now() })
+      return ok(0)
+    }
     if (e.argv[0] === python && e.argv.includes('--status')) {
       const flag = (name: string) => { const at = e.argv.indexOf(name); return at < 0 ? null : e.argv[at + 1] ?? null }
       if (failReports > 0 && e.argv.includes('--prompt-events-json')) { failReports -= 1; return ok(1) }
@@ -112,7 +126,7 @@ function world(on: On, options: Options = {}) {
     await clock.settle()
   })
   return {
-    clock, files, published, check, lost, reports,
+    clock, files, published, check, lost, reports, processFile, moves,
     record: (id: string) => JSON.parse(files.get(`${FOLDER}/${id}.json`) ?? 'null'),
     ended: (id: string) => JSON.parse(files.get(`${FOLDER}/${id}.end.json`) ?? 'null'),
     // As core writes it: once, into its own prompts folder, naming the launch and conversation.
@@ -357,6 +371,32 @@ describe('prompts for mv2', () => {
     await $.classic.ElicitationResult({ mcp_server_name: 'docs', elicitation_id: 'el-1', action: 'accept' } as never)
     await w.until(() => w.ended(id) !== null)
     expect(w.ended(id)).toMatchObject({ how: 'closed', cause: 'person' })
+  })
+
+  test("an old conversation's prompt end goes before the switch's move, though queued behind the new one's open", async ($, on) => {
+    // Core takes prompt edges only for the conversation it has recorded: the old one's must reach it before the move,
+    // the new one's after. Sent only from the queue's head, the old one's end waited behind the new one's open until
+    // the move's bound (about 32 s), then went after the move, to a core that no longer had its conversation.
+    const w = world(on)
+    await $.turn.start({ text: 'go', turnId: 't1' })  // the session is known: s1
+    const first = ask($, 'Bash', BASH)
+    await w.until(() => w.published().length === 1)
+    const old = w.published()[0] ?? ''
+    await $.classic.SessionStart({ source: 'clear', session_id: 's2' } as never)  // Claude doesn't name s2 yet
+    const second = ask($, 'Bash', BASH, undefined, { session_id: 's2', transcript_path: '/home/.claude/projects/p/s2.jsonl' })
+    await w.until(() => w.published().length === 2)
+    w.answer(old, { choice: 'allow' })
+    await first
+    await w.clock.settle()
+    w.processFile.id = 's2'
+    const named = w.clock.now()
+    for (let i = 0; i < 400 && w.moves.length === 0; i++) await w.clock.advance(100)
+    expect(w.moves.map((m) => [m.previous, m.session])).toEqual([['s1', 's2']])
+    const closedAt = w.reports.findIndex((r) => r.session === 's1' && r.events.some((e) => e.type === 'closed' && e.id === old))
+    expect(closedAt).toBeGreaterThanOrEqual(0)
+    expect(closedAt).toBeLessThan(w.moves[0]?.after ?? -1)
+    expect((w.moves[0]?.at ?? Infinity) - named).toBeLessThan(5000)
+    await closed(w, [second])
   })
 
   test('end records are kept for a while, then pruned', async ($, on) => {

@@ -1550,7 +1550,10 @@ sends to or resumes an agent, so a launch without the bridge follows a `/clear`
 too. A report that names another session than the process file shows is
 refused. Core then rebinds the agent and records the move in its session history
 ([session lineage](session-lineage.md)). Messages, usage and resume go to the new session;
-the old conversation stays on disk as an earlier generation.
+the old conversation stays on disk as an earlier generation. A `/resume` typed in the
+session, or a fork, moves the same process to another conversation, and the mod
+reports it as it does a `/clear`, with its own reason: Claude raises `SessionStart`
+with source `resume` for it, and no `session.start`.
 
 The pieces keep to their own side of the boundary:
 
@@ -1864,9 +1867,44 @@ conversation's, never from Claude's transcript.
 
 Turn events go the same way (`--turn-events-json`), from the rows Claude stores
 (`session.append`, with each row's id) and its turn hooks, grouped as the transcript
-reader groups rows. A user row with an origin opens a prompt turn: it is stored just
-before `turn.start`, which starts the turn under that row's id; a `turn.start` with
-no new row continues the last turn, which then ends again. A `queued_command` row
+reader groups rows. A user row with an origin opens a prompt turn; so does one with
+none that is neither meta, nor marked as a command, its output, a `/compact` or an
+interruption, nor in a compaction's span (from `session.compact` until the next
+stamped prompt, reply or tool result), as the reader counts it. The reader also
+wants such a row's `promptId` to be new, which an append doesn't show; on Claude
+Code 2.1.332 the only rows with no origin that reach it as a prompt or a command are a
+typed local command's, and a native compaction's own rows never reach it. A prompt row
+is stored just before `turn.start`, which starts the turn under that row's id; a
+`turn.start` with no new row continues the last turn, which then ends again. Claude
+can store several such rows before one `turn.start`, as it does for follow-ups queued
+behind a turn: each is a turn of its own, started in the order stored, and each but
+the last ends finished before the next one's start, naming its last row (its own, or
+one stored with it before the next, such as hook context), once that row is in the
+file, as for any end. An end is proved in its own conversation's file, named after its
+session beside the current one, so an end a `/clear` overtakes is still proved there;
+one no read proved, its conversation since moved on, names its last noted row. The `turn.start` waits, up to 2 s, for an opener row whose
+append is still running, so its start goes in its place; one noted after that is
+never a turn. Such rows a conversation stored and never took in before a `/clear`
+are still its turns: each starts under it, each but the last ends finished, naming
+its last noted row since the old file is no longer read, and the last is left for
+core to end at the switch. The move itself (`--native-session-id`) goes only once
+those edges and its prompt events have reached core, at most an end's bound and
+every try a report gets later, and each conversation a switch (a `/clear`, a `/resume`, a fork)
+moved to keeps its edges until the move to it is recorded or given up: core drops a batch for a
+conversation other than the one it has recorded. Turn edges and prompt events go one
+conversation at a time, so one waiting for its move never holds up another's. The moves go one
+at a time, in order, each from the conversation core has; a move overtaken by a later switch
+before Claude's process file named its conversation is given up (core would refuse it), so the
+next goes from the one before it. Before a `/clear` or a `/resume` switches at all, the
+conversation it leaves hands its edges to core in Claude's `SessionEnd` hook, which Claude
+waits for (about 1.5 s at most) before it switches and before its process file names the new
+conversation: any mv2 read after that rebinds the agent itself (reason `detected`), and core
+takes none of the old conversation's edges after it. The hold runs beside the other
+`SessionEnd` hooks and also waits for a local command of the old conversation still open (its
+output row not noted yet) while its row is recent, within an end's bound, so one that never gets an
+output (a `/model` with none) holds no later switch; a command's end waiting for the next row goes then with no report,
+since none comes, and a move into the old conversation still pending is recorded first, so the
+middle conversation of two quick `/clear`s is recorded too. A `queued_command` row
 in a running turn is a join. A local command's row opens a command turn, and its
 output row ends it, or the note it stores for the model right after its output
 (`/context`'s report), which the reader groups with it: the command's end waits for
