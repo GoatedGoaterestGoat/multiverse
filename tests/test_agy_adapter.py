@@ -2463,13 +2463,15 @@ class AgyAdapterUnitTest(BaseTest):
         # The typed prompt is longer than the hooks' 64 KB transcript tail, which must still find it.
         typed_step = append('USER_EXPLICIT', 'a person typed this ' + 'x' * (70 << 10))
 
-        def typed_turn():
-            # The person's turn: never attributed to the woken mv2 message, anchored at the typed row (init:).
+        def typed_turn(*joined):
+            # The person's turn: never attributed to the woken mv2 message, anchored at the typed row (init:);
+            # a woken steer that still goes in joins it.
             edges, injected = agy_bridge._on_turn_start(
                 agent_dir, launch_id, conv_id, invocation_num=0, initial_num_steps=typed_step + 1, env=env,
             )
-            self.assertEqual([(edge.source, edge.attempt, edge.turn.split(':')[0]) for edge in edges],
-                             [('person', None, 'init')])
+            self.assertEqual([(type(edge).__name__, edge.source, edge.attempt, edge.turn.split(':')[0]) for edge in edges],
+                             [('TurnStarted', 'person', None, 'init'),
+                              *(('TurnJoined', 'harness', mid, 'init') for mid in joined)])
             return injected
 
         self.assertEqual(typed_turn(), [])
@@ -2487,7 +2489,7 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(wake_exec.command.call_args[0][0].argv[-1], agy_bridge.WAKE_PING)
         self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, m_race_steer), 'wake_pending')
         typed_step = append('USER_EXPLICIT', 'typed again')
-        self.assertEqual(typed_turn(), ['race steer'])
+        self.assertEqual(typed_turn(m_race_steer), ['race steer'])
 
         # 5. A launch an older mv2 made (agy-bridge-v1, no bridge in native_mode: no PostInvocation hook, maybe an
         #    agy that ignores injectSteps) is never upgraded by these hooks, never gets text, and says to restart.
@@ -2909,10 +2911,76 @@ class AgyAdapterUnitTest(BaseTest):
         self.assertEqual(err_info.state, 'error')
         self.assertIsNone(adapter.transcript_readable(session))
 
+    def test_a_repeated_pre_invocation_names_its_injected_rows_after_the_first_calls(self):
+        """agy repeats PreInvocation(0) at the same initialNumSteps while a woken turn is open (as when it attaches a
+        server-restart notice); a steer the second call injects must name its own row, since a wrong one is never
+        noticed: the join resolves, to the first call's message."""
+        agent_id, launch_id, conv = str(uuid4()), str(uuid4()), str(uuid4())
+        agent_dir = self.root / 'state' / 'agents' / agent_id
+        (agent_dir / 'launches' / launch_id).mkdir(parents=True)
+        home = os.path.realpath(self._create_saved_conversation(conv))
+        write(agent_dir / 'properties.json', {
+            'id': agent_id, 'name': 'repeat', 'harness': 'agy', 'workspace': str(self.work),
+            'native_session_provider': 'agy', 'native_session_id': conv, 'native_session_home': home,
+        })
+        write(agent_dir / 'runtime.json', {
+            'launch_id': launch_id, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+            'native_bridge': BRIDGE,
+        })
+        launch_files.write_request(agent_dir, launch_id, {'expected_native_id': None})
+        logs = Path(home) / 'brain' / conv / '.system_generated' / 'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        log = logs / 'transcript_full.jsonl'
+
+        def append(*rows):
+            with log.open('a') as handle:
+                for row in rows:
+                    handle.write(json.dumps({'status': 'DONE', 'created_at': '2026-11-27T10:00:00Z', **row}) + '\n')
+
+        def queue(text, mode):
+            message_id = str(uuid4())
+            agy_bridge.write_receipt(agent_dir, message_id, launch_id=launch_id, native_id=conv,
+                                     route='hook-user-input', submitted_at=now(),
+                                     text_sha256=agy_storage.message_hash(text))
+            agy_bridge.enqueue_message(agent_dir, launch_id, message_id, conv, text, mode=mode)
+            return message_id
+
+        def injected(step, text):
+            return {'step_index': step, 'type': 'USER_INPUT', 'source': 'SYSTEM_SDK',
+                    'content': f'<USER_REQUEST>\n{text}\n</USER_REQUEST>'}
+
+        def system(step, content):
+            return {'step_index': step, 'type': 'SYSTEM_MESSAGE', 'source': 'SYSTEM',
+                    'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-27T10:00:00Z sender=system {content}\n'
+                               '</SYSTEM_MESSAGE>'}
+
+        append({'step_index': 0, 'type': 'USER_INPUT', 'source': 'USER_EXPLICIT',
+                'content': '<USER_REQUEST>\nfirst\n</USER_REQUEST>'},
+               {'step_index': 1, 'type': 'PLANNER_RESPONSE', 'source': 'MODEL', 'content': 'done'})
+        woken = queue('M', 'follow-up')
+        self.assertEqual(agy_bridge.claim_if_idle_head(agent_dir, launch_id, woken, conv), 'claimed')
+        started, texts = agy_bridge._on_turn_start(agent_dir, launch_id, conv, invocation_num=0, initial_num_steps=2)
+        self.assertEqual(([edge.attempt for edge in started], texts), ([woken], ['M']))
+        steer = queue('S', 'steer')
+        append(injected(2, 'M'), system(3, f'priority=MESSAGE_PRIORITY_HIGH content={agy_bridge.WAKE_PING}'),
+               system(4, 'priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks '
+                         'have been stopped due to server restart.'))
+        joined, texts = agy_bridge._on_turn_start(agent_dir, launch_id, conv, invocation_num=0, initial_num_steps=2)
+        self.assertEqual(([(type(edge).__name__, edge.turn, edge.attempt) for edge in joined], texts),
+                         ([('TurnJoined', started[0].turn, steer)], ['S']))
+        append(injected(5, 'S'), {'step_index': 6, 'type': 'PLANNER_RESPONSE', 'source': 'MODEL', 'content': 'M, S'})
+        adapter = AgyAdapter.configured('agy', {})
+        session = SessionHandle(agent_id, 'agy', str(self.work), launch_id=launch_id, native_id=conv, home=home)
+        view = adapter.transcript_view(session)
+        refs = {row.position: row.ref for row in view.rows}
+        self.assertEqual([refs.get(adapter.project_turn_event(session, view, edge).row_position)
+                          for edge in (*started, *joined)], ['step-2', 'step-5'])
+
     def test_turn_events_from_hooks_and_esc_cancel(self):
         """Antigravity PreInvocation, PostInvocation continuations, Stop (finished, error), idle wakes and Esc-without-Stop
         idle transitions must
-        publish ordered, transcript-resolved turn.started and turn.ended events, including wake turns followed by
+        publish ordered, transcript-resolved turn.started, turn.joined and turn.ended events (one per message, even when
+        one hook reply injects several), including wake turns followed by
         Antigravity's low-priority server-restart notice, because a broken emission or projection leaves plugins
         blind to live Antigravity turns."""
         from multiverse.plugins import events as plugin_events
@@ -3371,6 +3439,87 @@ class AgyAdapterUnitTest(BaseTest):
                 [by_step['step-26'], by_step['step-28'], by_step['step-30'], by_step['step-31']],
                 ['prompt', 'mid_turn', 'mid_turn', 'response'],
             )
+
+            # 10. Messages one PreInvocation reply injects together each get an event at their own row: a woken
+            #     follow-up starts the turn and a steer queued meanwhile joins it; two busy steers that waited
+            #     through a tool call both join the running turn.
+            write(agent_dir / 'runtime.json', {
+                'launch_id': launch_id, 'state': 'running', 'status': 'idle', 'session_generation': 1,
+                'native_bridge': BRIDGE,
+            })
+
+            def steer_message(text):
+                msg = append_message(agent_dir, text, {'name': 'lead'}, 'steer', target_session=conv1)
+                update_message(agent_dir, msg['id'], submission_state='accepted', delivery_method='native', attempts=[{
+                    'state': 'native_queued', 'mode': 'steer', 'message_id': msg['id'],
+                    'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+                }])
+                agy_bridge.write_receipt(agent_dir, msg['id'], launch_id=launch_id, native_id=conv1,
+                                         route='hook-user-input', submitted_at=now(),
+                                         text_sha256=agy_storage.message_hash(text))
+                agy_bridge.enqueue_message(agent_dir, launch_id, msg['id'], conv1, text, mode='steer')
+                return msg['id']
+
+            def turn_rows(since):
+                # Only this section's rows: a new start first closes the earlier section's still-open turn.
+                rows = [(kind, data.get('message'),
+                         core_transcripts._unpack(data['ref'], core_transcripts.CURSOR_PREFIX)['r'] if data['ref'] else None,
+                         data['resolved']) for kind, data in drain_all() if kind.startswith('turn.')]
+                return [row for row in rows if row[2] is None or int(row[2].split('-')[1]) >= since]
+
+            def response_row(step, text):
+                return {'step_index': step, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                        'created_at': '2026-11-24T10:06:09Z', 'content': text}
+
+            m1_id = wake_message('M1')
+            s1_id = steer_message('S1')
+            self.assertEqual(agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 32,
+            }, env=env), {'injectSteps': [{'userMessage': 'M1'}, {'userMessage': 'S1'}]})
+            append_rows(
+                injected_row(32, '2026-11-24T10:06:00Z', 'M1'),
+                injected_row(33, '2026-11-24T10:06:00Z', 'S1'),
+                ping_row(34, '2026-11-24T10:06:00Z'),
+                response_row(35, 'M1 and S1'),
+            )
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env)
+            self.assertEqual(turn_rows(32), [
+                ('turn.started', m1_id, 'step-32', True),
+                ('turn.joined', s1_id, 'step-33', True),
+                ('turn.ended', None, 'step-35', True),
+            ])
+            append_rows({'step_index': 36, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                         'created_at': '2026-11-24T10:06:10Z', 'content': '<USER_REQUEST>\ngo on\n</USER_REQUEST>'})
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 37,
+            }, env=env)
+            append_rows(
+                {'step_index': 37, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:06:11Z', 'tool_calls': [{'name': 'run_command', 'args': {}}]},
+                {'step_index': 38, 'source': 'MODEL', 'type': 'GENERIC', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:06:12Z', 'content': 'ok'},
+            )
+            s2_id, s3_id = steer_message('S2'), steer_message('S3')
+            self.assertEqual(agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 1, 'initialNumSteps': 39,
+            }, env=env), {'injectSteps': [{'userMessage': 'S2'}, {'userMessage': 'S3'}]})
+            append_rows(
+                injected_row(39, '2026-11-24T10:06:13Z', 'S2'),
+                injected_row(40, '2026-11-24T10:06:13Z', 'S3'),
+                response_row(41, 'S2 and S3'),
+            )
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env)
+            self.assertEqual(turn_rows(36), [
+                ('turn.started', None, 'step-36', True),
+                ('turn.joined', s2_id, 'step-39', True),
+                ('turn.joined', s3_id, 'step-40', True),
+                ('turn.ended', None, 'step-41', True),
+            ])
+            # A batch row agy never wrote (a third message at 32) resolves to no row, never the next batch's S2.
+            from multiverse.harnesses.types import TurnJoined as _TurnJoined
+            lost = adapter.project_turn_event(sess_obj, adapter.transcript_view(sess_obj), _TurnJoined(
+                turn='post:32:1', ref='inj:32:1:2', source='harness'))
+            self.assertIsNone(lost.row_position)
 
     def test_hooks_pin_launch_id_and_post_invocation_yields_to_idle_at_continuation_cap(self):
         """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's queue,

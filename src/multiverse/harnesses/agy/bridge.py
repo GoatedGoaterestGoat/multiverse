@@ -27,7 +27,7 @@ if __package__ in (None, ''):
 
 from multiverse.harnesses.agy import storage, transcripts
 from multiverse.harnesses.base import PARENT_AGY
-from multiverse.harnesses.types import TurnEnded, TurnStarted, normalize_session_id
+from multiverse.harnesses.types import TurnEnded, TurnJoined, TurnStarted, normalize_session_id
 from multiverse.store import lock, now, read, retry_missing, write
 
 
@@ -427,6 +427,15 @@ def _opt_str(value) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _injected_at(value) -> dict | None:
+    """`{'turn', 'steps', 'count'}`: how many messages hook replies injected into the open turn at one step."""
+    if (isinstance(value, dict) and isinstance(value.get('turn'), str) and value['turn']
+            and type(value.get('steps')) is int and value['steps'] >= 1
+            and type(value.get('count')) is int and value['count'] >= 0):
+        return {'turn': value['turn'], 'steps': value['steps'], 'count': value['count']}
+    return None
+
+
 def _load_followups_record_locked(path: Path) -> dict:
     """Load full follow-up queue state record; raises ValueError on damaged/oversized files."""
     try:
@@ -444,6 +453,7 @@ def _load_followups_record_locked(path: Path) -> dict:
             'idle_after_turn_at': None,
             'turn_open': False,
             'turn_id': None,
+            'injected_at': None,
             'pending_turn_attempt': None,
             'pending_turn_source': None,
             'pending_idle_attempt': None,
@@ -481,6 +491,7 @@ def _load_followups_record_locked(path: Path) -> dict:
         'idle_after_turn_at': _opt_timestamp(record.get('idle_after_turn_at')),
         'turn_open': bool(record.get('turn_open')),
         'turn_id': _opt_str(record.get('turn_id')),
+        'injected_at': _injected_at(record.get('injected_at')),
         'pending_turn_attempt': _opt_str(record.get('pending_turn_attempt')),
         'pending_turn_source': raw_source if raw_source in ('person', 'harness') else None,
         'pending_idle_attempt': _opt_str(record.get('pending_idle_attempt')),
@@ -515,6 +526,7 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
                            turn_active_at: str | None = None,
                            idle_after_turn: int = 0, idle_after_turn_at: str | None = None,
                            turn_open: bool = False, turn_id: str | None = None,
+                           injected_at: dict | None = None,
                            pending_turn_attempt: str | None = None,
                            pending_turn_source: str | None = None,
                            pending_idle_attempt: str | None = None,
@@ -555,6 +567,7 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
         'idle_after_turn_at': idle_at,
         'turn_open': bool(turn_open),
         'turn_id': turn_id if turn_open and isinstance(turn_id, str) and turn_id else None,
+        'injected_at': _injected_at(injected_at) if turn_open else None,
         'pending_turn_attempt': pending_turn_attempt if isinstance(pending_turn_attempt, str) and pending_turn_attempt else None,
         'pending_turn_source': pending_turn_source if pending_turn_source in ('person', 'harness') else None,
         'pending_idle_attempt': pending_idle_attempt if has_idle_attempt else None,
@@ -579,6 +592,7 @@ def _save_record_locked(path: Path, launch_id: str, rec: dict) -> None:
         idle_after_turn_at=rec['idle_after_turn_at'],
         turn_open=rec.get('turn_open', False),
         turn_id=rec.get('turn_id'),
+        injected_at=rec.get('injected_at'),
         pending_turn_attempt=rec.get('pending_turn_attempt'),
         pending_turn_source=rec.get('pending_turn_source'),
         pending_idle_attempt=rec.get('pending_idle_attempt'),
@@ -1308,8 +1322,12 @@ def _is_turn_ending_planner_response(rows: list[dict] | None, initial_num_steps=
 
 def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                    invocation_num=None, initial_num_steps=None,
-                   env: Mapping[str, str] | None = None) -> tuple[tuple[TurnStarted, ...], list[str]]:
-    """Advance `turn_seq`, handle `PreInvocation` `userMessage` injections, and return `(TurnStarted..., injected_texts)`."""
+                   env: Mapping[str, str] | None = None) -> tuple[tuple[TurnStarted | TurnJoined, ...], list[str]]:
+    """Advance `turn_seq`, handle `PreInvocation` `userMessage` injections, and return `(edges, injected_texts)`.
+
+    Every message injected here gets its own edge: the one a new turn opens with is its `TurnStarted`, and each
+    other one (the rest of a batch, or any injection into a running turn) is a `TurnJoined` of that turn.
+    """
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
         canonical_launch = normalize_session_id(launch_id)
@@ -1372,6 +1390,7 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
             rec['idle_after_turn_at'] = None
 
             injected_texts: list[str] = []
+            injected_ids: list[str] = []
             wake_handed_off_id: str | None = None
             human_opener = (
                 inv_num == 0
@@ -1406,6 +1425,7 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                                 entry.pop('claim_token', None)
                                 entry.pop('wake_sent_at', None)
                                 injected_texts.append(wake_text)
+                                injected_ids.append(entry['id'])
                                 if not human_opener:
                                     wake_handed_off_id = entry['id']
                             break
@@ -1422,10 +1442,12 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                         entry['handed_off_at'] = now()
                         entry.pop('text', None)
                         injected_texts.append(steer_text)
+                        injected_ids.append(entry['id'])
                         if wake_handed_off_id is None and starting_new and not human_opener and not rec.get('pending_turn_attempt'):
                             wake_handed_off_id = entry['id']
 
-            edges: tuple[TurnStarted, ...] = ()
+            edges: tuple[TurnStarted | TurnJoined, ...] = ()
+            started_attempt = None
             if starting_new:
                 attempt = rec.get('pending_turn_attempt')
                 source = rec.get('pending_turn_source')
@@ -1482,6 +1504,27 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                     turn=turn_id, kind='prompt', ref=ref, source=source,
                     attempt=attempt, first_task=first_task,
                 ),)
+                started_attempt = attempt
+            join_turn = rec.get('turn_id') if rec.get('turn_open') else None
+            if join_turn:
+                # Antigravity appends this reply's injectSteps rows in order from step-{initialNumSteps}, so the
+                # i-th one is the i-th hook-injected USER_INPUT row from there (a wake ping may sit between them),
+                # after those an earlier call at the same step injected into this turn (agy repeats a call when it
+                # attaches a server-restart notice).
+                earlier = rec.get('injected_at')
+                base = (earlier['count'] if isinstance(earlier, dict) and earlier['turn'] == join_turn
+                        and earlier['steps'] == init_steps else 0)
+                edges += tuple(
+                    TurnJoined(
+                        turn=join_turn,
+                        ref=f'inj:{init_steps}:{rec["turn_seq"]}:{base + index}' if init_steps is not None else None,
+                        source='harness', attempt=entry_id,
+                    )
+                    for index, entry_id in enumerate(injected_ids)
+                    if not (starting_new and entry_id == started_attempt)
+                )
+                if injected_ids and init_steps is not None:
+                    rec['injected_at'] = {'turn': join_turn, 'steps': init_steps, 'count': base + len(injected_ids)}
             rec['idle_flushed'] = False
             rec['idle_flushed_at'] = None
             rec['pending_idle_attempt'] = None
